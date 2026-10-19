@@ -1,0 +1,26 @@
+# ox-tuner — Cargo workspace.
+#
+# The repository and workspace are `ox-tuner`, the shipped binary is `oxtuner`,
+# crates use the `oxtuner-` prefix.
+
+[workspace]
+resolver = "3"
+members = ["crates/oxtuner-app"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/brilliantnz/ox-tuner"
+
+# Lints are declared once here and inherited by every crate (`[lints] workspace = true`).
+# CI additionally runs `cargo clippy -- -D warnings`.
+[workspace.lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+# ADR-0007: safety-critical code. No `unsafe` without an ADR + documented justification.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }

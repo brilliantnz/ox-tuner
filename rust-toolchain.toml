@@ -1,0 +1,7 @@
+# Pin the toolchain so CI and local builds agree. Bump deliberately (~monthly,
+# or when a dependency requires newer) — 1.99.1 chosen 2026-10-19 (latest stable,
+# GPUI tracks latest stable).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

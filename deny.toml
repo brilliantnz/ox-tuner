@@ -1,0 +1,54 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/RustSec/advisory-db"]
+# Advisories count for direct dependencies of workspace crates, transitive ones are
+# reported but do not fail the build (they are upstream's to fix).
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Allowlist: anything not listed is denied, which is how ADR-0015 bans
+# proprietary and GPL-2.0-only dependencies without an explicit deny rule.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "GPL-3.0-or-later",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "Zlib",
+]
+unused-allowed-license = "allow"
+
+[bans]
+# ADR-0013 wants exactly one `gpui` in the tree. Duplicates elsewhere are common in
+# practice, so the default is a warning, the gpui rule is enforced when the UI crate
+# lands (Spike S0) — uncomment then and record the pinned version in the reason:
+# deny = [
+#     { crate = "gpui", deny-multiple-versions = true, reason = "ADR-0013: one GPUI, pinned via gpui-kit" },
+# ]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The GPUI snapshot is expected to arrive through gpui-kit's re-export, if it must be
+# pulled straight from git, add the exact repository here during Spike S0.
+allow-git = []
