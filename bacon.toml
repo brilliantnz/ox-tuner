@@ -1,0 +1,39 @@
+#:schema https://dystroy.org/bacon/.bacon.schema.json
+#
+# Development watcher, `bacon` rebuilds and restarts the app on every save.
+
+default_job = "run"
+env.CARGO_TERM_COLOR = "always"
+
+# This is a virtual workspace, so `src` at the root does not exist and bacon's
+# defaults would watch nothing. Watch the crates explicitly instead.
+default_watch = false
+watch = ["crates", "Cargo.toml", "rust-toolchain.toml", "bacon.toml"]
+
+# The app itself rebuilt and restarted whenever a watched file changes.
+# `kill` stops the running `oxtuner` binary through its parent `cargo` process
+# without it, bacon kills cargo and leaves a stale window behind on macOS.
+[jobs.run]
+command = ["cargo", "run", "--package", "oxtuner-app"]
+need_stdout = true
+allow_warnings = true
+background = false
+on_change_strategy = "kill_then_restart"
+kill = ["pkill", "-TERM", "-P"]
+scroll_anchor = "auto"
+
+[jobs.check]
+command = ["cargo", "check", "--workspace", "--all-targets"]
+need_stdout = false
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+need_stdout = false
+
+[jobs.test]
+command = ["cargo", "test", "--workspace"]
+need_stdout = true
+
+[keybindings]
+c = "job:clippy"
+t = "job:test"

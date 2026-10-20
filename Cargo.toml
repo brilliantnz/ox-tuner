@@ -10,9 +10,12 @@ members = ["crates/oxtuner-app"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/brilliantnz/ox-tuner"
+
+[workspace.dependencies]
+gpui-kit = "=0.8.0"
 
 # Lints are declared once here and inherited by every crate (`[lints] workspace = true`).
 # CI additionally runs `cargo clippy -- -D warnings`.
@@ -24,3 +27,16 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# gpui-kit's installation guide: debug builds leave GPUI, layout and text
+# rendering unoptimized, which makes the window feel slow while developing.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
