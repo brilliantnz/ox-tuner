@@ -1,0 +1,36 @@
+signature|rusEFI test.f407-discovery.123
+signature_section|TunerStudio
+spec|None
+endianness|little
+flags|
+pages|2
+page|1|size=20000|burn=B%2i|read=R%2i%2o%2c|writable=true
+page|2|size=128|burn=<empty>|read=R%2i%2o%2c|writable=true
+constants|7
+constant|secondTable|Array|U08|page=2|addr=Some(0)|shape=[4]|units=%|scale=1|translate=0
+constant|engineMake|String|ASCII|page=1|addr=Some(1184)|shape=string[32]|units=|scale=|translate=
+constant|luaScript|String|ASCII|page=1|addr=Some(0)|shape=string[8000]|units=|scale=|translate=
+constant|bias_resistor|Scalar|F32|page=1|addr=Some(64)|shape=scalar|units=Ohm|scale=1|translate=0
+constant|injectionMode|Bits|U08|page=1|addr=Some(68)|shape=[0:1]|units=|scale=|translate=
+constant|gpio|Bits|U08|page=1|addr=Some(69)|shape=[0:7]|units=|scale=|translate=
+constant|veTable|Array|U16|page=1|addr=Some(196)|shape=[16x16]|units=%|scale=0.1|translate=0
+pc_variables|3
+channels|4
+channel|rpm|U16@0|units=RPM
+channel|crank|bits1(11..11)@852|units=
+channel|fuelingLoad|U16@6|units=%
+channel|RPMValue|U16@0|units=RPM
+tables|1
+table|veTable1Tbl|x=gearCountArray|y=gearCountArray|z=veTable|title=VE Table
+curves|1
+gauges|0
+dialogs|2
+menus|1
+commands|1
+datalog|1
+unsupported|2
+unsupported_section|Tools
+unsupported_section|EventTriggers
+coverage|97.10
+errors|0
+warnings|0
