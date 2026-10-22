@@ -25,7 +25,7 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Global, IntoElement, Keystroke,
     ParentElement as _, Pixels, Render, SharedString, Styled as _, WeakEntity, Window,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, px, size,
+    WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 
 pub mod preferences;
@@ -35,7 +35,6 @@ use crate::{
     app::shortcuts::{SHORTCUTS, Shortcut, ShortcutGroup},
     constants::APP_NAME,
     i18n::t,
-    shell::titlebar::{UtilityBar, titlebar_options},
 };
 
 /// Width of the settings sidebar.
@@ -323,7 +322,7 @@ fn about_page() -> SettingPage {
                         t!("app.settings.item.source_code"),
                         SettingField::render(|options, _, _| {
                             Button::new("open-homepage")
-                                .label("GitHub")
+                                .label(t!("app.settings.github_label"))
                                 .with_size(options.size())
                                 .on_click(|_, _, cx| {
                                     cx.open_url("https://github.com/brilliantnz/ox-tuner");

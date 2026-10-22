@@ -185,12 +185,19 @@ pub(crate) fn drag_child(id: &'static str) -> Stateful<Div> {
 ///
 /// The `id` must be unique within the window: keyed state means two regions
 /// sharing an id would share one armed flag.
+#[allow(
+    dead_code,
+    reason = "kept for windows that let a column reach the top edge; the current \
+              layouts draw one bar across the window, and this is the helper those \
+              layouts return to"
+)]
 #[derive(IntoElement)]
 pub(crate) struct DragTop {
     id: &'static str,
     width: Option<Pixels>,
 }
 
+#[allow(dead_code, reason = "see `DragTop`")]
 impl DragTop {
     pub(crate) const fn new(id: &'static str) -> Self {
         Self { id, width: None }
@@ -221,12 +228,18 @@ impl RenderOnce for DragTop {
 /// sidebar, in the sidebar's colour, so the sidebar reads as one column that
 /// reaches the top edge of the window — and on macOS the traffic lights float
 /// there, as they do in the main window.
+#[allow(
+    dead_code,
+    reason = "the split-bar layout the Settings window is designed around; its call \
+              site is currently commented out while the component's own bar is used"
+)]
 #[derive(IntoElement)]
 pub(crate) struct UtilityBar {
     title: SharedString,
     sidebar_width: Pixels,
 }
 
+#[allow(dead_code, reason = "see `UtilityBar`")]
 impl UtilityBar {
     pub(crate) fn new(title: impl Into<SharedString>, sidebar_width: Pixels) -> Self {
         Self {
