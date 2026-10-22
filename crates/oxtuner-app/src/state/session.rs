@@ -51,6 +51,10 @@ pub(crate) const BOTTOM_HEIGHT_RANGE: std::ops::Range<f32> = 96.0..480.0;
 /// One pixel, not a generous band: this only absorbs the rounding a zoomed frame
 /// can carry. It is never used to *decide* whether a window is maximized from a
 /// stored rectangle, only to recognise the frame zoom produces.
+///
+/// macOS-only: `is_zoom_frame` is the only reader, and Windows and Linux get the
+/// answer from `Window::is_maximized` alone.
+#[cfg(target_os = "macos")]
 const MAXIMIZE_EPSILON_PX: f32 = 1.;
 
 /// How much room a stored **windowed** rectangle must leave around itself.
@@ -205,7 +209,12 @@ fn fills_display(display: &Bounds<Pixels>, window: &Bounds<Pixels>) -> bool {
 }
 
 /// Whether `window` *is* the frame zoom produces: the display's usable area at the
-/// display's origin, within [`MAXIMIZE_EPSILON_PX`].
+/// display's origin, within `MAXIMIZE_EPSILON_PX`.
+///
+/// macOS-only: gpui's platform check compares sizes exactly, so a zoomed window
+/// can read as "not maximized" there. Windows and Linux answer the question
+/// themselves.
+#[cfg(target_os = "macos")]
 fn is_zoom_frame(display: &Bounds<Pixels>, window: &Bounds<Pixels>) -> bool {
     let close = |a: Pixels, b: Pixels| (a.as_f32() - b.as_f32()).abs() <= MAXIMIZE_EPSILON_PX;
 
@@ -461,10 +470,15 @@ pub(crate) fn capture_window(window: &Window, cx: &mut App) {
 /// Linux need: it asks `IsZoomed` and the window manager's state respectively.
 ///
 /// macOS additionally accepts the frame zoom produces — the display's usable area
-/// at its origin, within [`MAXIMIZE_EPSILON_PX`] — because gpui's macOS check
-/// compares sizes exactly and misses a zoomed window by a pixel often enough that
-/// the flag was saved as `false`. This *records* the state; nothing infers a
-/// maximize from a size when opening.
+/// at its origin, within one pixel — because gpui's macOS check compares sizes
+/// exactly and misses a zoomed window by a pixel often enough that the flag was
+/// saved as `false`. This *records* the state; nothing infers a maximize from a
+/// size when opening.
+///
+/// `cx` is only read on macOS. The parameter stays in the signature on every
+/// platform so callers do not need their own `cfg`, and the allowance below keeps
+/// `-D warnings` happy where it is unused.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub(crate) fn window_is_maximized(window: &Window, cx: &App) -> bool {
     if window.is_maximized() {
         return true;
@@ -769,6 +783,10 @@ mod tests {
 
     /// Detecting a maximize is a different question from storing one: only the
     /// exact zoom frame counts, or an oversized window would read as maximized.
+    ///
+    /// macOS-only, like the helper it covers: Windows and Linux take the answer
+    /// from the platform, so there is no zoom frame to recognise there.
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_the_exact_zoom_frame_reads_as_maximized() {
         let display = Bounds::new(point(px(0.), px(39.)), size(px(1800.), px(1130.)));
