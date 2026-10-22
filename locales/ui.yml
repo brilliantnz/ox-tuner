@@ -177,7 +177,7 @@ app:
     review:
       en: Review
     github_label:
-      en: ox-tuner on GitHub
+      en: GitHub
   language:
     en:
       en: English
