@@ -1,0 +1,19 @@
+[package]
+name = "oxtuner-core"
+description = "Headless core for ox-tuner: typed command/event bus, one owning thread, definition lifecycle."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# ADR-0005: the channel library is an owner decision. Blocking endpoints on
+# core threads; the async endpoint is for the UI's event pump only.
+crossfire = "3.1.21"
+oxtuner-ini.workspace = true
+tracing = "0.1.44"
+
+[lints]
+workspace = true
