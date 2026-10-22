@@ -17,8 +17,8 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::actions::{
-    About, OpenHomepage, OpenProject, Quit, Settings, ShowDisclaimer, ToggleBottomPanel,
-    TogglePrimarySidebar, ToggleSecondarySidebar,
+    About, OpenDefinition, OpenHomepage, OpenProject, Quit, Settings, ShowDisclaimer,
+    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::constants::APP_NAME;
 
@@ -98,10 +98,10 @@ fn app_items() -> Vec<MenuItem> {
 /// macOS already has Settings in the application menu, Windows and Linux have
 /// no application menu of their own, so Settings belongs under File there.
 fn file_items() -> Vec<MenuItem> {
-    let mut items = vec![MenuItem::action(
-        t!("app.menu.open_project_folder"),
-        OpenProject,
-    )];
+    let mut items = vec![
+        MenuItem::action(t!("app.menu.open_definition"), OpenDefinition),
+        MenuItem::action(t!("app.menu.open_project_folder"), OpenProject),
+    ];
     if !cfg!(target_os = "macos") {
         items.push(MenuItem::separator());
         items.push(MenuItem::action(t!("app.menu.settings"), Settings));

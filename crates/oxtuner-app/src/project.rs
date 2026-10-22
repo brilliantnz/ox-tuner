@@ -1,7 +1,7 @@
 //! Opening the project folder.
 //!
 //! M1 records the chosen project and remembers it for the next launch. The
-//! tune/INI engine that reads the folder arrives with the later milestones, so
+//! tune/INI reader that consumes the folder arrives with the later milestones, so
 //! this module deliberately stops at selecting and persisting the path — it
 //! does not claim to have parsed a tune.
 

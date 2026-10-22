@@ -17,7 +17,7 @@ pub mod window;
 
 use gpui_kit::App;
 
-use crate::{disclaimer, project, settings, shell};
+use crate::{core, disclaimer, project, settings, shell};
 
 pub fn app_identity() -> &'static str {
     "com.oxtuner.OxTuner"
@@ -42,6 +42,9 @@ pub fn init(cx: &mut App) {
     // a window holds focus — which is the case for every menu command.
     cx.on_action(|_: &actions::Quit, cx| cx.quit());
     cx.on_action(|_: &actions::Settings, cx| settings::open(cx));
+    cx.on_action(|_: &actions::OpenDefinition, cx| {
+        core::choose_definition(cx);
+    });
     cx.on_action(|_: &actions::OpenProject, cx| project::choose(cx));
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");

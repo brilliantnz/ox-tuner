@@ -11,7 +11,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use oxtuner_app::{
-    app, init,
+    app, core, init,
     platform::{logging, paths::AppPaths},
     settings::preferences::{AppSettings, apply_theme},
     shell,
@@ -60,6 +60,11 @@ fn main() {
         // Follow the stored preference, not always the OS: choosing Light or
         // Dark in Settings has to survive a restart.
         apply_theme(cx.global::<AppSettings>().theme(), cx);
+
+        // The headless core: one thread that owns the loaded definition and,
+        // later, the ECU session. Started before the first window so a view can
+        // never render core state that has nowhere to come from.
+        core::start(cx);
 
         shell::open_main_window(cx);
 

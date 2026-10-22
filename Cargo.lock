@@ -1202,6 +1202,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "crossfire"
+version = "3.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a2ff0acecd50a3f2a01c93e21c9f67266cbccc1018b4748c17435b61ca007b8"
+dependencies = [
+ "crossfire-utils",
+ "futures-core",
+ "parking_lot",
+ "pointers",
+ "smallvec",
+]
+
+[[package]]
+name = "crossfire-utils"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3398c18f4a17fd2b156e19256dfd20666488d5bf9a0d111d3fa8088e12b62ae"
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4485,12 +4504,22 @@ version = "0.0.0"
 dependencies = [
  "directories",
  "gpui-kit",
+ "oxtuner-core",
  "rust-i18n",
  "serde",
  "serde_json",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oxtuner-core"
+version = "0.0.0"
+dependencies = [
+ "crossfire",
+ "oxtuner-ini",
+ "tracing",
 ]
 
 [[package]]
@@ -4731,6 +4760,12 @@ dependencies = [
  "flate2",
  "miniz_oxide 0.8.9",
 ]
+
+[[package]]
+name = "pointers"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e527185f77b1805a7f16bed2b92e9bbe5a5efcb925f760e3c61cbd243b2ade93"
 
 [[package]]
 name = "polling"

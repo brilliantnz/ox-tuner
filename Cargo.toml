@@ -5,7 +5,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/oxtuner-app", "crates/oxtuner-ini"]
+members = ["crates/oxtuner-app", "crates/oxtuner-core", "crates/oxtuner-ini"]
 
 [workspace.package]
 version = "0.0.0"
@@ -16,6 +16,8 @@ repository = "https://github.com/brilliantnz/ox-tuner"
 
 [workspace.dependencies]
 gpui-kit = "=0.8.0"
+oxtuner-core = { path = "./crates/oxtuner-core" }
+oxtuner-ini = { path = "./crates/oxtuner-ini" }
 
 # Lints are declared once here and inherited by every crate (`[lints] workspace = true`).
 # CI additionally runs `cargo clippy -- -D warnings`.

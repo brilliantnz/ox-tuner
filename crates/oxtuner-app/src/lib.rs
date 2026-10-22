@@ -23,6 +23,7 @@ rust_i18n::i18n!("../../locales", fallback = "en");
 
 pub mod app;
 pub mod constants;
+pub mod core;
 pub mod disclaimer;
 pub mod i18n;
 pub mod platform;
