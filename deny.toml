@@ -13,8 +13,9 @@ ignore = []
 [licenses]
 version = 2
 confidence-threshold = 0.9
-# Allowlist: anything not listed is denied, which is how ADR-0015 bans
-# proprietary and GPL-2.0-only dependencies without an explicit deny rule.
+# License allowlist: only these SPDX licenses are permitted anywhere in the
+# dependency tree. Anything else (proprietary, GPL-2.0-only, unknown) is denied
+# by default, so no explicit deny rule is needed to exclude it.
 allow = [
   "0BSD",
   "Apache-2.0",
@@ -35,12 +36,9 @@ allow = [
 unused-allowed-license = "allow"
 
 [bans]
-# ADR-0013 wants exactly one `gpui` in the tree. Duplicates elsewhere are common in
-# practice, so the default is a warning, the gpui rule is enforced when the UI crate
-# lands (Spike S0) — uncomment then and record the pinned version in the reason:
-# deny = [
-#     { crate = "gpui", deny-multiple-versions = true, reason = "ADR-0013: one GPUI, pinned via gpui-kit" },
-# ]
+deny = [
+  { crate = "gpui-pre", deny-multiple-versions = true, reason = "only one GPUI snapshot may appear in the dependency graph, it is pinned upstream via gpui-kit's re-export" },
+]
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
@@ -49,6 +47,6 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The GPUI snapshot is expected to arrive through gpui-kit's re-export, if it must be
-# pulled straight from git, add the exact repository here during Spike S0.
+# The GPUI snapshot normally arrives through gpui-kit's re-export. If a dependency
+# ever needs to pull it straight from git, whitelist that exact repository here.
 allow-git = []
