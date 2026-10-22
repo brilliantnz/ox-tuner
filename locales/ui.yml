@@ -1,0 +1,183 @@
+# Application copy for ox-tuner (crate: oxtuner-app).
+#
+# Registered by `rust_i18n::i18n!("../../locales", fallback = "en")` in
+# `crates/oxtuner-app/src/lib.rs`; the directory lives at the workspace root so
+# later crates (oxtuner-ui, a headless CLI) can point at the same files.
+#
+# One file per module, each key with its `en` text. A key names what the text is
+# for, never the sentence. English ships today; adding a language means adding
+# its side to each key plus an entry in the Settings language dropdown.
+#
+# Component strings are NOT duplicated here — gpui-kit's built-in locales serve
+# them (dialogs, list search, the settings sidebar).
+#
+# Two tests in `src/i18n.rs` keep this file honest: every key the code asks for
+# exists, and every key here is asked for by the code.
+_version: 2
+app:
+  menu:
+    file:
+      en: File
+    edit:
+      en: Edit
+    selection:
+      en: Selection
+    view:
+      en: View
+    help:
+      en: Help
+    undo:
+      en: Undo
+    redo:
+      en: Redo
+    cut:
+      en: Cut
+    copy:
+      en: Copy
+    paste:
+      en: Paste
+    select_all:
+      en: Select All
+    toggle_primary_sidebar:
+      en: Toggle Primary Sidebar
+    toggle_secondary_sidebar:
+      en: Toggle Secondary Sidebar
+    toggle_bottom_panel:
+      en: Toggle Bottom Panel
+    about_item:
+      en: About Ox Tuner
+    settings:
+      en: Settings
+    quit:
+      en: Quit
+    open_project_folder:
+      en: Open Project Folder…
+    safety_disclaimer:
+      en: Safety Disclaimer
+    github:
+      en: GitHub
+  about:
+    line:
+      en: Open-source ECU tuning, written in Rust.
+    version:
+      en: Version %{version} · GPL-3.0-or-later
+  primary_sidebar:
+    project:
+      en: Project
+    recent:
+      en: Recent
+    no_project:
+      en: No project open
+  secondary_sidebar:
+    title:
+      en: Inspector
+    close_tooltip:
+      en: Close inspector
+    nothing_selected:
+      en: Nothing selected
+    select_hint:
+      en: Select a table or a cell to inspect it here.
+  bottom_panel:
+    title:
+      en: Output
+    close_tooltip:
+      en: Close output panel
+    empty:
+      en: No output yet.
+  editor:
+    project_hint:
+      en: This folder is remembered and opens with the app. Tune definitions and tables load when the INI engine lands.
+    project_missing:
+      en: This project folder is missing. Choose it again or open another folder.
+    choose_another:
+      en: Choose another folder…
+    no_tune:
+      en: No tune loaded
+    empty_hint:
+      en: Open a TunerStudio project folder to get started. Reading INI definitions and .msq tunes arrives with the engine.
+    open_project:
+      en: Open project folder…
+  status:
+    not_connected:
+      en: Not connected
+  panels:
+    toggle_primary_sidebar:
+      en: Toggle primary sidebar
+    toggle_secondary_sidebar:
+      en: Toggle secondary sidebar
+    toggle_bottom_panel:
+      en: Toggle output panel
+  shortcut_group:
+    general:
+      en: General
+    view:
+      en: View
+  shortcut:
+    open_settings:
+      en: Open settings
+    open_project:
+      en: Open project folder
+    quit:
+      en: Quit
+    toggle_primary_sidebar:
+      en: Toggle primary sidebar
+    toggle_secondary_sidebar:
+      en: Toggle secondary sidebar
+    toggle_bottom_panel:
+      en: Toggle output panel
+  disclaimer:
+    title:
+      en: Before you tune
+    ok_text:
+      en: I understand
+    warning:
+      en: ox-tuner writes calibration data to an engine controller. A wrong value can damage the engine or cause injury.
+    rule:
+      en: Keep a known-good tune, verify writes, and never tune while driving.
+    acceptance:
+      en: Continuing means you accept responsibility for the changes you make.
+  settings:
+    window_title:
+      en: Settings
+    page:
+      appearance:
+        en: Appearance
+      shortcuts:
+        en: Shortcuts
+      safety:
+        en: Safety
+      about:
+        en: About
+    group:
+      theme:
+        en: Theme
+      application:
+        en: Application
+      guardrails:
+        en: Guardrails
+    item:
+      mode:
+        en: Mode
+      language:
+        en: Language
+      version:
+        en: Version
+      license:
+        en: License
+      source_code:
+        en: Source code
+      safety_disclaimer:
+        en: Safety disclaimer
+    theme_description:
+      en: Follow the system appearance, or pin the app to light or dark.
+    disclaimer_accepted:
+      en: Accepted on this installation.
+    disclaimer_not_accepted:
+      en: Not accepted yet — it is shown on first launch.
+    review:
+      en: Review
+    github_label:
+      en: ox-tuner on GitHub
+  language:
+    en:
+      en: English
