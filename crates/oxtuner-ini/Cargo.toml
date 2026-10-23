@@ -1,0 +1,19 @@
+[package]
+name = "oxtuner-ini"
+description = "TunerStudio-style ECU definition (.ini) parser: preprocess, resolve, freeze."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Deliberately dependency-free: the dialect is hand-written (ADR-0006), and a
+# zero-dependency parser keeps `cargo deny` and the clean-room rule trivial.
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+[lints]
+workspace = true

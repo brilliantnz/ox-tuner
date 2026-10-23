@@ -4,10 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, ready_for_review, reopened]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -15,13 +23,43 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    # Single decision point for every trigger; every other job needs this
+    # one, so a skipped gate skips the whole workflow.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft) ||
+      (github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved' &&
+      !github.event.pull_request.draft) ||
+      (github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/ci'))
+    steps:
+      - run: echo "CI gate passed for ${{ github.event_name }}"
+
   fmt:
     name: fmt (rust)
+    needs: gate
     runs-on: ubuntu-latest
     steps:
+      # For `/ci` comment runs the default ref is main — check out the PR head.
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+
+      # Install exactly the toolchain pinned in rust-toolchain.toml instead of the floating `@stable` shorthand.
+      - id: tc
+        shell: bash
+        run: |
+          echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tc.outputs.channel }}
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -29,38 +67,111 @@ jobs:
   # Configuration lives in .oxfmtrc.json; the pnpm version is pinned in package.json.
   fmt-nonrust:
     name: fmt (non-rust)
+    needs: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # For `/ci` comment runs the default ref is main — check out the PR head.
+      - uses: actions/checkout@v7
         with:
-          node-version: 22
-          cache: pnpm
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          # `cache` is a boolean in pnpm/setup v3 (unlike actions/setup-node,
+          # where it takes the package-manager name).
+          cache: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec oxfmt --check
 
   deny:
     name: deny (licenses, advisories, bans, sources)
+    needs: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # For `/ci` comment runs the default ref is main — check out the PR head.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # CI: clippy -D warnings and tests must pass on Windows, macOS, Linux.
   build-test:
     name: ${{ matrix.os }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest","windows-latest"]') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # For `/ci` comment runs the default ref is main — check out the PR head.
+      - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+
+      # GPUI's Linux backend links system libraries; a bare runner fails at
+      # build-script time (`yeslogic-fontconfig-sys` needs `fontconfig.pc`).
+      # macOS and Windows ship theirs.
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shm0-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers
+
+      # Install exactly the toolchain pinned in rust-toolchain.toml.
+      # rust-cache folds every rustup-installed toolchain
+      # into its cache key, so we also drop the runner's floating `stable`:
+      # otherwise each new Rust stable release would change the key and force
+      # a full rebuild even though cargo builds with the pinned version.
+      - id: tc
+        shell: bash
+        run: |
+          echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tc.outputs.channel }}
           components: clippy
+      - name: Drop floating toolchains (keep the rust-cache key stable)
+        shell: bash
+        run: |
+          channel='${{ steps.tc.outputs.channel }}'
+          rustup default "$channel"
+          for tc in $(rustup toolchain list --quiet); do
+            case "$tc" in
+              "$channel"*) ;;
+              *) rustup toolchain uninstall "$tc" || true ;;
+            esac
+          done
+
+      # Caches target/{debug,release} + ~/.cargo, keyed by Cargo.lock and
+      # Cargo.toml files, rust-toolchain.toml, rustc version and OS/arch — so
+      # all three steps below start warm on the next run. cache-on-failure
+      # keeps the compiled dependency tree even when clippy/test fail, instead
+      # of throwing the work away and recompiling from scratch next push.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: 'true'
+
+      # clippy and test share target/debug (dependencies compile once, only
+      # the workspace crates are rebuilt after clippy, because its
+      # RUSTC_WORKSPACE_WRAPPER changes their fingerprint).
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
+
+      # `--release` is a separate profile tree (cargo cannot share artifacts
+      # across profiles) and recompiles every dependency — verify it
+      # post-merge and on manual runs instead of every approved PR run, its
+      # target/release tree stays warm in rust-cache between those runs.
       - run: cargo build --workspace --all-features --locked --release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

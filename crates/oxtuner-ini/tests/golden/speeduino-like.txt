@@ -1,0 +1,43 @@
+signature|speeduino 202501
+signature_section|MegaTune
+spec|Some(3.78)
+endianness|little
+flags|
+pages|2
+page|1|size=288|burn=b%2i|read=p%2i%2o%2c|writable=true
+page|2|size=288|burn=b%2i|read=p%2i%2o%2c|writable=true
+constants|12
+constant|primeBins|Array|U08|page=1|addr=Some(87)|shape=[4]|units=F|scale=1.8|translate=-22.23
+constant|CTPSPin|Bits|U08|page=1|addr=Some(91)|shape=[0:5]|units=|scale=|translate=
+constant|idleAdvDelay|Bits|U08|page=1|addr=Some(92)|shape=[3:7]|units=|scale=|translate=
+constant|idleAdvRPM|Scalar|U08|page=1|addr=Some(93)|shape=scalar|units=rpm|scale=100|translate=0
+constant|stoich|Scalar|U08|page=1|addr=Some(94)|shape=scalar|units=AFR|scale=0.1|translate=0
+constant|ego_min_lambda|Scalar|U08|page=1|addr=Some(95)|shape=scalar|units=Lambda|scale={0.1 / stoich}|translate=0
+constant|boardFuelOutputs|Array|U08|page=1|addr=Some(96)|shape=[128]|units= |scale=1|translate=0
+constant|AUXin00Alias|String|ASCII|page=1|addr=Some(224)|shape=string[20]|units=|scale=|translate=
+constant|rpmBins|Array|U08|page=2|addr=Some(0)|shape=[16]|units=RPM|scale=100|translate=0
+constant|fuelLoadBins|Array|U08|page=2|addr=Some(16)|shape=[16]|units=%|scale=1|translate=0
+constant|veTable|Array|U08|page=2|addr=Some(32)|shape=[16x16]|units=%|scale=1|translate=0
+constant|afrTable|Array|U08|page=2|addr=Some(32)|shape=[16x16]|units=AFR|scale=0.1|translate=0
+pc_variables|1
+channels|7
+channel|secl|U08@0|units=sec
+channel|status1|U08@1|units=bits
+channel|inj1Status|bits1(0..0)@1|units=
+channel|rpm|U16@4|units=RPM
+channel|map|U16@6|units=kpa
+channel|nSquirts|bits3(5..7)@84|units=
+channel|pulseLimit|computed|units=ms
+tables|1
+table|veTable1Tbl|x=rpmBins|y=fuelLoadBins|z=veTable|title=VE Table
+curves|1
+gauges|1
+dialogs|1
+menus|1
+commands|2
+datalog|1
+unsupported|1
+unsupported_section|EventTriggers
+coverage|98.80
+errors|0
+warnings|0

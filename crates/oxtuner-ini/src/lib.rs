@@ -1,0 +1,86 @@
+//! TunerStudio-style ECU definition (`.ini`) parsing for ox-tuner.
+//!
+//! Four passes, in the order ADR-0006 requires:
+//!
+//! ```text
+//! bytes ──decode──▶ text ──preprocess──▶ logical lines ──resolve──▶ Definition
+//!                        #if/#define/#set        sections, pages, commands
+//! ```
+//!
+//! The settings context enters **before** protocol-command derivation, because
+//! `COMMS_COMPAT` rewrites `burnCommand` and `mcu_stm32` rewrites
+//! `blockingFactor` (ADR-0006). That ordering is what makes
+//! [`SettingsContext`] an input to [`parse_str`] rather than a later adjustment.
+//!
+//! # Design rules this crate keeps
+//!
+//! - **Headless.** No GPUI, no I/O beyond the caller-supplied `#include`
+//!   resolver, no ECU-specific code (ADR-0001).
+//! - **Never panic.** Malformed text produces [`Diagnostic`]s with line numbers.
+//!   A section or key this build does not model is *data*
+//!   ([`Definition::unsupported`]), not a failure (ADR-0006 decision 4).
+//! - **Never guess.** Presentation attributes stay symbolic
+//!   ([`model::Number::Expression`]) because they re-evaluate at runtime;
+//!   expressions that cannot be folded exactly stay unfolded.
+//! - **Zero dependencies.** The dialect is hand-written; a dependency-free
+//!   parser keeps the clean-room and `cargo deny` stories trivial.
+//!
+//! # Example
+//!
+//! ```
+//! use oxtuner_ini::{parse_str, SettingsContext};
+//!
+//! let text = "\
+//! [MegaTune]
+//! signature = \"speeduino 202501\"
+//! queryCommand = \"Q\"
+//!
+//! [Constants]
+//! nPages = 1
+//! pageSize = 288
+//! page = 1
+//! reqFuel = scalar, U16, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+//! ";
+//!
+//! let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+//! assert_eq!(definition.signature, "speeduino 202501");
+//! assert_eq!(definition.constant("reqFuel").map(|c| c.page), Some(1));
+//! ```
+
+pub mod error;
+pub mod expr;
+pub mod fields;
+pub mod model;
+mod parser;
+pub mod preprocess;
+pub mod settings;
+pub mod source;
+
+pub use error::{Diagnostic, IniError, Severity};
+pub use fields::{Command, CommandArguments, Placeholder, Segment};
+pub use model::{
+    Axis, BitOption, BitRange, Channel, ChannelKind, Constant, ConstantClass, ConstantFlags,
+    Coverage, Curve, DataType, DatalogEntry, Definition, Dialog, DialogRow, Dimension, Endianness,
+    Extensions, FrontPage, Gauge, Indicator, KeyAction, Menu, MenuItem, MenuTargetKind, Number,
+    Offset, Ordered, Page, PcVariable, Protocol, ReferenceTable, RowKind, ScatteredConfig,
+    SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text, UnsupportedSection,
+};
+pub use parser::{MAX_SPEC_VERSION, parse_bytes, parse_str, parse_str_with_includes};
+pub use preprocess::{LogicalLine, Preprocessed, preprocess};
+pub use settings::SettingsContext;
+
+impl Definition {
+    /// Parses a definition from text with the given settings context.
+    ///
+    /// Shorthand for [`parse_str`].
+    pub fn parse(text: &str, settings: &SettingsContext) -> Result<Self, IniError> {
+        parse_str(text, settings)
+    }
+
+    /// Parses a definition from raw bytes, decoding lossily.
+    ///
+    /// Shorthand for [`parse_bytes`].
+    pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Self, IniError> {
+        parse_bytes(bytes, settings)
+    }
+}

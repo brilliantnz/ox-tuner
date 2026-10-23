@@ -52,6 +52,8 @@ app:
       en: Quit
     open_project_folder:
       en: Open Project Folder…
+    open_definition:
+      en: Open ECU Definition…
     safety_disclaimer:
       en: Safety Disclaimer
     github:
@@ -82,11 +84,15 @@ app:
       en: Output
     close_tooltip:
       en: Close output panel
-    empty:
-      en: No output yet.
+    no_definition:
+      en: No ECU definition loaded.
+    definition_summary:
+      en: '%{pages} pages · %{constants} constants · %{coverage}% of entries understood'
+    definition_failed:
+      en: The definition could not be loaded.
   editor:
     project_hint:
-      en: This folder is remembered and opens with the app. Tune definitions and tables load when the INI engine lands.
+      en: This folder is remembered and opens with the app. Tune definitions and tables load from the core as the milestones land.
     project_missing:
       en: This project folder is missing. Choose it again or open another folder.
     choose_another:
@@ -177,7 +183,7 @@ app:
     review:
       en: Review
     github_label:
-      en: ox-tuner on GitHub
+      en: GitHub
   language:
     en:
       en: English

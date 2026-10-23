@@ -8,8 +8,13 @@
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
-use gpui_kit::{App, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
+    div,
+};
 
+use crate::core::CoreService;
 use crate::i18n::t;
 
 /// The output panel.
@@ -51,12 +56,65 @@ impl RenderOnce for BottomPanel {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .items_center()
                     .justify_center()
+                    .gap_1()
                     .px_3()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t!("app.bottom_panel.empty")),
+                    .child(core_status(cx)),
             )
     }
+}
+
+/// What the core currently holds.
+///
+/// The output panel is where the app reports what the headless core is doing, so
+/// the definition status lives here rather than in the editor: the editor is for
+/// the tune, this panel is for the machinery behind it.
+fn core_status(cx: &App) -> AnyElement {
+    let status = CoreService::status(cx);
+    let muted = cx.theme().muted_foreground;
+    let danger = cx.theme().danger;
+
+    let headline: AnyElement = match &status.summary {
+        Some(summary) => v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(summary.signature.clone()),
+            )
+            .child(div().text_xs().text_color(muted).child(t!(
+                "app.bottom_panel.definition_summary",
+                pages = summary.pages.to_string(),
+                constants = summary.constants.to_string(),
+                coverage = format!("{:.2}", summary.coverage_percent),
+            )))
+            .into_any_element(),
+        None => div()
+            .text_sm()
+            .text_color(muted)
+            .child(t!("app.bottom_panel.no_definition"))
+            .into_any_element(),
+    };
+
+    v_flex()
+        .gap_1()
+        .child(headline)
+        .when_some(status.failure.clone(), |this, message| {
+            this.child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(danger)
+                            .child(t!("app.bottom_panel.definition_failed")),
+                    )
+                    // The parser's message names lines and sections; showing it
+                    // verbatim is what makes a bad definition fixable.
+                    .child(div().text_xs().text_color(muted).child(message)),
+            )
+        })
+        .into_any_element()
 }

@@ -9,6 +9,7 @@ gpui_kit::actions!(
     [
         Quit,
         About,
+        OpenDefinition,
         OpenProject,
         OpenHomepage,
         Settings,

@@ -275,7 +275,7 @@ impl Shell {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             // The connection, signature, write-state and realtime indicators
-            // join this row as the engine lands; until then it states what is
+            // join this row as the core lands; until then it states what is
             // actually true.
             .child(t!("app.status.not_connected"))
             .child(concat!("v", env!("CARGO_PKG_VERSION")))

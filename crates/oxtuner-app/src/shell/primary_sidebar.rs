@@ -11,7 +11,7 @@
 //! Settings window uses.
 //!
 //! The dock workspace (see `docs/architecture/ui/`) fills this column with the
-//! project and INI tree once the engine lands, so today it is its placeholder
+//! project and INI tree once the core lands, so today it is its placeholder
 //! rather than a second design.
 
 use std::path::{Path, PathBuf};
