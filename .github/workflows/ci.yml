@@ -77,7 +77,9 @@ jobs:
       - uses: pnpm/setup@v3
         with:
           runtime: node@24
-          cache: pnpm
+          # `cache` is a boolean in pnpm/setup v3 (unlike actions/setup-node,
+          # where it takes the package-manager name).
+          cache: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec oxfmt --check
 
