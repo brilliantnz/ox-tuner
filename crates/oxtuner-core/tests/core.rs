@@ -404,6 +404,55 @@ fn dropping_the_core_stops_and_joins_the_thread() {
 }
 
 #[test]
+fn a_slow_consumer_backpressures_the_core_without_losing_answers() {
+    // A consumer that falls behind blocks the core's replies (bounded queues,
+    // ADR-0005 rule 5) and new commands are refused at the door — but nothing
+    // accepted is lost: once the consumer returns, every answer arrives and
+    // the core still shuts down and joins. This is the app's contract too: the
+    // event pump keeps draining until `Stopped`, so the core is never wedged
+    // for good.
+    let core = Harness::start_with(CoreConfig {
+        command_capacity: 16,
+        event_capacity: 8,
+    });
+
+    let mut accepted = Vec::new();
+    let mut refused = 0usize;
+    for index in 0..200 {
+        let command =
+            Command::load_definition(format!("slow-{index}.ini"), SPEEDUINO_LIKE.as_bytes());
+        match core.handle.send(command) {
+            Ok(op) => accepted.push(op),
+            Err(CoreError::QueueFull) => refused += 1,
+            Err(other) => panic!("unexpected send error: {other}"),
+        }
+    }
+    assert!(
+        refused > 0 || accepted.len() == 200,
+        "the flood should outrun two tiny queues (refused {refused}, accepted {})",
+        accepted.len()
+    );
+
+    // The consumer returns: each accepted id is answered exactly once.
+    let mut answers: HashSet<OpId> = HashSet::new();
+    while answers.len() < accepted.len() {
+        if let Some(op) = core.next().op() {
+            assert!(answers.insert(op), "{op} was answered twice");
+        }
+    }
+    for op in &accepted {
+        assert!(answers.contains(op), "{op} was accepted but never answered");
+    }
+
+    core.handle
+        .shutdown()
+        .expect("the idle core accepts shutdown");
+    let report = core.thread.join();
+    assert_eq!(report.handled as usize, accepted.len());
+    assert_eq!(report.rejected, 0);
+}
+
+#[test]
 fn the_invariants_hold_across_repeated_runs() {
     // Determinism on the invariant fields, the way P6 claimed it: identical
     // answers, no duplicates, `Stopped` last — every run.

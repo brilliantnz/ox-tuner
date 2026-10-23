@@ -32,7 +32,10 @@ pub struct CoreConfig {
     /// at shutdown.
     pub command_capacity: usize,
     /// Events that may wait for the UI. Generous: dropping an event would break
-    /// the "answered exactly once" guarantee.
+    /// the "answered exactly once" guarantee. Keep at least
+    /// `command_capacity + 2`, so one answer (or one [`Event::Rejected`]) per
+    /// accepted command plus [`Event::Stopped`] fits without the UI consuming —
+    /// otherwise the shutdown drain could block on the queue.
     pub event_capacity: usize,
 }
 
@@ -114,6 +117,17 @@ impl CoreReport {
 /// shutdown; a longer one would make quitting feel stuck.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
+/// How long a refused shutdown still waits for the thread before abandoning it.
+///
+/// The shutdown command never reached the core, so the thread is wedged (or
+/// slower than [`SHUTDOWN_WAIT`] to finish its current command). Quitting must
+/// stay bounded — an abandoned thread dies with the process, and the abandon is
+/// reported as an error, never silently.
+const JOIN_WAIT: Duration = Duration::from_secs(5);
+
+/// How often the abandoned-thread wait checks whether the core has finished.
+const JOIN_POLL: Duration = Duration::from_millis(10);
+
 /// Queues a [`Command::Shutdown`], waiting up to [`SHUTDOWN_WAIT`] for room.
 ///
 /// Returns whether the core will see the command (or is already gone).
@@ -150,9 +164,12 @@ pub struct CoreParts {
 
 /// Owns the core thread and joins it on drop.
 ///
-/// Dropping is a safe shutdown: it queues [`Command::Shutdown`] and waits, so a
-/// forgotten core never leaves a detached thread behind. [`CoreThread::join`]
-/// does the same and returns the report.
+/// Dropping is a safe shutdown: it queues [`Command::Shutdown`] and joins the
+/// thread, so a forgotten core is stopped and reaped, and [`CoreThread::join`]
+/// returns its report. One policy is explicit rather than pretty: a core that
+/// refuses shutdown is wedged, and a wedged thread is abandoned — loudly, after
+/// [`SHUTDOWN_WAIT`] + [`JOIN_WAIT`] — instead of hanging the caller forever.
+/// Nothing is ever detached silently.
 pub struct CoreThread {
     join: Option<JoinHandle<CoreReport>>,
     commands: MTx<mpmc::Array<Envelope>>,
@@ -174,14 +191,29 @@ impl CoreThread {
             return CoreReport::default();
         };
         match send_shutdown(&self.commands, OpId::new(0)) {
-            // The core will stop; wait for it.
+            // The core will stop; the join below is safe to wait on, because
+            // the loop is guaranteed to end once `Shutdown` is handled. Its one
+            // dependency is a live consumer for the final events (`Stopped`
+            // among them) — oxtuner-app's event pump drains until then.
             Ok(()) | Err(CoreError::Stopped) => {}
-            // The queue stayed full: dropping this thread's sender still closes
-            // the channel, so the core exits on its own — but joining has no
-            // deadline, and a stuck join would hang the caller on quit.
+            // The queue stayed full, so `Shutdown` never reached the core and
+            // nothing else can be queued either. The thread is wedged or slower
+            // than the wait to finish its current command: give it a bounded
+            // moment, then abandon it — loudly and explicitly. Quitting must
+            // not hang, and nothing here detaches silently.
             Err(error) => {
                 tracing::warn!(%error, "the core did not accept a shutdown command");
-                return CoreReport::default();
+                let deadline = Instant::now() + JOIN_WAIT;
+                while !join.is_finished() && Instant::now() < deadline {
+                    thread::sleep(JOIN_POLL);
+                }
+                if !join.is_finished() {
+                    tracing::error!(
+                        "the core thread is still running and was abandoned; it dies with the \
+                         process"
+                    );
+                    return CoreReport::default();
+                }
             }
         }
         join.join().unwrap_or_else(|payload| {
@@ -388,8 +420,8 @@ mod tests {
 
         assert!(config.command_capacity > 0);
         assert!(
-            config.event_capacity >= config.command_capacity,
-            "every accepted command needs room for its answer"
+            config.event_capacity >= config.command_capacity + 2,
+            "a full accepted burst (one answer or rejection each) plus `Stopped` must fit"
         );
     }
 
