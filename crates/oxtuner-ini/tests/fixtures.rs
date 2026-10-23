@@ -210,8 +210,10 @@ fn the_speeduino_commands_encode_to_the_documented_bytes() {
         )
         .expect("encodes");
 
-    // `r` `$tsCanId` `\x30` `%2o` `%2c`
-    assert_eq!(bytes, vec![b'r', 0x00, 0x30, 0x00, 0x00, 0x00, 130]);
+    // `r` `$tsCanId` `\x30` `%2o` `%2c` — offsets and counts are
+    // little-endian on the wire (dialect default; `forceBigEndianProtocol`
+    // flips them).
+    assert_eq!(bytes, vec![b'r', 0x00, 0x30, 0x00, 0x00, 130, 0x00]);
 }
 
 #[test]

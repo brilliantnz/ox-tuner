@@ -1,12 +1,11 @@
 //! Small tokenizer helpers shared by every section parser.
 //!
-//! Three rules from Prototype P3 shape this module:
+//! Three dialect rules shape this module:
 //!
 //! - a `;` starts a comment **unless it is inside a quoted string**, so
 //!   `versionInfo = "S" ; shown in the title bar` keeps its value;
 //! - a comma inside `{ … }` or `"…"` does not split fields, or
-//!   `{ bitStringValue(units, algorithm) }` becomes two fields (P3 moved
-//!   `[OutputChannels]` from 69 % to 99 % when this was fixed);
+//!   `{ bitStringValue(units, algorithm) }` becomes two fields;
 //! - field *counts* must never be assumed — trailing fields are optional.
 
 use std::fmt;
@@ -196,11 +195,14 @@ pub enum Segment {
 /// The parameter placeholders the dialect defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placeholder {
-    /// `%2i` — page identifier, two bytes.
+    /// `%2i` — page identifier, two bytes: the `[canId][page]` pair, written
+    /// big-endian. It is read byte-wise on the wire (canId first), so this is
+    /// a composite, not an endianness question.
     PageId,
-    /// `%2o` — start offset, two bytes.
+    /// `%2o` — start offset, two bytes. Little-endian on the wire unless the
+    /// definition sets `forceBigEndianProtocol`.
     Offset,
-    /// `%2c` — byte count, two bytes.
+    /// `%2c` — byte count, two bytes. Same wire order as [`Self::Offset`].
     Count,
     /// `%2v` — the payload bytes.
     Values,
@@ -338,13 +340,21 @@ impl Command {
                     None => return Err(format!("unknown command variable ${name}")),
                 },
                 Segment::Placeholder(Placeholder::PageId) => {
+                    // The page identifier is the `[canId][page]` pair — read
+                    // byte-wise by the firmware, so always big-endian.
                     bytes.extend_from_slice(&arguments.page.to_be_bytes());
                 }
                 Segment::Placeholder(Placeholder::Offset) => {
-                    bytes.extend_from_slice(&arguments.offset.to_be_bytes());
+                    bytes.extend_from_slice(&word_bytes(
+                        arguments.offset,
+                        arguments.force_big_endian,
+                    ));
                 }
                 Segment::Placeholder(Placeholder::Count) => {
-                    bytes.extend_from_slice(&arguments.count.to_be_bytes());
+                    bytes.extend_from_slice(&word_bytes(
+                        arguments.count,
+                        arguments.force_big_endian,
+                    ));
                 }
                 Segment::Placeholder(Placeholder::Values) => {
                     bytes.extend_from_slice(arguments.values);
@@ -365,14 +375,29 @@ impl Command {
 /// Values substituted into a command at send time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandArguments<'a> {
-    /// Page identifier, written big-endian for `%2i`.
+    /// Page identifier, written as `[canId][page]` for `%2i`.
     pub page: u16,
-    /// Start offset for `%2o`.
+    /// Start offset for `%2o`. Little-endian on the wire unless
+    /// [`Self::force_big_endian`] is set.
     pub offset: u16,
-    /// Byte count for `%2c`.
+    /// Byte count for `%2c`. Same wire order as [`Self::offset`].
     pub count: u16,
     /// Payload for `%2v` / `%v`.
     pub values: &'a [u8],
+    /// The definition's `forceBigEndianProtocol`: offsets and lengths go on
+    /// the wire big-endian instead of the dialect's little-endian default.
+    /// Callers pass `protocol.force_big_endian_protocol`.
+    pub force_big_endian: bool,
+}
+
+/// One 16-bit command argument on the wire: little-endian unless the
+/// definition forces the big-endian protocol.
+fn word_bytes(value: u16, force_big_endian: bool) -> [u8; 2] {
+    if force_big_endian {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +462,9 @@ mod tests {
 
     #[test]
     fn placeholders_carry_page_offset_count_and_payload() {
+        // Offsets and counts are little-endian on the wire (the dialect
+        // default; `forceBigEndianProtocol` flips them).
+        // The page identifier is the [canId][page] pair, big-endian.
         let command = Command::parse(r#""p%2i%2o%2c""#);
 
         let bytes = command
@@ -446,12 +474,33 @@ mod tests {
                     offset: 0x0004,
                     count: 0x0003,
                     values: &[],
+                    force_big_endian: false,
                 },
                 &|_| None,
             )
             .expect("encodes");
 
-        assert_eq!(bytes, vec![0x70, 0x01, 0x02, 0x00, 0x04, 0x00, 0x03]);
+        assert_eq!(bytes, vec![0x70, 0x01, 0x02, 0x04, 0x00, 0x03, 0x00]);
+    }
+
+    #[test]
+    fn force_big_endian_protocol_flips_offset_and_count() {
+        let command = Command::parse(r#""p%2i%2o%2c""#);
+
+        let bytes = command
+            .encode(
+                &CommandArguments {
+                    page: 1,
+                    offset: 4,
+                    count: 3,
+                    force_big_endian: true,
+                    ..CommandArguments::default()
+                },
+                &|_| None,
+            )
+            .expect("encodes");
+
+        assert_eq!(bytes, vec![0x70, 0x00, 0x01, 0x00, 0x04, 0x00, 0x03]);
     }
 
     #[test]
@@ -489,11 +538,12 @@ mod tests {
                     offset: 2,
                     count: 3,
                     values: &[9, 8, 7],
+                    force_big_endian: false,
                 },
                 &|_| None,
             )
             .expect("encodes");
 
-        assert_eq!(bytes, vec![0x4D, 0, 1, 0, 2, 0, 3, 9, 8, 7]);
+        assert_eq!(bytes, vec![0x4D, 0, 1, 2, 0, 3, 0, 9, 8, 7]);
     }
 }
