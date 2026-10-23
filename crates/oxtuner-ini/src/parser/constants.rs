@@ -2,7 +2,7 @@
 //!
 //! `[Constants]` is the hardest section in the dialect: it mixes protocol
 //! settings, page declarations, per-page command blocks and calibration entries
-//! in one flat list (Prototype P3, finding 2). The parser therefore decides per
+//! in one flat list. The parser therefore decides per
 //! line whether it is an entry (`scalar, U08, …`) or a setting (`nPages = 15`).
 
 use std::collections::BTreeMap;

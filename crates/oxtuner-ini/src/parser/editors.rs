@@ -2,8 +2,8 @@
 //!
 //! Both are block-structured: a `table =` / `curve =` line opens a block and the
 //! indented keys that follow belong to it until the next one. The block form is
-//! what makes `xBins`, `yBins` and `zBins` available to the table grid
-//! (Prototype P3, finding 8) — a table without all three cannot be laid out.
+//! what makes `xBins`, `yBins` and `zBins` available to the table grid — a
+//! table without all three cannot be laid out.
 
 use crate::fields::split_fields;
 use crate::model::{Axis, Curve, Definition, Number, Table, Text};

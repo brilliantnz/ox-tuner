@@ -2,7 +2,7 @@
 //!
 //! Real definitions are not reliably UTF-8: rusEFI's generated INI carries a
 //! single raw `0xB1` (`±`) inside a help string, and `str::from_utf8` rejects
-//! the whole file because of it (Prototype P3, finding 1). A definition the
+//! the whole file because of it. A definition the
 //! user owns must never become unusable because one byte is odd, so decoding is
 //! lossy — UTF-8 where it is valid, Latin-1 for the remainder — and the loss is
 //! reported once, not per byte.

@@ -1,8 +1,7 @@
 //! Core invariants from ADR-0005, exercised headlessly.
 //!
-//! These are the same properties Prototype P6 measured on its harness, applied
-//! to the real crate: one owner, answered exactly once, prompt under load,
-//! deterministic shutdown, and no GUI or async runtime in the dependency tree.
+//! One owner, answered exactly once, prompt under load, deterministic
+//! shutdown, and no GUI or async runtime in the dependency tree.
 
 use std::collections::{HashMap, HashSet};
 use std::thread;

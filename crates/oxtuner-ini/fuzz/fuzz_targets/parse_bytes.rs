@@ -1,6 +1,6 @@
 //! Fuzz the byte entry point, including invalid UTF-8.
 //!
-//! Real definitions are not reliably UTF-8 (Prototype P3, finding 1), so the
+//! Real definitions are not reliably UTF-8, so the
 //! decoder is part of the attack surface: arbitrary bytes must decode and parse
 //! without panicking.
 

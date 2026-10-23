@@ -1,6 +1,6 @@
 //! `[OutputChannels]` and `[BurstMode]`.
 //!
-//! The section has three entry shapes on purpose (Prototype P3, finding 6): a
+//! The section has three entry shapes on purpose: a
 //! measurement (`scalar`/`bits` + offset), a derived value (`{ expression },
 //! "units"`) and the legacy row without a class token. All three appear in real
 //! Speeduino and rusEFI files.
