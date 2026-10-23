@@ -1,27 +1,28 @@
 //! The headless core for ox-tuner.
 //!
-//! One OS thread owns the application's core state — today the loaded
-//! definition, next the tune images and the ECU session — and answers typed
-//! commands with typed events over bounded [crossfire](https://crates.io/crates/crossfire)
-//! channels. No `gpui*` type crosses this boundary, and no async runtime is
-//! used (ADR-0001, ADR-0005).
+//! One OS thread owns the application's core state — today the open session
+//! (a definition, or a project with its tune images), next the ECU session —
+//! and answers typed commands with typed events over bounded
+//! [crossfire](https://crates.io/crates/crossfire) channels. No `gpui*` type
+//! crosses this boundary, and no async runtime is used (ADR-0001, ADR-0005).
 //!
 //! ```text
 //!            Command / OpId                    Event
 //!   UI ───────────────────────▶ [core thread] ───────────────────────▶ UI
 //!                                   owns the
-//!                                  Definition
+//!                              Definition / Project
 //! ```
 //!
 //! # Guarantees
 //!
-//! - **One owner.** The definition is moved into the core thread and dropped
-//!   there. Callers receive a [`DefinitionSummary`], never the data.
+//! - **One owner.** The definition and the tune are moved into the core thread
+//!   and dropped there. Callers receive a [`DefinitionSummary`] or a
+//!   [`ProjectSummary`], never the data.
 //! - **Answered exactly once.** [`CoreHandle::send`] returns the [`OpId`] the
 //!   reply will carry; every accepted command produces exactly one
-//!   `DefinitionLoaded` / `DefinitionUnloaded` / `Failed` / `Rejected` event.
-//!   A refused command ([`CoreError::QueueFull`]) never enters the core and
-//!   receives no event — its id is simply unused.
+//!   `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` / `DefinitionUnloaded` /
+//!   `Failed` / `Rejected` event. A refused command ([`CoreError::QueueFull`])
+//!   never enters the core and receives no event — its id is simply unused.
 //! - **Bounded and non-blocking for the UI.** Sending never blocks; a full
 //!   command queue is reported, not waited on.
 //! - **Deterministic shutdown.** [`CoreThread::join`] (or dropping it) queues
@@ -30,10 +31,10 @@
 //!
 //! # What lands here next
 //!
-//! The transport (ADR-0008, M5), the tune images and write state (ADR-0010,
-//! M3/M7), the realtime poller (ADR-0014, M8) and guardrails S1–S10 (ADR-0011,
-//! M7) all belong to this crate — not to the UI. Nothing above is stubbed for
-//! them: the core is complete for the lifecycle it claims.
+//! The transport (ADR-0008, M5), the ECU-side tune images and the write path
+//! (ADR-0010/0011, M7), the realtime poller (ADR-0014, M8) and guardrails
+//! S1–S10 (ADR-0011, M7) all belong to this crate — not to the UI. Nothing
+//! above is stubbed for them: the core is complete for the lifecycle it claims.
 //!
 //! # Example
 //!
@@ -61,11 +62,16 @@
 //! ```
 
 mod handle;
+mod menu;
 mod message;
 mod service;
 
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
-pub use message::{Command, DefinitionSummary, Event, Failure, FailureCode, OpId, RejectReason};
+pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
+pub use message::{
+    Command, DefinitionSummary, Event, Failure, FailureCode, OpId, ProjectSummary, RejectReason,
+    SaveSummary,
+};
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
 /// Re-exported so callers can build [`Command::LoadDefinition`] without adding
