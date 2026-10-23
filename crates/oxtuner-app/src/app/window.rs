@@ -279,10 +279,10 @@ pub fn save_on_quit(cx: &mut App) {
         save_window_state(cx);
         AppState::save(cx);
         AppSettings::save(cx);
-        // The core stops before the process tears down, so its thread is
-        // joined while the runtime it reports into still exists.
-        crate::core::request_shutdown(cx);
-        async {}
+        // The core stops before the process tears down: this future resolves
+        // once its thread is joined, and until then the event pump keeps
+        // draining, so the core's last sends cannot block on the queue.
+        crate::core::request_shutdown(cx)
     });
 }
 

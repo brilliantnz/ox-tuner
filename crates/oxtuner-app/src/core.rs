@@ -196,26 +196,43 @@ fn load(path: std::path::PathBuf, cx: &mut App) {
     }
 }
 
-/// Tells the core to stop and waits for its thread.
+/// Tells the core to stop and returns the future that resolves once it is gone.
 ///
-/// Joining here rather than relying on drop order means the core is gone before
-/// the app's own state starts being torn down, and the wait is bounded by the
-/// core's own shutdown path.
-pub(crate) fn request_shutdown(cx: &mut App) {
-    if !cx.has_global::<CoreService>() {
-        return;
-    }
-    let service = cx.global_mut::<CoreService>();
-    if let Err(error) = service.handle.shutdown() {
-        tracing::debug!(%error, "the core was already stopping");
-    }
-    if let Some(thread) = service.thread.take() {
-        let report = thread.join();
-        tracing::debug!(
-            handled = report.handled,
-            rejected = report.rejected,
-            "the core stopped"
-        );
+/// Every blocking step runs on the background pool: the foreground executor has
+/// to keep running the event pump until [`Event::Stopped`], or the core's last
+/// sends block on a full events queue and the join would never return. The
+/// returned future is awaited by the quit hook (`on_app_quit`), so quitting is
+/// deferred until the core's thread is joined — the core is gone before the
+/// app's own state starts being torn down.
+pub(crate) fn request_shutdown(cx: &mut App) -> impl Future<Output = ()> + use<> {
+    let core = if cx.has_global::<CoreService>() {
+        let service = cx.global_mut::<CoreService>();
+        Some((service.handle.clone(), service.thread.take()))
+    } else {
+        None
+    };
+
+    let stopped = cx.background_executor().spawn(async move {
+        let Some((handle, thread)) = core else {
+            return;
+        };
+        // Bounded: a shutdown that cannot be queued is reported, never waited
+        // on forever.
+        if let Err(error) = handle.shutdown() {
+            tracing::debug!(%error, "the core was already stopping");
+        }
+        if let Some(thread) = thread {
+            let report = thread.join();
+            tracing::debug!(
+                handled = report.handled,
+                rejected = report.rejected,
+                "the core stopped"
+            );
+        }
+    });
+
+    async move {
+        stopped.await;
     }
 }
 
