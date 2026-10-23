@@ -4633,6 +4633,7 @@ version = "0.0.0"
 dependencies = [
  "crossfire",
  "oxtuner-ini",
+ "oxtuner-project",
  "tracing",
 ]
 

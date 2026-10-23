@@ -1,9 +1,9 @@
 //! Opening the project folder.
 //!
-//! M1 records the chosen project and remembers it for the next launch. The
-//! tune/INI reader that consumes the folder arrives with the later milestones, so
-//! this module deliberately stops at selecting and persisting the path — it
-//! does not claim to have parsed a tune.
+//! The picker and the recent list send the path to the core, which reads the
+//! definition and the tune and owns them (ADR-0007). This module owns the path
+//! semantics — canonicalising, naming, remembering — and persists the folder
+//! only once the core reports it opened successfully.
 
 use std::{
     fs,
@@ -13,7 +13,7 @@ use std::{
 use gpui_kit::{App, PathPromptOptions};
 use rust_i18n::t;
 
-use crate::{settings::preferences::AppSettings, state::session::AppState};
+use crate::{core, settings::preferences::AppSettings, state::session::AppState};
 
 /// Asks the OS for a project folder, then opens it.
 ///
@@ -40,10 +40,11 @@ pub(crate) fn choose(cx: &mut App) {
     .detach();
 }
 
-/// Makes `path` the active project and remembers it.
+/// Asks the core to open `path`.
 ///
-/// The state write is immediate rather than debounced: choosing a project is a
-/// deliberate action and should survive a crash a moment later.
+/// The reply arrives on the event pump: the core module persists the folder and
+/// repaints once the core reports success, so a failed open never enters the
+/// recent list.
 pub(crate) fn open(path: PathBuf, cx: &mut App) {
     let path = match fs::canonicalize(&path) {
         Ok(path) => path,
@@ -53,8 +54,36 @@ pub(crate) fn open(path: PathBuf, cx: &mut App) {
         }
     };
 
-    AppState::update_global(cx, |state| state.last_project = Some(path.clone()));
-    AppSettings::remember_project(cx, &path);
+    core::open_project(&path, cx);
+}
+
+/// Reopens the project the last session left, when it is still on disk.
+///
+/// Called once at start-up, after the core is running. A folder that has since
+/// moved is left alone rather than reported as a start-up failure: the empty
+/// state already offers the picker, and a stale path is not worth a red banner.
+pub fn reopen_last(cx: &mut App) {
+    let path = cx
+        .global::<AppState>()
+        .last_project()
+        .map(Path::to_path_buf);
+
+    if let Some(path) = path
+        && is_available(&path)
+    {
+        tracing::debug!(path = %path.display(), "reopening the last project");
+        open(path, cx);
+    }
+}
+
+/// Makes `path` the active project and remembers it.
+///
+/// Called by the core event pump after a successful open. The state write is
+/// immediate rather than debounced: choosing a project is a deliberate action
+/// and should survive a crash a moment later.
+pub(crate) fn remember(path: &Path, cx: &mut App) {
+    AppState::update_global(cx, |state| state.last_project = Some(path.to_path_buf()));
+    AppSettings::remember_project(cx, path);
     AppState::save(cx);
     // Only the shell draws the active project; the Settings window does not.
     crate::app::window::notify_main(cx);

@@ -46,6 +46,7 @@ pub fn init(cx: &mut App) {
         core::choose_definition(cx);
     });
     cx.on_action(|_: &actions::OpenProject, cx| project::choose(cx));
+    cx.on_action(|_: &actions::SaveTune, cx| core::save_tune(cx));
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");
     });
