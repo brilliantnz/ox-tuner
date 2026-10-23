@@ -28,17 +28,21 @@ jobs:
     runs-on: ubuntu-latest
     # Single decision point for every trigger; every other job needs this
     # one, so a skipped gate skips the whole workflow.
-    if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-      !github.event.pull_request.draft) ||
-      (github.event_name == 'pull_request_review' &&
-      github.event.review.state == 'approved' &&
-      !github.event.pull_request.draft) ||
-      (github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/ci'))
+    # CI disabled during early development (saves runner time/credits).
+    # Re-enable by removing the `if: false` below and restoring the original condition.
+    # Original gate condition:
+    #   if: >-
+    #     github.event_name == 'push' ||
+    #     github.event_name == 'workflow_dispatch' ||
+    #     (github.event_name == 'pull_request' &&
+    #     !github.event.pull_request.draft) ||
+    #     (github.event_name == 'pull_request_review' &&
+    #     github.event.review.state == 'approved' &&
+    #     !github.event.pull_request.draft) ||
+    #     (github.event_name == 'issue_comment' &&
+    #     github.event.issue.pull_request &&
+    #     startsWith(github.event.comment.body, '/ci'))
+    if: false
     steps:
       - run: echo "CI gate passed for ${{ github.event_name }}"
 
