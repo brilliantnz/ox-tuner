@@ -221,9 +221,8 @@ fn label_to_raw(
 
     options
         .iter()
-        .enumerate()
-        .find(|(_, option)| option.label.trim() == text.trim())
-        .map(|(index, option)| f64::from(option.value.unwrap_or(u8::try_from(index).unwrap_or(0))))
+        .find(|option| option.label.trim() == text.trim())
+        .map(|option| f64::from(option.value))
         .ok_or_else(|| format!("`{text}` is not one of the definition's labels"))
 }
 
@@ -274,10 +273,10 @@ pub fn format_values(
                         .map(|variable| &variable.options)
                 });
             let label = options.and_then(|options| {
-                options.iter().enumerate().find_map(|(index, option)| {
-                    let value = option.value.unwrap_or(u8::try_from(index).unwrap_or(0));
-                    (f64::from(value) == raw).then_some(option.label.as_str())
-                })
+                options
+                    .iter()
+                    .find(|option| f64::from(option.value) == raw)
+                    .map(|option| option.label.as_str())
             });
             match label {
                 Some(label) => Ok(format!("\"{label}\"")),
@@ -348,6 +347,7 @@ reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
 note = string, ASCII, 8
 table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+canAddress = bits, U16, 10, [0:15], 256="0x100", 300="0x12C"
 
 [PcVariables]
 rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
@@ -363,6 +363,7 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
         <constant name="aeMode">"MAP"</constant>
         <constant name="note">"NO2C"</constant>
         <constant cols="2" rows="2" name="table">1.0 2.0 3.0 4.0</constant>
+        <constant name="canAddress">"0x12C"</constant>
     </page>
 </msq>"#;
 
@@ -396,6 +397,21 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
     fn a_bit_label_maps_through_the_option_list() {
         let loaded = loaded();
         assert_eq!(loaded.tune.scalar_raw("aeMode").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn a_label_past_the_first_byte_keeps_its_value() {
+        // `bits` option values are not bytes: Speeduino's CAN address fields
+        // use `[0:15]` with a 65 536-label list, so `0x12C` is value 300.
+        let loaded = loaded();
+        assert_eq!(loaded.tune.scalar_raw("canAddress").unwrap(), 300.0);
+
+        let spec = loaded.layout.variable("canAddress").unwrap();
+        let values = loaded.tune.value("canAddress").unwrap();
+        assert_eq!(
+            format_values(spec, definition(), values).unwrap(),
+            "\"0x12C\""
+        );
     }
 
     #[test]
