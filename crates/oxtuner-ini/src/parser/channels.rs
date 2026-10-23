@@ -5,6 +5,8 @@
 //! "units"`) and the legacy row without a class token. All three appear in real
 //! Speeduino and rusEFI files.
 
+use std::borrow::Cow;
+
 use crate::fields::{Command, split_fields};
 use crate::model::{
     BitRange, Channel, ChannelKind, DataType, Definition, Number, ScatteredConfig, Text,
@@ -101,7 +103,12 @@ pub(crate) fn parse_channels(
     }
 }
 
-fn parse_channel(name: &str, raw: &str, fields: &[String], line: u32) -> Result<Channel, String> {
+fn parse_channel(
+    name: &str,
+    raw: &str,
+    fields: &[Cow<'_, str>],
+    line: u32,
+) -> Result<Channel, String> {
     let first = fields.first().ok_or("no value")?.trim().to_owned();
 
     // Derived channel: `name = { ego1 / 10.0 }, "AFR"`.
@@ -144,7 +151,7 @@ fn parse_channel(name: &str, raw: &str, fields: &[String], line: u32) -> Result<
         .ok_or_else(|| {
             format!(
                 "data type {:?}",
-                fields.get(index).map(String::as_str).unwrap_or("")
+                fields.get(index).map(|field| field.as_ref()).unwrap_or("")
             )
         })?;
     index += 1;
@@ -250,12 +257,17 @@ pub(crate) fn parse_burst_mode(
 mod tests {
     use super::*;
 
+    /// The parser takes the expanded fields; a test writes them out directly.
+    fn fields(value: &str) -> Vec<Cow<'static, str>> {
+        split_fields(value).into_iter().map(Cow::Owned).collect()
+    }
+
     #[test]
     fn a_scalar_channel_reads_its_type_offset_and_units() {
         let channel = parse_channel(
             "map",
             "scalar, U16, 4, \"kpa\", 1.000, 0.000",
-            &split_fields("scalar, U16, 4, \"kpa\", 1.000, 0.000"),
+            &fields("scalar, U16, 4, \"kpa\", 1.000, 0.000"),
             1,
         )
         .expect("parses");
@@ -279,7 +291,7 @@ mod tests {
         let channel = parse_channel(
             "nSquirts",
             "bits, U08, 84, [5:7]",
-            &split_fields("bits, U08, 84, [5:7]"),
+            &fields("bits, U08, 84, [5:7]"),
             1,
         )
         .expect("parses");
@@ -299,7 +311,7 @@ mod tests {
         let channel = parse_channel(
             "afr",
             "{ ego1 / 10.0 }, \"AFR\"",
-            &split_fields("{ ego1 / 10.0 }, \"AFR\""),
+            &fields("{ ego1 / 10.0 }, \"AFR\""),
             1,
         )
         .expect("parses");
@@ -313,7 +325,7 @@ mod tests {
         let channel = parse_channel(
             "rpm",
             "U16, 0, \"RPM\", 1.0, 0.0",
-            &split_fields("U16, 0, \"RPM\", 1.0, 0.0"),
+            &fields("U16, 0, \"RPM\", 1.0, 0.0"),
             1,
         )
         .expect("parses");

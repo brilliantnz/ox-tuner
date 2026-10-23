@@ -194,6 +194,9 @@ pub(crate) fn parse_menu(
 ) {
     let mut dialog: Option<String> = None;
     let mut index: Option<usize> = None;
+    // Index in the current menu's `items` of the `groupMenu` that later
+    // `groupChildMenu` entries belong to. A `subMenu` or a separator closes it.
+    let mut group: Option<usize> = None;
 
     for (line, text) in lines {
         section.count_entry();
@@ -207,8 +210,10 @@ pub(crate) fn parse_menu(
                     target: String::new(),
                     label: String::new(),
                     conditions: Vec::new(),
+                    group: None,
                     line: *line,
                 });
+                group = None;
                 section.understand(*line);
                 continue;
             }
@@ -246,15 +251,20 @@ pub(crate) fn parse_menu(
                         definition.menus.len() - 1
                     }
                 });
+                group = None;
                 section.understand(*line);
             }
             "submenu" | "groupmenu" | "groupchildmenu" => {
                 let (target, label, conditions) = parse_menu_item(&fields);
                 let kind = match lowered.as_str() {
-                    "groupmenu" => MenuTargetKind::SubMenu,
-                    "groupchildmenu" => MenuTargetKind::SubMenu,
+                    "groupmenu" => MenuTargetKind::Group,
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
                     _ => MenuTargetKind::Panel,
+                };
+                let owner = match lowered.as_str() {
+                    "groupmenu" => None,
+                    "groupchildmenu" => group,
+                    _ => None,
                 };
                 let Some(menu) = index.and_then(|index| definition.menus.get_mut(index)) else {
                     section.warn(
@@ -264,13 +274,22 @@ pub(crate) fn parse_menu(
                     );
                     continue;
                 };
+                let position = menu.items.len();
                 menu.items.push(MenuItem {
                     kind,
                     target,
                     label,
                     conditions,
+                    group: owner,
                     line: *line,
                 });
+                // A group header opens a group and a child keeps it open; a
+                // plain subMenu ends it.
+                group = match lowered.as_str() {
+                    "groupmenu" => Some(position),
+                    "groupchildmenu" => group,
+                    _ => None,
+                };
                 section.understand(*line);
             }
             "removeSubMenu" | "updateSubMenuLabel" | "replaceSubMenu" => {
@@ -288,8 +307,20 @@ pub(crate) fn parse_menu(
 }
 
 /// `subMenu = target, "Label"[, cond…]`, tolerating the space-separated form
-/// some generators emit (`subMenu = target "Label"`).
+/// some generators emit (`subMenu = target "Label"[, cond…]`).
+///
+/// The space-separated form is detected by the quote in the first field, not by
+/// the field count: with a trailing condition it splits into two fields, and
+/// reading those as target and label would turn the condition into the label.
 fn parse_menu_item(fields: &[String]) -> (String, String, Vec<String>) {
+    if let Some(first) = fields.first()
+        && let Some(start) = first.find('"')
+    {
+        let target = first[..start].trim().to_owned();
+        let label = crate::fields::unquote(first[start..].trim()).to_owned();
+        return (target, label, fields[1..].to_vec());
+    }
+
     if fields.len() >= 2 {
         return (
             fields[0].clone(),
@@ -297,15 +328,12 @@ fn parse_menu_item(fields: &[String]) -> (String, String, Vec<String>) {
             fields[2..].to_vec(),
         );
     }
-    let joined = fields.first().cloned().unwrap_or_default();
-    match joined.find('"') {
-        Some(start) => {
-            let target = joined[..start].trim().to_owned();
-            let label = joined[start..].trim();
-            (target, crate::fields::unquote(label).to_owned(), Vec::new())
-        }
-        None => (joined, String::new(), Vec::new()),
-    }
+
+    (
+        fields.first().cloned().unwrap_or_default(),
+        String::new(),
+        Vec::new(),
+    )
 }
 
 /// `[SettingContextHelp]`: per-constant help text.
@@ -420,10 +448,44 @@ mod tests {
     }
 
     #[test]
+    fn a_group_menu_owns_the_group_child_entries_that_follow_it() {
+        let definition = parse(
+            "[MegaTune]\nsignature = \"x\"\n[Menu]\nmenu = \"Fuel\"\nsubMenu = before, \"Before\"\ngroupMenu = \"Protection\"\ngroupChildMenu = cut, \"Cut\"\ngroupChildMenu = limiter, \"Limiter\"\nsubMenu = after, \"After\"\n",
+        );
+
+        let menu = definition.menus.first().expect("menu");
+        assert_eq!(menu.items[1].kind, MenuTargetKind::Group);
+        assert_eq!(menu.items[1].label, "Protection");
+        assert_eq!(menu.items[2].group, Some(1));
+        assert_eq!(menu.items[3].group, Some(1));
+        assert_eq!(
+            menu.items[4].group, None,
+            "a plain subMenu closes the group"
+        );
+        assert_eq!(menu.items[4].kind, MenuTargetKind::Panel);
+    }
+
+    #[test]
     fn a_space_separated_menu_item_still_yields_a_target_and_label() {
-        let (target, label, _) = parse_menu_item(&["veTable1Tbl \"VE Table\"".to_owned()]);
+        let (target, label, conditions) = parse_menu_item(&["veTable1Tbl \"VE Table\"".to_owned()]);
 
         assert_eq!(target, "veTable1Tbl");
         assert_eq!(label, "VE Table");
+        assert!(conditions.is_empty());
+    }
+
+    #[test]
+    fn a_space_separated_menu_item_keeps_its_trailing_condition() {
+        // The real Speeduino INI writes this form; splitting on the comma must
+        // not turn `{ useDwellMap }` into the label.
+        let fields = vec![
+            "dwell_tblMap \"Dwell Map\"".to_owned(),
+            "{ useDwellMap }".to_owned(),
+        ];
+        let (target, label, conditions) = parse_menu_item(&fields);
+
+        assert_eq!(target, "dwell_tblMap");
+        assert_eq!(label, "Dwell Map");
+        assert_eq!(conditions, vec!["{ useDwellMap }"]);
     }
 }

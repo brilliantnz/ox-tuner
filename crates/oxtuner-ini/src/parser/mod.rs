@@ -342,14 +342,20 @@ fn finalize(definition: &mut Definition) {
 }
 
 fn apply_extension_flags(definition: &mut Definition) {
-    let read_only = definition.extensions.read_only.clone();
-    let controller_priority = definition.extensions.controller_priority.clone();
+    // The lists live beside the constants, not inside them: destructuring
+    // borrows each field once, so the sets are read in place instead of being
+    // cloned (`readOnly` can name every constant in the file).
+    let Definition {
+        extensions,
+        constants,
+        ..
+    } = definition;
 
-    for (name, constant) in definition.constants.iter_mut() {
-        if read_only.contains(name) {
+    for (name, constant) in constants.iter_mut() {
+        if extensions.read_only.contains(name) {
             constant.flags.controller_priority |= true;
         }
-        if controller_priority.contains(name) {
+        if extensions.controller_priority.contains(name) {
             constant.flags.controller_priority = true;
         }
     }
@@ -363,7 +369,7 @@ fn validate_pages(definition: &mut Definition) {
         if page_number == 0 {
             continue;
         }
-        let Some(page) = definition.page(page_number).cloned() else {
+        let Some(page) = definition.page(page_number) else {
             problems.push(Diagnostic::new(
                 Severity::Warning,
                 "unknown-page",

@@ -13,7 +13,8 @@
 //! The output keeps 1-based line numbers so every later diagnostic can point at
 //! the line the user will find in their editor.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use crate::error::{Diagnostic, IniError, Severity};
 use crate::fields::{has_assignment, split_fields, strip_comment};
@@ -46,15 +47,34 @@ pub struct Preprocessed {
 }
 
 impl Preprocessed {
+    /// An expander over this file's defines.
+    ///
+    /// Building one resolves every define, so a caller that expands more than
+    /// a few lines should build it once and reuse it rather than call
+    /// [`Preprocessed::expand_fields`] in a loop.
+    pub fn expander(&self) -> Expander<'_> {
+        Expander::new(&self.defines)
+    }
+
     /// Expands a field list: a field that is exactly `$name` is replaced by that
     /// define's fields.
     pub fn expand_fields(&self, fields: &[String]) -> Vec<String> {
-        Expander::new(&self.defines).expand(fields)
+        let expander = self.expander();
+        expander
+            .expand(fields)
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect()
     }
 
     /// [`Preprocessed::expand_fields`], also returning undefined references.
     pub fn expand_reporting(&self, fields: &[String]) -> (Vec<String>, Vec<String>) {
-        Expander::new(&self.defines).expand_reporting(fields)
+        let expander = self.expander();
+        let (expanded, undefined) = expander.expand_reporting(fields);
+        (
+            expanded.into_iter().map(Cow::into_owned).collect(),
+            undefined,
+        )
     }
 }
 
@@ -64,24 +84,45 @@ impl Preprocessed {
 /// (Speeduino composes `invalid_x16` from two `invalid_x8`s). Per-index
 /// overrides (`$PINLIST, 1="INVALID"`) replace one element. A cycle or a
 /// missing name is left as written and reported, never looped on.
-#[derive(Debug, Clone, Copy)]
+///
+/// Every define is resolved **once**, when the expander is built, and the
+/// results borrow from the defines themselves. That matters because a define
+/// list can be very large — Speeduino spells out all 65 536 CAN addresses —
+/// and dozens of entries reference the same one; expanding on demand would
+/// copy that list for every reference.
+#[derive(Debug)]
 pub struct Expander<'a> {
-    defines: &'a BTreeMap<String, Vec<String>>,
+    /// Each define's fully expanded fields, keyed lowercase.
+    resolved: BTreeMap<String, Vec<&'a str>>,
 }
 
 impl<'a> Expander<'a> {
     /// An expander over one file's defines.
+    ///
+    /// Every define is resolved here, and each one only once: a definition can
+    /// reference the same list from a dozen entries, and a list can be tens of
+    /// thousands of fields wide (Speeduino's CAN address table is). Resolving on
+    /// demand and copying the result into every reference made `[Constants]`
+    /// dominate the whole parse.
     pub fn new(defines: &'a BTreeMap<String, Vec<String>>) -> Self {
-        Self { defines }
+        let mut resolved = BTreeMap::new();
+        let mut stack = Vec::new();
+        for name in defines.keys() {
+            stack.clear();
+            if let Some(fields) = resolve(defines, &mut resolved, name, &mut stack, 0) {
+                resolved.insert(name.clone(), fields);
+            }
+        }
+        Self { resolved }
     }
 
     /// Expanded fields.
-    pub fn expand(&self, fields: &[String]) -> Vec<String> {
+    pub fn expand<'s>(&'s self, fields: &[String]) -> Vec<Cow<'s, str>> {
         self.expand_reporting(fields).0
     }
 
     /// Expanded fields plus the names that could not be resolved.
-    pub fn expand_reporting(&self, fields: &[String]) -> (Vec<String>, Vec<String>) {
+    pub fn expand_reporting<'s>(&'s self, fields: &[String]) -> (Vec<Cow<'s, str>>, Vec<String>) {
         let mut undefined = Vec::new();
         let mut expanded = Vec::with_capacity(fields.len());
         let mut index = 0usize;
@@ -91,69 +132,104 @@ impl<'a> Expander<'a> {
             index += 1;
 
             let Some(name) = field.strip_prefix('$').map(str::trim) else {
-                expanded.push(field.clone());
+                expanded.push(Cow::Owned(field.clone()));
                 continue;
             };
             if name.is_empty() || name.contains(char::is_whitespace) {
-                expanded.push(field.clone());
+                expanded.push(Cow::Owned(field.clone()));
                 continue;
             }
 
-            let mut visited = BTreeSet::new();
-            match self.resolve(name, 0, &mut visited) {
-                Some(mut values) => {
+            match lookup(&self.resolved, name).map(|(_, values)| values) {
+                Some(values) => {
                     // Per-index overrides follow the reference:
                     // `$PINLIST, 1="INVALID", 2="STEPPER"`.
-                    while let Some(override_field) = fields.get(index) {
-                        match parse_index_override(override_field) {
-                            Some((position, text)) => {
-                                if let Some(slot) = values.get_mut(position) {
-                                    *slot = text;
-                                }
-                                index += 1;
+                    if fields
+                        .get(index)
+                        .and_then(|field| parse_index_override(field))
+                        .is_some()
+                    {
+                        let mut values: Vec<Cow<'s, str>> =
+                            values.iter().copied().map(Cow::Borrowed).collect();
+                        while let Some(override_field) = fields.get(index) {
+                            let Some((position, text)) = parse_index_override(override_field)
+                            else {
+                                break;
+                            };
+                            if let Some(slot) = values.get_mut(position) {
+                                *slot = Cow::Owned(text);
                             }
-                            None => break,
+                            index += 1;
                         }
+                        expanded.extend(values);
+                    } else {
+                        expanded.extend(values.iter().copied().map(Cow::Borrowed));
                     }
-                    expanded.extend(values);
                 }
                 None => {
                     undefined.push(name.to_owned());
-                    expanded.push(field.clone());
+                    expanded.push(Cow::Owned(field.clone()));
                 }
             }
         }
 
         (expanded, undefined)
     }
+}
 
-    fn resolve(
-        &self,
-        name: &str,
-        depth: usize,
-        visited: &mut BTreeSet<String>,
-    ) -> Option<Vec<String>> {
-        if depth > 32 {
-            return None;
-        }
-        let key = name.trim().to_ascii_lowercase();
-        if !visited.insert(key.clone()) {
-            // A cycle in `#define` nesting: refuse rather than loop.
-            return None;
-        }
-        let fields = self.defines.get(&key)?.clone();
-        let mut resolved = Vec::with_capacity(fields.len());
-        for field in &fields {
-            match field.strip_prefix('$').map(str::trim) {
-                Some(nested) if !nested.is_empty() => {
-                    resolved.extend(self.resolve(nested, depth + 1, visited)?);
-                }
-                _ => resolved.push(field.clone()),
-            }
-        }
-        visited.remove(&key);
-        Some(resolved)
+/// Resolves one define and everything it references.
+///
+/// The returned strings borrow from `defines`, which the caller keeps alive for
+/// the whole parse. Results are memoized in `resolved`: a list referenced by
+/// many entries is walked once. `stack` holds the names being resolved right
+/// now, so a cycle is refused rather than looped on; a define may still be
+/// referenced twice by the same entry (`$two, $two`), because each reference is
+/// resolved after the previous one has been popped.
+fn resolve<'a>(
+    defines: &'a BTreeMap<String, Vec<String>>,
+    resolved: &mut BTreeMap<String, Vec<&'a str>>,
+    name: &str,
+    stack: &mut Vec<&'a String>,
+    depth: usize,
+) -> Option<Vec<&'a str>> {
+    if depth > 32 {
+        return None;
     }
+    let (key, _) = lookup(defines, name)?;
+    if let Some(fields) = resolved.get(key.as_str()) {
+        return Some(fields.clone());
+    }
+    if stack.contains(&key) {
+        // A cycle in `#define` nesting: refuse rather than loop.
+        return None;
+    }
+
+    stack.push(key);
+    let mut fields = Vec::with_capacity(defines[key.as_str()].len());
+    for field in &defines[key.as_str()] {
+        match field.strip_prefix('$').map(str::trim) {
+            Some(nested) if !nested.is_empty() => {
+                fields.extend(resolve(defines, resolved, nested, stack, depth + 1)?);
+            }
+            _ => fields.push(field.as_str()),
+        }
+    }
+    stack.pop();
+
+    resolved.insert(key.clone(), fields.clone());
+    Some(fields)
+}
+
+/// The entry a `$name` reference names, with the key it is stored under.
+///
+/// Define keys are stored lowercase, and references almost always are too, so
+/// the common case is a lookup with no allocation at all.
+fn lookup<'a, V>(map: &'a BTreeMap<String, V>, name: &str) -> Option<(&'a String, &'a V)> {
+    if let Some(entry) = map.get_key_value(name) {
+        return Some(entry);
+    }
+    let lowered = name.trim().to_ascii_lowercase();
+    map.get_key_value(lowered.as_str())
 }
 
 fn parse_index_override(field: &str) -> Option<(usize, String)> {

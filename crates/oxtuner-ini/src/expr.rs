@@ -264,7 +264,9 @@ impl std::error::Error for ExprError {}
 enum Token {
     Number(f64),
     Ident(String),
-    Symbol(String),
+    /// A punctuation or operator. Every symbol is ASCII, so the token borrows
+    /// a static string instead of allocating one per operator.
+    Symbol(&'static str),
 }
 
 fn tokenize(text: &str) -> Result<Vec<Token>, ExprError> {
@@ -319,36 +321,14 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ExprError> {
             continue;
         }
 
-        let two: String = characters.iter().skip(index).take(2).collect();
-        if matches!(
-            two.as_str(),
-            "&&" | "||" | "==" | "!=" | "<=" | ">=" | "<<" | ">>"
-        ) {
-            tokens.push(Token::Symbol(two));
+        if let Some(symbol) = two_char_symbol(character, characters.get(index + 1).copied()) {
+            tokens.push(Token::Symbol(symbol));
             index += 2;
             continue;
         }
 
-        if matches!(
-            character,
-            '+' | '-'
-                | '*'
-                | '/'
-                | '%'
-                | '('
-                | ')'
-                | ','
-                | '?'
-                | ':'
-                | '<'
-                | '>'
-                | '&'
-                | '|'
-                | '^'
-                | '~'
-                | '!'
-        ) {
-            tokens.push(Token::Symbol(character.to_string()));
+        if let Some(symbol) = one_char_symbol(character) {
+            tokens.push(Token::Symbol(symbol));
             index += 1;
             continue;
         }
@@ -359,6 +339,48 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ExprError> {
     }
 
     Ok(tokens)
+}
+
+/// The two-character operator starting with these characters, if any.
+///
+/// Symbol tokens borrow static text, so both helpers are plain matches instead
+/// of allocating a string for every operator in every expression.
+fn two_char_symbol(character: char, next: Option<char>) -> Option<&'static str> {
+    match (character, next) {
+        ('&', Some('&')) => Some("&&"),
+        ('|', Some('|')) => Some("||"),
+        ('=', Some('=')) => Some("=="),
+        ('!', Some('=')) => Some("!="),
+        ('<', Some('=')) => Some("<="),
+        ('>', Some('=')) => Some(">="),
+        ('<', Some('<')) => Some("<<"),
+        ('>', Some('>')) => Some(">>"),
+        _ => None,
+    }
+}
+
+/// The single-character punctuation the grammar accepts.
+fn one_char_symbol(character: char) -> Option<&'static str> {
+    Some(match character {
+        '+' => "+",
+        '-' => "-",
+        '*' => "*",
+        '/' => "/",
+        '%' => "%",
+        '(' => "(",
+        ')' => ")",
+        ',' => ",",
+        '?' => "?",
+        ':' => ":",
+        '<' => "<",
+        '>' => ">",
+        '&' => "&",
+        '|' => "|",
+        '^' => "^",
+        '~' => "~",
+        '!' => "!",
+        _ => return None,
+    })
 }
 
 struct Parser {
@@ -502,7 +524,7 @@ impl Parser {
                 }
                 Ok(Expr::Ident(name))
             }
-            Some(Token::Symbol(symbol)) if symbol == "(" => {
+            Some(Token::Symbol("(")) => {
                 self.index += 1;
                 let inner = self.ternary()?;
                 self.expect(")")?;

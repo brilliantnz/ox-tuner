@@ -5,7 +5,9 @@
 //! in one flat list. The parser therefore decides per
 //! line whether it is an entry (`scalar, U08, …`) or a setting (`nPages = 15`).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::fields::{Command, split_fields, split_fields_preserving_empty};
 use crate::model::{
@@ -266,6 +268,7 @@ pub(crate) fn parse_constants(
 ) {
     let mut cursor = Cursor::default();
     let mut table = PageTable::default();
+    let mut option_tables = OptionTables::default();
     let mut current_page = 0u8;
     let mut highest_page = 0u8;
 
@@ -296,22 +299,24 @@ pub(crate) fn parse_constants(
             continue;
         }
 
-        let fields = expander.expand(&split_fields(value));
+        let raw_fields = split_fields(value);
+        let fields = expander.expand(&raw_fields);
         if is_constant_entry(&fields) {
             let entry = Entry {
                 line: *line,
                 key,
                 raw: value,
+                raw_fields: &raw_fields,
                 fields,
                 page: current_page,
             };
-            if parse_constant(definition, section, entry, &mut cursor) {
+            if parse_constant(definition, section, entry, &mut cursor, &mut option_tables) {
                 section.understand(*line);
             }
             continue;
         }
 
-        if parse_protocol_key(
+        let parsed = parse_protocol_key(
             definition,
             &mut table,
             current_page,
@@ -319,7 +324,8 @@ pub(crate) fn parse_constants(
             value,
             section,
             *line,
-        ) {
+        );
+        if parsed {
             section.understand(*line);
         } else {
             section.unrecognized_key(key, *line);
@@ -333,7 +339,7 @@ pub(crate) fn parse_constants(
 /// Whether the expanded field list is a calibration entry rather than a section
 /// setting. Both a known class and a known data type are required, so a typo'd
 /// key with a scalar value stays a setting instead of becoming a bogus constant.
-fn is_constant_entry(fields: &[String]) -> bool {
+fn is_constant_entry(fields: &[Cow<'_, str>]) -> bool {
     match (fields.first(), fields.get(1)) {
         (Some(class), Some(data_type)) => {
             ConstantClass::parse(class).is_some() && DataType::parse(data_type).is_some()
@@ -441,7 +447,10 @@ struct Entry<'a> {
     line: u32,
     key: &'a str,
     raw: &'a str,
-    fields: Vec<String>,
+    /// The entry's fields as written, before `$define` expansion. Only the
+    /// option list needs them: it is what identifies a shared table.
+    raw_fields: &'a [String],
+    fields: Vec<Cow<'a, str>>,
     page: u8,
 }
 
@@ -451,11 +460,13 @@ fn parse_constant(
     section: &mut SectionParser,
     entry: Entry<'_>,
     cursor: &mut Cursor,
+    option_tables: &mut OptionTables,
 ) -> bool {
     let Entry {
         line,
         key,
         raw,
+        raw_fields,
         fields,
         page,
     } = entry;
@@ -497,7 +508,7 @@ fn parse_constant(
             };
             (
                 shape,
-                parse_bit_options(&fields[index..]),
+                option_tables.table(shared_define(raw_fields, index), &fields[index..]),
                 Text::Literal(String::new()),
                 None,
                 None,
@@ -523,7 +534,7 @@ fn parse_constant(
             let (units, numbers) = split_numbers(&fields[index..], &mut flags);
             (
                 shape,
-                Vec::new(),
+                Arc::from([]),
                 units,
                 numbers.first().cloned(),
                 numbers.get(1).cloned(),
@@ -542,7 +553,7 @@ fn parse_constant(
             }
             (
                 shape,
-                Vec::new(),
+                Arc::from([]),
                 Text::Literal(String::new()),
                 None,
                 None,
@@ -555,7 +566,7 @@ fn parse_constant(
             let (units, numbers) = split_numbers(&fields[index..], &mut flags);
             (
                 Shape::Scalar,
-                Vec::new(),
+                Arc::from([]),
                 units,
                 numbers.first().cloned(),
                 numbers.get(1).cloned(),
@@ -619,7 +630,7 @@ fn parse_constant(
 
 /// Splits the trailing fields of a scalar/array entry into units and the numeric
 /// attributes, collecting storage keywords as it goes.
-fn split_numbers(fields: &[String], flags: &mut ConstantFlags) -> (Text, Vec<Number>) {
+fn split_numbers(fields: &[Cow<'_, str>], flags: &mut ConstantFlags) -> (Text, Vec<Number>) {
     let mut units = Text::Literal(String::new());
     let mut numbers = Vec::new();
     let mut seen_units = false;
@@ -710,7 +721,7 @@ fn parse_dimension(field: &str) -> Option<Dimension> {
         .map(Dimension::Expression)
 }
 
-fn parse_string_shape(fields: &[String]) -> (Shape, usize) {
+fn parse_string_shape(fields: &[Cow<'_, str>]) -> (Shape, usize) {
     let length = fields
         .first()
         .and_then(|field| parse_dimension(field))
@@ -734,9 +745,50 @@ fn apply_keyword(flags: &mut ConstantFlags, field: &str) {
     }
 }
 
-fn parse_bit_options(fields: &[String]) -> Vec<BitOption> {
+/// Bit-option tables, shared between entries that use the same `$define`.
+///
+/// A `bits` entry's option list can be very large: Speeduino spells out all
+/// 65 536 CAN addresses in `$CAN_ADDRESS_HEX`, and twenty entries reference
+/// it. Parsing the list once per define keeps both the time and the memory
+/// proportional to the definition instead of to the number of entries using
+/// it, and the [`Arc`] makes the sharing cheap for a [`Definition`] clone.
+#[derive(Debug, Default)]
+struct OptionTables {
+    by_define: BTreeMap<String, Arc<[BitOption]>>,
+}
+
+impl OptionTables {
+    fn table(&mut self, define: Option<String>, fields: &[Cow<'_, str>]) -> Arc<[BitOption]> {
+        let Some(define) = define else {
+            return parse_bit_options(fields);
+        };
+        if let Some(table) = self.by_define.get(&define) {
+            return Arc::clone(table);
+        }
+        let table = parse_bit_options(fields);
+        self.by_define.insert(define, Arc::clone(&table));
+        table
+    }
+}
+
+/// The define a bit-option list consists of, when it is exactly one `$name`
+/// field — the case worth sharing.
+///
+/// `index` is where the option list starts in the expanded fields; the raw
+/// fields before it expand one-to-one for every entry this applies to, so
+/// `raw.len() == index + 1` means the list is the expansion of the last field
+/// and nothing else.
+fn shared_define(raw_fields: &[String], index: usize) -> Option<String> {
+    if raw_fields.len() != index.checked_add(1)? {
+        return None;
+    }
+    let name = raw_fields.last()?.trim().strip_prefix('$')?.trim();
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_ascii_lowercase())
+}
+
+fn parse_bit_options(fields: &[Cow<'_, str>]) -> Arc<[BitOption]> {
     let mut options = Vec::new();
-    let mut next_value: u16 = 0;
+    let mut next_value: u32 = 0;
 
     for field in fields {
         let field = field.trim();
@@ -745,7 +797,7 @@ fn parse_bit_options(fields: &[String]) -> Vec<BitOption> {
         }
         let (value, label) = match field.split_once('=') {
             Some((value, label)) => (
-                value.trim().parse::<u16>().ok(),
+                value.trim().parse::<u32>().ok(),
                 crate::fields::unquote(label).to_owned(),
             ),
             None => (None, crate::fields::unquote(field).to_owned()),
@@ -753,13 +805,13 @@ fn parse_bit_options(fields: &[String]) -> Vec<BitOption> {
         let assigned = value.unwrap_or(next_value);
         next_value = assigned.saturating_add(1);
         options.push(BitOption {
-            value: u8::try_from(assigned).ok(),
+            value: assigned,
             hidden: label.eq_ignore_ascii_case("INVALID"),
             label,
         });
     }
 
-    options
+    options.into()
 }
 
 /// `[PcVariables]`: the same syntax as constants, without an offset.
@@ -791,7 +843,7 @@ pub(crate) fn parse_pc_variables(
                 data_type: DataType::F32,
                 shape: Shape::Scalar,
                 units: Text::Literal(String::new()),
-                options: Vec::new(),
+                options: Arc::from([]),
                 channel_value_on_connect: is_connect.then(|| channel.clone()),
                 continuous_channel_value: (!is_connect).then_some(channel),
                 line: *line,
@@ -818,7 +870,7 @@ pub(crate) fn parse_pc_variables(
                 "unknown-type",
                 format!(
                     "`{key}` has data type {:?}",
-                    fields.get(1).map(String::as_str).unwrap_or("")
+                    fields.get(1).map(|field| field.as_ref()).unwrap_or("")
                 ),
                 *line,
             );
@@ -840,10 +892,10 @@ pub(crate) fn parse_pc_variables(
             _ => Shape::Scalar,
         };
 
-        let options = if class == ConstantClass::Bits {
+        let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
             parse_bit_options(&fields[index..])
         } else {
-            Vec::new()
+            Arc::from([])
         };
         let units = if class == ConstantClass::Bits {
             Text::Literal(String::new())

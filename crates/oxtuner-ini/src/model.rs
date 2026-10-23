@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use crate::error::Diagnostic;
 use crate::expr::Expr;
@@ -62,10 +63,13 @@ impl<T> Ordered<T> {
         if let Some(found) = self.get(name) {
             return Some(found);
         }
-        let lowered = name.trim().to_ascii_lowercase();
+        // ASCII-case-insensitive comparison without lowering every candidate:
+        // this runs for every reference in the file, and a capitalization
+        // mismatch would otherwise allocate once per entry.
+        let name = name.trim();
         self.entries
             .iter()
-            .find(|(candidate, _)| candidate.to_ascii_lowercase() == lowered)
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
             .map(|(_, value)| value)
     }
 
@@ -503,8 +507,9 @@ impl ConstantClass {
 /// One label in a `bits` option list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitOption {
-    /// The value this label stands for. `None` for a plain sequential label.
-    pub value: Option<u8>,
+    /// The value this label stands for: the explicit `3="Three"` number, or
+    /// the label's position when the dialect leaves it out.
+    pub value: u32,
     /// The text shown in the drop-down. `INVALID` entries are hidden by the UI.
     pub label: String,
     /// Whether the dialect marks this option as hidden (`"INVALID"`).
@@ -566,8 +571,10 @@ pub struct Constant {
     pub maximum: Option<Number>,
     /// Decimal digits to display.
     pub digits: Option<Number>,
-    /// Option list for `bits`.
-    pub options: Vec<BitOption>,
+    /// Option list for `bits`, shared between entries that declare the same
+    /// `$define` (Speeduino repeats a 65 536-label CAN address list twenty
+    /// times).
+    pub options: Arc<[BitOption]>,
     /// Storage modifiers written on the entry itself.
     pub flags: ConstantFlags,
     /// Source line.
@@ -607,7 +614,7 @@ pub struct PcVariable {
     /// Display units.
     pub units: Text,
     /// Option list for `bits` (the value of a bit PC variable is its index).
-    pub options: Vec<BitOption>,
+    pub options: Arc<[BitOption]>,
     /// Whether the value is a snapshot taken at connect time.
     pub channel_value_on_connect: Option<String>,
     /// Whether the value tracks a live channel.
@@ -1028,8 +1035,8 @@ pub enum MenuTargetKind {
     Panel,
     /// A divider.
     Separator,
-    /// A nested submenu.
-    SubMenu,
+    /// A group header declared with `groupMenu`.
+    Group,
     /// One of the application's standard dialogs (`std_*`).
     Standard,
 }
@@ -1039,12 +1046,15 @@ pub enum MenuTargetKind {
 pub struct MenuItem {
     /// Item kind.
     pub kind: MenuTargetKind,
-    /// Target id, empty for a separator.
+    /// Target id, empty for a separator and for a group header.
     pub target: String,
     /// Label as written (may contain `&`).
     pub label: String,
     /// Visibility/enable expressions, as written.
     pub conditions: Vec<String>,
+    /// Index in the owning menu's `items` of the `groupMenu` this entry was
+    /// declared under with `groupChildMenu`.
+    pub group: Option<usize>,
     /// Source line.
     pub line: u32,
 }
@@ -1407,8 +1417,8 @@ impl Definition {
             ConstantClass::Bits => variable
                 .options
                 .iter()
-                .position(|option| !option.hidden)
-                .map(|position| position as u8),
+                .find(|option| !option.hidden)
+                .and_then(|option| u8::try_from(option.value).ok()),
             _ => Some(0),
         }
     }
@@ -1628,7 +1638,7 @@ mod tests {
             minimum: None,
             maximum: None,
             digits: None,
-            options: Vec::new(),
+            options: Arc::from([]),
             flags: ConstantFlags::default(),
             line: 1,
             raw: String::new(),

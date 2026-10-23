@@ -68,9 +68,7 @@ pub fn has_assignment(line: &str) -> bool {
 /// Splits a comma-separated value into trimmed fields, ignoring commas inside
 /// `"…"` and `{ … }`. Empty fields are dropped.
 pub fn split_fields(value: &str) -> Vec<String> {
-    let mut fields = split_fields_preserving_empty(value);
-    fields.retain(|field| !field.trim().is_empty());
-    fields
+    split(value, false)
 }
 
 /// [`split_fields`] without dropping empty fields.
@@ -79,45 +77,47 @@ pub fn split_fields(value: &str) -> Vec<String> {
 /// where the empty strings mark pages that cannot be burned. Dropping them
 /// would shift every later page onto the wrong command.
 pub fn split_fields_preserving_empty(value: &str) -> Vec<String> {
+    split(value, true)
+}
+
+/// The one scanner behind both [`split_fields`] and
+/// [`split_fields_preserving_empty`]; trimming happens once, on the way out.
+fn split(value: &str, keep_empty: bool) -> Vec<String> {
     let mut fields = Vec::new();
-    let mut current = String::new();
+    let mut start = 0usize;
     let mut in_quotes = false;
     let mut escaped = false;
     let mut depth = 0usize;
 
-    for character in value.chars() {
+    for (index, character) in value.char_indices() {
         if escaped {
-            current.push(character);
             escaped = false;
             continue;
         }
         match character {
-            '\\' if in_quotes => {
-                current.push(character);
-                escaped = true;
-            }
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push(character);
-            }
-            '{' if !in_quotes => {
-                depth += 1;
-                current.push(character);
-            }
-            '}' if !in_quotes => {
-                depth = depth.saturating_sub(1);
-                current.push(character);
-            }
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            '{' if !in_quotes => depth += 1,
+            '}' if !in_quotes => depth = depth.saturating_sub(1),
             ',' if !in_quotes && depth == 0 => {
-                fields.push(current.trim().to_owned());
-                current.clear();
+                push_field(&mut fields, &value[start..index], keep_empty);
+                start = index + character.len_utf8();
             }
-            _ => current.push(character),
+            _ => {}
         }
     }
-    fields.push(current.trim().to_owned());
+    push_field(&mut fields, &value[start..], keep_empty);
 
     fields
+}
+
+/// Adds one trimmed field. Fields are copied as slices rather than grown
+/// character by character: a real definition has thousands of them.
+fn push_field(fields: &mut Vec<String>, field: &str, keep_empty: bool) {
+    let field = field.trim();
+    if keep_empty || !field.is_empty() {
+        fields.push(field.to_owned());
+    }
 }
 
 /// Removes one layer of double quotes, if present.

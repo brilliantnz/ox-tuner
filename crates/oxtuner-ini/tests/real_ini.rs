@@ -172,6 +172,26 @@ fn the_reference_project_ini_parses() {
     assert!(definition.constants.len() > 500);
     assert!(definition.tables.len() >= 10);
 
+    // A `bits` option list is a value → label table, so it may be wider than
+    // a byte: `[0:15]` with all 65 536 CAN addresses spelled out. The values
+    // must survive that width, and the twenty entries that reference the same
+    // `$define` must share one parsed table instead of copying it.
+    let can = definition
+        .constant("caninput_source_can_address0")
+        .expect("CAN address constant");
+    assert_eq!(can.options.len(), 65_536);
+    assert_eq!(can.options[0].label, "0x100");
+    assert_eq!(can.options[256].label, "0x200");
+    assert_eq!(can.options[256].value, 256);
+
+    let other = definition
+        .constant("caninput_source_can_address1")
+        .expect("second CAN address constant");
+    assert!(
+        std::sync::Arc::ptr_eq(&can.options, &other.options),
+        "entries sharing a `$define` must share the parsed option table"
+    );
+
     for section in ["Constants", "OutputChannels", "TableEditor"] {
         let coverage = definition.coverage.section(section).expect(section);
         assert!(
