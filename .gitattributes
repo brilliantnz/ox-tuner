@@ -1,0 +1,4 @@
+# Test fixtures and golden snapshots are compared byte-for-byte in the test
+# suite, keep them LF on every platform regardless of core.autocrlf.
+crates/oxtuner-ini/tests/fixtures/** text eol=lf
+crates/oxtuner-ini/tests/golden/** text eol=lf

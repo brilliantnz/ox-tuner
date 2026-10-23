@@ -42,7 +42,13 @@ fn check_golden(name: &str, actual: &str) {
             path.display()
         )
     });
-    assert_eq!(expected, actual, "the parsed model changed");
+    // Compare with LF only on Windows git may check the golden files out
+    // with CRLF, while `summary()` always generates `\n`.
+    assert_eq!(
+        expected.replace("\r\n", "\n"),
+        actual.replace("\r\n", "\n"),
+        "the parsed model changed"
+    );
 }
 
 #[test]
