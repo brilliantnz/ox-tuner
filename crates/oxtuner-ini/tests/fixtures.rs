@@ -300,3 +300,35 @@ fn a_fixture_report_is_stable_under_reparse() {
         assert_eq!(first.summary(), second.summary(), "{name}");
     }
 }
+
+#[test]
+fn an_uninterpretable_offset_is_never_a_valid_address() {
+    let text = "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+broken = scalar, U08, xyz(, \"ms\", 0.1, 0, 0, 25.5, 1
+";
+
+    let definition = parse_str(text, &SettingsContext::new()).expect("the file still parses");
+    let constant = definition.constant("broken").expect("the constant is kept");
+
+    assert_eq!(constant.offset, oxtuner_ini::Offset::Unknown);
+    assert_eq!(
+        constant.address, None,
+        "a failed offset must not become a fabricated ECU address"
+    );
+
+    assert!(
+        definition
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "bad-offset"),
+        "the failure must be reported, not guessed away"
+    );
+}

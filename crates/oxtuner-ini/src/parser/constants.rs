@@ -570,7 +570,10 @@ fn parse_constant(
         Offset::Fixed(value) => Some(*value),
         Offset::Next => Some(cursor.next),
         Offset::Last => Some(cursor.last),
-        Offset::Expression(_) => None,
+        // An expression resolves at load time; an unknown offset has none.
+        // Both must stay address-less so they can never be mistaken for a
+        // real (and therefore writable) ECU address.
+        Offset::Expression(_) | Offset::Unknown => None,
     };
 
     if matches!(offset, Offset::Expression(_)) {
@@ -655,15 +658,20 @@ fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) 
     match crate::expr::Expr::parse(crate::fields::expression_body(field).unwrap_or(field)) {
         Ok(expression) => Offset::Expression(expression),
         Err(error) => {
-            // The zero fallback is deliberate but must never be silent: the
-            // warning names the constant, so consumers can filter the model
-            // for constants whose layout is effectively unknown.
+            // The offset decides where this constant lives in ECU memory, so a
+            // failed parse must never become a fabricated — and therefore
+            // writable — address. `Offset::Unknown` marks the constant's
+            // layout as unresolved; the warning names the constant so
+            // consumers can filter for definitions with unknown layout.
             section.warn(
                 "bad-offset",
-                format!("`{key}` has offset {field:?}: {error}; the model records offset 0"),
+                format!(
+                    "`{key}` has offset {field:?}: {error}; the constant's memory location is \
+                     recorded as unknown"
+                ),
                 line,
             );
-            Offset::Expression(crate::expr::Expr::Number(0.0))
+            Offset::Unknown
         }
     }
 }

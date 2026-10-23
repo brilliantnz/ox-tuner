@@ -531,6 +531,10 @@ pub enum Offset {
     Last,
     /// An expression, resolved at load time when its inputs are known.
     Expression(Expr),
+    /// The offset could not be interpreted; the parser reported a
+    /// `bad-offset` diagnostic. This is **not** an address: consumers must
+    /// treat the constant's memory location as unknown, never as byte 0.
+    Unknown,
 }
 
 /// One editable calibration parameter.
