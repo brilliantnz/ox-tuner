@@ -4,7 +4,10 @@
 //! decision 7), so they are never checked in. The test looks for them in the
 //! git-ignored study folder (`docs/tmp/local/ini/`) or at the path in
 //! `OXTUNER_INI_SPEEDUINO` / `OXTUNER_INI_RUSEFI`. When neither exists the test
-//! reports that it was skipped — CI stays green without pretending.
+//! reports that it was skipped — CI stays green without pretending. Set
+//! `OXTUNER_INI_REQUIRED=1` (e.g. in a pre-release integration job) to turn a
+//! missing fixture into a hard failure; pinned fixture versions are recorded in
+//! `docs/development/ini/real-ini-fixtures.md`.
 
 use std::path::PathBuf;
 
@@ -15,7 +18,17 @@ fn load(variable: &str, fallback: &str) -> Option<(String, Vec<u8>)> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fallback));
 
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        // Integration mode: a missing fixture is a failure, not a skip, so a
+        // compatibility run can never silently pass by parsing nothing.
+        Err(_) if std::env::var_os("OXTUNER_INI_REQUIRED").is_some_and(|v| v == "1") => panic!(
+            "OXTUNER_INI_REQUIRED=1 but `{}` is unreadable — provide the reference INIs \
+             (see docs/development/ini/real-ini-fixtures.md) or unset the variable",
+            path.display()
+        ),
+        Err(_) => return None,
+    };
     Some((path.display().to_string(), bytes))
 }
 

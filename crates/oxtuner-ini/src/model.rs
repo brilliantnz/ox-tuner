@@ -1159,7 +1159,11 @@ impl UnsupportedSection {
     /// Renders the section back as INI text.
     ///
     /// Capturing an unknown section is only useful if it can be handed back, so
-    /// the round-trip is part of the contract: `[Name]` then the original lines.
+    /// the round-trip is part of the contract: `[Name]` then the logical lines.
+    /// This is **not** byte-exact: preprocessing removed comments and joined
+    /// continuations before the lines got here, and unknown keys inside
+    /// *modelled* sections are not captured here at all (they are reported once
+    /// and preserved in the section's `raw` map where one exists).
     pub fn render(&self) -> String {
         let mut out = format!("[{}]\n", self.name);
         for line in &self.lines {

@@ -83,12 +83,17 @@ impl SettingsContext {
     }
 
     /// Every flag that is active in this parse.
+    ///
+    /// Resolution goes through [`Self::is_active`], so an override can veto an
+    /// active `#set` declaration — the same precedence the parser applied when
+    /// it selected `#if` branches. Reporting anything else would make this set
+    /// disagree with the definition it was used to produce.
     pub fn active_flags(&self) -> BTreeSet<String> {
         self.declared
-            .iter()
-            .chain(self.overrides.iter())
-            .filter(|(_, active)| **active)
-            .map(|(name, _)| name.clone())
+            .keys()
+            .chain(self.overrides.keys())
+            .filter(|name| self.is_active(name))
+            .cloned()
             .collect()
     }
 }
@@ -124,6 +129,24 @@ mod tests {
 
         assert!(!context.is_active("enablehardware_test"));
         assert!(!context.active_flags().contains("enablehardware_test"));
+    }
+
+    #[test]
+    fn an_override_can_veto_an_active_declaration() {
+        let mut context = SettingsContext::new();
+        context.declare("celsius", true);
+        context.set_override("CELSIUS", false);
+
+        assert!(!context.is_active("celsius"));
+        assert!(
+            !context.active_flags().contains("celsius"),
+            "active_flags must follow the same precedence as is_active"
+        );
+
+        // The reverse direction too: an override can activate what the INI unset.
+        context.declare("lambda", false);
+        context.set_override("lambda", true);
+        assert!(context.active_flags().contains("lambda"));
     }
 
     #[test]

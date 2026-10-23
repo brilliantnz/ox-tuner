@@ -37,8 +37,19 @@ pub(crate) fn parse_channels(
                 continue;
             }
             "maxunusedruntimerange" => {
-                definition.protocol.max_unused_runtime_range =
-                    crate::fields::parse_u32(&value).unwrap_or(0);
+                // An unreadable value keeps the dialect default instead of guessing.
+                if let Some(range) = crate::fields::parse_u32(&value) {
+                    definition.protocol.max_unused_runtime_range = range;
+                } else {
+                    section.warn(
+                        "bad-number",
+                        format!(
+                            "`maxUnusedRuntimeRange` is not a number: {value}; keeping the \
+                             dialect default"
+                        ),
+                        *line,
+                    );
+                }
                 section.understand(*line);
                 continue;
             }

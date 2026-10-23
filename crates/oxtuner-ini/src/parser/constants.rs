@@ -311,7 +311,15 @@ pub(crate) fn parse_constants(
             continue;
         }
 
-        if parse_protocol_key(definition, &mut table, current_page, &lowered, value) {
+        if parse_protocol_key(
+            definition,
+            &mut table,
+            current_page,
+            &lowered,
+            value,
+            section,
+            *line,
+        ) {
             section.understand(*line);
         } else {
             section.unrecognized_key(key, *line);
@@ -341,6 +349,8 @@ fn parse_protocol_key(
     page: u8,
     key: &str,
     value: &str,
+    section: &mut SectionParser,
+    line: u32,
 ) -> bool {
     let protocol: &mut Protocol = &mut definition.protocol;
     match key {
@@ -373,13 +383,31 @@ fn parse_protocol_key(
         }
         "forcebigendianprotocol" => protocol.force_big_endian_protocol = is_on(value),
         "outputchannelstartoffset" => {
-            protocol.output_channel_start_offset = crate::fields::parse_u32(value).unwrap_or(0);
+            // An unreadable value keeps the dialect default instead of guessing.
+            if let Some(offset) = crate::fields::parse_u32(value) {
+                protocol.output_channel_start_offset = offset;
+            } else {
+                section.warn(
+                    "bad-number",
+                    format!("`{key}` is not a number: {value}; keeping the dialect default"),
+                    line,
+                );
+            }
         }
         "defaultruntimerecordpersec" => {
             protocol.default_runtime_record_per_sec = crate::fields::parse_u32(value);
         }
         "maxunusedruntimerange" => {
-            protocol.max_unused_runtime_range = crate::fields::parse_u32(value).unwrap_or(0);
+            // An unreadable value keeps the dialect default instead of guessing.
+            if let Some(range) = crate::fields::parse_u32(value) {
+                protocol.max_unused_runtime_range = range;
+            } else {
+                section.warn(
+                    "bad-number",
+                    format!("`{key}` is not a number: {value}; keeping the dialect default"),
+                    line,
+                );
+            }
         }
         "retrieveconfigerror" => protocol.retrieve_config_error = Some(Command::parse(value)),
         "ochgetcommand" => protocol.och_get_command = Some(Command::parse(value)),
@@ -627,9 +655,12 @@ fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) 
     match crate::expr::Expr::parse(crate::fields::expression_body(field).unwrap_or(field)) {
         Ok(expression) => Offset::Expression(expression),
         Err(error) => {
+            // The zero fallback is deliberate but must never be silent: the
+            // warning names the constant, so consumers can filter the model
+            // for constants whose layout is effectively unknown.
             section.warn(
                 "bad-offset",
-                format!("`{key}` has offset {field:?}: {error}"),
+                format!("`{key}` has offset {field:?}: {error}; the model records offset 0"),
                 line,
             );
             Offset::Expression(crate::expr::Expr::Number(0.0))
