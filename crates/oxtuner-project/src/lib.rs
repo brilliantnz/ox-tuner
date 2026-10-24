@@ -46,8 +46,10 @@
 
 #![forbid(unsafe_code)]
 
+mod atomic;
 pub mod check;
 pub mod encoding;
+mod flags;
 pub mod hash;
 pub mod load;
 pub mod msq;

@@ -34,6 +34,7 @@ use crate::check::LoadReport;
 use crate::load::{self, FileValueError};
 use crate::msq::{EntryKind, EntryPage, Msq, MsqError};
 use crate::sidecar::Provenance;
+use crate::{atomic, flags};
 
 /// The tune file inside a project.
 pub const TUNE_FILE: &str = "CurrentTune.msq";
@@ -397,6 +398,8 @@ impl Project {
         }
 
         let diff = TuneDiff::between(self.images.baseline(), self.images.working())?;
+        let mut written: Vec<String> = Vec::new();
+        let mut cells = 0;
         for name in &diff.changed_variables {
             let Some(spec) = self.layout().variable(name) else {
                 continue;
@@ -407,6 +410,12 @@ impl Project {
             let Some(values) = self.tune().value(name) else {
                 continue;
             };
+            let Some(baseline) = self.images.baseline().value(name) else {
+                continue;
+            };
+            // Counted before the write: `values` borrows the images and the
+            // document is mutated next.
+            let changed = baseline.changed_cells(values);
             let text = load::format_values(spec, &self.definition, values).map_err(|source| {
                 ProjectError::Unrepresentable {
                     name: name.clone(),
@@ -419,13 +428,21 @@ impl Project {
                 None => (EntryPage::Pc, EntryKind::PcVariable),
             };
             self.msq.put_entry_text(page, kind, name, &text)?;
+
+            // Only the cells that actually reached the file are reported; a
+            // `noMsqSave` variable is skipped above and must not be counted.
+            cells += changed;
+            written.push(name.clone());
         }
 
         self.msq
             .set_settings(&self.settings, &self.definition.tested_flags)?;
 
         let bytes = self.msq.save()?;
-        write_atomically(&self.tune_path, &bytes)?;
+        atomic::write(&self.tune_path, &bytes).map_err(|source| ProjectError::Io {
+            path: self.tune_path.clone(),
+            source,
+        })?;
 
         if self.in_project {
             let relative = self
@@ -450,8 +467,8 @@ impl Project {
 
         Ok(SaveOutcome {
             path: self.tune_path.clone(),
-            cells: diff.cells,
-            variables: diff.changed_variables,
+            cells,
+            variables: written,
         })
     }
 
@@ -468,21 +485,6 @@ fn read(path: &Path) -> Result<Vec<u8>, ProjectError> {
     fs::read(path).map_err(|source| ProjectError::Io {
         path: path.to_owned(),
         source,
-    })
-}
-
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), ProjectError> {
-    let temporary = path.with_extension("msq.oxtuner-tmp");
-    fs::write(&temporary, bytes).map_err(|source| ProjectError::Io {
-        path: temporary.clone(),
-        source,
-    })?;
-    fs::rename(&temporary, path).map_err(|source| {
-        let _ = fs::remove_file(&temporary);
-        ProjectError::Io {
-            path: path.to_owned(),
-            source,
-        }
     })
 }
 
@@ -545,7 +547,25 @@ fn read_include(base: &Path, name: &str) -> Option<String> {
     }) {
         return None;
     }
-    let bytes = fs::read(base.join(path)).ok()?;
+
+    // A symlink inside the definition directory can point anywhere, and a
+    // backslash is not a separator on Unix, so lexical checks alone do not
+    // keep the read inside `base`. Resolve both sides and compare.
+    //
+    // A bare filename has an empty parent, which is the working directory.
+    // `canonicalize` rejects the empty path, so spell it out.
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    let base = fs::canonicalize(base).ok()?;
+    let path = fs::canonicalize(base.join(path)).ok()?;
+    if !path.starts_with(&base) {
+        return None;
+    }
+
+    let bytes = fs::read(&path).ok()?;
     Some(oxtuner_ini::source::decode(&bytes).text)
 }
 
@@ -568,9 +588,9 @@ fn settings_overrides(entries: &[(String, String)]) -> Vec<(String, bool)> {
     let mut overrides: Vec<(String, bool)> = Vec::new();
     for (name, value) in entries {
         for text in [name, value] {
-            if let Some(stem) = strip_suffix_ci(text, "_OFF") {
+            if let Some(stem) = flags::strip_suffix_ci(text, "_OFF") {
                 overrides.push((stem.to_owned(), false));
-            } else if let Some(stem) = strip_suffix_ci(text, "_ON") {
+            } else if let Some(stem) = flags::strip_suffix_ci(text, "_ON") {
                 overrides.push((stem.to_owned(), true));
             } else if !text.is_empty() {
                 overrides.push((text.clone(), true));
@@ -578,12 +598,6 @@ fn settings_overrides(entries: &[(String, String)]) -> Vec<(String, bool)> {
         }
     }
     overrides
-}
-
-fn strip_suffix_ci<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
-    let start = text.len().checked_sub(suffix.len())?;
-    let tail = text.get(start..)?;
-    tail.eq_ignore_ascii_case(suffix).then(|| &text[..start])
 }
 
 #[cfg(test)]
@@ -625,5 +639,34 @@ mod tests {
         let base = Path::new("/tmp/project/projectCfg");
         assert_eq!(read_include(base, "../secret.ini"), None);
         assert_eq!(read_include(base, "/etc/passwd"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_include_cannot_escape_its_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "oxtuner-include-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = root.join("projectCfg");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(root.join("secret.ini"), "signature = \"secret\"").unwrap();
+        fs::write(config.join("real.ini"), "signature = \"real\"").unwrap();
+        symlink(root.join("secret.ini"), config.join("link.ini")).unwrap();
+
+        assert!(read_include(&config, "real.ini").is_some());
+        assert_eq!(
+            read_include(&config, "link.ini"),
+            None,
+            "a symlink that leaves the definition directory must not be read"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -1,0 +1,116 @@
+//! Crash-safe file replacement.
+//!
+//! A write goes to a sibling temporary file that is flushed to disk before it
+//! replaces the target, so a crash or power loss leaves either the old file or
+//! the new one, never a half-written tune. The parent directory is flushed
+//! afterwards so the rename itself is durable too.
+
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+/// Replaces `path` with `bytes`.
+///
+/// The target keeps its permissions when it already exists. A failed write or
+/// rename removes the temporary file and leaves the target untouched.
+pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = temporary_path(path);
+    let result = replace(&temporary, path, bytes);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn replace(temporary: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Replacing a file must not change what the user can do with it.
+    let permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+
+    let mut file = fs::File::create(temporary)?;
+    file.write_all(bytes)?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)?;
+    }
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(temporary, path)?;
+    sync_parent(path);
+    Ok(())
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".oxtuner-tmp");
+    PathBuf::from(name)
+}
+
+/// Flushes the directory entry so the rename survives a crash.
+///
+/// Not every platform can open a directory as a file. The data file is already
+/// flushed by then, so a failure here only weakens durability of the rename
+/// itself and is not reported.
+fn sync_parent(path: &Path) {
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "oxtuner-atomic-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_write_replaces_the_file_and_leaves_no_temporary_behind() {
+        let root = temp_dir("replace");
+        let path = root.join("CurrentTune.msq");
+        fs::write(&path, b"old").unwrap();
+
+        write(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("oxtuner-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_keeps_the_permissions_it_found() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_dir("permissions");
+        let path = root.join("CurrentTune.msq");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        write(&path, b"new").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+}

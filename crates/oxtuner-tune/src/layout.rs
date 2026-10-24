@@ -54,11 +54,15 @@ pub enum EntryShape {
 
 impl EntryShape {
     /// Number of stored elements.
+    ///
+    /// Text is stored as one string cell even when the definition reserves
+    /// `len` characters on the wire, so it counts as one here. Counting the
+    /// reserved length would make the state and diff layers compare the same
+    /// string `len` times.
     pub const fn element_count(self) -> usize {
         match self {
-            Self::Scalar | Self::Bits { .. } => 1,
+            Self::Scalar | Self::Bits { .. } | Self::Text { .. } => 1,
             Self::Array { cols, rows } => cols.saturating_mul(rows),
-            Self::Text { len } => len,
         }
     }
 

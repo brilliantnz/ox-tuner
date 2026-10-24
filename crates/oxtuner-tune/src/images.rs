@@ -90,6 +90,9 @@ impl fmt::Display for CellState {
 pub enum CellValue {
     /// A numeric value in user units.
     Number(f64),
+    /// A numeric value in raw units, because the definition's `scale` or
+    /// `translate` is an expression this build could not resolve.
+    Raw(f64),
     /// A text value.
     Text(String),
 }
@@ -314,7 +317,10 @@ impl TuneImages {
                     if working.same_at(ecu, index) {
                         continue;
                     }
-                    (cell_value(working, index), cell_value(ecu, index))
+                    (
+                        cell_value(spec, working, index),
+                        cell_value(spec, ecu, index),
+                    )
                 };
 
                 self.overlays
@@ -385,8 +391,8 @@ impl TuneImages {
                     name: spec.name.clone(),
                     row,
                     column,
-                    working: cell_value(working, index),
-                    ecu: cell_value(ecu, index),
+                    working: cell_value(spec, working, index),
+                    ecu: cell_value(spec, ecu, index),
                 });
             }
         }
@@ -665,9 +671,15 @@ impl StateTable {
     }
 }
 
-fn cell_value(values: &Values, index: usize) -> CellValue {
+fn cell_value(spec: &crate::VariableSpec, values: &Values, index: usize) -> CellValue {
     match values {
-        Values::Numbers(numbers) => CellValue::Number(numbers.get(index).copied().unwrap_or(0.0)),
+        Values::Numbers(numbers) => {
+            let raw = numbers.get(index).copied().unwrap_or(0.0);
+            match spec.to_user(raw) {
+                Ok(user) => CellValue::Number(user),
+                Err(_) => CellValue::Raw(raw),
+            }
+        }
         Values::Text(text) => CellValue::Text(text.clone()),
     }
 }
@@ -923,6 +935,61 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
         );
         assert_eq!(table.page(IniPage::FIRST).unwrap().changed, 1);
         assert_eq!(table.page(IniPage::new(9).unwrap()), None);
+    }
+
+    const SCALED_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+note = string, ASCII, 8
+"#;
+
+    fn scaled_images() -> TuneImages {
+        let definition =
+            parse_str(SCALED_DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let layout = Arc::new(Layout::build(&definition, &|_| None));
+        TuneImages::from_working(Tune::new(layout))
+    }
+
+    #[test]
+    fn conflict_values_are_reported_in_user_units() {
+        let mut images = scaled_images();
+        let mut ram = Tune::new(Arc::clone(images.layout()));
+        ram.set_user("reqFuel", 12.3).unwrap();
+
+        let conflicts = images.reconnect(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].name, "reqFuel");
+        assert_eq!(conflicts[0].working, CellValue::Number(0.0));
+        let CellValue::Number(ecu) = conflicts[0].ecu else {
+            panic!("the ECU value should be a user-unit number");
+        };
+        assert!((ecu - 12.3).abs() < 1e-9, "got {ecu}");
+    }
+
+    #[test]
+    fn a_text_value_is_one_cell_not_its_reserved_length() {
+        let mut images = scaled_images();
+        let ram = Tune::new(Arc::clone(images.layout()));
+        images.set_ecu_ram(ram.clone()).unwrap();
+        images.set_ecu_flash(ram).unwrap();
+
+        assert_eq!(images.cell_state("note", 0, 0).unwrap(), CellState::Synced);
+        assert_eq!(images.page_state(IniPage::FIRST), Some(CellState::Synced));
+
+        let table = StateTable::build(&images);
+        assert_eq!(table.page(IniPage::FIRST).unwrap().cells, 2);
+        assert_eq!(table.count(CellState::Synced), 2);
+
+        images.working_mut().set_text("note", "ABC").unwrap();
+        let diff = TuneDiff::between(images.baseline(), images.working()).unwrap();
+        assert_eq!(diff.cells, 1, "an edited string is one changed cell");
     }
 
     #[test]

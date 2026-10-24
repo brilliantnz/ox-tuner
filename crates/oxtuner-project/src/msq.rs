@@ -22,6 +22,7 @@ use oxtuner_ini::SettingsContext;
 use oxtuner_tune::MsqPage;
 
 use crate::encoding::{self, EncodeError};
+use crate::flags;
 use crate::xml::{Document, Element, Node, XmlError};
 
 /// A `.msq` page address: the unnumbered PC page, or a numbered calibration page.
@@ -336,7 +337,7 @@ impl Msq {
         let mut documented: BTreeMap<String, bool> = BTreeMap::new();
         for setting in element.find_children("setting") {
             let name = setting.attr("name").unwrap_or_default();
-            let (flag, state) = flag_state(name);
+            let (flag, state) = flags::state(name);
             documented.insert(flag.to_ascii_lowercase(), state);
         }
         let agrees = tested.iter().all(|flag| {
@@ -355,7 +356,7 @@ impl Msq {
             let keep = match &node {
                 Node::Element(setting) if setting.name == "setting" => {
                     let name = setting.attr("name").unwrap_or_default();
-                    let (flag, state) = flag_state(name);
+                    let (flag, state) = flags::state(name);
                     let key = flag.to_ascii_lowercase();
                     if tested.contains(&key) {
                         let agrees = state == settings.is_active(&flag);
@@ -526,27 +527,6 @@ fn find_child_mut<'a>(element: &'a mut Element, name: &str) -> Option<&'a mut El
         Node::Element(child) if child.name == name => Some(child),
         _ => None,
     })
-}
-
-/// Splits a setting name into the flag it selects and its state.
-///
-/// TunerStudio writes `enablehardware_test_OFF` for a disabled boolean and
-/// `CELSIUS` for an enabled choice. The suffix convention is the only signal
-/// the file carries, so it is made explicit here and covered by tests.
-fn flag_state(name: &str) -> (String, bool) {
-    if let Some(stem) = name
-        .strip_suffix("_OFF")
-        .or_else(|| name.strip_suffix("_off"))
-    {
-        return (stem.to_owned(), false);
-    }
-    if let Some(stem) = name
-        .strip_suffix("_ON")
-        .or_else(|| name.strip_suffix("_on"))
-    {
-        return (stem.to_owned(), true);
-    }
-    (name.to_owned(), true)
 }
 
 #[cfg(test)]
@@ -755,13 +735,18 @@ mod tests {
     #[test]
     fn a_setting_name_maps_to_its_flag() {
         assert_eq!(
-            flag_state("enablehardware_test_OFF"),
+            flags::state("enablehardware_test_OFF"),
             ("enablehardware_test".to_owned(), false)
         );
         assert_eq!(
-            flag_state("enablehardware_test_ON"),
+            flags::state("enablehardware_test_Off"),
+            ("enablehardware_test".to_owned(), false),
+            "a mixed-case suffix must read the same as the canonical one"
+        );
+        assert_eq!(
+            flags::state("enablehardware_test_ON"),
             ("enablehardware_test".to_owned(), true)
         );
-        assert_eq!(flag_state("CELSIUS"), ("CELSIUS".to_owned(), true));
+        assert_eq!(flags::state("CELSIUS"), ("CELSIUS".to_owned(), true));
     }
 }

@@ -56,7 +56,7 @@ impl Provenance {
             escape(&self.definition_sha256),
             escape(&self.signature),
         );
-        fs::write(&path, text)?;
+        crate::atomic::write(&path, text.as_bytes())?;
         Ok(path)
     }
 

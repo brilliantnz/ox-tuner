@@ -538,6 +538,47 @@ fn a_reference_project_opens_and_round_trips() {
     );
 }
 
+#[test]
+fn a_no_msq_save_variable_is_not_reported_as_written() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 32
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+helper = scalar, U08, 1, "", 1, 0, 0, 255, 0, noMsqSave
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="32">
+        <constant name="reqFuel">15.4</constant>
+        <constant name="helper">0.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("no-msq-save");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project.tune_mut().set_user("reqFuel", 12.3).unwrap();
+    project.tune_mut().set_user("helper", 7.0).unwrap();
+
+    let outcome = project.save().expect("the edit saves");
+
+    assert_eq!(outcome.variables, ["reqFuel"]);
+    assert_eq!(outcome.cells, 1);
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("<constant name=\"helper\">0.0</constant>"),
+        "a noMsqSave variable keeps its file text: {saved}"
+    );
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("destination is creatable");
     for entry in fs::read_dir(from).expect("source is readable") {

@@ -68,6 +68,21 @@ impl Values {
         }
     }
 
+    /// Number of elements that differ from `other`.
+    ///
+    /// Text values compare whole strings and count as one cell.
+    pub fn changed_cells(&self, other: &Self) -> usize {
+        match (self, other) {
+            (Self::Numbers(left), Self::Numbers(right)) => left
+                .iter()
+                .zip(right)
+                .filter(|(left, right)| left != right)
+                .count(),
+            (Self::Text(left), Self::Text(right)) => usize::from(left != right),
+            _ => self.len().max(other.len()),
+        }
+    }
+
     /// Whether the element at `index` equals the same element of `other`.
     ///
     /// Text values compare whole strings; the index is the single text cell.

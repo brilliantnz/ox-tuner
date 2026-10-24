@@ -57,18 +57,6 @@ impl fmt::Display for TuneDiff {
     }
 }
 
-fn changed_cells(left: &Values, right: &Values) -> usize {
-    match (left, right) {
-        (Values::Numbers(left), Values::Numbers(right)) => left
-            .iter()
-            .zip(right)
-            .filter(|(left, right)| left != right)
-            .count(),
-        (Values::Text(left), Values::Text(right)) => usize::from(left != right),
-        _ => left.len().max(right.len()),
-    }
-}
-
 /// Summarises two value slices that are known to share `layout`.
 ///
 /// `TuneImages` enforces the shared layout when it is built, so its status
@@ -80,7 +68,7 @@ pub(crate) fn diff_values(layout: &Layout, baseline: &[Values], other: &[Values]
         let (Some(left), Some(right)) = (baseline.get(index), other.get(index)) else {
             continue;
         };
-        let changed = changed_cells(left, right);
+        let changed = left.changed_cells(right);
         if changed == 0 {
             continue;
         }
