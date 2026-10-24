@@ -313,15 +313,21 @@ impl Msq {
 
     /// Updates the `<settings>` snapshot to mirror the definition's flags.
     ///
-    /// An entry whose name maps to a flag the definition tests is kept only
-    /// when that flag is active; entries this build cannot map (TunerStudio
-    /// setting-group choices) are preserved. Flags that became active but have
-    /// no entry are appended, so a standalone reopen sees the same definition.
+    /// An entry whose name or value maps to a flag the definition tests is kept
+    /// only when that flag is active; entries this build cannot map
+    /// (TunerStudio setting-group choices) are preserved. Flags that became
+    /// active but have no entry are appended, so a standalone reopen sees the
+    /// same definition.
     ///
     /// A document that already agrees with the context is left untouched:
     /// TunerStudio writes a disabled boolean as an explicit `enablehardware_test_OFF`
     /// entry, and a save with no settings change must not delete it (the file
     /// has to stay byte-for-byte).
+    ///
+    /// A setting-group choice puts the flag in the entry's `value`
+    /// (`pressure_units` → `pressure_bar`), while the `name` is the group, so
+    /// both halves are read. Without that, a tune saved with a non-default
+    /// group would gain a second entry for the option name on its first save.
     pub fn set_settings(
         &mut self,
         settings: &SettingsContext,
@@ -336,9 +342,9 @@ impl Msq {
 
         let mut documented: BTreeMap<String, bool> = BTreeMap::new();
         for setting in element.find_children("setting") {
-            let name = setting.attr("name").unwrap_or_default();
-            let (flag, state) = flags::state(name);
-            documented.insert(flag.to_ascii_lowercase(), state);
+            for (flag, state) in documented_flags(setting) {
+                documented.insert(flag, state);
+            }
         }
         let agrees = tested.iter().all(|flag| {
             // A flag that is neither documented nor active matches the absent
@@ -352,33 +358,37 @@ impl Msq {
         let mut present: BTreeSet<String> = BTreeSet::new();
         let children = std::mem::take(&mut element.children);
         let mut kept = Vec::with_capacity(children.len());
+        let mut removed = false;
         for node in children {
             let keep = match &node {
                 Node::Element(setting) if setting.name == "setting" => {
-                    let name = setting.attr("name").unwrap_or_default();
-                    let (flag, state) = flags::state(name);
-                    let key = flag.to_ascii_lowercase();
-                    if tested.contains(&key) {
-                        let agrees = state == settings.is_active(&flag);
-                        if agrees {
-                            present.insert(key);
+                    // The name is the group, the value the selected option: both
+                    // may be the tested flag, and a disagreement on either one
+                    // drops the entry.
+                    let documented = documented_flags(setting);
+                    let agrees = documented
+                        .iter()
+                        .filter(|(flag, _)| tested.contains(flag))
+                        .all(|(flag, state)| *state == settings.is_active(flag));
+                    if agrees {
+                        for (flag, _) in documented.iter().filter(|(flag, _)| tested.contains(flag))
+                        {
+                            present.insert(flag.clone());
                         }
-                        // An explicit `_OFF` entry agrees with an inactive flag
-                        // and stays, so a one-flag change does not rewrite the
-                        // rest of the snapshot.
-                        agrees
-                    } else {
-                        true
                     }
+                    agrees
                 }
                 _ => true,
             };
             if keep {
                 kept.push(node);
-            } else if matches!(kept.last(), Some(Node::Text(text)) if text.trim().is_empty()) {
-                // Drop the indentation that belonged to the removed line, so a
-                // removal does not leave a blank line behind.
-                kept.pop();
+            } else {
+                removed = true;
+                if matches!(kept.last(), Some(Node::Text(text)) if text.trim().is_empty()) {
+                    // Drop the indentation that belonged to the removed line, so
+                    // a removal does not leave a blank line behind.
+                    kept.pop();
+                }
             }
         }
 
@@ -387,7 +397,8 @@ impl Msq {
             .into_iter()
             .filter(|flag| tested.contains(flag) && !present.contains(flag))
             .collect();
-        if !missing.is_empty() {
+        let appended = !missing.is_empty();
+        if appended {
             // Reuse the closing indentation as the boundary for new entries.
             if matches!(kept.last(), Some(Node::Text(text)) if text.trim().is_empty()) {
                 kept.pop();
@@ -402,6 +413,16 @@ impl Msq {
             }
             kept.push(Node::Text("\n    ".to_owned()));
         }
+
+        if !removed && !appended {
+            // Nothing was dropped or appended; keep the element exactly as it
+            // was written, including `<settings/>`.
+            element.children = kept;
+            return Ok(());
+        }
+        // A self-closing `<settings/>` has to be opened, or the serializer would
+        // emit it unchanged and lose the new entries.
+        element.open();
         element.children = kept;
         Ok(())
     }
@@ -446,7 +467,13 @@ impl Msq {
                     _ => None,
                 })
             {
-                if entry.attr("name") == Some(name) {
+                // Names are keyed case-insensitively everywhere else (the tune
+                // layout lowercases them), so a file that spells a name with a
+                // different case must be updated in place, not duplicated.
+                if entry
+                    .attr("name")
+                    .is_some_and(|written| written.eq_ignore_ascii_case(name))
+                {
                     entry.set_text(text);
                     return Ok(());
                 }
@@ -509,6 +536,9 @@ impl Msq {
 
         let mut element = Element::with_attrs(tag, &[("name", name)], false);
         element.set_text(text);
+        // A self-closing `<page …/>` must be opened first, or the serializer
+        // would keep emitting it unchanged and the new entry would be lost.
+        page_element.open();
         page_element
             .children
             .push(Node::Text("\n        ".to_owned()));
@@ -520,6 +550,31 @@ impl Msq {
 
 fn attribute_usize(element: &Element, name: &str) -> Option<usize> {
     element.attr(name)?.trim().parse().ok()
+}
+
+/// The flags one `<setting>` entry documents, with the state each implies.
+///
+/// TunerStudio writes a boolean as name and value (`enablehardware_test_OFF`),
+/// and a setting-group choice as the group in `name` and the selected option in
+/// `value` (`pressure_units` → `pressure_bar`). Both halves are flags the
+/// definition can test in `#if`, so both are returned, deduplicated and
+/// lowercased to match `SettingsContext`.
+fn documented_flags(setting: &Element) -> Vec<(String, bool)> {
+    let mut flags_documented: Vec<(String, bool)> = Vec::with_capacity(2);
+    for text in [setting.attr("name"), setting.attr("value")] {
+        let Some(text) = text else { continue };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (flag, state) = flags::state(text);
+        let key = flag.to_ascii_lowercase();
+        if flags_documented.iter().any(|(seen, _)| *seen == key) {
+            continue;
+        }
+        flags_documented.push((key, state));
+    }
+    flags_documented
 }
 
 fn find_child_mut<'a>(element: &'a mut Element, name: &str) -> Option<&'a mut Element> {
@@ -730,6 +785,113 @@ mod tests {
             b"<msq>\n  <bibliography author=\"Jos\xe9\"/>\n  <versionInfo signature=\"s\"/>\n</msq>";
         let msq = Msq::parse(source).expect("latin-1 parses");
         assert_eq!(msq.save().unwrap(), source);
+    }
+
+    #[test]
+    fn an_edit_of_a_self_closing_entry_is_written() {
+        let source = "<msq><versionInfo signature=\"s\"/><page number=\"0\" size=\"64\"><constant name=\"x\"/></page></msq>";
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.set_entry_text(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "x",
+            "2.5",
+        )
+        .expect("the entry exists");
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert!(
+            saved.contains("<constant name=\"x\">2.5</constant>"),
+            "the edit must not be swallowed by `<constant name=\"x\"/>`: {saved}"
+        );
+    }
+
+    #[test]
+    fn a_missing_entry_is_appended_to_a_self_closing_page() {
+        let source = "<msq><versionInfo signature=\"s\"/><page number=\"0\" size=\"64\"/></msq>";
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.put_entry_text(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "x",
+            "1.5",
+        )
+        .expect("the page exists");
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert!(
+            saved.contains("<constant name=\"x\">1.5</constant>"),
+            "a self-closing page must be opened before it gains an entry: {saved}"
+        );
+        assert!(
+            !saved.contains("<page number=\"0\" size=\"64\"/>"),
+            "{saved}"
+        );
+    }
+
+    #[test]
+    fn a_self_closing_settings_block_receives_the_missing_entries() {
+        let source = "<msq><versionInfo signature=\"s\"/><settings/></msq>";
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+        let mut context = SettingsContext::new();
+        context.set_override("CELSIUS", true);
+        let tested: BTreeSet<String> = ["celsius".to_owned()].into_iter().collect();
+
+        msq.set_settings(&context, &tested)
+            .expect("settings update");
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert!(saved.contains("<setting name=\"celsius\""), "{saved}");
+        assert!(!saved.contains("<settings/>"), "{saved}");
+    }
+
+    #[test]
+    fn a_setting_group_choice_is_not_duplicated_on_a_no_op_save() {
+        let source = r#"<msq>
+    <versionInfo signature="s"/>
+    <settings>
+        <setting name="pressure_units" value="pressure_bar"/>
+    </settings>
+</msq>"#;
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+        // `Project::settings_overrides` records both halves of the entry.
+        let mut context = SettingsContext::new();
+        context.set_override("pressure_units", true);
+        context.set_override("pressure_bar", true);
+        let tested: BTreeSet<String> = ["pressure_bar".to_owned()].into_iter().collect();
+
+        msq.set_settings(&context, &tested)
+            .expect("settings update");
+
+        assert_eq!(
+            msq.save().unwrap(),
+            source.as_bytes(),
+            "the option lives in the entry's value; it must not be appended again"
+        );
+        assert_eq!(msq.settings().len(), 1);
+    }
+
+    #[test]
+    fn an_entry_name_is_matched_ignoring_case() {
+        let source = "<msq><versionInfo signature=\"s\"/><page number=\"0\" size=\"64\"><constant name=\"REQFUEL\">1.0</constant></page></msq>";
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.set_entry_text(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "reqFuel",
+            "2.0",
+        )
+        .expect("the name is the same, whatever the case");
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert_eq!(saved.matches("<constant").count(), 1, "{saved}");
+        assert!(
+            saved.contains("<constant name=\"REQFUEL\">2.0</constant>"),
+            "{saved}"
+        );
     }
 
     #[test]

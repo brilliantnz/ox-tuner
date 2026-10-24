@@ -398,6 +398,10 @@ impl Project {
         }
 
         let diff = TuneDiff::between(self.images.baseline(), self.images.working())?;
+        // Edits land in a copy: a write that fails (or a value that cannot be
+        // formatted) must leave the session's document exactly as it was, so a
+        // later revert cannot save text from the failed attempt.
+        let mut document = self.msq.clone();
         let mut written: Vec<String> = Vec::new();
         let mut cells = 0;
         for name in &diff.changed_variables {
@@ -414,7 +418,7 @@ impl Project {
                 continue;
             };
             // Counted before the write: `values` borrows the images and the
-            // document is mutated next.
+            // document copy is mutated next.
             let changed = baseline.changed_cells(values);
             let text = load::format_values(spec, &self.definition, values).map_err(|source| {
                 ProjectError::Unrepresentable {
@@ -427,7 +431,7 @@ impl Project {
                 Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
                 None => (EntryPage::Pc, EntryKind::PcVariable),
             };
-            self.msq.put_entry_text(page, kind, name, &text)?;
+            document.put_entry_text(page, kind, name, &text)?;
 
             // Only the cells that actually reached the file are reported; a
             // `noMsqSave` variable is skipped above and must not be counted.
@@ -435,14 +439,17 @@ impl Project {
             written.push(name.clone());
         }
 
-        self.msq
-            .set_settings(&self.settings, &self.definition.tested_flags)?;
+        document.set_settings(&self.settings, &self.definition.tested_flags)?;
 
-        let bytes = self.msq.save()?;
+        let bytes = document.save()?;
         atomic::write(&self.tune_path, &bytes).map_err(|source| ProjectError::Io {
             path: self.tune_path.clone(),
             source,
         })?;
+
+        // The file holds these values now; keep the session's copy in step even
+        // if the sidecar below fails, so a retry cannot write an older tune.
+        self.msq = document;
 
         if self.in_project {
             let relative = self

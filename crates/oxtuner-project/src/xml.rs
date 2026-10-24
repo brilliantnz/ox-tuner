@@ -270,11 +270,32 @@ impl Element {
         self.text().trim().to_owned()
     }
 
+    /// Converts a self-closing element to the open/close form before it gains
+    /// content.
+    ///
+    /// The serializer emits a self-closing element as `<name …/>` and never
+    /// looks at its children, so adding text or a child without opening the
+    /// element first would silently drop the change. Every mutation calls this
+    /// first; an element that is already open is left exactly as written.
+    pub(crate) fn open(&mut self) {
+        if !self.self_closing {
+            return;
+        }
+        self.self_closing = false;
+        // `raw_open` ends with `/>`; drop the slash and keep the `>`.
+        if self.raw_open.ends_with("/>") {
+            self.raw_open.truncate(self.raw_open.len() - 2);
+            self.raw_open.push('>');
+        }
+        self.raw_close = format!("</{}>", self.name);
+    }
+
     /// Replaces the element's text with `value`, escaping it for XML.
     ///
     /// Child elements are left alone, so an unknown wrapper inside a constant
     /// survives; text nodes are replaced by a single escaped node.
     pub fn set_text(&mut self, value: &str) {
+        self.open();
         let escaped = escape_text(value);
         let mut replaced = false;
         self.children.retain_mut(|node| match node {
@@ -359,7 +380,13 @@ fn serialize_node(node: &Node, out: &mut String) {
         }
         Node::Element(element) => {
             out.push_str(&element.raw_open);
-            if !element.self_closing {
+            if element.self_closing {
+                debug_assert!(
+                    element.children.is_empty(),
+                    "a self-closing <{}> cannot hold children; call Element::open first",
+                    element.name
+                );
+            } else {
                 for child in &element.children {
                     serialize_node(child, out);
                 }
@@ -912,6 +939,35 @@ mod tests {
         }
         let error = Document::parse(&source).expect_err("too deep");
         assert_eq!(error.kind, XmlErrorKind::TooDeep { limit: MAX_DEPTH });
+    }
+
+    #[test]
+    fn editing_a_self_closing_element_opens_it_instead_of_dropping_the_text() {
+        let mut document = parse("<r><v a=\"1\"/></r>");
+        let value = document
+            .root_mut()
+            .unwrap()
+            .children
+            .iter_mut()
+            .find_map(|node| match node {
+                Node::Element(element) if element.name == "v" => Some(element),
+                _ => None,
+            })
+            .unwrap();
+
+        value.set_text("x < y");
+
+        assert_eq!(
+            document.serialize(),
+            "<r><v a=\"1\">x &lt; y</v></r>",
+            "the value must be written, not swallowed by `<v/>`"
+        );
+    }
+
+    #[test]
+    fn an_untouched_self_closing_element_keeps_its_form() {
+        let source = "<r><v a=\"1\"/></r>";
+        assert_eq!(parse(source).serialize(), source);
     }
 
     #[test]

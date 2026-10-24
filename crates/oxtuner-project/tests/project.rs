@@ -579,6 +579,189 @@ helper = scalar, U08, 1, "", 1, 0, 0, 255, 0, noMsqSave
     );
 }
 
+#[test]
+fn a_self_closing_entry_and_settings_block_survive_an_edit() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"><constant name="reqFuel"/></page>
+    <settings/>
+</msq>
+"#;
+
+    let dir = TempDir::new("self-closing-entry");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+
+    project.tune_mut().set_user("reqFuel", 12.3).unwrap();
+    let outcome = project.save().expect("the edit saves");
+
+    assert_eq!(outcome.cells, 1);
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("<constant name=\"reqFuel\">12.3</constant>"),
+        "the value must be written, not dropped by the self-closing tag: {saved}"
+    );
+    assert!(
+        saved.contains("<settings/>"),
+        "a settings block with nothing to change keeps its form: {saved}"
+    );
+
+    let reopened = Project::open(dir.path()).expect("the saved project reopens");
+    assert_close(reopened.tune().scalar_user("reqFuel").unwrap(), 12.3);
+}
+
+#[test]
+fn a_missing_entry_is_written_into_a_self_closing_page() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"/>
+</msq>
+"#;
+
+    let dir = TempDir::new("self-closing-page");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    project.tune_mut().set_user("reqFuel", 12.3).unwrap();
+
+    let outcome = project.save().expect("the edit saves");
+    assert_eq!(outcome.cells, 1);
+
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("<constant name=\"reqFuel\">12.3</constant>"),
+        "the page must be opened before the entry is appended: {saved}"
+    );
+    let reopened = Project::open(dir.path()).expect("the saved project reopens");
+    assert_close(reopened.tune().scalar_user("reqFuel").unwrap(), 12.3);
+}
+
+#[test]
+fn a_setting_group_choice_does_not_rewrite_an_unedited_tune() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = pressure_units, "Pressure Display"
+settingOption = DEFAULT, "PSI"
+settingOption = pressure_bar, "BAR"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#if pressure_bar
+b = scalar, U08, 1, "", 1, 0, 0, 255, 0
+#endif
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="a">1.0</constant>
+        <constant name="b">2.0</constant>
+    </page>
+    <settings>
+        <setting name="pressure_units" value="pressure_bar"/>
+    </settings>
+</msq>
+"#;
+
+    let dir = TempDir::new("group-choice");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+    let before = read_tune(&dir);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(
+        project.settings().is_active("pressure_bar"),
+        "the option is active through the entry's value"
+    );
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+
+    let outcome = project.save().expect("an unedited project saves");
+
+    assert_eq!(outcome.cells, 0);
+    assert_eq!(
+        read_tune(&dir),
+        before,
+        "the group option must not be appended as a second setting"
+    );
+}
+
+#[test]
+fn a_failed_save_does_not_change_what_the_session_saves_next() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, "", 1, 0, 0, 255, 0
+mode = bits, U08, 1, [0:3], "ONE", "TWO"
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="a">1.0</constant>
+        <constant name="mode">"ONE"</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("failed-save");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+    let before = read_tune(&dir);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project.tune_mut().set_user("a", 5.0).unwrap();
+    // `a` is formatted first; a bit value with no option label fails after it.
+    project.tune_mut().set_raw_at("mode", 0, 99.0).unwrap();
+
+    assert!(matches!(
+        project.save(),
+        Err(ProjectError::Unrepresentable { .. })
+    ));
+    assert_eq!(read_tune(&dir), before, "the failed save wrote nothing");
+
+    // Discard the edits: the next save must write the file as it was, not the
+    // values the failed attempt had already put into its working copy.
+    project.images_mut().revert_to_baseline();
+    let outcome = project.save().expect("the reverted tune saves");
+
+    assert_eq!(outcome.cells, 0);
+    assert_eq!(read_tune(&dir), before);
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("destination is creatable");
     for entry in fs::read_dir(from).expect("source is readable") {
