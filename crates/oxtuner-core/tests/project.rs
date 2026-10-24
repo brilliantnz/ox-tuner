@@ -1,0 +1,315 @@
+//! Project lifecycle in the core: open in place, save, read-only, and failure.
+//!
+//! The fixture is a real project shape in miniature (the same one
+//! `oxtuner-project`'s end-to-end tests use): `projectCfg/` with an `#include`,
+//! a `CurrentTune.msq` with unknown elements, and a definition with a scalar, a
+//! bit field, text and a table. Every test runs in its own temporary directory,
+//! so "the file was not touched" assertions are meaningful.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use oxtuner_core::{
+    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId,
+    ProjectSummary, SaveSummary, start,
+};
+use oxtuner_project::TUNE_FILE;
+
+/// How long a test waits for an event before failing.
+const WAIT: Duration = Duration::from_secs(10);
+
+const MAIN_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 128, 288
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
+note = string, ASCII, 8
+table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+#include page2.ini
+
+[PcVariables]
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+"#;
+
+const PAGE_TWO: &str = "page = 2
+b = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+";
+
+const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <bibliography author="TunerStudio" tuneComment="fixture"/>
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="2" signature="speeduino 202501"/>
+    <page>
+        <pcVariable digits="0" name="rpmhigh" units="rpm">12000.0</pcVariable>
+    </page>
+    <page number="0" size="128">
+        <constant digits="1" name="reqFuel" units="ms">15.4</constant>
+        <constant name="aeMode">"MAP"</constant>
+        <constant name="note">"NO2C"</constant>
+        <constant cols="2" digits="0" name="table" rows="2" units="">1.0 2.0 3.0 4.0</constant>
+        <!-- a comment this build does not understand and must keep -->
+        <futureThing mode="x"><nested a="1"/></futureThing>
+    </page>
+    <page number="1" size="288">
+        <constant name="b">2.0</constant>
+    </page>
+    <settings Comment="written by TunerStudio">
+        <setting name="enablehardware_test_OFF" value="enablehardware_test_OFF"/>
+        <setting name="CELSIUS" value="CELSIUS"/>
+    </settings>
+</msq>
+"#;
+
+/// The same tune, written for another firmware.
+fn other_firmware_tune() -> String {
+    TUNE.replace("signature=\"speeduino 202501\"", "signature=\"other 1\"")
+}
+
+/// A temporary directory that removes itself, even when a test fails.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "oxtuner-core-project-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("temporary directory is creatable");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write(&self, relative: &str, contents: &str) {
+        let path = self.path.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent is creatable");
+        }
+        fs::write(path, contents).expect("fixture is writable");
+    }
+
+    fn tune(&self) -> Vec<u8> {
+        fs::read(self.path.join(TUNE_FILE)).expect("the tune file is readable")
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn project_dir(label: &str, tune: &str) -> TempDir {
+    let dir = TempDir::new(label);
+    dir.write("projectCfg/mainController.ini", MAIN_DEFINITION);
+    dir.write("projectCfg/page2.ini", PAGE_TWO);
+    dir.write(TUNE_FILE, tune);
+    dir
+}
+
+/// A running core whose events are consumed synchronously.
+struct Harness {
+    handle: CoreHandle,
+    _thread: CoreThread,
+    events: BlockingEventStream,
+}
+
+impl Harness {
+    fn start() -> Self {
+        let parts = start(CoreConfig::default()).expect("the core starts");
+        Self {
+            handle: parts.handle,
+            _thread: parts.thread,
+            events: parts.events.into_blocking(),
+        }
+    }
+
+    fn open(&self, path: &Path) -> OpId {
+        self.handle
+            .open_project(path)
+            .expect("the command is queued")
+    }
+
+    fn next(&self) -> Event {
+        self.events.recv_timeout(WAIT).expect("an event arrives")
+    }
+}
+
+fn opened(event: &Event) -> &ProjectSummary {
+    match event {
+        Event::ProjectOpened { summary, .. } => summary,
+        other => panic!("expected a project open, got {other:?}"),
+    }
+}
+
+fn failure(event: &Event) -> (FailureCode, &str) {
+    match event {
+        Event::Failed { failure, .. } => (failure.code, failure.message.as_str()),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn opening_a_project_summarises_the_tune_for_the_ui() {
+    let dir = project_dir("open", TUNE);
+    let core = Harness::start();
+
+    let op = core.open(dir.path());
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op), "the reply carries the command's id");
+    let summary = opened(&event);
+    assert_eq!(summary.root.as_path(), dir.path());
+    assert_eq!(summary.tune_path, dir.path().join(TUNE_FILE));
+    assert!(summary.in_project);
+    assert!(!summary.read_only, "{:?}", summary.read_only_reasons);
+    assert!(summary.read_only_reasons.is_empty());
+    assert_eq!(summary.definition.signature, "speeduino 202501");
+    assert_eq!(summary.definition.pages, 2);
+    assert_eq!(summary.definition.constants, 5);
+    // Six entries exist in the tune: five constants and one PC variable.
+    assert_eq!(summary.loaded, 6);
+    assert_eq!(summary.skipped, 0);
+    assert!(summary.warnings.is_empty(), "{:?}", summary.warnings);
+}
+
+#[test]
+fn saving_an_unedited_project_writes_nothing_and_keeps_the_file_identical() {
+    let dir = project_dir("save", TUNE);
+    let before = dir.tune();
+    let core = Harness::start();
+
+    core.open(dir.path());
+    opened(&core.next());
+
+    let op = core.handle.save_tune().expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let Event::TuneSaved { outcome, .. } = &event else {
+        panic!("expected a save, got {event:?}");
+    };
+    let expected = SaveSummary {
+        path: dir.path().join(TUNE_FILE),
+        cells: 0,
+    };
+    assert_eq!(outcome, &expected);
+    assert_eq!(dir.tune(), before, "an unedited save is byte-identical");
+}
+
+#[test]
+fn a_signature_mismatch_opens_read_only_and_refuses_to_save() {
+    let dir = project_dir("read-only", &other_firmware_tune());
+    let before = dir.tune();
+    let core = Harness::start();
+
+    core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+
+    assert!(summary.read_only);
+    assert!(
+        !summary.read_only_reasons.is_empty(),
+        "read-only mode must explain itself (S1)"
+    );
+
+    let op = core.handle.save_tune().expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (code, message) = failure(&event);
+    assert_eq!(code, FailureCode::TuneSaveFailed);
+    assert!(!message.is_empty());
+    assert_eq!(dir.tune(), before, "a refused save touches nothing");
+}
+
+#[test]
+fn a_failed_open_keeps_the_previous_project_open() {
+    let dir = project_dir("keep", TUNE);
+    let core = Harness::start();
+
+    core.open(dir.path());
+    opened(&core.next());
+
+    let missing = dir.path().join("does-not-exist");
+    let op = core.open(&missing);
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (code, message) = failure(&event);
+    assert_eq!(code, FailureCode::ProjectRejected);
+    assert!(
+        message.contains("does-not-exist"),
+        "the message names the path: {message}"
+    );
+
+    // The old project survived the failure, so saving still works.
+    core.handle.save_tune().expect("the command is queued");
+    let Event::TuneSaved { outcome, .. } = core.next() else {
+        panic!("expected the previous project to still be open");
+    };
+    assert_eq!(outcome.cells, 0);
+}
+
+#[test]
+fn saving_without_a_project_says_so() {
+    let core = Harness::start();
+
+    let op = core.handle.save_tune().expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (code, message) = failure(&event);
+    assert_eq!(code, FailureCode::NothingToSave);
+    assert!(!message.is_empty());
+}
+
+#[test]
+fn unloading_closes_the_project() {
+    let dir = project_dir("unload", TUNE);
+    let core = Harness::start();
+
+    core.open(dir.path());
+    opened(&core.next());
+
+    let op = core
+        .handle
+        .unload_definition()
+        .expect("the command is queued");
+    assert_eq!(core.next(), Event::DefinitionUnloaded { op });
+
+    core.handle.save_tune().expect("the command is queued");
+    let (code, _) = failure(&core.next());
+    assert_eq!(code, FailureCode::NothingToSave);
+}
+
+#[test]
+fn a_project_failure_is_not_a_dead_core() {
+    let empty = TempDir::new("empty");
+    let core = Harness::start();
+
+    let op = core.open(empty.path());
+    assert_eq!(core.next().op(), Some(op));
+
+    // The core still answers: a definition load works after a rejected project.
+    let op = core
+        .handle
+        .load_definition("speeduino.ini", MAIN_DEFINITION.as_bytes())
+        .expect("the command is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+    assert!(matches!(event, Event::DefinitionLoaded { .. }));
+}

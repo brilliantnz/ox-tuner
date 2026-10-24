@@ -334,3 +334,36 @@ broken = scalar, U08, xyz(, \"ms\", 0.1, 0, 0, 25.5, 1
         "the failure must be reported, not guessed away"
     );
 }
+
+#[test]
+fn a_wide_option_list_keeps_its_values_and_is_shared() {
+    // Speeduino spells out all 65 536 CAN addresses and references the define
+    // from twenty entries. Two things must hold: a `bits` value is not a byte
+    // (the table is a value → label map for the whole `[low:high]` range), and
+    // the entries that share a define share one parsed table.
+    let text = "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 32
+page = 1
+#define addresses = 256=\"0x100\", 300=\"0x12C\"
+first = bits, U16, 0, [0:15], $addresses
+second = bits, U16, 2, [0:15], $addresses
+";
+
+    let definition = parse_str(text, &SettingsContext::new()).expect("the file parses");
+    let first = definition.constant("first").expect("first");
+    let second = definition.constant("second").expect("second");
+
+    assert_eq!(first.options.len(), 2);
+    assert_eq!(first.options[0].value, 256);
+    assert_eq!(first.options[0].label, "0x100");
+    assert_eq!(first.options[1].value, 300);
+    assert!(
+        std::sync::Arc::ptr_eq(&first.options, &second.options),
+        "entries sharing a `$define` must share the parsed option table"
+    );
+}

@@ -11,6 +11,7 @@ gpui_kit::actions!(
         About,
         OpenDefinition,
         OpenProject,
+        SaveTune,
         OpenHomepage,
         Settings,
         ShowDisclaimer,

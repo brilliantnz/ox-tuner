@@ -36,12 +36,13 @@ use gpui_kit::{
 };
 
 pub mod bottom_panel;
+mod explorer;
 pub mod primary_sidebar;
 pub mod secondary_sidebar;
 pub mod titlebar;
 
 use self::{
-    bottom_panel::BottomPanel, primary_sidebar::PrimarySidebar,
+    bottom_panel::BottomPanel, explorer::Explorer, primary_sidebar::PrimarySidebar,
     secondary_sidebar::SecondarySidebar, titlebar::MainBar,
 };
 use crate::{
@@ -64,6 +65,11 @@ pub(crate) struct Shell {
     _bounds: Subscription,
     /// The in-window menu bar. Rendered only where the OS has no global menu.
     menu_bar: Entity<AppMenuBar>,
+    /// The definition-driven navigation tree. The sidebar renders it; the
+    /// editor column shows what is selected.
+    explorer: Entity<Explorer>,
+    /// Keeps the selection observer alive so the editor repaints on a click.
+    _explorer: Subscription,
 }
 
 impl Shell {
@@ -99,20 +105,67 @@ impl Shell {
             schedule_save(cx);
         });
 
+        // The tree is its own entity: it observes the core, owns the gpui-kit
+        // tree state and keeps the selection. The shell watches it only to
+        // repaint the editor column when the selection changes.
+        let explorer = cx.new(Explorer::new);
+        let _explorer = cx.observe(&explorer, |_, _, cx| cx.notify());
+
         Self {
             _appearance,
             _bounds,
             menu_bar,
+            explorer,
+            _explorer,
         }
     }
 
-    /// The editor column: a header band and the (still empty) tune workspace.
+    /// The editor column: the open project's identity, then the node selected
+    /// in the navigation tree (or an honest empty workspace).
     fn render_editor_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let project = cx
-            .global::<AppState>()
-            .last_project()
-            .map(std::path::Path::to_path_buf);
+        // The editor names what the core owns. `AppState::last_project` only
+        // remembers the path between launches.
+        let status = crate::core::CoreService::status(cx);
+        let project = status.project.clone();
+        let definition = status
+            .definition()
+            .map(|definition| (definition.label.clone(), definition.signature.clone()));
+        let selected = self.explorer.read(cx).selected().cloned();
+        let has_selection = selected.is_some();
         let has_project = project.is_some();
+        let has_definition = definition.is_some();
+
+        let identity = project
+            .as_ref()
+            .map(|project| {
+                (
+                    project::display_name(&project.root),
+                    project.tune_path.display().to_string(),
+                )
+            })
+            .or(definition);
+
+        let read_only = project.as_ref().is_some_and(|project| project.read_only);
+        let reasons = project
+            .as_ref()
+            .map(|project| project.read_only_reasons.join("; "))
+            .unwrap_or_default();
+        let available = project
+            .as_ref()
+            .is_none_or(|project| project::is_available(&project.root));
+
+        let heading = if has_definition {
+            t!("app.editor.nothing_selected")
+        } else {
+            t!("app.editor.no_tune")
+        };
+        let empty_hint = if has_project && !available {
+            t!("app.editor.project_missing")
+        } else if has_definition {
+            t!("app.editor.select_hint")
+        } else {
+            t!("app.editor.empty_hint")
+        };
 
         v_flex()
             .size_full()
@@ -122,6 +175,63 @@ impl Shell {
             // The window's identity lives in the title bar, so this band
             // carries the workspace's own line. It is deliberately not part of
             // the bar: it never drags the window.
+            .when_some(identity, |this, (title, subtitle)| {
+                this.child(
+                    h_flex()
+                        .h_9()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_4()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .truncate()
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate()
+                                        .child(subtitle),
+                                ),
+                        )
+                        .when(has_project, |this| {
+                            this.child(
+                                Button::new("choose-another-project")
+                                    .ghost()
+                                    .small()
+                                    .label(t!("app.editor.choose_another"))
+                                    .on_click(|_, _, cx| project::choose(cx)),
+                            )
+                        }),
+                )
+            })
+            // A read-only tune is a property of the workspace, not of the
+            // selected node, so it stays visible above the editor body.
+            .when(read_only, |this| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .px_4()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(t!("app.editor.read_only", reason = reasons)),
+                )
+            })
             .child(
                 v_flex()
                     .flex_1()
@@ -130,46 +240,23 @@ impl Shell {
                     .justify_center()
                     .gap_3()
                     .px_6()
-                    .when_some(project, |this, path| {
-                        let available = project::is_available(&path);
+                    .when_some(selected, |this, node| {
                         this.child(
+                            Icon::new(explorer::icon(node.kind))
+                                .large()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(
                             div()
                                 .text_lg()
                                 .font_weight(FontWeight::MEDIUM)
-                                .truncate()
-                                .child(project::display_name(&path)),
+                                .child(node.label.clone()),
                         )
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(path.display().to_string()),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(420.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if available {
-                                    t!("app.editor.project_hint")
-                                } else {
-                                    t!("app.editor.project_missing")
-                                }),
-                        )
-                        .child(
-                            Button::new("choose-another-project")
-                                .label(t!("app.editor.choose_another"))
-                                .on_click(|_, _, cx| project::choose(cx)),
-                        )
-                    })
-                    .when(!has_project, |this| {
-                        this.child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(t!("app.editor.no_tune")),
+                                .child(explorer::summary(&node)),
                         )
                         .child(
                             div()
@@ -177,13 +264,31 @@ impl Shell {
                                 .text_sm()
                                 .text_center()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t!("app.editor.empty_hint")),
+                                .child(explorer::hint(node.kind)),
+                        )
+                    })
+                    .when(!has_selection, |this| {
+                        this.child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(heading),
                         )
                         .child(
-                            Button::new("open-project")
-                                .label(t!("app.editor.open_project"))
-                                .on_click(|_, _, cx| project::choose(cx)),
+                            div()
+                                .max_w(px(440.))
+                                .text_sm()
+                                .text_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(empty_hint),
                         )
+                        .when(!has_definition, |this| {
+                            this.child(
+                                Button::new("open-project")
+                                    .label(t!("app.editor.open_project"))
+                                    .on_click(|_, _, cx| project::choose(cx)),
+                            )
+                        })
                     }),
             )
     }
@@ -325,7 +430,7 @@ impl Render for Shell {
                                         px(PRIMARY_WIDTH_RANGE.start)..px(PRIMARY_WIDTH_RANGE.end),
                                     )
                                     .fixed()
-                                    .child(PrimarySidebar),
+                                    .child(PrimarySidebar::new(self.explorer.clone())),
                             )
                         })
                         .child(

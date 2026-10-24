@@ -8,9 +8,12 @@
 //! - **Events** use the *async* receiver, so the UI can await them on GPUI's
 //!   foreground executor without a polling loop or a second runtime.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crossfire::{MAsyncRx, MTx, TrySendError, mpmc};
@@ -104,7 +107,20 @@ impl CoreHandle {
         self.send(Command::load_definition(label, bytes))
     }
 
-    /// Drops the loaded definition.
+    /// Opens a TunerStudio project folder in the core.
+    ///
+    /// The core reads and owns the definition and the tune; the reply is
+    /// [`crate::Event::ProjectOpened`] or [`crate::Event::Failed`].
+    pub fn open_project(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::OpenProject { path: path.into() })
+    }
+
+    /// Writes the open project's changed values back to its tune file.
+    pub fn save_tune(&self) -> Result<OpId, CoreError> {
+        self.send(Command::SaveTune)
+    }
+
+    /// Drops the loaded definition (and tune, if a project is open).
     pub fn unload_definition(&self) -> Result<OpId, CoreError> {
         self.send(Command::UnloadDefinition)
     }

@@ -54,6 +54,8 @@ app:
       en: Open Project Folder…
     open_definition:
       en: Open ECU Definition…
+    save_tune:
+      en: Save Tune
     safety_disclaimer:
       en: Safety Disclaimer
     github:
@@ -70,6 +72,39 @@ app:
       en: Recent
     no_project:
       en: No project open
+    navigation:
+      en: Navigation
+    no_definition:
+      en: Open a project or a definition to see its menu.
+    no_menu:
+      en: This definition declares no menus.
+  explorer:
+    kind_menu:
+      en: Menu
+    kind_group:
+      en: Group
+    kind_table:
+      en: Table
+    kind_curve:
+      en: Curve
+    kind_dialog:
+      en: Dialog
+    kind_help:
+      en: Help topic
+    kind_standard:
+      en: TunerStudio dialog
+    kind_missing:
+      en: Not in this definition
+    detail_table:
+      en: '%{cols} × %{rows}'
+    detail_curve:
+      en: '%{points} points'
+    detail_dialog:
+      en: '%{rows} rows'
+    one_item:
+      en: 1 item
+    items:
+      en: '%{count} items'
   secondary_sidebar:
     title:
       en: Inspector
@@ -90,17 +125,43 @@ app:
       en: '%{pages} pages · %{constants} constants · %{coverage}% of entries understood'
     definition_failed:
       en: The definition could not be loaded.
+    project_failed:
+      en: The project could not be opened.
+    save_failed:
+      en: The tune could not be saved.
+    nothing_to_save:
+      en: There is no open tune to save.
+    command_failed:
+      en: The command failed.
+    tune_summary:
+      en: '%{loaded} values loaded from %{tune}'
+    tune_warnings:
+      en: 'Warnings: %{count}'
+    read_only:
+      en: 'Read-only: %{reason}'
+    saved:
+      en: 'Saved %{cells} values to %{tune}.'
   editor:
-    project_hint:
-      en: This folder is remembered and opens with the app. Tune definitions and tables load from the core as the milestones land.
+    select_hint:
+      en: Choose a table, curve or dialog from the menu.
+    nothing_selected:
+      en: Nothing selected
+    folder_hint:
+      en: Choose an item from this menu to open it.
+    missing_hint:
+      en: The definition does not declare this target, so there is nothing to open.
+    unbuilt_hint:
+      en: The editor for this item arrives in a later milestone.
     project_missing:
       en: This project folder is missing. Choose it again or open another folder.
+    read_only:
+      en: 'Read-only: %{reason}'
     choose_another:
       en: Choose another folder…
     no_tune:
       en: No tune loaded
     empty_hint:
-      en: Open a TunerStudio project folder to get started. Reading INI definitions and .msq tunes arrives with the engine.
+      en: Open a TunerStudio project folder to load its definition and tune.
     open_project:
       en: Open project folder…
   status:
@@ -123,6 +184,8 @@ app:
       en: Open settings
     open_project:
       en: Open project folder
+    save_tune:
+      en: Save tune
     quit:
       en: Quit
     toggle_primary_sidebar:

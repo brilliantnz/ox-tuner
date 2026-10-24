@@ -13,6 +13,7 @@
 use oxtuner_app::{
     app, core, init,
     platform::{logging, paths::AppPaths},
+    project,
     settings::preferences::{AppSettings, apply_theme},
     shell,
     state::session::AppState,
@@ -61,10 +62,14 @@ fn main() {
         // Dark in Settings has to survive a restart.
         apply_theme(cx.global::<AppSettings>().theme(), cx);
 
-        // The headless core: one thread that owns the loaded definition and,
-        // later, the ECU session. Started before the first window so a view can
-        // never render core state that has nowhere to come from.
+        // The headless core: one thread that owns the open project (definition
+        // and tune) and, later, the ECU session. Started before the first window
+        // so a view can never render core state that has nowhere to come from.
         core::start(cx);
+
+        // The core is running, so the project the last session left can be
+        // reopened. It reads on the core thread; the window opens meanwhile.
+        project::reopen_last(cx);
 
         shell::open_main_window(cx);
 

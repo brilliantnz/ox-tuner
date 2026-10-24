@@ -1,0 +1,541 @@
+//! The working tune: one value vector per variable plus edit bookkeeping.
+//!
+//! A [`Tune`] is a plain value — cloneable, comparable by value, and free of
+//! I/O. It does **not** know about the ECU, the file or the UI. Images combine
+//! two or more tunes ([`crate::TuneImages`]); the core executes write intents.
+//!
+//! Values are stored in **raw** units (the integer the ECU sees). User units are
+//! computed through the layout's scale/translate on every access
+//! ([`crate::VariableSpec::to_user`]). That is the only place the conversion
+//! exists, so a table cell and a scalar cannot disagree about it.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use oxtuner_ini::Definition;
+
+use crate::{AttributeError, EntryShape, Layout, RawConversion, Values, VariableSpec};
+
+/// One edited cell, for the edit log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Cell {
+    variable: usize,
+    index: usize,
+}
+
+/// What an accepted edit did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditOutcome {
+    /// The raw value that was stored.
+    pub raw: f64,
+    /// Whether integer storage had to round a fractional raw value.
+    pub rounded: bool,
+    /// Whether the value is outside the definition's range (stored anyway).
+    pub out_of_range: bool,
+}
+
+impl From<RawConversion> for EditOutcome {
+    fn from(conversion: RawConversion) -> Self {
+        Self {
+            raw: conversion.raw,
+            rounded: conversion.rounded,
+            out_of_range: conversion.is_out_of_range(),
+        }
+    }
+}
+
+/// Why a tune operation could not be performed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TuneError {
+    /// No variable of that name exists in the layout.
+    UnknownVariable(String),
+    /// A numeric operation was asked for a text variable, or the reverse.
+    WrongKind {
+        /// The variable's name.
+        name: String,
+        /// What the caller needed (`number` or `text`).
+        expected: &'static str,
+    },
+    /// A `(row, column)` is outside the variable's shape.
+    CellOutOfRange {
+        /// The variable's name.
+        name: String,
+        /// Requested row.
+        row: usize,
+        /// Requested column.
+        column: usize,
+    },
+    /// A flat index is outside the variable's shape.
+    IndexOutOfRange {
+        /// The variable's name.
+        name: String,
+        /// Requested index.
+        index: usize,
+    },
+    /// The definition's presentation attributes could not be resolved.
+    Conversion {
+        /// Why.
+        source: AttributeError,
+    },
+    /// Two tunes built from different layouts were combined.
+    LayoutMismatch,
+}
+
+impl std::fmt::Display for TuneError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownVariable(name) => write!(formatter, "no tune variable named `{name}`"),
+            Self::WrongKind { name, expected } => {
+                write!(formatter, "`{name}` is not a {expected} value")
+            }
+            Self::CellOutOfRange { name, row, column } => {
+                write!(formatter, "`{name}` has no cell ({row}, {column})")
+            }
+            Self::IndexOutOfRange { name, index } => {
+                write!(formatter, "`{name}` has no element {index}")
+            }
+            Self::Conversion { source } => write!(formatter, "{source}"),
+            Self::LayoutMismatch => formatter.write_str(
+                "the tunes were built from different definitions and cannot be compared",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TuneError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Conversion { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<AttributeError> for TuneError {
+    fn from(source: AttributeError) -> Self {
+        Self::Conversion { source }
+    }
+}
+
+/// The working image of a tune.
+#[derive(Debug, Clone)]
+pub struct Tune {
+    layout: Arc<Layout>,
+    values: Vec<Values>,
+    edits: BTreeMap<Cell, SystemTime>,
+}
+
+impl Tune {
+    /// A tune built from a definition with every value at its default.
+    pub fn from_definition(definition: &Definition) -> Self {
+        let layout = Layout::build(definition, &|_| None);
+        Self::new(Arc::new(layout))
+    }
+
+    /// A tune whose values are the layout's defaults.
+    pub fn new(layout: Arc<Layout>) -> Self {
+        let values = layout
+            .variables()
+            .iter()
+            .map(default_values)
+            .collect::<Vec<_>>();
+        Self {
+            layout,
+            values,
+            edits: BTreeMap::new(),
+        }
+    }
+
+    /// The frozen layout every value is interpreted through.
+    pub fn layout(&self) -> &Arc<Layout> {
+        &self.layout
+    }
+
+    /// Whether both tunes can be compared value by value.
+    pub fn same_layout(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.layout, &other.layout)
+    }
+
+    /// A copy of this tune's values without edit timestamps.
+    ///
+    /// This is what becomes the baseline image: "as persisted" is about values,
+    /// not about when a cell was last typed into.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            layout: Arc::clone(&self.layout),
+            values: self.values.clone(),
+            edits: BTreeMap::new(),
+        }
+    }
+
+    /// Every value vector, in layout order.
+    pub fn values(&self) -> &[Values] {
+        &self.values
+    }
+
+    /// One variable's values.
+    pub fn value(&self, name: &str) -> Option<&Values> {
+        let index = self.layout.index(name)?;
+        self.values.get(index)
+    }
+
+    /// The raw value of a scalar or bit field.
+    pub fn scalar_raw(&self, name: &str) -> Result<f64, TuneError> {
+        let variable = self.variable(name)?;
+        if !variable.shape.is_scalar() {
+            return Err(TuneError::WrongKind {
+                name: name.to_owned(),
+                expected: "scalar",
+            });
+        }
+        self.raw_at(name, 0)
+    }
+
+    /// The user value of a scalar or bit field.
+    pub fn scalar_user(&self, name: &str) -> Result<f64, TuneError> {
+        let raw = self.scalar_raw(name)?;
+        Ok(self.variable(name)?.to_user(raw)?)
+    }
+
+    /// The raw value at a flat index (arrays included).
+    pub fn raw_at(&self, name: &str, index: usize) -> Result<f64, TuneError> {
+        let variable = self.variable(name)?;
+        let values = self.value_at(name)?;
+        match values {
+            Values::Numbers(numbers) => {
+                numbers
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| TuneError::IndexOutOfRange {
+                        name: name.to_owned(),
+                        index,
+                    })
+            }
+            Values::Text(_) => {
+                let _ = variable;
+                Err(TuneError::WrongKind {
+                    name: name.to_owned(),
+                    expected: "number",
+                })
+            }
+        }
+    }
+
+    /// The user value at a flat index.
+    pub fn user_at(&self, name: &str, index: usize) -> Result<f64, TuneError> {
+        let raw = self.raw_at(name, index)?;
+        Ok(self.variable(name)?.to_user(raw)?)
+    }
+
+    /// The raw value at a table cell.
+    pub fn cell_raw(&self, name: &str, row: usize, column: usize) -> Result<f64, TuneError> {
+        let index = self.offset(name, row, column)?;
+        self.raw_at(name, index)
+    }
+
+    /// The user value at a table cell.
+    pub fn cell_user(&self, name: &str, row: usize, column: usize) -> Result<f64, TuneError> {
+        let index = self.offset(name, row, column)?;
+        self.user_at(name, index)
+    }
+
+    /// The text of a string variable.
+    pub fn text(&self, name: &str) -> Result<&str, TuneError> {
+        let variable = self.variable(name)?;
+        if variable.shape.is_numeric() {
+            return Err(TuneError::WrongKind {
+                name: name.to_owned(),
+                expected: "text",
+            });
+        }
+        match self.value_at(name)? {
+            Values::Text(text) => Ok(text),
+            Values::Numbers(_) => unreachable!("shape and storage disagree"),
+        }
+    }
+
+    /// Stores a raw value at a flat index.
+    pub fn set_raw_at(&mut self, name: &str, index: usize, raw: f64) -> Result<(), TuneError> {
+        self.set_raw_at_time(name, index, raw, SystemTime::now())
+    }
+
+    fn set_raw_at_time(
+        &mut self,
+        name: &str,
+        index: usize,
+        raw: f64,
+        at: SystemTime,
+    ) -> Result<(), TuneError> {
+        let variable = self.index_of(name)?;
+        let len = self.values[variable].len();
+        if index >= len {
+            return Err(TuneError::IndexOutOfRange {
+                name: name.to_owned(),
+                index,
+            });
+        }
+        match &mut self.values[variable] {
+            Values::Numbers(numbers) => {
+                numbers[index] = raw;
+            }
+            Values::Text(_) => {
+                return Err(TuneError::WrongKind {
+                    name: name.to_owned(),
+                    expected: "number",
+                });
+            }
+        }
+        self.edits.insert(Cell { variable, index }, at);
+        Ok(())
+    }
+
+    /// Converts a user value and stores its raw form.
+    pub fn set_user_at(
+        &mut self,
+        name: &str,
+        index: usize,
+        user: f64,
+    ) -> Result<EditOutcome, TuneError> {
+        self.set_user_at_time(name, index, user, SystemTime::now())
+    }
+
+    /// Stores a user value, recording `at` as the edit time.
+    ///
+    /// Timestamps are caller-supplied so tests are deterministic; the UI-facing
+    /// [`Self::set_user_at`] uses the system clock.
+    pub fn set_user_at_time(
+        &mut self,
+        name: &str,
+        index: usize,
+        user: f64,
+        at: SystemTime,
+    ) -> Result<EditOutcome, TuneError> {
+        let variable = self.variable(name)?;
+        let conversion = variable.to_raw(user)?;
+        self.set_raw_at_time(name, index, conversion.raw, at)?;
+        Ok(conversion.into())
+    }
+
+    /// Stores a user value in a scalar or bit field.
+    pub fn set_user(&mut self, name: &str, user: f64) -> Result<EditOutcome, TuneError> {
+        let variable = self.variable(name)?;
+        if !variable.shape.is_scalar() {
+            return Err(TuneError::WrongKind {
+                name: name.to_owned(),
+                expected: "scalar",
+            });
+        }
+        self.set_user_at(name, 0, user)
+    }
+
+    /// Stores a user value in a table cell.
+    pub fn set_cell_user(
+        &mut self,
+        name: &str,
+        row: usize,
+        column: usize,
+        user: f64,
+    ) -> Result<EditOutcome, TuneError> {
+        let index = self.offset(name, row, column)?;
+        self.set_user_at(name, index, user)
+    }
+
+    /// Replaces a string variable's text.
+    pub fn set_text(&mut self, name: &str, text: &str) -> Result<(), TuneError> {
+        let index = self.index_of(name)?;
+        match &mut self.values[index] {
+            Values::Text(current) => {
+                *current = text.to_owned();
+            }
+            Values::Numbers(_) => {
+                return Err(TuneError::WrongKind {
+                    name: name.to_owned(),
+                    expected: "text",
+                });
+            }
+        }
+        self.edits.insert(
+            Cell {
+                variable: index,
+                index: 0,
+            },
+            SystemTime::now(),
+        );
+        Ok(())
+    }
+
+    /// When a cell was last edited through this tune, if it was.
+    pub fn last_edit(&self, name: &str, row: usize, column: usize) -> Option<SystemTime> {
+        let variable = self.layout.index(name)?;
+        let index = self.layout.variables()[variable]
+            .shape
+            .offset(row, column)?;
+        self.edits.get(&Cell { variable, index }).copied()
+    }
+
+    /// Whether the variable is offered for editing by the definition.
+    pub fn is_writable(&self, name: &str) -> bool {
+        self.layout
+            .variable(name)
+            .is_some_and(|variable| !variable.is_controller_owned())
+    }
+
+    /// One variable by name, with the normalised error for a miss.
+    pub fn variable(&self, name: &str) -> Result<&VariableSpec, TuneError> {
+        self.layout
+            .variable(name)
+            .ok_or_else(|| TuneError::UnknownVariable(name.to_owned()))
+    }
+
+    fn index_of(&self, name: &str) -> Result<usize, TuneError> {
+        self.layout
+            .index(name)
+            .ok_or_else(|| TuneError::UnknownVariable(name.to_owned()))
+    }
+
+    fn value_at(&self, name: &str) -> Result<&Values, TuneError> {
+        let index = self.index_of(name)?;
+        Ok(&self.values[index])
+    }
+
+    fn offset(&self, name: &str, row: usize, column: usize) -> Result<usize, TuneError> {
+        let variable = self.variable(name)?;
+        variable
+            .shape
+            .offset(row, column)
+            .ok_or_else(|| TuneError::CellOutOfRange {
+                name: name.to_owned(),
+                row,
+                column,
+            })
+    }
+}
+
+fn default_values(variable: &VariableSpec) -> Values {
+    let default = variable.default_raw;
+    match variable.shape {
+        EntryShape::Text { .. } => Values::Text(String::new()),
+        EntryShape::Scalar | EntryShape::Bits { .. } => Values::numbers(default, 1),
+        EntryShape::Array { .. } => Values::numbers(default, variable.shape.element_count()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use oxtuner_ini::{SettingsContext, parse_str};
+
+    use super::*;
+
+    fn definition() -> Definition {
+        parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+queryCommand = "Q"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+reqFuel = scalar, U16, 0, "ms", 0.1, 0, 0, 25.5, 1
+veTable = array, U08, 32, [4x2], "%", 1, 0, 0, 255, 0
+note = string, ASCII, 8, 4
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_tune_starts_at_the_definition_defaults() {
+        let tune = Tune::from_definition(&definition());
+
+        assert_eq!(tune.scalar_raw("reqFuel").unwrap(), 0.0);
+        assert_eq!(tune.text("note").unwrap(), "");
+        assert_eq!(tune.value("veTable").unwrap().len(), 8);
+    }
+
+    #[test]
+    fn a_cell_is_addressed_row_major() {
+        let mut tune = Tune::from_definition(&definition());
+
+        tune.set_cell_user("veTable", 1, 2, 42.0).unwrap();
+        assert_eq!(tune.cell_user("veTable", 1, 2).unwrap(), 42.0);
+        assert_eq!(tune.user_at("veTable", 6).unwrap(), 42.0);
+        assert!(tune.cell_user("veTable", 2, 0).is_err());
+    }
+
+    #[test]
+    fn conversions_round_trip_without_losing_the_raw_value() {
+        let mut tune = Tune::from_definition(&definition());
+        tune.set_user("reqFuel", 12.3).unwrap();
+
+        assert_eq!(tune.scalar_raw("reqFuel").unwrap(), 123.0);
+        assert!((tune.scalar_user("reqFuel").unwrap() - 12.3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_edit_records_its_timestamp() {
+        let mut tune = Tune::from_definition(&definition());
+        let at = UNIX_EPOCH + Duration::from_secs(1_000);
+
+        tune.set_user_at_time("reqFuel", 0, 1.0, at).unwrap();
+
+        assert_eq!(tune.last_edit("reqFuel", 0, 0), Some(at));
+        assert_eq!(tune.last_edit("veTable", 0, 0), None);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_values_and_drops_edit_times() {
+        let mut tune = Tune::from_definition(&definition());
+        tune.set_user("reqFuel", 5.0).unwrap();
+        let at = UNIX_EPOCH;
+        tune.set_user_at_time("reqFuel", 0, 7.0, at).unwrap();
+
+        let snapshot = tune.snapshot();
+
+        assert_eq!(snapshot.scalar_raw("reqFuel").unwrap(), 70.0);
+        assert_eq!(snapshot.last_edit("reqFuel", 0, 0), None);
+        assert!(tune.last_edit("reqFuel", 0, 0).is_some());
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_not_a_default() {
+        let mut tune = Tune::from_definition(&definition());
+
+        assert_eq!(
+            tune.scalar_raw("missing"),
+            Err(TuneError::UnknownVariable("missing".to_owned()))
+        );
+        assert_eq!(
+            tune.set_user("missing", 1.0),
+            Err(TuneError::UnknownVariable("missing".to_owned()))
+        );
+    }
+
+    #[test]
+    fn text_and_numeric_values_do_not_mix() {
+        let mut tune = Tune::from_definition(&definition());
+
+        assert!(matches!(
+            tune.scalar_raw("note"),
+            Err(TuneError::WrongKind {
+                expected: "scalar",
+                ..
+            })
+        ));
+        assert!(matches!(
+            tune.text("reqFuel"),
+            Err(TuneError::WrongKind {
+                expected: "text",
+                ..
+            })
+        ));
+
+        tune.set_text("note", "ME7.5").unwrap();
+        assert_eq!(tune.text("note").unwrap(), "ME7.5");
+    }
+}

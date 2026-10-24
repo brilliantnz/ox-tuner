@@ -7,12 +7,16 @@
 //!   A definition load moves bytes and a settings snapshot in; nothing is shared.
 //! - **Every accepted command is answered exactly once.** [`OpId`] is assigned by
 //!   the sender, so the UI can correlate a reply without trusting arrival order;
-//!   the core answers with [`Event::DefinitionLoaded`], [`Event::DefinitionUnloaded`],
-//!   [`Event::Failed`] or [`Event::Rejected`] — never twice, never silently.
+//!   the core answers with [`Event::DefinitionLoaded`], [`Event::ProjectOpened`],
+//!   [`Event::TuneSaved`], [`Event::DefinitionUnloaded`], [`Event::Failed`] or
+//!   [`Event::Rejected`] — never twice, never silently.
 
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use oxtuner_ini::{Definition, SettingsContext, Severity};
+use oxtuner_project::Project;
+
+use crate::menu::MenuNode;
 
 /// Identifies one accepted command for its whole lifetime.
 ///
@@ -59,7 +63,26 @@ pub enum Command {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
-    /// Drop the loaded definition.
+    /// Open a TunerStudio project folder in place (ADR-0007).
+    ///
+    /// The core reads the definition and the tune, owns both, and answers with
+    /// [`Event::ProjectOpened`] — or [`Event::Failed`] when the folder is not a
+    /// project or a file cannot be read. A failure leaves the previous session
+    /// untouched. A successful open **replaces** it: the previous definition and
+    /// tune are dropped in the core.
+    ///
+    /// The read happens on the core thread, never on the UI thread.
+    OpenProject {
+        /// The project folder (a directory containing `projectCfg/`).
+        path: PathBuf,
+    },
+    /// Write the open project's changed values back to its tune file.
+    ///
+    /// Only variables that differ from the baseline are touched, so an unedited
+    /// tune stays byte-for-byte identical. A read-only session refuses with
+    /// [`FailureCode::TuneSaveFailed`] and the S1 reasons.
+    SaveTune,
+    /// Drop the loaded definition and tune.
     UnloadDefinition,
     /// Stop the core. No command is accepted after this one is read.
     Shutdown,
@@ -79,6 +102,8 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::LoadDefinition { .. } => "load-definition",
+            Self::OpenProject { .. } => "open-project",
+            Self::SaveTune => "save-tune",
             Self::UnloadDefinition => "unload-definition",
             Self::Shutdown => "shutdown",
         }
@@ -93,7 +118,12 @@ pub enum Event {
         op: OpId,
         summary: DefinitionSummary,
     },
-    /// The loaded definition was dropped.
+    /// A project is open and owned by the core: definition, tune images and the
+    /// load gate's findings.
+    ProjectOpened { op: OpId, summary: ProjectSummary },
+    /// The open project's tune file was rewritten.
+    TuneSaved { op: OpId, outcome: SaveSummary },
+    /// The loaded definition (and tune, if a project was open) was dropped.
     DefinitionUnloaded { op: OpId },
     /// The command was handled but could not do its work.
     Failed { op: OpId, failure: Failure },
@@ -108,6 +138,8 @@ impl Event {
     pub fn op(&self) -> Option<OpId> {
         match self {
             Self::DefinitionLoaded { op, .. }
+            | Self::ProjectOpened { op, .. }
+            | Self::TuneSaved { op, .. }
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
@@ -150,6 +182,13 @@ pub enum FailureCode {
     /// The bytes are not a definition this build can read (ADR-0006 rule 11:
     /// an unsupported `iniSpecVersion` fails loudly rather than half-parsing).
     DefinitionRejected,
+    /// The folder is not an openable TunerStudio project, or a file in it could
+    /// not be read or parsed.
+    ProjectRejected,
+    /// The tune file could not be written, or the session is read-only (S1).
+    TuneSaveFailed,
+    /// There is no open tune to save (no project, or only a definition).
+    NothingToSave,
 }
 
 impl FailureCode {
@@ -157,6 +196,9 @@ impl FailureCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DefinitionRejected => "definition-rejected",
+            Self::ProjectRejected => "project-rejected",
+            Self::TuneSaveFailed => "tune-save-failed",
+            Self::NothingToSave => "nothing-to-save",
         }
     }
 }
@@ -189,6 +231,8 @@ pub struct DefinitionSummary {
     pub gauges: usize,
     /// Dialogs.
     pub dialogs: usize,
+    /// The navigation tree the primary sidebar draws, in definition order.
+    pub menu: Vec<MenuNode>,
     /// Share of entries that became model data, 0–100.
     pub coverage_percent: f64,
     /// Parse errors recorded while loading.
@@ -222,6 +266,7 @@ impl DefinitionSummary {
             curves: definition.curves.len(),
             gauges: definition.gauges.len(),
             dialogs: definition.dialogs.len(),
+            menu: crate::menu::build(definition),
             coverage_percent: definition.coverage.percent(),
             errors: severity(Severity::Error),
             warnings: severity(Severity::Warning),
@@ -233,6 +278,81 @@ impl DefinitionSummary {
     pub fn is_clean(&self) -> bool {
         self.errors == 0
     }
+}
+
+/// An open project, shaped for the UI rather than for the file layer.
+///
+/// Deliberately small and `Clone`: the core keeps the [`Project`] (definition,
+/// tune images, `.msq` document); the UI only needs enough to name what is open,
+/// explain read-only mode and show the load gate's findings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSummary {
+    /// The project folder, or the tune's folder in standalone mode.
+    pub root: PathBuf,
+    /// The tune file that was read (and will be written).
+    pub tune_path: PathBuf,
+    /// The definition file the tune was interpreted with.
+    pub definition_path: PathBuf,
+    /// Whether this is a project folder (as opposed to standalone).
+    pub in_project: bool,
+    /// The definition, summarised like a standalone load.
+    pub definition: DefinitionSummary,
+    /// Whether saving is refused (S1).
+    pub read_only: bool,
+    /// Why the tune opened read-only, for the editor and output panel that
+    /// explain it.
+    pub read_only_reasons: Vec<String>,
+    /// Values copied from the tune into the model.
+    pub loaded: usize,
+    /// Values left at their definition default (absent from the tune).
+    pub skipped: usize,
+    /// Non-fatal findings, ready for the output panel.
+    pub warnings: Vec<String>,
+}
+
+impl ProjectSummary {
+    /// Builds the UI-facing summary of an open project.
+    pub(crate) fn from_project(project: &Project) -> Self {
+        let report = project.report();
+        let label = project
+            .definition_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or_else(
+                || project.definition_path().display().to_string(),
+                str::to_owned,
+            );
+
+        Self {
+            root: project.root().to_owned(),
+            tune_path: project.tune_path().to_owned(),
+            definition_path: project.definition_path().to_owned(),
+            in_project: project.is_in_project(),
+            definition: DefinitionSummary::new(label, project.definition()),
+            read_only: report.is_read_only(),
+            read_only_reasons: report
+                .read_only_reasons()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            loaded: report.loaded,
+            skipped: report.skipped,
+            warnings: report
+                .warnings
+                .iter()
+                .map(|issue| issue.message.clone())
+                .collect(),
+        }
+    }
+}
+
+/// What a successful [`Command::SaveTune`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveSummary {
+    /// The tune file that was rewritten.
+    pub path: PathBuf,
+    /// Number of values that changed and were written.
+    pub cells: usize,
 }
 
 /// One command plus the id it will be answered under.
@@ -264,6 +384,7 @@ mod tests {
             curves: 34,
             gauges: 90,
             dialogs: 239,
+            menu: Vec::new(),
             coverage_percent: 97.95,
             errors: 0,
             warnings: 0,
@@ -286,6 +407,17 @@ mod tests {
             Event::DefinitionLoaded {
                 op,
                 summary: summary()
+            }
+            .op(),
+            Some(op)
+        );
+        assert_eq!(
+            Event::TuneSaved {
+                op,
+                outcome: SaveSummary {
+                    path: PathBuf::from("CurrentTune.msq"),
+                    cells: 0,
+                },
             }
             .op(),
             Some(op)

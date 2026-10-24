@@ -2,14 +2,15 @@
 //!
 //! ```text
 //! UI ──Command──▶ [commands queue] ──▶ core thread ──▶ [events queue] ──Event──▶ UI
-//!                                       owns Definition
+//!                                       owns the session
 //! ```
 //!
-//! What this thread owns today is the definition and the lifecycle around it.
-//! The transport, the realtime poller and the tune images arrive with M3/M5/M8
-//! and land **here**, not in the UI — that is the point of the crate
-//! (`docs/architecture/crates/oxtuner-core.md`). Nothing in this module is a
-//! stub for them: the core is complete for what it claims to do.
+//! What this thread owns today is the **session** — nothing, a standalone
+//! definition, or an open project (definition + tune images) — and the lifecycle
+//! around it. The transport, the realtime poller and the ECU-side images arrive
+//! with M5/M7/M8 and land **here**, not in the UI — that is the point of the
+//! crate (`docs/architecture/crates/oxtuner-core.md`). Nothing in this module is
+//! a stub for them: the core is complete for what it claims to do.
 
 use std::{
     io,
@@ -20,9 +21,13 @@ use std::{
 
 use crossfire::{MRx, MTx, mpmc};
 use oxtuner_ini::Definition;
+use oxtuner_project::Project;
 
 use crate::handle::{CoreHandle, EventStream, Gate};
-use crate::message::{Command, DefinitionSummary, Envelope, Event, Failure, FailureCode, OpId};
+use crate::message::{
+    Command, DefinitionSummary, Envelope, Event, Failure, FailureCode, OpId, ProjectSummary,
+    SaveSummary,
+};
 
 /// Queue sizes and thread behaviour.
 #[derive(Debug, Clone, Copy)]
@@ -91,7 +96,11 @@ pub struct CoreReport {
     pub rejected: u64,
     /// Definitions loaded successfully.
     pub loads: u64,
-    /// Definitions that failed to parse.
+    /// Projects opened successfully.
+    pub projects_opened: u64,
+    /// Tune files saved successfully.
+    pub tune_saves: u64,
+    /// Commands that failed (a rejected definition, project or save).
     pub failures: u64,
     /// Slowest command, measured from dequeue to reply.
     pub max_op_latency: Duration,
@@ -269,13 +278,13 @@ fn run(
 ) -> CoreReport {
     let started = Instant::now();
     let mut report = CoreReport::default();
-    let mut definition: Option<Definition> = None;
+    let mut session = Session::Empty;
 
     // Every handle is gone (`Err`) also ends the loop, which is what makes a
     // dropped UI a shutdown rather than a leak.
     while let Ok(envelope) = commands.recv() {
         let op_started = Instant::now();
-        let outcome = handle(envelope, &mut definition, &events, &mut report);
+        let outcome = handle(envelope, &mut session, &events, &mut report);
         let took = op_started.elapsed();
 
         report.total_op_latency += took;
@@ -328,9 +337,37 @@ enum Outcome {
     Stop,
 }
 
+/// What the core owns between commands.
+///
+/// One enum rather than separate options: a definition and a project cannot both
+/// be open, so the "one owner" rule is a property of the type.
+#[derive(Debug)]
+enum Session {
+    /// Nothing loaded.
+    Empty,
+    /// A definition opened on its own (no tune file).
+    ///
+    /// Owned for the commands that will read it (the protocol layer, M5); today
+    /// only the load summary is derived from it.
+    Definition(
+        #[expect(
+            dead_code,
+            reason = "owned for the M5 protocol layer; only the summary is read today"
+        )]
+        Box<Definition>,
+    ),
+    /// A TunerStudio project: definition, tune images and the file they came
+    /// from.
+    ///
+    /// Boxed: a `Project` is a few kilobytes of tune images, and the session
+    /// lives on the core thread's stack for the whole run — it must not inflate
+    /// the enum every command frame touches.
+    Project(Box<Project>),
+}
+
 fn handle(
     envelope: Envelope,
-    definition: &mut Option<Definition>,
+    session: &mut Session,
     events: &MTx<mpmc::Array<Event>>,
     report: &mut CoreReport,
 ) -> Outcome {
@@ -357,9 +394,9 @@ fn handle(
                         coverage = summary.coverage_percent,
                         "definition loaded"
                     );
-                    // The core is the only owner: the previous definition is
+                    // The core is the only owner: the previous session is
                     // dropped here, never handed back to a caller.
-                    *definition = Some(parsed);
+                    *session = Session::Definition(Box::new(parsed));
                     report.loads += 1;
                     send(events, Event::DefinitionLoaded { op, summary });
                 }
@@ -380,9 +417,100 @@ fn handle(
             }
             Outcome::Continue
         }
+        Command::OpenProject { path } => {
+            // Reading and parsing happen here, on the core thread: the UI must
+            // never wait on a project's INI and `.msq`.
+            match Project::open(&path) {
+                Ok(project) => {
+                    let summary = ProjectSummary::from_project(&project);
+                    tracing::info!(
+                        %op,
+                        root = %summary.root.display(),
+                        signature = %summary.definition.signature,
+                        loaded = summary.loaded,
+                        skipped = summary.skipped,
+                        warnings = summary.warnings.len(),
+                        read_only = summary.read_only,
+                        "project opened"
+                    );
+                    *session = Session::Project(Box::new(project));
+                    report.projects_opened += 1;
+                    send(events, Event::ProjectOpened { op, summary });
+                }
+                Err(error) => {
+                    tracing::warn!(%op, path = %path.display(), %error, "project rejected");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::ProjectRejected,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
+        Command::SaveTune => {
+            match session {
+                Session::Project(project) => match project.save() {
+                    Ok(outcome) => {
+                        tracing::info!(
+                            %op,
+                            path = %outcome.path.display(),
+                            cells = outcome.cells,
+                            "tune saved"
+                        );
+                        report.tune_saves += 1;
+                        send(
+                            events,
+                            Event::TuneSaved {
+                                op,
+                                outcome: SaveSummary {
+                                    path: outcome.path,
+                                    cells: outcome.cells,
+                                },
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%op, %error, "tune save failed");
+                        report.failures += 1;
+                        send(
+                            events,
+                            Event::Failed {
+                                op,
+                                failure: Failure {
+                                    code: FailureCode::TuneSaveFailed,
+                                    message: error.to_string(),
+                                },
+                            },
+                        );
+                    }
+                },
+                Session::Definition(_) | Session::Empty => {
+                    tracing::debug!(%op, "nothing to save");
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::NothingToSave,
+                                message: "no tune is open; open a project folder first".to_owned(),
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
         Command::UnloadDefinition => {
-            let had_definition = definition.take().is_some();
-            tracing::debug!(%op, had_definition, "definition unloaded");
+            let had_session = !matches!(session, Session::Empty);
+            *session = Session::Empty;
+            tracing::debug!(%op, had_session, "session unloaded");
             send(events, Event::DefinitionUnloaded { op });
             Outcome::Continue
         }
