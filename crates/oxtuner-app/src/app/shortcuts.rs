@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    Action, App, DummyKeyboardMapper, Global, KeyBinding, KeyBindingContextPredicate, Keystroke,
-    Modifiers, SharedString,
+    Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Modifiers,
+    OperatingSystem, SharedString,
 };
 
 use super::actions::{
@@ -201,7 +201,7 @@ pub fn apply_shortcuts(cx: &mut App) {
         .try_global::<KitBindings>()
         .map(|kit| kit.0.clone())
         .unwrap_or_default();
-    bindings.extend(key_bindings());
+    bindings.extend(key_bindings(cx));
 
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
@@ -209,7 +209,7 @@ pub fn apply_shortcuts(cx: &mut App) {
 }
 
 /// The bindings [`SHORTCUTS`] describes, for this platform.
-pub(super) fn key_bindings() -> Vec<KeyBinding> {
+pub(super) fn key_bindings(cx: &App) -> Vec<KeyBinding> {
     SHORTCUTS
         .iter()
         .filter_map(|shortcut| {
@@ -224,15 +224,7 @@ pub(super) fn key_bindings() -> Vec<KeyBinding> {
                 .first()
                 .and_then(|context| KeyBindingContextPredicate::parse(context).ok())
                 .map(Rc::new);
-            KeyBinding::load(
-                keys,
-                shortcut.action(),
-                predicate,
-                false,
-                None,
-                &DummyKeyboardMapper,
-            )
-            .ok()
+            KeyBinding::load(keys, shortcut.action(), predicate, false, None, cx).ok()
         })
         .collect()
 }
@@ -243,7 +235,14 @@ pub fn key_caps(keys: &str) -> Vec<SharedString> {
     if keys.is_empty() {
         return Vec::new();
     }
-    let Ok(keystroke) = Keystroke::parse(keys) else {
+    let os = if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else {
+        OperatingSystem::Linux
+    };
+    let Ok(keystroke) = Keystroke::parse_with_os(keys, os) else {
         return Vec::new();
     };
     let modifiers = keystroke.modifiers;
