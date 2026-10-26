@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-crossfire = "3.1.21"
+crossfire = "3.1.22"
 oxtuner-ini.workspace = true
 oxtuner-project.workspace = true
 tracing = "0.1.44"

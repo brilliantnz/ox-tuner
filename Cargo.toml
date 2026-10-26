@@ -21,7 +21,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/brilliantnz/ox-tuner"
 
 [workspace.dependencies]
-gpui-kit = "=0.8.0"
+gpui-kit = "=0.8.1"
 oxtuner-core = { path = "./crates/oxtuner-core" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
 oxtuner-project = { path = "./crates/oxtuner-project" }
