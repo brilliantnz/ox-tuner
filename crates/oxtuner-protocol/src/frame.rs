@@ -194,12 +194,8 @@ impl FrameDecoder {
             }
             let total = declared + 6;
             if self.buffer.len() < total {
-                // A partial frame can never be larger than the maximum frame.
-                if self.buffer.len() > MAX_PAYLOAD + 6 {
-                    let buffered = self.buffer.len();
-                    self.buffer.clear();
-                    return Err(FrameError::TooLarge { declared: buffered });
-                }
+                // `declared` is within the cap, so the partial frame is
+                // bounded by `MAX_PAYLOAD + 6`; wait for the rest.
                 break;
             }
             match Frame::parse(&self.buffer[..total]) {
