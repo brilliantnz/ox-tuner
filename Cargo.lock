@@ -4983,6 +4983,9 @@ dependencies = [
  "crossfire",
  "oxtuner-ini",
  "oxtuner-project",
+ "oxtuner-protocol",
+ "oxtuner-sim",
+ "oxtuner-transport",
  "oxtuner-tune",
  "tracing",
 ]

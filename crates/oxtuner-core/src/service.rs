@@ -5,29 +5,39 @@
 //!                                       owns the session
 //! ```
 //!
-//! What this thread owns today is the **session** — nothing, a standalone
-//! definition, or an open project (definition + tune images) — and the lifecycle
-//! around it. The transport, the realtime poller and the ECU-side images arrive
-//! with M5/M7/M8 and land **here**, not in the UI — that is the point of the
-//! crate (`docs/architecture/crates/oxtuner-core.md`). Nothing in this module is
-//! a stub for them: the core is complete for what it claims to do.
+//! What this thread owns is the **session** — nothing, a standalone definition,
+//! or an open project (definition + tune images) — and the live ECU session's
+//! state machine: the I/O thread handle, pending conversations, the poll and
+//! reconnect timers, and the last read summary. The write path and the datalog
+//! ring buffer arrive with M7/M8 and land **here**, not in the UI — that is the
+//! point of the crate (`docs/architecture/crates/oxtuner-core.md`). Nothing in
+//! this module is a stub for them.
 
 use std::{
+    collections::BTreeMap,
     io,
     sync::{Arc, atomic::AtomicU64},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
-use crossfire::{MRx, MTx, mpmc};
+use crossfire::{MRx, MTx, RecvTimeoutError, Rx, mpmc, spsc};
 use oxtuner_ini::Definition;
 use oxtuner_project::Project;
+use oxtuner_protocol::{Behavior, LinkMode};
+use oxtuner_tune::{IniPage, Tune, decode_page};
 
 use crate::handle::{CoreHandle, EventStream, Gate};
-use crate::message::{
-    AxisEdit, CellEdit, Command, DefinitionSummary, DialogSummary, Envelope, Event, Failure,
-    FailureCode, OpId, ProjectSummary, SaveSummary, TableSummary,
+use crate::io_thread::{
+    self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, LinkChoice, PageRead,
+    RequestId,
 };
+use crate::message::{
+    AxisEdit, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary, Envelope,
+    Event, Failure, FailureCode, OpId, PortChoice, PortSummary, ProjectSummary, ReadAllSummary,
+    SaveSummary, SignatureVerdict, TableSummary,
+};
+use crate::realtime::{LatestFrame, RealtimeDecoder};
 
 /// Queue sizes and thread behaviour.
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +73,8 @@ pub enum CoreError {
     Stopped,
     /// The thread could not be created.
     Spawn(io::Error),
+    /// A connection could not be built (no message set, a bad definition).
+    Connect(String),
 }
 
 impl std::fmt::Display for CoreError {
@@ -71,6 +83,7 @@ impl std::fmt::Display for CoreError {
             Self::QueueFull => formatter.write_str("the core is busy; the command was refused"),
             Self::Stopped => formatter.write_str("the core has stopped"),
             Self::Spawn(error) => write!(formatter, "could not start the core thread: {error}"),
+            Self::Connect(message) => write!(formatter, "could not connect: {message}"),
         }
     }
 }
@@ -79,7 +92,7 @@ impl std::error::Error for CoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn(error) => Some(error),
-            Self::QueueFull | Self::Stopped => None,
+            Self::QueueFull | Self::Stopped | Self::Connect(_) => None,
         }
     }
 }
@@ -102,6 +115,12 @@ pub struct CoreReport {
     pub tune_saves: u64,
     /// Commands that failed (a rejected definition, project or save).
     pub failures: u64,
+    /// Connections opened.
+    pub connects: u64,
+    /// Page reads that completed.
+    pub page_reads: u64,
+    /// Realtime frames decoded.
+    pub realtime_frames: u64,
     /// Slowest command, measured from dequeue to reply.
     pub max_op_latency: Duration,
     /// Sum of command durations, for the mean.
@@ -167,6 +186,8 @@ pub struct CoreParts {
     pub handle: CoreHandle,
     /// Events out. Single consumer by construction.
     pub events: EventStream,
+    /// The newest realtime frame, read without an event round trip (ADR-0014).
+    pub latest: LatestFrame,
     /// The thread, which joins on shutdown.
     pub thread: CoreThread,
 }
@@ -245,10 +266,12 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
     let next_op = Arc::new(AtomicU64::new(OpId::FIRST));
     let gate = Arc::new(Gate::default());
     let core_gate = Arc::clone(&gate);
+    let latest = LatestFrame::default();
+    let core_latest = latest.clone();
 
     let join = thread::Builder::new()
         .name("oxtuner-core".to_owned())
-        .spawn(move || run(command_rx, event_tx, core_gate))
+        .spawn(move || run(command_rx, event_tx, core_gate, core_latest))
         .map_err(CoreError::Spawn)?;
 
     tracing::debug!("core thread started");
@@ -260,6 +283,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
             gate,
         },
         events: EventStream { events },
+        latest,
         thread: CoreThread {
             join: Some(join),
             commands,
@@ -275,25 +299,56 @@ fn run(
     commands: MRx<mpmc::Array<Envelope>>,
     events: MTx<mpmc::Array<Event>>,
     gate: Arc<Gate>,
+    latest: LatestFrame,
 ) -> CoreReport {
     let started = Instant::now();
     let mut report = CoreReport::default();
     let mut session = Session::Empty;
+    let mut live: Option<Live> = None;
 
     // Every handle is gone (`Err`) also ends the loop, which is what makes a
     // dropped UI a shutdown rather than a leak.
-    while let Ok(envelope) = commands.recv() {
-        let op_started = Instant::now();
-        let outcome = handle(envelope, &mut session, &events, &mut report);
-        let took = op_started.elapsed();
+    loop {
+        let envelope = match next_wait(&live) {
+            Some(timeout) => match commands.recv_timeout(timeout) {
+                Ok(envelope) => Some(envelope),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match commands.recv() {
+                Ok(envelope) => Some(envelope),
+                Err(_) => break,
+            },
+        };
 
-        report.total_op_latency += took;
-        report.max_op_latency = report.max_op_latency.max(took);
+        if let Some(envelope) = envelope {
+            let op_started = Instant::now();
+            let outcome = handle(
+                envelope,
+                &mut session,
+                &mut live,
+                &events,
+                &latest,
+                &mut report,
+            );
+            let took = op_started.elapsed();
 
-        if outcome == Outcome::Stop {
-            break;
+            report.total_op_latency += took;
+            report.max_op_latency = report.max_op_latency.max(took);
+
+            if outcome == Outcome::Stop {
+                break;
+            }
+            report.handled += 1;
         }
-        report.handled += 1;
+
+        // Replies and timers are serviced after every command and every wait,
+        // so a poll or a reconnect never depends on another command arriving.
+        service_live(&mut live, &mut session, &events, &latest, &mut report);
+    }
+
+    if let Some(live) = live.take() {
+        live.thread.shutdown();
     }
 
     // Close the door first: from here on no command can be queued, so draining
@@ -347,15 +402,10 @@ enum Session {
     Empty,
     /// A definition opened on its own (no tune file).
     ///
-    /// Owned for the commands that will read it (the protocol layer, M5); today
-    /// only the load summary is derived from it.
-    Definition(
-        #[expect(
-            dead_code,
-            reason = "owned for the M5 protocol layer; only the summary is read today"
-        )]
-        Box<Definition>,
-    ),
+    /// Owned for the protocol layer: a connection encodes its commands from
+    /// this definition, and a definition-only session keeps the ECU RAM image
+    /// here.
+    Definition(Box<Definition>),
     /// A TunerStudio project: definition, tune images and the file they came
     /// from.
     ///
@@ -365,10 +415,30 @@ enum Session {
     Project(Box<Project>),
 }
 
+impl Session {
+    /// The definition the session owns, whichever shape it has.
+    fn definition(&self) -> Option<&Definition> {
+        match self {
+            Self::Empty => None,
+            Self::Definition(definition) => Some(definition),
+            Self::Project(project) => Some(project.definition()),
+        }
+    }
+
+    /// Everything unproven on the ECU side becomes unknown (ADR-0010).
+    fn mark_unknown(&mut self) {
+        if let Self::Project(project) = self {
+            project.images_mut().mark_unknown();
+        }
+    }
+}
+
 fn handle(
     envelope: Envelope,
     session: &mut Session,
+    live: &mut Option<Live>,
     events: &MTx<mpmc::Array<Event>>,
+    latest: &LatestFrame,
     report: &mut CoreReport,
 ) -> Outcome {
     let Envelope { op, command } = envelope;
@@ -377,6 +447,237 @@ fn handle(
         Command::Shutdown => {
             tracing::debug!(%op, "shutdown requested");
             Outcome::Stop
+        }
+        Command::ListPorts => {
+            match io_thread::list_ports() {
+                Ok(ports) => {
+                    let summary: Vec<PortSummary> = ports
+                        .into_iter()
+                        .map(|port| PortSummary {
+                            label: port.label().to_owned(),
+                            name: port.name,
+                        })
+                        .collect();
+                    tracing::debug!(%op, ports = summary.len(), "serial ports listed");
+                    send(events, Event::PortsListed { op, ports: summary });
+                }
+                Err(error) => {
+                    tracing::warn!(%op, %error, "serial ports could not be listed");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::ConnectFailed,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
+        Command::Connect { port, framing } => {
+            connect(op, session, live, events, report, port, framing, false)
+        }
+        Command::TestConnection { port, framing } => {
+            connect(op, session, live, events, report, port, framing, true)
+        }
+        Command::Disconnect => {
+            let Some(connection) = live.as_mut() else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: "there is no connection to close".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+            if let Err(error) = connection.request(op, PendingKind::Disconnect, IoOp::Close) {
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+            }
+            Outcome::Continue
+        }
+        Command::ReadAll => {
+            let Some(connection) = live.as_mut() else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: "there is no connection to read from".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+            if !connection.connected {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: "the link is lost; waiting for it to come back".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if connection.pending_kind(PendingKind::ReadAll) {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::ReadFailed,
+                            message: "a page read is already running".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if let Err(error) = connection.request(op, PendingKind::ReadAll, IoOp::ReadAll) {
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::ReadFailed,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+            }
+            Outcome::Continue
+        }
+        Command::StartRealtime { interval_ms } => {
+            let Some(connection) = live.as_mut() else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::RealtimeRejected,
+                            message: "there is no connection to poll".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+            if !connection.connected {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::RealtimeRejected,
+                            message: "the link is lost; waiting for it to come back".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if connection.realtime_block.is_none() {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::RealtimeRejected,
+                            message: "the definition declares no realtime block".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            connection.auto_poll = true;
+            connection.start_polling(interval_ms);
+            send(events, Event::RealtimeState { op, running: true });
+            Outcome::Continue
+        }
+        Command::StopRealtime => {
+            let running = live.as_mut().is_some_and(|connection| {
+                connection.auto_poll = false;
+                connection.stop_polling();
+                true
+            });
+            if running {
+                send(events, Event::RealtimeState { op, running: false });
+            } else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: "there is no connection to stop".to_owned(),
+                        },
+                    },
+                );
+            }
+            Outcome::Continue
+        }
+        Command::SaveTrace { path } => {
+            let Some(connection) = live.as_mut() else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NotConnected,
+                            message: "there is no session trace to save".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+            if !connection.connected {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TraceFailed,
+                            message: "there is no session to save while the link is lost"
+                                .to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if let Err(error) = connection.request(op, PendingKind::Trace, IoOp::SaveTrace { path })
+            {
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TraceFailed,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+            }
+            Outcome::Continue
         }
         Command::LoadDefinition {
             label,
@@ -395,7 +696,10 @@ fn handle(
                         "definition loaded"
                     );
                     // The core is the only owner: the previous session is
-                    // dropped here, never handed back to a caller.
+                    // dropped here, never handed back to a caller. A live
+                    // connection belongs to the definition it was built from,
+                    // so it is torn down first.
+                    teardown(live, latest);
                     *session = Session::Definition(Box::new(parsed));
                     report.loads += 1;
                     send(events, Event::DefinitionLoaded { op, summary });
@@ -433,6 +737,7 @@ fn handle(
                         read_only = summary.read_only,
                         "project opened"
                     );
+                    teardown(live, latest);
                     *session = Session::Project(Box::new(project));
                     report.projects_opened += 1;
                     send(events, Event::ProjectOpened { op, summary });
@@ -832,6 +1137,7 @@ fn handle(
         }
         Command::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
+            teardown(live, latest);
             *session = Session::Empty;
             tracing::debug!(%op, had_session, "session unloaded");
             send(events, Event::DefinitionUnloaded { op });
@@ -986,6 +1292,782 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
         .downcast_ref::<String>()
         .map(String::as_str)
         .unwrap_or("unknown panic")
+}
+
+/// The default realtime poll rate.
+///
+/// 10 Hz is the rate the realtime spec targets for gauges and the pre-chart
+/// value display; the charts (M8) will own their own schedule.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The slowest and fastest accepted poll rates.
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// How long an idle core waits while an I/O reply is outstanding.
+const PENDING_WAIT: Duration = Duration::from_millis(5);
+
+/// The first reconnect delay; doubled per attempt, capped.
+const RECONNECT_BASE: Duration = Duration::from_millis(500);
+const RECONNECT_MAX: Duration = Duration::from_secs(5);
+
+/// What an accepted command is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    /// The connect handshake (signature).
+    Connect,
+    /// A full page read.
+    ReadAll,
+    /// One realtime block.
+    Realtime,
+    /// A trace save.
+    Trace,
+    /// A requested disconnect.
+    Disconnect,
+    /// A reconnect attempt (no command owns it).
+    Reconnect,
+}
+
+/// One in-flight conversation.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    op: OpId,
+    kind: PendingKind,
+}
+
+/// A running poll schedule.
+#[derive(Debug, Clone, Copy)]
+struct Poll {
+    interval: Duration,
+    next_at: Instant,
+}
+
+/// A pending reconnect attempt.
+#[derive(Debug, Clone, Copy)]
+struct Reconnect {
+    attempts: u32,
+    next_at: Instant,
+}
+
+/// A live ECU session: the I/O thread, its pending conversations and the
+/// summary the UI shows.
+struct Live {
+    thread: IoThread,
+    replies: Rx<spsc::Array<IoReply>>,
+    link_label: String,
+    simulator: bool,
+    definition_signature: String,
+    behavior: String,
+    framing: &'static str,
+    pages: usize,
+    realtime_block: Option<u16>,
+    decoder: RealtimeDecoder,
+    pending: BTreeMap<u64, Pending>,
+    next_id: RequestId,
+    poll: Option<Poll>,
+    reconnect: Option<Reconnect>,
+    sequence: u64,
+    /// The ECU RAM image when no project owns one (a definition on its own).
+    standalone: Option<Box<Tune>>,
+    /// Whether the last handshake succeeded and no loss happened since.
+    connected: bool,
+    /// Whether a successful page read should start polling. Cleared when the
+    /// user stops it, so a stop is not undone by the next read.
+    auto_poll: bool,
+    /// A signature-only probe: report the verdict, then close.
+    probe: bool,
+    /// The last signature verdict, kept for reconnects and the summary.
+    signature: String,
+    verdict: SignatureVerdict,
+}
+
+impl Live {
+    fn new(
+        thread: IoThread,
+        replies: Rx<spsc::Array<IoReply>>,
+        link: &LinkChoice,
+        definition: &Definition,
+        behavior: Behavior,
+        framing: LinkMode,
+        standalone: Option<Box<Tune>>,
+    ) -> Self {
+        let realtime_block = definition
+            .protocol
+            .och_block_size
+            .and_then(|size| u16::try_from(size).ok())
+            .filter(|size| *size > 0);
+        Self {
+            thread,
+            replies,
+            link_label: link.label(),
+            simulator: link.is_simulator(),
+            definition_signature: definition.signature.clone(),
+            behavior: behavior.as_dyn().name().to_owned(),
+            framing: match framing {
+                LinkMode::Legacy => "legacy",
+                LinkMode::Envelope => "envelope",
+            },
+            pages: definition.pages.len(),
+            realtime_block,
+            decoder: RealtimeDecoder::new(definition),
+            pending: BTreeMap::new(),
+            next_id: RequestId::FIRST,
+            poll: None,
+            reconnect: None,
+            sequence: 0,
+            standalone,
+            connected: false,
+            auto_poll: true,
+            probe: false,
+            signature: String::new(),
+            verdict: SignatureVerdict::Mismatch,
+        }
+    }
+
+    /// Queues one request and records what its answer will mean.
+    fn request(&mut self, op: OpId, kind: PendingKind, io_op: IoOp) -> Result<(), CoreError> {
+        let id = self.next_id;
+        self.thread.submit(id.0, io_op)?;
+        self.next_id = self.next_id.next();
+        self.pending.insert(id.0, Pending { op, kind });
+        Ok(())
+    }
+
+    /// Whether a request of this kind is already in flight.
+    fn pending_kind(&self, kind: PendingKind) -> bool {
+        self.pending.values().any(|pending| pending.kind == kind)
+    }
+
+    /// Starts (or changes) the poll schedule.
+    fn start_polling(&mut self, interval_ms: u32) {
+        let interval = Duration::from_millis(u64::from(interval_ms))
+            .clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
+        self.poll = Some(Poll {
+            interval,
+            next_at: Instant::now(),
+        });
+    }
+
+    /// Stops polling; the last frame stays readable.
+    fn stop_polling(&mut self) {
+        self.poll = None;
+    }
+
+    /// Whether a poll is due.
+    fn poll_due(&self) -> bool {
+        self.poll
+            .as_ref()
+            .is_some_and(|poll| poll.next_at <= Instant::now())
+    }
+
+    /// Moves the poll schedule on.
+    fn polled(&mut self) {
+        if let Some(poll) = &mut self.poll {
+            poll.next_at = Instant::now() + poll.interval;
+        }
+    }
+
+    /// Whether a reconnect attempt is due.
+    fn reconnect_due(&self) -> bool {
+        self.reconnect
+            .as_ref()
+            .is_some_and(|reconnect| reconnect.next_at <= Instant::now())
+    }
+
+    /// The summary to show for this session.
+    fn summary(&self) -> ConnectionSummary {
+        let read_only = self.verdict == SignatureVerdict::Mismatch;
+        ConnectionSummary {
+            port: self.link_label.clone(),
+            simulator: self.simulator,
+            signature: self.signature.clone(),
+            definition_signature: self.definition_signature.clone(),
+            verdict: self.verdict,
+            read_only,
+            read_only_reason: read_only.then(|| {
+                format!(
+                    "the ECU reports {:?}, the definition expects {:?}",
+                    self.signature, self.definition_signature
+                )
+            }),
+            behavior: self.behavior.clone(),
+            framing: self.framing,
+            pages: self.pages,
+            realtime_block: self.realtime_block,
+        }
+    }
+
+    /// Re-evaluates the signature verdict after a handshake.
+    fn set_signature(&mut self, signature: String) {
+        self.verdict = if signature.trim() == self.definition_signature.trim() {
+            SignatureVerdict::Match
+        } else {
+            SignatureVerdict::Mismatch
+        };
+        self.signature = signature;
+        self.connected = true;
+        self.reconnect = None;
+    }
+}
+
+/// Stops a live session, releases its port and forgets its frame.
+fn teardown(live: &mut Option<Live>, latest: &LatestFrame) {
+    if let Some(live) = live.take() {
+        live.thread.shutdown();
+        latest.clear();
+    }
+}
+
+/// How long the core may wait for the next command.
+fn next_wait(live: &Option<Live>) -> Option<Duration> {
+    let live = live.as_ref()?;
+    if !live.pending.is_empty() {
+        return Some(PENDING_WAIT);
+    }
+
+    let now = Instant::now();
+    let poll = live
+        .poll
+        .as_ref()
+        .map(|poll| poll.next_at.saturating_duration_since(now));
+    let reconnect = live
+        .reconnect
+        .as_ref()
+        .map(|reconnect| reconnect.next_at.saturating_duration_since(now));
+    match (poll, reconnect) {
+        (Some(poll), Some(reconnect)) => Some(poll.min(reconnect).max(Duration::from_millis(1))),
+        (Some(wait), None) | (None, Some(wait)) => Some(wait.max(Duration::from_millis(1))),
+        (None, None) => None,
+    }
+}
+
+/// Starts a connection for `Connect`.
+#[allow(clippy::too_many_arguments)]
+fn connect(
+    op: OpId,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    port: PortChoice,
+    framing: Option<LinkMode>,
+    probe: bool,
+) -> Outcome {
+    if live.is_some() {
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::ConnectFailed,
+                    message: if probe {
+                        "disconnect the ECU before testing another port".to_owned()
+                    } else {
+                        "a connection is already open; disconnect it first".to_owned()
+                    },
+                },
+            },
+        );
+        return Outcome::Continue;
+    }
+
+    let Some(definition) = session.definition() else {
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::ConnectFailed,
+                    message: "open a project or a definition before connecting".to_owned(),
+                },
+            },
+        );
+        return Outcome::Continue;
+    };
+    let Some(behavior) = Behavior::select(definition) else {
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::ConnectFailed,
+                    message: format!(
+                        "no ECU behavior claims `{}`; its message set is not one this build knows",
+                        definition.signature
+                    ),
+                },
+            },
+        );
+        return Outcome::Continue;
+    };
+
+    // A definition on its own has no project images; the connection keeps its
+    // own ECU RAM image so a read is still meaningful.
+    let standalone = match session {
+        Session::Definition(_) => Some(Box::new(Tune::from_definition(definition))),
+        Session::Project(_) | Session::Empty => None,
+    };
+
+    let link = match &port {
+        PortChoice::Simulator(config) => LinkChoice::Simulator(config.clone()),
+        PortChoice::Serial { port, baud } => LinkChoice::Serial(
+            oxtuner_transport::SerialSettings::new(port.clone()).with_baud(*baud),
+        ),
+    };
+    let effective_framing = framing.unwrap_or_else(|| default_framing(definition));
+    let plan = IoPlan {
+        definition: Box::new(definition.clone()),
+        behavior,
+        link_mode: framing,
+        link: link.clone(),
+    };
+
+    match IoThread::start(plan) {
+        Ok((thread, replies)) => {
+            let mut connection = Live::new(
+                thread,
+                replies,
+                &link,
+                definition,
+                behavior,
+                effective_framing,
+                standalone,
+            );
+            connection.probe = probe;
+            if let Err(error) = connection.request(op, PendingKind::Connect, IoOp::Signature) {
+                tracing::warn!(%op, %error, "the signature query could not be queued");
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::ConnectFailed,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if !probe {
+                report.connects += 1;
+            }
+            *live = Some(connection);
+        }
+        Err(error) => {
+            tracing::warn!(%op, %error, "the connection could not start");
+            report.failures += 1;
+            send(
+                events,
+                Event::Failed {
+                    op,
+                    failure: Failure {
+                        code: FailureCode::ConnectFailed,
+                        message: error.to_string(),
+                    },
+                },
+            );
+        }
+    }
+
+    Outcome::Continue
+}
+
+/// The framing a definition asks for.
+fn default_framing(definition: &Definition) -> LinkMode {
+    match definition.protocol.envelope.as_deref() {
+        Some(format) if format.eq_ignore_ascii_case("msEnvelope_1.0") => LinkMode::Envelope,
+        _ => LinkMode::Legacy,
+    }
+}
+
+/// Drains replies and runs the poll/reconnect timers.
+fn service_live(
+    live: &mut Option<Live>,
+    session: &mut Session,
+    events: &MTx<mpmc::Array<Event>>,
+    latest: &LatestFrame,
+    report: &mut CoreReport,
+) {
+    let Some(connection) = live.as_mut() else {
+        return;
+    };
+
+    while let Ok(reply) = connection.replies.try_recv() {
+        let keep = on_reply(connection, reply, session, events, latest, report);
+        if !keep {
+            teardown(live, latest);
+            return;
+        }
+    }
+
+    let Some(connection) = live.as_mut() else {
+        return;
+    };
+
+    if connection.reconnect_due()
+        && !connection.pending_kind(PendingKind::Reconnect)
+        && let Err(error) =
+            connection.request(OpId::new(0), PendingKind::Reconnect, IoOp::Reconnect)
+    {
+        tracing::debug!(%error, "the reconnect could not be queued");
+        schedule_reconnect(connection);
+    }
+
+    if connection.poll_due()
+        && !connection.pending_kind(PendingKind::Realtime)
+        && !connection.pending_kind(PendingKind::ReadAll)
+        && !connection.pending_kind(PendingKind::Reconnect)
+    {
+        if let Err(error) =
+            connection.request(OpId::new(0), PendingKind::Realtime, IoOp::ReadRealtime)
+        {
+            tracing::debug!(%error, "the realtime poll could not be queued");
+            connection.stop_polling();
+        } else {
+            connection.polled();
+        }
+    }
+}
+
+/// Handles one I/O reply. Returns `false` when the session is finished.
+fn on_reply(
+    live: &mut Live,
+    reply: IoReply,
+    session: &mut Session,
+    events: &MTx<mpmc::Array<Event>>,
+    latest: &LatestFrame,
+    report: &mut CoreReport,
+) -> bool {
+    let Some(pending) = live.pending.remove(&reply.id) else {
+        tracing::debug!(id = reply.id, "an I/O reply had no pending request");
+        return true;
+    };
+
+    match (pending.kind, reply.outcome) {
+        (PendingKind::Connect, IoOutcome::Signature { signature }) => {
+            live.set_signature(signature);
+            let summary = live.summary();
+            if live.probe {
+                tracing::info!(
+                    port = %summary.port,
+                    signature = %summary.signature,
+                    verdict = summary.verdict.as_str(),
+                    "ECU test connection"
+                );
+                send(
+                    events,
+                    Event::ConnectionTested {
+                        op: pending.op,
+                        summary,
+                    },
+                );
+                // A probe is not a session: its port is released at once.
+                return false;
+            }
+            tracing::info!(
+                port = %summary.port,
+                signature = %summary.signature,
+                verdict = summary.verdict.as_str(),
+                read_only = summary.read_only,
+                "ECU connected"
+            );
+            send(
+                events,
+                Event::Connected {
+                    op: pending.op,
+                    summary,
+                },
+            );
+            true
+        }
+        (PendingKind::Connect, IoOutcome::Failed(failure)) => {
+            let probe = live.probe;
+            tracing::warn!(
+                kind = failure.kind.as_str(),
+                %failure.message,
+                probe,
+                "connect failed"
+            );
+            report.failures += 1;
+            send(
+                events,
+                Event::Failed {
+                    op: pending.op,
+                    failure: Failure {
+                        code: if probe {
+                            FailureCode::TestFailed
+                        } else {
+                            FailureCode::ConnectFailed
+                        },
+                        message: failure.message,
+                    },
+                },
+            );
+            false
+        }
+        (PendingKind::Disconnect, _) => {
+            tracing::info!("ECU disconnected");
+            stop_for_disconnect(live);
+            session.mark_unknown();
+            latest.clear();
+            send(events, Event::Disconnected { op: pending.op });
+            false
+        }
+        (PendingKind::ReadAll, IoOutcome::All { pages }) => {
+            match commit_pages(session, live, &pages) {
+                Ok(summary) => {
+                    tracing::info!(
+                        pages = summary.pages,
+                        bytes = summary.bytes,
+                        constants = summary.constants,
+                        skipped = summary.skipped,
+                        "pages read"
+                    );
+                    report.page_reads += 1;
+                    // The documented connect flow is signature → read all pages
+                    // → start the poller. Starting it earlier would interleave
+                    // realtime replies with the page read on the wire.
+                    if live.auto_poll && live.realtime_block.is_some() && live.poll.is_none() {
+                        live.start_polling(
+                            u32::try_from(DEFAULT_POLL_INTERVAL.as_millis()).unwrap_or(100),
+                        );
+                    }
+                    send(
+                        events,
+                        Event::PagesRead {
+                            op: pending.op,
+                            summary,
+                        },
+                    );
+                }
+                Err(message) => {
+                    tracing::warn!(%message, "the page read could not be applied");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op: pending.op,
+                            failure: Failure {
+                                code: FailureCode::ReadFailed,
+                                message,
+                            },
+                        },
+                    );
+                }
+            }
+            true
+        }
+        (PendingKind::Realtime, IoOutcome::Realtime { block }) => {
+            let sequence = live.sequence;
+            live.sequence = sequence.wrapping_add(1);
+            let frame = live.decoder.decode(&block, sequence);
+            if frame.values.is_empty() {
+                return true;
+            }
+            latest.set(frame);
+            report.realtime_frames += 1;
+            send(events, Event::RealtimeFrame { sequence });
+            true
+        }
+        (PendingKind::Trace, IoOutcome::TraceSaved { path, frames }) => {
+            tracing::info!(path = %path.display(), frames, "session trace saved");
+            send(
+                events,
+                Event::TraceSaved {
+                    op: pending.op,
+                    path,
+                    frames,
+                },
+            );
+            true
+        }
+        (PendingKind::Reconnect, IoOutcome::Reconnected { signature }) => {
+            live.set_signature(signature);
+            let summary = live.summary();
+            tracing::info!(
+                signature = %summary.signature,
+                verdict = summary.verdict.as_str(),
+                "ECU reconnected"
+            );
+            send(events, Event::Reconnected { summary });
+            true
+        }
+        (PendingKind::Reconnect, IoOutcome::Failed(failure)) => {
+            tracing::debug!(kind = failure.kind.as_str(), "a reconnect attempt failed");
+            schedule_reconnect(live);
+            true
+        }
+        (kind, IoOutcome::Failed(failure)) => {
+            let code = failure_code(kind);
+            tracing::warn!(
+                kind = failure.kind.as_str(),
+                operation = ?kind,
+                %failure.message,
+                "a wire operation failed"
+            );
+            if kind != PendingKind::Realtime {
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op: pending.op,
+                        failure: Failure {
+                            code,
+                            message: failure.message.clone(),
+                        },
+                    },
+                );
+            }
+
+            match failure.kind {
+                IoFailureKind::LinkLost | IoFailureKind::Timeout
+                    if kind != PendingKind::Connect =>
+                {
+                    connection_lost(live, session, events, latest, failure.message);
+                }
+                IoFailureKind::Protocol | IoFailureKind::Unsupported
+                    if kind == PendingKind::Realtime =>
+                {
+                    // The definition's realtime command does not work on this
+                    // firmware; stop asking, keep the session.
+                    live.stop_polling();
+                }
+                _ => {}
+            }
+            true
+        }
+        (kind, outcome) => {
+            tracing::debug!(?kind, ?outcome, "an I/O reply did not match its request");
+            true
+        }
+    }
+}
+
+/// Turns a pending kind into the failure code its UI switches on.
+fn failure_code(kind: PendingKind) -> FailureCode {
+    match kind {
+        PendingKind::Connect => FailureCode::ConnectFailed,
+        PendingKind::ReadAll => FailureCode::ReadFailed,
+        PendingKind::Realtime => FailureCode::RealtimeRejected,
+        PendingKind::Trace => FailureCode::TraceFailed,
+        PendingKind::Disconnect | PendingKind::Reconnect => FailureCode::NotConnected,
+    }
+}
+
+/// Marks the session as lost and schedules a reconnect.
+fn connection_lost(
+    live: &mut Live,
+    session: &mut Session,
+    events: &MTx<mpmc::Array<Event>>,
+    latest: &LatestFrame,
+    reason: String,
+) {
+    tracing::warn!(%reason, "the ECU link was lost");
+    live.connected = false;
+    live.stop_polling();
+    session.mark_unknown();
+    latest.clear();
+
+    // Every conversation that was waiting is answered now: a vanished link
+    // must not leave a command unanswered.
+    for pending in std::mem::take(&mut live.pending).into_values() {
+        if pending.kind == PendingKind::Realtime || pending.kind == PendingKind::Reconnect {
+            continue;
+        }
+        send(
+            events,
+            Event::Failed {
+                op: pending.op,
+                failure: Failure {
+                    code: failure_code(pending.kind),
+                    message: format!("the link was lost: {reason}"),
+                },
+            },
+        );
+    }
+
+    schedule_reconnect(live);
+    send(events, Event::ConnectionLost { reason });
+}
+
+/// Schedules the next reconnect attempt with exponential backoff.
+fn schedule_reconnect(live: &mut Live) {
+    let attempts = live
+        .reconnect
+        .map(|reconnect| reconnect.attempts.saturating_add(1))
+        .unwrap_or(0);
+    // First retry after RECONNECT_BASE, then doubling: 500 ms, 1 s, 2 s, 4 s, 5 s.
+    let delay = RECONNECT_BASE
+        .saturating_mul(1u32 << attempts.saturating_sub(1).min(4))
+        .min(RECONNECT_MAX);
+    live.reconnect = Some(Reconnect {
+        attempts,
+        next_at: Instant::now() + delay,
+    });
+}
+
+/// Stops polling without touching the port (disconnect path).
+fn stop_for_disconnect(live: &mut Live) {
+    live.stop_polling();
+    live.reconnect = None;
+    live.connected = false;
+}
+
+/// Applies a complete page read to the session's ECU image.
+fn commit_pages(
+    session: &mut Session,
+    live: &mut Live,
+    pages: &[PageRead],
+) -> Result<ReadAllSummary, String> {
+    let mut summary = ReadAllSummary {
+        pages: 0,
+        bytes: 0,
+        constants: 0,
+        skipped: 0,
+        signature_verified: live.verdict == SignatureVerdict::Match,
+    };
+
+    match session {
+        Session::Project(project) => {
+            let layout = Arc::clone(project.layout());
+            let mut ram = project.tune().snapshot();
+            for read in pages {
+                let page = IniPage::new(read.page)
+                    .ok_or_else(|| format!("page {} is not a valid page number", read.page))?;
+                let report = decode_page(&layout, page, &read.bytes, &mut ram)
+                    .map_err(|error| error.to_string())?;
+                summary.pages += 1;
+                summary.bytes += read.bytes.len();
+                summary.constants += report.decoded;
+                summary.skipped += report.skipped;
+            }
+            project
+                .images_mut()
+                .set_ecu_ram(ram)
+                .map_err(|error| error.to_string())?;
+        }
+        Session::Definition(_) => {
+            let tune = live
+                .standalone
+                .as_mut()
+                .ok_or_else(|| "the connection has no ECU image".to_owned())?;
+            let layout = Arc::clone(tune.layout());
+            for read in pages {
+                let page = IniPage::new(read.page)
+                    .ok_or_else(|| format!("page {} is not a valid page number", read.page))?;
+                let report = decode_page(&layout, page, &read.bytes, tune)
+                    .map_err(|error| error.to_string())?;
+                summary.pages += 1;
+                summary.bytes += read.bytes.len();
+                summary.constants += report.decoded;
+                summary.skipped += report.skipped;
+            }
+        }
+        Session::Empty => return Err("no definition is loaded".to_owned()),
+    }
+
+    Ok(summary)
 }
 
 #[cfg(test)]

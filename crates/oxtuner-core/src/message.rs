@@ -16,6 +16,7 @@ use std::{collections::HashSet, fmt, path::PathBuf};
 
 use oxtuner_ini::{Definition, DialogRow, RowKind, SettingsContext, Severity};
 use oxtuner_project::Project;
+use oxtuner_protocol::LinkMode;
 use oxtuner_tune::CellState;
 
 use crate::menu::MenuNode;
@@ -182,6 +183,53 @@ pub enum Command {
         /// Bins to write, in user units.
         edits: Vec<AxisEdit>,
     },
+    /// Connect to a simulator or a serial device, using the loaded definition.
+    ///
+    /// The core builds the transport and protocol, owns them on the I/O thread
+    /// and answers with [`Event::Connected`] (or [`Event::Failed`] with
+    /// [`FailureCode::ConnectFailed`]). The definition must be loaded; without
+    /// one the core has no message set to talk.
+    Connect {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing override. `None` uses the definition's own
+        /// `messageEnvelopeFormat`; `Some(Legacy)` is the fallback for a
+        /// firmware whose framed path misbehaves.
+        framing: Option<LinkMode>,
+    },
+    /// Read the signature from a port without opening a session.
+    ///
+    /// Only the definition's `queryCommand` is sent — no page read, no write.
+    /// The reply is [`Event::ConnectionTested`] with the same
+    /// [`ConnectionSummary`] a real connection would report, or a failure with
+    /// [`FailureCode::TestFailed`]. A live connection must be closed first.
+    TestConnection {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing override, as for [`Self::Connect`].
+        framing: Option<LinkMode>,
+    },
+    /// Close the connection and release the port.
+    Disconnect,
+    /// Read every declared page into the tune images.
+    ///
+    /// Only a complete read updates the ECU image; a failure leaves it
+    /// untouched and reports which page failed.
+    ReadAll,
+    /// Start periodic realtime polling at `interval_ms`.
+    StartRealtime {
+        /// Milliseconds between blocks. Clamped to 10–1000 by the core.
+        interval_ms: u32,
+    },
+    /// Stop periodic realtime polling. The last frame stays readable.
+    StopRealtime,
+    /// Write the session trace to `path`.
+    SaveTrace {
+        /// Where to write the trace file.
+        path: PathBuf,
+    },
+    /// List the serial ports the connect dialog can offer.
+    ListPorts,
     /// Drop the loaded definition and tune.
     UnloadDefinition,
     /// Stop the core. No command is accepted after this one is read.
@@ -209,6 +257,14 @@ impl Command {
             Self::EditScalar { .. } => "edit-scalar",
             Self::EditTable { .. } => "edit-table",
             Self::EditAxis { .. } => "edit-axis",
+            Self::Connect { .. } => "connect",
+            Self::TestConnection { .. } => "test-connection",
+            Self::Disconnect => "disconnect",
+            Self::ReadAll => "read-all",
+            Self::StartRealtime { .. } => "start-realtime",
+            Self::StopRealtime => "stop-realtime",
+            Self::SaveTrace { .. } => "save-trace",
+            Self::ListPorts => "list-ports",
             Self::UnloadDefinition => "unload-definition",
             Self::Shutdown => "shutdown",
         }
@@ -236,6 +292,50 @@ pub enum Event {
     DialogRead { op: OpId, dialog: DialogSummary },
     /// A scalar edit was accepted; `dialog` is the state after it.
     DialogEdited { op: OpId, dialog: DialogSummary },
+    /// The serial ports the connect dialog can offer.
+    PortsListed { op: OpId, ports: Vec<PortSummary> },
+    /// A [`Command::TestConnection`] read a signature.
+    ///
+    /// The summary describes what a real connection would be: the same verdict
+    /// and read-only rule, without a session or a page read.
+    ConnectionTested {
+        op: OpId,
+        summary: ConnectionSummary,
+    },
+    /// The ECU answered and the session is up.
+    Connected {
+        op: OpId,
+        summary: ConnectionSummary,
+    },
+    /// The connection was closed on request.
+    Disconnected { op: OpId },
+    /// Every declared page was read into the tune images.
+    PagesRead { op: OpId, summary: ReadAllSummary },
+    /// Periodic polling started or stopped.
+    RealtimeState { op: OpId, running: bool },
+    /// A new realtime frame is available through [`LatestFrame`].
+    ///
+    /// Carries no data: rendering reads the shared frame, so a slow UI can
+    /// never queue up a backlog of stale values (ADR-0014).
+    ///
+    /// [`LatestFrame`]: crate::LatestFrame
+    RealtimeFrame {
+        /// Sequence number of the frame that is now the latest.
+        sequence: u64,
+    },
+    /// The session trace was written.
+    TraceSaved {
+        op: OpId,
+        path: PathBuf,
+        frames: usize,
+    },
+    /// The link died; the core is either reconnecting or waiting for a command.
+    ConnectionLost {
+        /// Why, in text the UI can show.
+        reason: String,
+    },
+    /// The link came back and the ECU answered again.
+    Reconnected { summary: ConnectionSummary },
     /// The loaded definition (and tune, if a project was open) was dropped.
     DefinitionUnloaded { op: OpId },
     /// The command was handled but could not do its work.
@@ -257,9 +357,19 @@ impl Event {
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }
             | Self::DialogEdited { op, .. }
+            | Self::PortsListed { op, .. }
+            | Self::ConnectionTested { op, .. }
+            | Self::Connected { op, .. }
+            | Self::Disconnected { op }
+            | Self::PagesRead { op, .. }
+            | Self::RealtimeState { op, .. }
+            | Self::TraceSaved { op, .. }
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
+            Self::RealtimeFrame { .. } | Self::ConnectionLost { .. } | Self::Reconnected { .. } => {
+                None
+            }
             Self::Stopped => None,
         }
     }
@@ -316,6 +426,20 @@ pub enum FailureCode {
     DialogUnavailable,
     /// A scalar edit was not finite, not a scalar, or the session is read-only.
     DialogEditRejected,
+    /// The port could not be opened, the definition has no message set, or a
+    /// connection is already up.
+    ConnectFailed,
+    /// The signature test could not run (no definition, port busy, no answer).
+    TestFailed,
+    /// There is no connection to act on.
+    NotConnected,
+    /// A page read failed. The ECU image is left untouched.
+    ReadFailed,
+    /// The session trace could not be written.
+    TraceFailed,
+    /// Realtime polling was refused (no connection, or the definition has no
+    /// realtime block).
+    RealtimeRejected,
 }
 
 impl FailureCode {
@@ -330,6 +454,12 @@ impl FailureCode {
             Self::TableEditRejected => "table-edit-rejected",
             Self::DialogUnavailable => "dialog-unavailable",
             Self::DialogEditRejected => "dialog-edit-rejected",
+            Self::ConnectFailed => "connect-failed",
+            Self::TestFailed => "test-failed",
+            Self::NotConnected => "not-connected",
+            Self::ReadFailed => "read-failed",
+            Self::TraceFailed => "trace-failed",
+            Self::RealtimeRejected => "realtime-rejected",
         }
     }
 }
@@ -1157,6 +1287,133 @@ fn field_row(project: &Project, row: &DialogRow, section: &str) -> Option<Dialog
 pub(crate) struct Envelope {
     pub(crate) op: OpId,
     pub(crate) command: Command,
+}
+
+/// Where a connection's bytes go.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PortChoice {
+    /// The built-in simulator, built from the loaded definition.
+    ///
+    /// The config is the same one the simulator's own tests use: a signature
+    /// override for the S1 path, a seed, and fault rules for the link-loss and
+    /// recovery scenarios. The app passes the default.
+    Simulator(oxtuner_sim::SimConfig),
+    /// A serial device at a baud rate.
+    Serial {
+        /// Device path (`/dev/cu.usbmodem21201`, `COM3`).
+        port: String,
+        /// Bits per second.
+        baud: u32,
+    },
+}
+
+impl PortChoice {
+    /// The simulator with its default configuration.
+    pub fn simulator() -> Self {
+        Self::Simulator(Default::default())
+    }
+
+    /// A serial port at a baud rate.
+    pub fn serial(port: impl Into<String>, baud: u32) -> Self {
+        Self::Serial {
+            port: port.into(),
+            baud,
+        }
+    }
+
+    /// The label the UI shows for this choice.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Simulator(_) => "simulator".to_owned(),
+            Self::Serial { port, .. } => port.clone(),
+        }
+    }
+}
+
+/// One serial port the connect dialog can offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortSummary {
+    /// Device path.
+    pub name: String,
+    /// The label to show (the path itself: `serial2` reports no product
+    /// description).
+    pub label: String,
+}
+
+/// How the ECU's signature compared with the definition's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureVerdict {
+    /// Exactly the definition's signature.
+    Match,
+    /// Different text: the session is read-only (S1).
+    Mismatch,
+}
+
+impl SignatureVerdict {
+    /// A stable code for logs and the UI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Mismatch => "mismatch",
+        }
+    }
+}
+
+/// What the core is connected to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionSummary {
+    /// Device path, or `simulator`.
+    pub port: String,
+    /// Whether this is the simulator.
+    pub simulator: bool,
+    /// The signature the ECU reported.
+    pub signature: String,
+    /// The signature the definition expects.
+    pub definition_signature: String,
+    /// Whether they match.
+    pub verdict: SignatureVerdict,
+    /// Whether this session refuses writes (S1).
+    pub read_only: bool,
+    /// Why, when it does.
+    pub read_only_reason: Option<String>,
+    /// The `EcuBehavior` that claimed the definition.
+    pub behavior: String,
+    /// Framing in use: `legacy` or `envelope`.
+    pub framing: &'static str,
+    /// Pages the definition declares.
+    pub pages: usize,
+    /// The realtime block size, when the definition declares one.
+    pub realtime_block: Option<u16>,
+}
+
+impl ConnectionSummary {
+    /// The ECU and the definition disagree, or the definition cannot be
+    /// confirmed; the session is read-only either way (S1).
+    pub fn is_mismatched(&self) -> bool {
+        self.verdict == SignatureVerdict::Mismatch
+    }
+}
+
+/// What a full page read did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadAllSummary {
+    /// Pages read.
+    pub pages: usize,
+    /// Bytes read from the ECU.
+    pub bytes: usize,
+    /// Constants taken from those bytes.
+    pub constants: usize,
+    /// Constants that could not be placed (an unresolved address or shape).
+    pub skipped: usize,
+    /// Whether the signature matched when the read started.
+    pub signature_verified: bool,
+}
+
+impl ReadAllSummary {
+    /// Whether every declared page and cell was read.
+    pub fn is_complete(&self) -> bool {
+        self.skipped == 0
+    }
 }
 
 #[cfg(test)]
