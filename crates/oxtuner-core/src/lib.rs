@@ -69,11 +69,15 @@ mod service;
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
-    Command, DefinitionSummary, Event, Failure, FailureCode, OpId, ProjectSummary, RejectReason,
-    SaveSummary,
+    AxisEdit, AxisKind, AxisSummary, CellEdit, Command, DefinitionSummary, DialogFieldSummary,
+    DialogSummary, Event, Failure, FailureCode, OpId, ProjectSummary, RejectReason, SaveSummary,
+    TableSummary,
 };
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
 /// Re-exported so callers can build [`Command::LoadDefinition`] without adding
 /// a dependency on `oxtuner-ini` themselves.
 pub use oxtuner_ini::SettingsContext;
+
+/// Re-exported for the table grid's per-cell write-state decoration.
+pub use oxtuner_tune::CellState;

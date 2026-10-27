@@ -12,6 +12,7 @@ publish = false
 crossfire = "3.1.22"
 oxtuner-ini.workspace = true
 oxtuner-project.workspace = true
+oxtuner-tune.workspace = true
 tracing = "0.1.44"
 
 [lints]

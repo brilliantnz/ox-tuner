@@ -18,7 +18,7 @@ use std::{
 
 use crossfire::{MAsyncRx, MTx, TrySendError, mpmc};
 
-use crate::message::{Command, Envelope, Event, OpId};
+use crate::message::{CellEdit, Command, Envelope, Event, OpId};
 use crate::service::CoreError;
 
 /// The door commands pass through, so "shutdown" has one exact meaning.
@@ -118,6 +118,66 @@ impl CoreHandle {
     /// Writes the open project's changed values back to its tune file.
     pub fn save_tune(&self) -> Result<OpId, CoreError> {
         self.send(Command::SaveTune)
+    }
+
+    /// Reads one table from the open project.
+    ///
+    /// The reply is [`crate::Event::TableRead`] or [`crate::Event::Failed`].
+    pub fn read_table(&self, name: impl Into<String>) -> Result<OpId, CoreError> {
+        self.send(Command::ReadTable { name: name.into() })
+    }
+
+    /// Applies user-unit cell edits to one table.
+    ///
+    /// The reply is [`crate::Event::TableEdited`] or [`crate::Event::Failed`].
+    pub fn edit_table(
+        &self,
+        name: impl Into<String>,
+        edits: Vec<CellEdit>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::EditTable {
+            name: name.into(),
+            edits,
+        })
+    }
+
+    /// Applies user-unit bin edits to one table axis.
+    ///
+    /// The reply is [`crate::Event::TableEdited`] or [`crate::Event::Failed`].
+    pub fn edit_axis(
+        &self,
+        table: impl Into<String>,
+        axis: crate::message::AxisKind,
+        edits: Vec<crate::message::AxisEdit>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::EditAxis {
+            table: table.into(),
+            axis,
+            edits,
+        })
+    }
+
+    /// Reads one dialog from the open project.
+    ///
+    /// The reply is [`crate::Event::DialogRead`] or [`crate::Event::Failed`].
+    pub fn read_dialog(&self, name: impl Into<String>) -> Result<OpId, CoreError> {
+        self.send(Command::ReadDialog { name: name.into() })
+    }
+
+    /// Applies a user-unit scalar edit from one dialog.
+    ///
+    /// The reply is [`crate::Event::DialogEdited`] or [`crate::Event::Failed`].
+    pub fn edit_scalar(
+        &self,
+        dialog: impl Into<String>,
+        name: impl Into<String>,
+        value: f64,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::EditScalar {
+            dialog: dialog.into(),
+            name: name.into(),
+            value,
+        })
     }
 
     /// Drops the loaded definition (and tune, if a project is open).

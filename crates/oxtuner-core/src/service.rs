@@ -25,8 +25,8 @@ use oxtuner_project::Project;
 
 use crate::handle::{CoreHandle, EventStream, Gate};
 use crate::message::{
-    Command, DefinitionSummary, Envelope, Event, Failure, FailureCode, OpId, ProjectSummary,
-    SaveSummary,
+    AxisEdit, CellEdit, Command, DefinitionSummary, DialogSummary, Envelope, Event, Failure,
+    FailureCode, OpId, ProjectSummary, SaveSummary, TableSummary,
 };
 
 /// Queue sizes and thread behaviour.
@@ -507,6 +507,329 @@ fn handle(
             }
             Outcome::Continue
         }
+        Command::ReadTable { name } => {
+            let Session::Project(project) = session else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableUnavailable,
+                            message: "no tune is open; open a project folder first".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+
+            match TableSummary::from_project(project, &name) {
+                Ok(table) => {
+                    tracing::debug!(
+                        %op,
+                        table = %table.id,
+                        rows = table.rows,
+                        columns = table.cols,
+                        "table read"
+                    );
+                    send(events, Event::TableRead { op, table });
+                }
+                Err(message) => {
+                    tracing::debug!(%op, table = %name, %message, "table unavailable");
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::TableUnavailable,
+                                message,
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
+        Command::EditTable { name, edits } => {
+            let Session::Project(project) = session else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message: "no tune is open; open a project folder first".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+
+            if let Err(message) = validate_edits(project, &name, &edits) {
+                tracing::debug!(%op, table = %name, %message, "table edit rejected");
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message,
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+
+            for edit in &edits {
+                // Validation above covers every error `set_cell_user` can
+                // report, so a failure here would be a bug; report it rather
+                // than swallow it, and keep the snapshot truthful.
+                if let Err(error) =
+                    project
+                        .tune_mut()
+                        .set_cell_user(&name, edit.row, edit.column, edit.value)
+                {
+                    tracing::error!(%op, table = %name, %error, "a validated edit failed");
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::TableEditRejected,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                    return Outcome::Continue;
+                }
+            }
+
+            match TableSummary::from_project(project, &name) {
+                Ok(table) => {
+                    tracing::debug!(
+                        %op,
+                        table = %table.id,
+                        cells = edits.len(),
+                        "table edited"
+                    );
+                    send(events, Event::TableEdited { op, table });
+                }
+                Err(message) => send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message,
+                        },
+                    },
+                ),
+            }
+            Outcome::Continue
+        }
+        Command::EditAxis { table, axis, edits } => {
+            let Session::Project(project) = session else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message: "no tune is open; open a project folder first".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+
+            let variable = match TableSummary::axis_variable(project, &table, axis) {
+                Ok(variable) => variable,
+                Err(message) => {
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::TableEditRejected,
+                                message,
+                            },
+                        },
+                    );
+                    return Outcome::Continue;
+                }
+            };
+
+            if let Err(message) = validate_axis_edits(project, &variable, &edits) {
+                tracing::debug!(%op, table = %table, axis = axis.as_str(), %message, "axis edit rejected");
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message,
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+
+            for edit in &edits {
+                if let Err(error) = project
+                    .tune_mut()
+                    .set_user_at(&variable, edit.index, edit.value)
+                {
+                    tracing::error!(%op, table = %table, %error, "a validated axis edit failed");
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::TableEditRejected,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                    return Outcome::Continue;
+                }
+            }
+
+            match TableSummary::from_project(project, &table) {
+                Ok(table) => {
+                    tracing::debug!(
+                        %op,
+                        table = %table.id,
+                        axis = axis.as_str(),
+                        bins = edits.len(),
+                        "axis edited"
+                    );
+                    send(events, Event::TableEdited { op, table });
+                }
+                Err(message) => send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::TableEditRejected,
+                            message,
+                        },
+                    },
+                ),
+            }
+            Outcome::Continue
+        }
+        Command::ReadDialog { name } => {
+            let Session::Project(project) = session else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::DialogUnavailable,
+                            message: "no tune is open; open a project folder first".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+
+            match DialogSummary::from_project(project, &name) {
+                Ok(dialog) => {
+                    tracing::debug!(
+                        %op,
+                        dialog = %dialog.id,
+                        fields = dialog.fields.len(),
+                        "dialog read"
+                    );
+                    send(events, Event::DialogRead { op, dialog });
+                }
+                Err(message) => {
+                    tracing::debug!(%op, table = %name, %message, "dialog unavailable");
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::DialogUnavailable,
+                                message,
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
+        Command::EditScalar {
+            dialog,
+            name,
+            value,
+        } => {
+            let Session::Project(project) = session else {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::DialogEditRejected,
+                            message: "no tune is open; open a project folder first".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            };
+
+            if let Err(message) = validate_scalar_edit(project, &name, value) {
+                tracing::debug!(%op, variable = %name, %message, "scalar edit rejected");
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::DialogEditRejected,
+                            message,
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+
+            if let Err(error) = project.tune_mut().set_user_at(&name, 0, value) {
+                tracing::error!(%op, variable = %name, %error, "a validated scalar edit failed");
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::DialogEditRejected,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+
+            match DialogSummary::from_project(project, &dialog) {
+                Ok(dialog) => {
+                    tracing::debug!(
+                        %op,
+                        dialog = %dialog.id,
+                        variable = %name,
+                        "scalar edited"
+                    );
+                    send(events, Event::DialogEdited { op, dialog });
+                }
+                Err(message) => send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::DialogEditRejected,
+                            message,
+                        },
+                    },
+                ),
+            }
+            Outcome::Continue
+        }
         Command::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
             *session = Session::Empty;
@@ -515,6 +838,133 @@ fn handle(
             Outcome::Continue
         }
     }
+}
+
+/// Checks every edit before one is stored, so a rejected request leaves the tune
+/// exactly as it was.
+fn validate_edits(project: &Project, name: &str, edits: &[CellEdit]) -> Result<(), String> {
+    if project.is_read_only() {
+        return Err(format!(
+            "the tune is read-only: {}",
+            project.report().read_only_reasons().join("; ")
+        ));
+    }
+
+    let Some(spec) = project.layout().variable(name) else {
+        return Err(format!("the tune has no variable named `{name}`"));
+    };
+    if spec.is_controller_owned() {
+        return Err(format!(
+            "`{name}` is owned by the controller and cannot be edited"
+        ));
+    }
+    if !spec.shape.is_numeric() {
+        return Err(format!("`{name}` holds text, not numbers"));
+    }
+    if spec.scale.is_none() || spec.translate.is_none() {
+        return Err(format!(
+            "`{name}` has an unresolved scale or translate, so a value cannot be converted"
+        ));
+    }
+
+    for edit in edits {
+        if !edit.value.is_finite() {
+            return Err(format!(
+                "the value for ({}, {}) is not a finite number",
+                edit.row, edit.column
+            ));
+        }
+        if spec.shape.offset(edit.row, edit.column).is_none() {
+            return Err(format!(
+                "`{name}` has no cell ({}, {})",
+                edit.row, edit.column
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks every axis bin edit before one is stored.
+fn validate_axis_edits(project: &Project, name: &str, edits: &[AxisEdit]) -> Result<(), String> {
+    if project.is_read_only() {
+        return Err(format!(
+            "the tune is read-only: {}",
+            project.report().read_only_reasons().join("; ")
+        ));
+    }
+
+    let Some(spec) = project.layout().variable(name) else {
+        return Err(format!("the tune has no variable named `{name}`"));
+    };
+    if spec.is_controller_owned() {
+        return Err(format!(
+            "`{name}` is owned by the controller and cannot be edited"
+        ));
+    }
+    if !spec.shape.is_numeric() {
+        return Err(format!("`{name}` holds text, not numbers"));
+    }
+    if spec.scale.is_none() || spec.translate.is_none() {
+        return Err(format!(
+            "`{name}` has an unresolved scale or translate, so a value cannot be converted"
+        ));
+    }
+    let len = spec.shape.element_count();
+    if edits.is_empty() {
+        return Err("no axis bins to write".to_owned());
+    }
+
+    for edit in edits {
+        if !edit.value.is_finite() {
+            return Err(format!(
+                "the value for bin {} is not a finite number",
+                edit.index
+            ));
+        }
+        if edit.index >= len {
+            return Err(format!("`{name}` has no bin {}", edit.index));
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks a scalar edit before it is stored.
+fn validate_scalar_edit(project: &Project, name: &str, value: f64) -> Result<(), String> {
+    if project.is_read_only() {
+        return Err(format!(
+            "the tune is read-only: {}",
+            project.report().read_only_reasons().join("; ")
+        ));
+    }
+
+    let Some(spec) = project.layout().variable(name) else {
+        return Err(format!("the tune has no variable named `{name}`"));
+    };
+    if spec.is_controller_owned() {
+        return Err(format!(
+            "`{name}` is owned by the controller and cannot be edited"
+        ));
+    }
+    if !spec.shape.is_numeric() {
+        return Err(format!("`{name}` holds text, not numbers"));
+    }
+    if !spec.shape.is_scalar() {
+        return Err(format!(
+            "`{name}` is an array; edit it from its table or curve"
+        ));
+    }
+    if spec.scale.is_none() || spec.translate.is_none() {
+        return Err(format!(
+            "`{name}` has an unresolved scale or translate, so a value cannot be converted"
+        ));
+    }
+    if !value.is_finite() {
+        return Err(format!("the value for `{name}` is not a finite number"));
+    }
+
+    Ok(())
 }
 
 /// Sends an event, ignoring a closed channel.
