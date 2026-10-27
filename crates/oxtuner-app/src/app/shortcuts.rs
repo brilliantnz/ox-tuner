@@ -19,32 +19,22 @@ use std::rc::Rc;
 
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    Action, App, DummyKeyboardMapper, Global, KeyBinding, KeyBindingContextPredicate, Keystroke,
-    Modifiers, SharedString,
+    Action, App, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, Modifiers,
+    OperatingSystem, SharedString,
 };
 
 use super::actions::{
-    OpenProject, Quit, SaveTune, Settings, ToggleBottomPanel, TogglePrimarySidebar,
-    ToggleSecondarySidebar,
+    CloseProject, ManageProjects, OpenProject, Quit, SaveTune, Settings, ToggleBottomPanel,
+    TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::i18n::t;
 
-/// The groups of Settings › Shortcuts, in the order the page shows them.
+/// A shortcut's category. Kept on each entry for ordering and future filtering;
+/// the settings page shows one flat list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutGroup {
     General,
     View,
-}
-
-impl ShortcutGroup {
-    pub const ALL: [Self; 2] = [Self::General, Self::View];
-
-    pub fn title(self) -> SharedString {
-        match self {
-            Self::General => t!("app.shortcut_group.general"),
-            Self::View => t!("app.shortcut_group.view"),
-        }
-    }
 }
 
 /// One shortcut: what it does, what it is called, and the keys on each
@@ -104,7 +94,7 @@ macro_rules! shortcut {
 /// The panel toggles the primary sidebar on the main modifier
 /// plus `B`, the bottom panel plus `J`, and the secondary sidebar on the
 /// neighbouring `Alt+B` so the three read as a family.
-pub static SHORTCUTS: [Shortcut; 7] = [
+pub static SHORTCUTS: [Shortcut; 9] = [
     shortcut!(
         "open-settings",
         "app.shortcut.open_settings",
@@ -122,6 +112,24 @@ pub static SHORTCUTS: [Shortcut; 7] = [
         "cmd-o",
         "ctrl-o",
         OpenProject
+    ),
+    shortcut!(
+        "manage-projects",
+        "app.shortcut.manage_projects",
+        General,
+        &[],
+        "cmd-shift-o",
+        "ctrl-shift-o",
+        ManageProjects
+    ),
+    shortcut!(
+        "close-project",
+        "app.shortcut.close_project",
+        General,
+        &[],
+        "cmd-shift-w",
+        "ctrl-shift-w",
+        CloseProject
     ),
     shortcut!(
         "save-tune",
@@ -201,7 +209,7 @@ pub fn apply_shortcuts(cx: &mut App) {
         .try_global::<KitBindings>()
         .map(|kit| kit.0.clone())
         .unwrap_or_default();
-    bindings.extend(key_bindings());
+    bindings.extend(key_bindings(cx));
 
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
@@ -209,7 +217,7 @@ pub fn apply_shortcuts(cx: &mut App) {
 }
 
 /// The bindings [`SHORTCUTS`] describes, for this platform.
-pub(super) fn key_bindings() -> Vec<KeyBinding> {
+pub(super) fn key_bindings(cx: &App) -> Vec<KeyBinding> {
     SHORTCUTS
         .iter()
         .filter_map(|shortcut| {
@@ -224,15 +232,7 @@ pub(super) fn key_bindings() -> Vec<KeyBinding> {
                 .first()
                 .and_then(|context| KeyBindingContextPredicate::parse(context).ok())
                 .map(Rc::new);
-            KeyBinding::load(
-                keys,
-                shortcut.action(),
-                predicate,
-                false,
-                None,
-                &DummyKeyboardMapper,
-            )
-            .ok()
+            KeyBinding::load(keys, shortcut.action(), predicate, false, None, cx).ok()
         })
         .collect()
 }
@@ -243,7 +243,14 @@ pub fn key_caps(keys: &str) -> Vec<SharedString> {
     if keys.is_empty() {
         return Vec::new();
     }
-    let Ok(keystroke) = Keystroke::parse(keys) else {
+    let os = if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else {
+        OperatingSystem::Linux
+    };
+    let Ok(keystroke) = Keystroke::parse_with_os(keys, os) else {
         return Vec::new();
     };
     let modifiers = keystroke.modifiers;

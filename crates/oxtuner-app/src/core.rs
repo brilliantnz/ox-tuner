@@ -20,8 +20,9 @@ use std::path::Path;
 
 use gpui_kit::{App, Global, PathPromptOptions};
 use oxtuner_core::{
-    CoreConfig, CoreHandle, CoreParts, CoreThread, DefinitionSummary, Event, EventStream, Failure,
-    FailureCode, ProjectSummary, SaveSummary,
+    AxisEdit, AxisKind, CellEdit, CoreConfig, CoreHandle, CoreParts, CoreThread, DefinitionSummary,
+    DialogSummary, Event, EventStream, Failure, FailureCode, ProjectSummary, SaveSummary,
+    TableSummary,
 };
 use rust_i18n::t;
 
@@ -35,8 +36,15 @@ pub(crate) struct CoreStatus {
     pub(crate) project: Option<ProjectSummary>,
     /// The last successful save, shown until the next open or failure.
     pub(crate) last_save: Option<SaveSummary>,
+    /// The table the UI last read, kept until another table replaces it.
+    pub(crate) table: Option<TableSummary>,
+    /// The dialog the UI last read, kept until another dialog replaces it.
+    pub(crate) dialog: Option<DialogSummary>,
     /// The last command failure, kept until a command succeeds.
     pub(crate) failure: Option<Failure>,
+    /// Bumped whenever an edit or a save may have moved tune values, so a view
+    /// can tell that copies it kept are no longer trustworthy.
+    pub(crate) tune_revision: u64,
 }
 
 impl CoreStatus {
@@ -154,6 +162,34 @@ fn apply(event: Event, cx: &mut App) {
             );
             (Update::Saved(outcome), None)
         }
+        Event::TableRead { table, .. } => (
+            Update::Table {
+                table,
+                edited: false,
+            },
+            None,
+        ),
+        Event::TableEdited { table, .. } => (
+            Update::Table {
+                table,
+                edited: true,
+            },
+            None,
+        ),
+        Event::DialogRead { dialog, .. } => (
+            Update::Dialog {
+                dialog,
+                edited: false,
+            },
+            None,
+        ),
+        Event::DialogEdited { dialog, .. } => (
+            Update::Dialog {
+                dialog,
+                edited: true,
+            },
+            None,
+        ),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => {
             tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
@@ -176,6 +212,8 @@ enum Update {
     Loaded(DefinitionSummary),
     Opened(ProjectSummary),
     Saved(SaveSummary),
+    Table { table: TableSummary, edited: bool },
+    Dialog { dialog: DialogSummary, edited: bool },
     Unloaded,
     Failed(Failure),
     Nothing,
@@ -188,20 +226,52 @@ impl CoreStatus {
                 self.definition = Some(summary);
                 self.project = None;
                 self.last_save = None;
+                self.table = None;
+                self.dialog = None;
                 self.failure = None;
             }
             Update::Opened(project) => {
                 self.project = Some(project);
                 self.definition = None;
                 self.last_save = None;
+                self.table = None;
+                self.dialog = None;
                 self.failure = None;
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
                 self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::Table { table, edited } => {
+                self.table = Some(table);
+                // A successful table operation also proves the earlier failure
+                // is stale.
+                self.failure = None;
+                if edited {
+                    self.tune_revision = self.tune_revision.wrapping_add(1);
+                }
+            }
+            Update::Dialog { dialog, edited } => {
+                self.dialog = Some(dialog);
+                self.failure = None;
+                if edited {
+                    self.tune_revision = self.tune_revision.wrapping_add(1);
+                }
             }
             Update::Unloaded => *self = Self::default(),
-            Update::Failed(failure) => self.failure = Some(failure),
+            Update::Failed(failure) => {
+                // A table or dialog that could not be read must not stay on
+                // screen as if it were still the selection; an edit failure
+                // keeps it, since the user needs to see what was changing.
+                if failure.code == FailureCode::TableUnavailable {
+                    self.table = None;
+                }
+                if failure.code == FailureCode::DialogUnavailable {
+                    self.dialog = None;
+                }
+                self.failure = Some(failure);
+            }
             Update::Nothing => {}
         }
     }
@@ -230,6 +300,72 @@ pub(crate) fn save_tune(cx: &mut App) {
     if let Err(error) = handle.save_tune() {
         tracing::warn!(%error, "the core refused the save");
         report_failure(cx, FailureCode::TuneSaveFailed, error.to_string());
+    }
+}
+
+/// Asks the core for one table snapshot.
+pub(crate) fn read_table(name: &str, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TableUnavailable) else {
+        return;
+    };
+    if let Err(error) = handle.read_table(name) {
+        tracing::warn!(%error, table = name, "the core refused the table read");
+        report_failure(cx, FailureCode::TableUnavailable, error.to_string());
+    }
+}
+
+/// Asks the core to apply a dialog scalar edit.
+pub(crate) fn edit_scalar(dialog: &str, name: &str, value: f64, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::DialogEditRejected) else {
+        return;
+    };
+    if let Err(error) = handle.edit_scalar(dialog, name, value) {
+        tracing::warn!(%error, dialog, variable = name, "the core refused the scalar edit");
+        report_failure(cx, FailureCode::DialogEditRejected, error.to_string());
+    }
+}
+
+/// Asks the core for one dialog snapshot.
+pub(crate) fn read_dialog(name: &str, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::DialogUnavailable) else {
+        return;
+    };
+    if let Err(error) = handle.read_dialog(name) {
+        tracing::warn!(%error, dialog = name, "the core refused the dialog read");
+        report_failure(cx, FailureCode::DialogUnavailable, error.to_string());
+    }
+}
+
+/// Asks the core to apply table cell edits.
+pub(crate) fn edit_table(name: &str, edits: Vec<CellEdit>, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TableEditRejected) else {
+        return;
+    };
+    if let Err(error) = handle.edit_table(name, edits) {
+        tracing::warn!(%error, table = name, "the core refused the table edit");
+        report_failure(cx, FailureCode::TableEditRejected, error.to_string());
+    }
+}
+
+/// Asks the core to apply table axis bin edits.
+pub(crate) fn edit_axis(table: &str, axis: AxisKind, edits: Vec<AxisEdit>, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TableEditRejected) else {
+        return;
+    };
+    if let Err(error) = handle.edit_axis(table, axis, edits) {
+        tracing::warn!(%error, table, axis = axis.as_str(), "the core refused the axis edit");
+        report_failure(cx, FailureCode::TableEditRejected, error.to_string());
+    }
+}
+
+/// Closes the open project (and any standalone definition).
+pub(crate) fn close_project(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TableUnavailable) else {
+        return;
+    };
+    if let Err(error) = handle.unload_definition() {
+        tracing::warn!(%error, "the core refused to close the project");
+        report_failure(cx, FailureCode::TableUnavailable, error.to_string());
     }
 }
 
@@ -395,6 +531,40 @@ mod tests {
             code,
             message: "boom".to_owned(),
         }
+    }
+
+    fn dialog() -> DialogSummary {
+        DialogSummary {
+            id: "engine".to_owned(),
+            title: "Engine".to_owned(),
+            fields: Vec::new(),
+            changed: 0,
+            writable: true,
+            unavailable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_an_edit_or_a_save_moves_the_tune_revision() {
+        let mut status = CoreStatus::default();
+
+        status.apply(Update::Dialog {
+            dialog: dialog(),
+            edited: false,
+        });
+        assert_eq!(status.tune_revision, 0, "a read is not a change");
+
+        status.apply(Update::Dialog {
+            dialog: dialog(),
+            edited: true,
+        });
+        assert_eq!(status.tune_revision, 1);
+
+        status.apply(Update::Saved(SaveSummary {
+            path: "/projects/roadster/CurrentTune.msq".into(),
+            cells: 3,
+        }));
+        assert_eq!(status.tune_revision, 2);
     }
 
     #[test]

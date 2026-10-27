@@ -52,6 +52,10 @@ app:
       en: Quit
     open_project_folder:
       en: Open Project Folder…
+    manage_projects:
+      en: Projects…
+    close_project:
+      en: Close Project
     open_definition:
       en: Open ECU Definition…
     save_tune:
@@ -66,12 +70,6 @@ app:
     version:
       en: Version %{version} · GPL-3.0-or-later
   primary_sidebar:
-    project:
-      en: Project
-    recent:
-      en: Recent
-    no_project:
-      en: No project open
     navigation:
       en: Navigation
     no_definition:
@@ -141,7 +139,129 @@ app:
       en: 'Read-only: %{reason}'
     saved:
       en: 'Saved %{cells} values to %{tune}.'
+    table_failed:
+      en: The table could not be read or changed.
+    dialog_failed:
+      en: The dialog could not be read or changed.
+  table:
+    copy:
+      en: Copy
+    copy_tooltip:
+      en: Copy the selection as tab-separated values
+    paste:
+      en: Paste
+    paste_tooltip:
+      en: Paste tab-separated values at the selection
+    save:
+      en: Save
+    save_tooltip:
+      en: Write the changed values back to the tune file
+    flip_y:
+      en: Flip Y
+    flip_y_tooltip:
+      en: Draw the Y axis from high to low
+    loading:
+      en: Loading table…
+    unavailable:
+      en: This table could not be opened.
+    retry:
+      en: Retry
+    read_only:
+      en: Read-only
+    position:
+      en: '%{x} · %{y}'
+    cursor_value:
+      en: '%{value}'
+    axis_order:
+      en: '%{axis} bins are not in increasing order'
+    selection:
+      en: '%{count} selected'
+    changed:
+      en: '%{count} changed'
+    copied:
+      en: Copied %{count} cells
+    pasted:
+      en: Pasted %{count} cells
+    paste_rejected:
+      en: The clipboard does not fit here
+    undo:
+      en: Undo
+    undo_tooltip:
+      en: Undo the last table edit
+    redo:
+      en: Redo
+    redo_tooltip:
+      en: Redo the last undone table edit
+    operations:
+      en: Operations
+    interpolate_rows:
+      en: Interpolate across rows
+    interpolate_columns:
+      en: Interpolate down columns
+    smooth:
+      en: Smooth
+    equalize:
+      en: Equalize
+    fill_down:
+      en: Fill down
+    fill_right:
+      en: Fill right
+    rebin_x:
+      en: Re-bin X bins
+    rebin_y:
+      en: Re-bin Y bins
+    rebinned_axis:
+      en: Respaced %{count} bins
+    interpolated:
+      en: Interpolated %{count} cells
+    smoothed:
+      en: Smoothed %{count} cells
+    equalized:
+      en: Set %{count} cells to the mean
+    filled:
+      en: Filled %{count} cells
+    undone:
+      en: Undid %{count} cells
+    redone:
+      en: Redid %{count} cells
+    undone_axis:
+      en: Undid %{count} bins
+    redone_axis:
+      en: Redid %{count} bins
+    too_small:
+      en: Select more cells for this operation
+  dialog:
+    save:
+      en: Save
+    save_tooltip:
+      en: Write the changed values back to the tune file
+    loading:
+      en: Loading dialog…
+    unavailable:
+      en: This dialog could not be opened.
+    retry:
+      en: Retry
+    read_only:
+      en: Read-only
+    changed:
+      en: '%{count} changed'
+    hint:
+      en: Click a value to edit it. Enter saves and moves to the next row.
+    empty:
+      en: This dialog has no constants to edit.
+    no_value:
+      en: '—'
+    toggle_on:
+      en: 'On'
+    toggle_off:
+      en: 'Off'
+    unavailable_panels:
+      en: 'Built-in panels this build cannot draw: %{names}'
   editor:
+    tab_table:
+      en: Table
+    tab_constants:
+      en: Constants
     select_hint:
       en: Choose a table, curve or dialog from the menu.
     nothing_selected:
@@ -152,12 +272,14 @@ app:
       en: The definition does not declare this target, so there is nothing to open.
     unbuilt_hint:
       en: The editor for this item arrives in a later milestone.
+    standard_hint:
+      en: Built-in TunerStudio dialogs are not implemented yet.
+    help_hint:
+      en: Help topics open in a later milestone.
     project_missing:
       en: This project folder is missing. Choose it again or open another folder.
     read_only:
       en: 'Read-only: %{reason}'
-    choose_another:
-      en: Choose another folder…
     no_tune:
       en: No tune loaded
     empty_hint:
@@ -174,16 +296,15 @@ app:
       en: Toggle secondary sidebar
     toggle_bottom_panel:
       en: Toggle output panel
-  shortcut_group:
-    general:
-      en: General
-    view:
-      en: View
   shortcut:
     open_settings:
       en: Open settings
     open_project:
       en: Open project folder
+    manage_projects:
+      en: Open projects dialog
+    close_project:
+      en: Close project
     save_tune:
       en: Save tune
     quit:
@@ -211,6 +332,8 @@ app:
     page:
       appearance:
         en: Appearance
+      project:
+        en: Project
       shortcuts:
         en: Shortcuts
       safety:
@@ -218,15 +341,17 @@ app:
       about:
         en: About
     group:
-      theme:
-        en: Theme
       application:
         en: Application
+      startup:
+        en: Startup
       guardrails:
         en: Guardrails
     item:
       mode:
         en: Mode
+      auto_reopen:
+        en: Reopen the last project at startup
       language:
         en: Language
       version:
@@ -239,6 +364,8 @@ app:
         en: Safety disclaimer
     theme_description:
       en: Follow the system appearance, or pin the app to light or dark.
+    auto_reopen_description:
+      en: Off keeps launching clean; the Projects dialog reopens it in one click.
     disclaimer_accepted:
       en: Accepted on this installation.
     disclaimer_not_accepted:
@@ -247,6 +374,27 @@ app:
       en: Review
     github_label:
       en: GitHub
+  project:
+    title:
+      en: Projects
+    current:
+      en: Current project
+    recent:
+      en: Recent projects
+    none_open:
+      en: No project open
+    no_recent:
+      en: No recent projects yet — open a folder to start the list.
+    open_folder:
+      en: Open folder…
+    close_project:
+      en: Close project
+    read_only:
+      en: Read-only
+    auto_reopen_on:
+      en: The last project reopens at startup (Settings › Project).
+    auto_reopen_off:
+      en: Startup stays clean; reopen from here or Settings › Project.
   language:
     en:
       en: English

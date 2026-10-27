@@ -142,6 +142,12 @@ fn core_status(cx: &App) -> AnyElement {
             FailureCode::ProjectRejected => t!("app.bottom_panel.project_failed"),
             FailureCode::TuneSaveFailed => t!("app.bottom_panel.save_failed"),
             FailureCode::NothingToSave => t!("app.bottom_panel.nothing_to_save"),
+            FailureCode::TableUnavailable | FailureCode::TableEditRejected => {
+                t!("app.bottom_panel.table_failed")
+            }
+            FailureCode::DialogUnavailable | FailureCode::DialogEditRejected => {
+                t!("app.bottom_panel.dialog_failed")
+            }
             _ => t!("app.bottom_panel.command_failed"),
         };
 

@@ -32,7 +32,7 @@ pub mod preferences;
 
 use self::preferences::{AppSettings, ThemePreference};
 use crate::{
-    app::shortcuts::{SHORTCUTS, Shortcut, ShortcutGroup},
+    app::shortcuts::{SHORTCUTS, Shortcut},
     constants::APP_NAME,
     i18n::t,
 };
@@ -143,6 +143,7 @@ impl Render for SettingsWindow {
 fn pages() -> Vec<SettingPage> {
     vec![
         appearance_page(),
+        project_page(),
         shortcuts_page(),
         safety_page(),
         about_page(),
@@ -151,11 +152,10 @@ fn pages() -> Vec<SettingPage> {
 
 fn appearance_page() -> SettingPage {
     SettingPage::new(t!("app.settings.page.appearance"))
-        .icon(IconName::Settings)
-        .default_open(true)
+        .icon(IconName::Settings2)
         .group(
             SettingGroup::new()
-                .title(t!("app.settings.group.theme"))
+                .title(t!("app.settings.page.appearance"))
                 .item(
                     SettingItem::new(
                         t!("app.settings.item.mode"),
@@ -172,11 +172,7 @@ fn appearance_page() -> SettingPage {
                     )
                     .description(t!("app.settings.theme_description").to_string())
                     .keywords(["theme", "appearance", "dark", "light"]),
-                ),
-        )
-        .group(
-            SettingGroup::new()
-                .title(t!("app.settings.group.application"))
+                )
                 .item(
                     SettingItem::new(
                         t!("app.settings.item.language"),
@@ -223,27 +219,41 @@ fn language_options() -> Vec<(SharedString, SharedString)> {
     vec![(preferences::DEFAULT_LANGUAGE.into(), t!("app.language.en"))]
 }
 
+fn project_page() -> SettingPage {
+    SettingPage::new(t!("app.settings.page.project"))
+        .icon(IconName::Folder)
+        .group(
+            SettingGroup::new()
+                .title(t!("app.settings.group.startup"))
+                .item(
+                    SettingItem::new(
+                        t!("app.settings.item.auto_reopen"),
+                        SettingField::switch(
+                            |cx| cx.global::<AppSettings>().settings().project.auto_reopen,
+                            |value, cx| AppSettings::set_auto_reopen(cx, value),
+                        ),
+                    )
+                    .description(t!("app.settings.auto_reopen_description").to_string())
+                    .keywords(["project", "reopen", "startup", "recent"]),
+                ),
+        )
+}
+
 /// Keyboard shortcuts, from the static table that also binds them.
 ///
 /// Reading [`SHORTCUTS`] rather than the live keymap means the page cannot show
 /// a binding the app does not use: the table *is* what `app::shortcuts` binds,
 /// and a unit test checks that no two entries share a key.
 fn shortcuts_page() -> SettingPage {
-    let mut page =
-        SettingPage::new(t!("app.settings.page.shortcuts")).icon(IconName::SquareTerminal);
+    let items: Vec<SettingItem> = SHORTCUTS.iter().map(shortcut_item).collect();
 
-    for group in ShortcutGroup::ALL {
-        let items: Vec<SettingItem> = SHORTCUTS
-            .iter()
-            .filter(|shortcut| shortcut.group == group)
-            .map(shortcut_item)
-            .collect();
-        if !items.is_empty() {
-            page = page.group(SettingGroup::new().title(group.title()).items(items));
-        }
-    }
-
-    page
+    SettingPage::new(t!("app.settings.page.shortcuts"))
+        .icon(IconName::SquareTerminal)
+        .group(
+            SettingGroup::new()
+                .title(t!("app.settings.page.shortcuts"))
+                .items(items),
+        )
 }
 
 /// One read-only shortcut row: the command's name and its keys.

@@ -13,7 +13,7 @@
 //! Sizes travel as [`MenuDetail`], not as text: the core has no language, so the
 //! UI phrases them (`16 × 16`, `9 points`, `4 rows`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
@@ -71,6 +71,18 @@ pub struct MenuNode {
     pub kind: MenuNodeKind,
     /// Size/count, when the definition makes it known.
     pub detail: Option<MenuDetail>,
+    /// The definition object this node opens, when it opens one.
+    ///
+    /// For a table this is the table id (not the menu's map id), for a curve or
+    /// dialog its name. The editor asks the core for that id; it never reads the
+    /// definition itself.
+    pub target: Option<String>,
+    /// The table or curve a dialog's panels embed, when it declares one.
+    ///
+    /// `VE Table` in the Speeduino menu is a dialog whose north panel is the
+    /// 16×16 fuel map: opening the dialog name alone would lose the grid, so the
+    /// id travels beside the dialog target and the editor can show both.
+    pub embedded: Option<String>,
     /// Child nodes, in definition order.
     pub children: Vec<MenuNode>,
 }
@@ -116,6 +128,8 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         label: clean_label(&menu.title),
         kind: MenuNodeKind::Menu,
         detail: None,
+        target: None,
+        embedded: None,
         children,
     }
 }
@@ -145,6 +159,8 @@ fn build_item(
             label,
             kind: MenuNodeKind::Group,
             detail: None,
+            target: None,
+            embedded: None,
             children: Vec::new(),
         },
         MenuTargetKind::Standard => MenuNode {
@@ -152,6 +168,8 @@ fn build_item(
             label,
             kind: MenuNodeKind::Standard,
             detail: None,
+            target: None,
+            embedded: None,
             children: Vec::new(),
         },
         MenuTargetKind::Panel => resolve(id, label, &item.target, definition),
@@ -174,21 +192,20 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             label,
             kind: MenuNodeKind::Table,
             detail: table_detail(table, definition),
+            target: Some(table.id.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
     // A 3-D map is a table's second id; the `3D Tuning Maps` menu uses it.
-    if let Some(table) = definition.tables.values().find(|table| {
-        table
-            .map_id
-            .as_deref()
-            .is_some_and(|map| map.eq_ignore_ascii_case(target))
-    }) {
+    if let Some(table) = table_by_target(target, definition) {
         return MenuNode {
             id,
             label,
             kind: MenuNodeKind::Table,
             detail: table_detail(table, definition),
+            target: Some(table.id.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
@@ -198,17 +215,25 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             label,
             kind: MenuNodeKind::Curve,
             detail: curve_detail(curve, definition),
+            target: Some(curve.name.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
     if let Some(dialog) = definition.dialogs.get_ci(target) {
+        let embedded = embedded_target(&dialog.name, definition, &mut HashSet::new());
         return MenuNode {
             id,
             label,
             kind: MenuNodeKind::Dialog,
-            detail: Some(MenuDetail::Dialog {
-                rows: dialog.rows.len(),
-            }),
+            detail: embedded
+                .as_ref()
+                .map(|found| found.detail)
+                .or(Some(MenuDetail::Dialog {
+                    rows: dialog.rows.len(),
+                })),
+            target: Some(dialog.name.clone()),
+            embedded: embedded.map(|found| found.id),
             children: Vec::new(),
         };
     }
@@ -218,6 +243,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             label,
             kind: MenuNodeKind::Help,
             detail: None,
+            target: Some(target.to_owned()),
+            embedded: None,
             children: Vec::new(),
         };
     }
@@ -226,6 +253,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
         label,
         kind: MenuNodeKind::Missing,
         detail: None,
+        target: Some(target.to_owned()),
+        embedded: None,
         children: Vec::new(),
     }
 }
@@ -240,6 +269,75 @@ fn is_help_topic(definition: &Definition, target: &str) -> bool {
                 })
         })
     })
+}
+
+/// The table a target names, by table id or by 3-D map id.
+fn table_by_target<'a>(target: &str, definition: &'a Definition) -> Option<&'a Table> {
+    definition.tables.get_ci(target).or_else(|| {
+        definition.tables.values().find(|table| {
+            table
+                .map_id
+                .as_deref()
+                .is_some_and(|map| map.eq_ignore_ascii_case(target))
+        })
+    })
+}
+
+/// A table or curve a dialog's panels carry.
+///
+/// The id is the one the core reads snapshots by, and the detail is its size,
+/// so a menu node can show the grid instead of the dialog's row count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddedTarget {
+    pub(crate) id: String,
+    pub(crate) detail: MenuDetail,
+}
+
+/// Walks a dialog and the dialogs its panels embed, looking for a table or curve.
+///
+/// Panels nest (a dialog panel may hold another dialog that holds the map), and
+/// definitions can reference each other in cycles, so visited names are
+/// remembered and cut the walk short. A table wins over a curve in the same
+/// dialog because a grid is the larger thing to open; the first one found in
+/// row order is used.
+pub(crate) fn embedded_target(
+    name: &str,
+    definition: &Definition,
+    visited: &mut HashSet<String>,
+) -> Option<EmbeddedTarget> {
+    if !visited.insert(name.to_ascii_lowercase()) {
+        return None;
+    }
+    let dialog = definition.dialogs.get_ci(name)?;
+    for row in &dialog.rows {
+        if row.kind != RowKind::Panel {
+            continue;
+        }
+        let Some(field) = row.fields.first() else {
+            continue;
+        };
+        let target = field.trim().trim_matches('"');
+        if let Some(table) = table_by_target(target, definition)
+            && let Some(detail) = table_detail(table, definition)
+        {
+            return Some(EmbeddedTarget {
+                id: table.id.clone(),
+                detail,
+            });
+        }
+        if let Some(curve) = definition.curves.get_ci(target)
+            && let Some(detail) = curve_detail(curve, definition)
+        {
+            return Some(EmbeddedTarget {
+                id: curve.name.clone(),
+                detail,
+            });
+        }
+        if let Some(found) = embedded_target(target, definition, visited) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// The cell grid, when the table's array is a fixed 2-D shape.
@@ -396,18 +494,27 @@ menu = \"3D &Tuning Maps\"
         assert_eq!(group.children[0].kind, MenuNodeKind::Dialog);
         assert_eq!(
             group.children[0].detail,
-            Some(MenuDetail::Dialog { rows: 1 })
+            Some(MenuDetail::Table { cols: 16, rows: 16 }),
+            "the dialog embeds the table, so its grid is the useful size"
         );
+        assert_eq!(group.children[0].target.as_deref(), Some("veTableDialog"));
+        assert_eq!(group.children[0].embedded.as_deref(), Some("veTable1Tbl"));
         assert_eq!(group.children[1].kind, MenuNodeKind::Missing);
 
         let table = node(&menu.children, "VE Table");
         assert_eq!(table.kind, MenuNodeKind::Table);
         assert_eq!(table.detail, Some(MenuDetail::Table { cols: 16, rows: 16 }));
+        assert_eq!(table.target.as_deref(), Some("veTable1Tbl"));
 
         // The 3-D map id resolves to the table that declares it.
         let map = node(&menu.children, "Fuel Map");
         assert_eq!(map.kind, MenuNodeKind::Table);
         assert_eq!(map.detail, Some(MenuDetail::Table { cols: 16, rows: 16 }));
+        assert_eq!(
+            map.target.as_deref(),
+            Some("veTable1Tbl"),
+            "the editor opens the table id, not the map id"
+        );
 
         let curve = node(&menu.children, "Idle Curve");
         assert_eq!(curve.kind, MenuNodeKind::Curve);
@@ -440,6 +547,76 @@ menu = \"3D &Tuning Maps\"
     fn a_definition_without_menus_has_an_empty_tree() {
         let definition = parse("[MegaTune]\nsignature = \"x\"\n");
         assert!(build(&definition).is_empty());
+    }
+
+    #[test]
+    fn a_dialog_reports_the_grid_of_the_table_it_embeds() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+page = 1
+pageSize = 288
+veTable = array, U08, 0, [16x16], \"%\", 1, 0, 0, 255, 0
+
+[TableEditor]
+table = veTable1Tbl, veTable1Map, \"VE Table\", 1
+  zBins = veTable
+
+[UserDefined]
+dialog = north, \"\"
+panel = veTable1Tbl, North
+dialog = veTableDialog, \"VE Table\"
+panel = north, North
+panel = loopB, South
+dialog = plainDialog, \"Plain\"
+field = \"Multiplier\", multiplyMAP
+dialog = loopA, \"A\"
+panel = loopB, Center
+dialog = loopB, \"B\"
+panel = loopA, Center
+
+[Menu]
+menuDialog = main
+menu = \"&Fuel\"
+  subMenu = veTableDialog, \"VE Table\"
+  subMenu = plainDialog, \"Plain\"
+  subMenu = loopA, \"Loop\"
+",
+        );
+        let tree = build(&definition);
+
+        // The table sits one panel deeper than the menu's dialog.
+        let ve_table = &tree[0].children[0];
+        assert_eq!(ve_table.kind, MenuNodeKind::Dialog);
+        assert_eq!(
+            ve_table.detail,
+            Some(MenuDetail::Table { cols: 16, rows: 16 }),
+            "the embedded table's grid is the size the reader cares about"
+        );
+        assert_eq!(
+            ve_table.embedded.as_deref(),
+            Some("veTable1Tbl"),
+            "the editor can open the grid the dialog wraps"
+        );
+
+        let plain = &tree[0].children[1];
+        assert_eq!(
+            plain.detail,
+            Some(MenuDetail::Dialog { rows: 1 }),
+            "a dialog without a table keeps its row count"
+        );
+        assert_eq!(plain.embedded, None);
+
+        let cycle = &tree[0].children[2];
+        assert_eq!(
+            cycle.detail,
+            Some(MenuDetail::Dialog { rows: 1 }),
+            "panels that reference each other end the walk, not the program"
+        );
+        assert_eq!(cycle.embedded, None);
     }
 
     #[test]

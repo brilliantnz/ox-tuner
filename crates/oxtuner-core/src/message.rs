@@ -8,13 +8,15 @@
 //! - **Every accepted command is answered exactly once.** [`OpId`] is assigned by
 //!   the sender, so the UI can correlate a reply without trusting arrival order;
 //!   the core answers with [`Event::DefinitionLoaded`], [`Event::ProjectOpened`],
-//!   [`Event::TuneSaved`], [`Event::DefinitionUnloaded`], [`Event::Failed`] or
-//!   [`Event::Rejected`] — never twice, never silently.
+//!   [`Event::TuneSaved`], [`Event::TableRead`], [`Event::TableEdited`],
+//!   [`Event::DefinitionUnloaded`], [`Event::Failed`] or [`Event::Rejected`] —
+//!   never twice, never silently.
 
-use std::{fmt, path::PathBuf};
+use std::{collections::HashSet, fmt, path::PathBuf};
 
-use oxtuner_ini::{Definition, SettingsContext, Severity};
+use oxtuner_ini::{Definition, DialogRow, RowKind, SettingsContext, Severity};
 use oxtuner_project::Project;
+use oxtuner_tune::CellState;
 
 use crate::menu::MenuNode;
 
@@ -44,6 +46,45 @@ impl fmt::Display for OpId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "op-{}", self.0)
     }
+}
+
+/// One table cell the UI asked to write, in user units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellEdit {
+    /// Row, from the top of the definition's array.
+    pub row: usize,
+    /// Column, from the left of the definition's array.
+    pub column: usize,
+    /// The value the user typed, after the definition's conversion.
+    pub value: f64,
+}
+
+/// Which axis of a table a bin edit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisKind {
+    /// The column bins (`xBins`).
+    X,
+    /// The row bins (`yBins`).
+    Y,
+}
+
+impl AxisKind {
+    /// A stable code for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Y => "y",
+        }
+    }
+}
+
+/// One axis bin the UI asked to write, in user units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisEdit {
+    /// Bin index along the axis.
+    pub index: usize,
+    /// The value the user typed.
+    pub value: f64,
 }
 
 /// A request from the UI.
@@ -82,6 +123,65 @@ pub enum Command {
     /// tune stays byte-for-byte identical. A read-only session refuses with
     /// [`FailureCode::TuneSaveFailed`] and the S1 reasons.
     SaveTune,
+    /// Read one table from the open project, shaped for the grid.
+    ///
+    /// `name` is the table id, its 3-D map id, its cell variable, or a curve
+    /// name (which reads as a one-row table). The reply is
+    /// [`Event::TableRead`] or [`Event::Failed`] with
+    /// [`FailureCode::TableUnavailable`].
+    ReadTable {
+        /// Table id as written in the definition, its map id, a curve name, or
+        /// the cell variable the grid edits.
+        name: String,
+    },
+    /// Read one dialog from the open project, shaped for the constant list.
+    ///
+    /// The reply is [`Event::DialogRead`] or [`Event::Failed`] with
+    /// [`FailureCode::DialogUnavailable`].
+    ReadDialog {
+        /// Dialog name as written in the definition.
+        name: String,
+    },
+    /// Apply one scalar edit to a dialog's variable, in user units.
+    ///
+    /// The edit is validated before anything is stored. The reply is
+    /// [`Event::DialogEdited`] with the dialog after the edit, or
+    /// [`Event::Failed`] with [`FailureCode::DialogEditRejected`].
+    EditScalar {
+        /// Dialog the edit was made from, for the echo.
+        dialog: String,
+        /// Variable to write.
+        name: String,
+        /// New value, in user units.
+        value: f64,
+    },
+    /// Apply user-unit edits to one table's cells.
+    ///
+    /// Every edit is validated before any value is stored, so a rejected
+    /// request leaves the tune untouched. The reply is [`Event::TableEdited`]
+    /// with the table after the edit, or [`Event::Failed`] with
+    /// [`FailureCode::TableEditRejected`].
+    EditTable {
+        /// The cell variable's name (the table's `zBins`).
+        name: String,
+        /// Cells to write, in user units.
+        edits: Vec<CellEdit>,
+    },
+    /// Apply user-unit edits to one table's axis bins.
+    ///
+    /// `table` is the table id (or its 3-D map id, or a curve name — anything
+    /// `TableSummary::from_project` resolves). Every edit is validated before
+    /// any bin is stored. The reply is [`Event::TableEdited`] with the table
+    /// after the edit, or [`Event::Failed`] with
+    /// [`FailureCode::TableEditRejected`].
+    EditAxis {
+        /// Table id as written in the definition, its map id, or a curve name.
+        table: String,
+        /// Which axis the bins belong to.
+        axis: AxisKind,
+        /// Bins to write, in user units.
+        edits: Vec<AxisEdit>,
+    },
     /// Drop the loaded definition and tune.
     UnloadDefinition,
     /// Stop the core. No command is accepted after this one is read.
@@ -104,6 +204,11 @@ impl Command {
             Self::LoadDefinition { .. } => "load-definition",
             Self::OpenProject { .. } => "open-project",
             Self::SaveTune => "save-tune",
+            Self::ReadTable { .. } => "read-table",
+            Self::ReadDialog { .. } => "read-dialog",
+            Self::EditScalar { .. } => "edit-scalar",
+            Self::EditTable { .. } => "edit-table",
+            Self::EditAxis { .. } => "edit-axis",
             Self::UnloadDefinition => "unload-definition",
             Self::Shutdown => "shutdown",
         }
@@ -123,6 +228,14 @@ pub enum Event {
     ProjectOpened { op: OpId, summary: ProjectSummary },
     /// The open project's tune file was rewritten.
     TuneSaved { op: OpId, outcome: SaveSummary },
+    /// A table was read from the open project.
+    TableRead { op: OpId, table: TableSummary },
+    /// A table edit was accepted; `table` is the state after it.
+    TableEdited { op: OpId, table: TableSummary },
+    /// A dialog was read from the open project.
+    DialogRead { op: OpId, dialog: DialogSummary },
+    /// A scalar edit was accepted; `dialog` is the state after it.
+    DialogEdited { op: OpId, dialog: DialogSummary },
     /// The loaded definition (and tune, if a project was open) was dropped.
     DefinitionUnloaded { op: OpId },
     /// The command was handled but could not do its work.
@@ -140,6 +253,10 @@ impl Event {
             Self::DefinitionLoaded { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
+            | Self::TableRead { op, .. }
+            | Self::TableEdited { op, .. }
+            | Self::DialogRead { op, .. }
+            | Self::DialogEdited { op, .. }
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
@@ -189,6 +306,16 @@ pub enum FailureCode {
     TuneSaveFailed,
     /// There is no open tune to save (no project, or only a definition).
     NothingToSave,
+    /// The table is not in the definition, has no numeric cell array, or no
+    /// project is open to read it from.
+    TableUnavailable,
+    /// A table edit was out of range, not finite, or the session is read-only.
+    TableEditRejected,
+    /// The dialog is not in the definition, or no project is open to read it
+    /// from.
+    DialogUnavailable,
+    /// A scalar edit was not finite, not a scalar, or the session is read-only.
+    DialogEditRejected,
 }
 
 impl FailureCode {
@@ -199,6 +326,10 @@ impl FailureCode {
             Self::ProjectRejected => "project-rejected",
             Self::TuneSaveFailed => "tune-save-failed",
             Self::NothingToSave => "nothing-to-save",
+            Self::TableUnavailable => "table-unavailable",
+            Self::TableEditRejected => "table-edit-rejected",
+            Self::DialogUnavailable => "dialog-unavailable",
+            Self::DialogEditRejected => "dialog-edit-rejected",
         }
     }
 }
@@ -353,6 +484,668 @@ pub struct SaveSummary {
     pub path: PathBuf,
     /// Number of values that changed and were written.
     pub cells: usize,
+}
+
+/// What a dialog row holds, for the UI to pick a presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogFieldKind {
+    /// A scalar value from `field`, `displayOnlyField`, `slider` or a setting.
+    Value,
+    /// A boolean from `checkbox` or `radio`; the value is 0 or 1.
+    Toggle,
+    /// Text with no variable: a hint or a warning the definition shows.
+    Note,
+}
+
+/// One row of a dialog, shaped for the constant list.
+///
+/// Values are in **user units**. The UI keeps no tune values of its own: it
+/// renders this snapshot and asks for edits by variable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DialogFieldSummary {
+    /// Label from the row, unquoted.
+    pub label: String,
+    /// Tune variable the row writes, empty for a note.
+    pub variable: String,
+    /// User value, for scalar numbers.
+    pub value: Option<f64>,
+    /// Text, for string variables and notes.
+    pub text: Option<String>,
+    /// Units of the value.
+    pub units: String,
+    /// Decimal digits to display.
+    pub digits: u8,
+    /// Whether the row differs from the file baseline.
+    pub changed: bool,
+    /// Whether the definition marks the row display-only.
+    pub display_only: bool,
+    /// Whether the session may store an edit to this row.
+    pub writable: bool,
+    /// What the row holds, so a toggle is not drawn as a plain number.
+    pub kind: DialogFieldKind,
+    /// The nested panel title the row came from, empty at the dialog's top.
+    pub section: String,
+    /// Whether a note is a warning (`!` or `#` before the text).
+    pub warning: bool,
+}
+
+/// One dialog, shaped for the constant list.
+///
+/// Panels are flattened into the field list: a dialog like `Engine Constants`
+/// is a border layout of panels, and its constants live one or two levels down.
+/// Tables and curves a panel embeds stay out; the menu opens them as grids.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DialogSummary {
+    /// The definition's dialog name.
+    pub id: String,
+    /// Window title from the definition, or the dialog name.
+    pub title: String,
+    /// Rows in document order, panels flattened in place.
+    pub fields: Vec<DialogFieldSummary>,
+    /// Number of fields that differ from the file baseline.
+    pub changed: usize,
+    /// Whether the session may store edits.
+    pub writable: bool,
+    /// Built-in `std_*` panels this dialog embeds, which this build cannot draw.
+    pub unavailable: Vec<String>,
+}
+
+/// One table, shaped for the grid.
+///
+/// Values are in **user units**, row-major from the definition's array. The UI
+/// keeps no tune values of its own: it renders this snapshot and asks for edits
+/// by cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableSummary {
+    /// The definition's table id (the `[TableEditor]` name).
+    pub id: String,
+    /// The cell variable's name (the table's `zBins`).
+    pub name: String,
+    /// Window title from the definition, or the table id when it has none.
+    pub title: String,
+    /// Columns.
+    pub cols: usize,
+    /// Rows.
+    pub rows: usize,
+    /// Decimal digits to display.
+    pub digits: u8,
+    /// Units of the cell values.
+    pub units: String,
+    /// Cell values, row-major.
+    pub cells: Vec<f64>,
+    /// Per-cell write state (ADR-0010). `Unknown` until an ECU was read.
+    pub states: Vec<CellState>,
+    /// Per-cell "differs from the file baseline".
+    pub changed: Vec<bool>,
+    /// Column axis.
+    pub x_axis: AxisSummary,
+    /// Row axis.
+    pub y_axis: AxisSummary,
+    /// Lowest cell value, for the heatmap.
+    pub minimum: f64,
+    /// Highest cell value, for the heatmap.
+    pub maximum: f64,
+    /// Whether the session may store edits.
+    pub writable: bool,
+}
+
+/// One table axis, as the grid draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisSummary {
+    /// Variable name the values come from.
+    pub name: String,
+    /// Label to show, from `xyLabels`, otherwise the variable name.
+    pub label: String,
+    /// Units.
+    pub units: String,
+    /// Decimal digits to display.
+    pub digits: u8,
+    /// Axis values, in definition order.
+    pub values: Vec<f64>,
+}
+
+impl TableSummary {
+    /// Reads one table from an open project.
+    ///
+    /// A table that the definition declares but the tune cannot represent is an
+    /// error, never an empty grid: a wrong shape would put values in the wrong
+    /// cells.
+    ///
+    /// A 1-D curve resolves here too, as a one-row table: the curve's first
+    /// `yBins` series becomes the cells and its `xBins` the column axis. The
+    /// grid, its edits and its copy/paste then work unchanged; the 3-D view
+    /// and the chart stay pending work.
+    pub(crate) fn from_project(project: &Project, name: &str) -> Result<Self, String> {
+        let definition = project.definition();
+        if let Some(table) = definition
+            .tables
+            .get_ci(name)
+            .or_else(|| {
+                definition.tables.values().find(|table| {
+                    table
+                        .map_id
+                        .as_deref()
+                        .is_some_and(|map| map.eq_ignore_ascii_case(name))
+                })
+            })
+            .or_else(|| {
+                definition.tables.values().find(|table| {
+                    table
+                        .z_bins
+                        .as_deref()
+                        .is_some_and(|cells| cells.eq_ignore_ascii_case(name))
+                })
+            })
+        {
+            return Self::from_table(project, table);
+        }
+
+        if let Some(curve) = definition.curves.get_ci(name) {
+            return Self::from_curve(project, curve);
+        }
+
+        // A curve's value array (its first `yBins`), so a cell edit echoed by
+        // variable name still finds the curve it belongs to.
+        if let Some(curve) = definition.curves.values().find(|curve| {
+            curve
+                .y_bins
+                .first()
+                .is_some_and(|bins| bins.array.eq_ignore_ascii_case(name))
+        }) {
+            return Self::from_curve(project, curve);
+        }
+
+        // A menu's `VE Table` is a dialog whose panel holds the map; opening it
+        // by the dialog name must still reach the grid inside.
+        if let Some(dialog) = definition.dialogs.get_ci(name)
+            && let Some(embedded) =
+                crate::menu::embedded_target(&dialog.name, definition, &mut HashSet::new())
+        {
+            return Self::from_project(project, &embedded.id);
+        }
+
+        Err(format!("the definition has no table named `{name}`"))
+    }
+
+    /// The axis variable a table's bins live in, if the definition declares it.
+    pub(crate) fn axis_variable(
+        project: &Project,
+        name: &str,
+        axis: AxisKind,
+    ) -> Result<String, String> {
+        let definition = project.definition();
+        if let Some(table) = definition.tables.get_ci(name).or_else(|| {
+            definition.tables.values().find(|table| {
+                table
+                    .map_id
+                    .as_deref()
+                    .is_some_and(|map| map.eq_ignore_ascii_case(name))
+            })
+        }) {
+            let bins = match axis {
+                AxisKind::X => table.x_bins.as_ref(),
+                AxisKind::Y => table.y_bins.as_ref(),
+            };
+            return bins
+                .map(|bins| bins.array.clone())
+                .ok_or_else(|| format!("table `{}` has no {} axis bins", table.id, axis.as_str()));
+        }
+
+        if let Some(curve) = definition.curves.get_ci(name) {
+            return match axis {
+                AxisKind::X => curve.x_bins.as_ref().map(|bins| bins.array.clone()),
+                AxisKind::Y => curve.y_bins.first().map(|bins| bins.array.clone()),
+            }
+            .ok_or_else(|| format!("curve `{}` has no {} axis bins", curve.name, axis.as_str()));
+        }
+
+        Err(format!("the definition has no table named `{name}`"))
+    }
+
+    fn from_table(project: &Project, table: &oxtuner_ini::Table) -> Result<Self, String> {
+        let cells_name = table
+            .z_bins
+            .as_deref()
+            .ok_or_else(|| format!("table `{}` has no `zBins` cell array", table.id))?;
+        let spec = project
+            .layout()
+            .variable(cells_name)
+            .ok_or_else(|| format!("the tune has no variable named `{cells_name}`"))?;
+        let (cols, rows) = spec.shape.dimensions().ok_or_else(|| {
+            format!("`{cells_name}` is not a 2-D array, so it cannot be shown as a table")
+        })?;
+
+        let tune = project.tune();
+        let baseline = project.images().baseline();
+        let mut cells = Vec::with_capacity(cols.saturating_mul(rows));
+        let mut states = Vec::with_capacity(cols.saturating_mul(rows));
+        let mut changed = Vec::with_capacity(cols.saturating_mul(rows));
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+
+        for row in 0..rows {
+            for column in 0..cols {
+                let value = tune
+                    .cell_user(cells_name, row, column)
+                    .map_err(|error| error.to_string())?;
+                minimum = minimum.min(value);
+                maximum = maximum.max(value);
+                cells.push(value);
+                states.push(
+                    project
+                        .images()
+                        .cell_state(cells_name, row, column)
+                        .unwrap_or(CellState::Unknown),
+                );
+                let edited = matches!(
+                    (
+                        tune.cell_raw(cells_name, row, column),
+                        baseline.cell_raw(cells_name, row, column)
+                    ),
+                    (Ok(current), Ok(saved)) if current != saved
+                );
+                changed.push(edited);
+            }
+        }
+
+        let (minimum, maximum) = if cells.is_empty() {
+            (0.0, 0.0)
+        } else {
+            (minimum, maximum)
+        };
+
+        let x_label = table.xy_labels.first().and_then(|text| text.literal());
+        let y_label = table.xy_labels.get(1).and_then(|text| text.literal());
+        let x_axis = axis_summary(project, table.x_bins.as_ref(), cols, x_label, "X");
+        let y_axis = axis_summary(project, table.y_bins.as_ref(), rows, y_label, "Y");
+
+        Ok(Self {
+            id: table.id.clone(),
+            name: cells_name.to_owned(),
+            title: table
+                .title
+                .literal()
+                .map_or_else(|| table.id.clone(), str::to_owned),
+            cols,
+            rows,
+            digits: spec.digits,
+            units: spec.units.clone(),
+            cells,
+            states,
+            changed,
+            x_axis,
+            y_axis,
+            minimum,
+            maximum,
+            writable: !project.is_read_only() && tune.is_writable(cells_name),
+        })
+    }
+
+    /// A curve as a one-row table: the first `yBins` series is the row, the
+    /// `xBins` are the column axis.
+    fn from_curve(project: &Project, curve: &oxtuner_ini::Curve) -> Result<Self, String> {
+        let bins = curve
+            .y_bins
+            .first()
+            .ok_or_else(|| format!("curve `{}` has no `yBins` value array", curve.name))?;
+        let cells_name = bins.array.as_str();
+        let spec = project
+            .layout()
+            .variable(cells_name)
+            .ok_or_else(|| format!("the tune has no variable named `{cells_name}`"))?;
+        let (cols, rows) = spec.shape.dimensions().ok_or_else(|| {
+            format!("`{cells_name}` is not an array, so it cannot be shown as a curve")
+        })?;
+        // A list is `cols == points, rows == 1`; anything else is flattened
+        // into one row so the grid still shows every value.
+        let points = cols.saturating_mul(rows).max(1);
+
+        let tune = project.tune();
+        let baseline = project.images().baseline();
+        let mut cells = Vec::with_capacity(points);
+        let mut states = Vec::with_capacity(points);
+        let mut changed = Vec::with_capacity(points);
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+
+        for index in 0..points {
+            let value = tune
+                .user_at(cells_name, index)
+                .map_err(|error| error.to_string())?;
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+            cells.push(value);
+            states.push(CellState::Unknown);
+            let edited = matches!(
+                (tune.raw_at(cells_name, index), baseline.raw_at(cells_name, index)),
+                (Ok(current), Ok(saved)) if current != saved
+            );
+            changed.push(edited);
+        }
+
+        let (minimum, maximum) = if cells.is_empty() {
+            (0.0, 0.0)
+        } else {
+            (minimum, maximum)
+        };
+
+        let x_label = curve.column_labels.first().and_then(|text| text.literal());
+        let x_axis = axis_summary(project, curve.x_bins.as_ref(), points, x_label, "X");
+        let y_label = curve
+            .line_labels
+            .first()
+            .and_then(|text| text.literal())
+            .or_else(|| curve.column_labels.get(1).and_then(|text| text.literal()));
+        let y_axis = AxisSummary {
+            name: cells_name.to_owned(),
+            label: y_label.map_or_else(|| cells_name.to_owned(), str::to_owned),
+            units: spec.units.clone(),
+            digits: spec.digits,
+            values: vec![minimum],
+        };
+
+        Ok(Self {
+            id: curve.name.clone(),
+            name: cells_name.to_owned(),
+            title: curve
+                .title
+                .literal()
+                .map_or_else(|| curve.name.clone(), str::to_owned),
+            cols: points,
+            rows: 1,
+            digits: spec.digits,
+            units: spec.units.clone(),
+            cells,
+            states,
+            changed,
+            x_axis,
+            y_axis,
+            minimum,
+            maximum,
+            writable: !project.is_read_only() && tune.is_writable(cells_name),
+        })
+    }
+
+    /// The value at `(row, column)`, if the cell exists.
+    pub fn cell(&self, row: usize, column: usize) -> Option<f64> {
+        (row < self.rows && column < self.cols)
+            .then(|| {
+                self.cells
+                    .get(row.saturating_mul(self.cols).saturating_add(column))
+                    .copied()
+            })
+            .flatten()
+    }
+
+    /// Number of cells that differ from the file baseline.
+    pub fn changed_cells(&self) -> usize {
+        self.changed.iter().filter(|changed| **changed).count()
+    }
+}
+
+fn axis_summary(
+    project: &Project,
+    axis: Option<&oxtuner_ini::Axis>,
+    length: usize,
+    label: Option<&str>,
+    fallback: &str,
+) -> AxisSummary {
+    let Some(axis) = axis else {
+        return AxisSummary {
+            name: fallback.to_owned(),
+            label: fallback.to_owned(),
+            units: String::new(),
+            digits: 0,
+            values: (0..length).map(|index| index as f64).collect(),
+        };
+    };
+
+    let spec = project.layout().variable(&axis.array);
+    let values = (0..length)
+        .map(|index| {
+            project
+                .tune()
+                .user_at(&axis.array, index)
+                .unwrap_or(index as f64)
+        })
+        .collect();
+
+    AxisSummary {
+        name: spec.map_or_else(|| axis.array.clone(), |spec| spec.name.clone()),
+        label: label.map_or_else(
+            || {
+                if axis.array.is_empty() {
+                    fallback.to_owned()
+                } else {
+                    axis.array.clone()
+                }
+            },
+            str::to_owned,
+        ),
+        units: spec.map_or_else(String::new, |spec| spec.units.clone()),
+        digits: spec.map_or(0, |spec| spec.digits),
+        values,
+    }
+}
+
+impl DialogSummary {
+    /// Reads one dialog's rows from an open project, panels flattened.
+    ///
+    /// A dialog is a layout: `Engine Constants` is a border of panels, and the
+    /// constants sit one or two levels down. Reading only its own rows would
+    /// show an empty list, so panels are walked in place and their rows keep the
+    /// nested title as a section. Rows that name no tune variable and carry one
+    /// field are the definition's own text, kept as notes. A built-in `std_*`
+    /// panel cannot be drawn from the definition and is reported by name.
+    ///
+    /// Tables and curves a panel embeds are grids, not rows: the menu opens
+    /// them, and only the grid's snapshot carries their values.
+    pub(crate) fn from_project(project: &Project, name: &str) -> Result<Self, String> {
+        let definition = project.definition();
+        let dialog = definition
+            .dialogs
+            .get_ci(name)
+            .ok_or_else(|| format!("the definition has no dialog named `{name}`"))?;
+
+        let mut fields = Vec::new();
+        let mut unavailable = Vec::new();
+        collect_rows(
+            project,
+            &dialog.name,
+            "",
+            &mut HashSet::new(),
+            &mut fields,
+            &mut unavailable,
+        );
+
+        let changed = fields.iter().filter(|field| field.changed).count();
+        Ok(Self {
+            id: dialog.name.clone(),
+            title: dialog
+                .title
+                .clone()
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| dialog.name.clone()),
+            fields,
+            changed,
+            writable: !project.is_read_only(),
+            unavailable,
+        })
+    }
+}
+
+/// Collects a dialog's rows, walking its panels in place.
+///
+/// `visited` holds lowercased dialog names: definitions reference panels in
+/// cycles, and a dialog that appears twice in one layout is drawn once.
+fn collect_rows(
+    project: &Project,
+    name: &str,
+    section: &str,
+    visited: &mut HashSet<String>,
+    fields: &mut Vec<DialogFieldSummary>,
+    unavailable: &mut Vec<String>,
+) {
+    if !visited.insert(name.to_ascii_lowercase()) {
+        return;
+    }
+    let definition = project.definition();
+    let Some(dialog) = definition.dialogs.get_ci(name) else {
+        return;
+    };
+
+    for row in &dialog.rows {
+        match row.kind {
+            RowKind::Panel => {
+                let Some(target) = row
+                    .fields
+                    .first()
+                    .map(|field| oxtuner_ini::fields::unquote(field).trim())
+                else {
+                    continue;
+                };
+                if target.is_empty() {
+                    continue;
+                }
+                if let Some(nested) = definition.dialogs.get_ci(target) {
+                    let title = nested
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty());
+                    collect_rows(
+                        project,
+                        &nested.name,
+                        title.unwrap_or(section),
+                        visited,
+                        fields,
+                        unavailable,
+                    );
+                } else if target.to_ascii_lowercase().starts_with("std_")
+                    && !unavailable
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(target))
+                {
+                    unavailable.push(target.to_owned());
+                }
+            }
+            RowKind::Field
+            | RowKind::DisplayOnlyField
+            | RowKind::Slider
+            | RowKind::Checkbox
+            | RowKind::Radio
+            | RowKind::SettingSelector => {
+                if let Some(field) = field_row(project, row, section) {
+                    fields.push(field);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One readable row of a dialog.
+///
+/// The variable is the first field after the label that names a tune constant;
+/// a row with one field and no variable is text the definition shows (a hint or
+/// a warning), not a value.
+fn field_row(project: &Project, row: &DialogRow, section: &str) -> Option<DialogFieldSummary> {
+    let label = row
+        .fields
+        .first()
+        .map(|field| oxtuner_ini::fields::unquote(field).to_owned())
+        .unwrap_or_default();
+
+    let tune = project.tune();
+    let variable = row
+        .fields
+        .iter()
+        .skip(1)
+        .map(|field| oxtuner_ini::fields::unquote(field).trim())
+        .find(|field| project.layout().variable(field).is_some())
+        .or_else(|| {
+            // A row that names no other variable may itself be one.
+            let first = row
+                .fields
+                .first()
+                .map(|field| oxtuner_ini::fields::unquote(field).trim())
+                .unwrap_or_default();
+            (!first.is_empty() && project.layout().variable(first).is_some()).then_some(first)
+        });
+
+    let Some(variable) = variable else {
+        if row.fields.len() != 1 || label.is_empty() {
+            return None;
+        }
+        let warning = matches!(label.chars().next(), Some('!' | '#'));
+        let text = if warning {
+            label.get(1..).map(str::trim).unwrap_or_default().to_owned()
+        } else {
+            label
+        };
+        return Some(DialogFieldSummary {
+            label: text.clone(),
+            variable: String::new(),
+            value: None,
+            text: Some(text),
+            units: String::new(),
+            digits: 0,
+            changed: false,
+            display_only: true,
+            writable: false,
+            kind: DialogFieldKind::Note,
+            section: section.to_owned(),
+            warning,
+        });
+    };
+
+    let spec = tune.variable(variable).ok()?;
+    let baseline = project.images().baseline();
+    let (value, text) = if spec.shape.is_scalar() && spec.shape.is_numeric() {
+        (tune.user_at(variable, 0).ok(), None)
+    } else if !spec.shape.is_numeric() {
+        (None, tune.text(variable).ok().map(str::to_owned))
+    } else {
+        (None, None)
+    };
+    let changed = if spec.shape.is_scalar() && spec.shape.is_numeric() {
+        matches!(
+            (tune.raw_at(variable, 0), baseline.raw_at(variable, 0)),
+            (Ok(current), Ok(saved)) if current != saved
+        )
+    } else {
+        false
+    };
+    let display_only = row.kind == RowKind::DisplayOnlyField;
+    let writable =
+        !display_only && !project.is_read_only() && tune.is_writable(variable) && value.is_some();
+    let kind = match row.kind {
+        RowKind::Checkbox | RowKind::Radio => DialogFieldKind::Toggle,
+        _ => DialogFieldKind::Value,
+    };
+
+    Some(DialogFieldSummary {
+        label: if label.is_empty() {
+            variable.to_owned()
+        } else {
+            label
+        },
+        variable: variable.to_owned(),
+        value,
+        text,
+        units: if spec.shape.is_numeric() {
+            spec.units.clone()
+        } else {
+            String::new()
+        },
+        digits: spec.digits,
+        changed,
+        display_only,
+        writable,
+        kind,
+        section: section.to_owned(),
+        warning: false,
+    })
 }
 
 /// One command plus the id it will be answered under.

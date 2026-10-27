@@ -28,7 +28,9 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar};
+use gpui_kit::component::{
+    ActiveTheme as _, Selectable as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
@@ -38,8 +40,11 @@ use gpui_kit::{
 pub mod bottom_panel;
 mod explorer;
 pub mod primary_sidebar;
+pub mod project_dialog;
 pub mod secondary_sidebar;
 pub mod titlebar;
+
+use oxtuner_core::MenuNodeKind;
 
 use self::{
     bottom_panel::BottomPanel, explorer::Explorer, primary_sidebar::PrimarySidebar,
@@ -47,6 +52,7 @@ use self::{
 };
 use crate::{
     app::{self, menu},
+    editor::{dialog::DialogEditor, table::TableEditor},
     i18n::t,
     project,
     settings::preferences::AppSettings,
@@ -68,8 +74,31 @@ pub(crate) struct Shell {
     /// The definition-driven navigation tree. The sidebar renders it; the
     /// editor column shows what is selected.
     explorer: Entity<Explorer>,
+    /// The table editor; one instance so the Y-axis preference and cursor
+    /// survive switching between nodes.
+    table_editor: Entity<TableEditor>,
+    /// The dialog editor; one instance so the edit-in-progress survives a
+    /// core echo.
+    dialog_editor: Entity<DialogEditor>,
+    /// Which view a dialog-backed node shows: its grid or its constants.
+    tab: EditorTab,
+    /// The node the tab belongs to, so a new selection starts on the grid.
+    tab_node: Option<String>,
     /// Keeps the selection observer alive so the editor repaints on a click.
     _explorer: Subscription,
+}
+
+/// The two views a dialog that wraps a table offers.
+///
+/// `Tuning ▸ VE Table` is a dialog, not a table: its north panel holds the
+/// 16×16 map and its south panel holds a few options. The grid is what the
+/// reader came for, so it opens first; the constants are one click away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorTab {
+    /// The grid of the table or curve the dialog embeds.
+    Table,
+    /// The dialog's own rows.
+    Constants,
 }
 
 impl Shell {
@@ -109,41 +138,101 @@ impl Shell {
         // tree state and keeps the selection. The shell watches it only to
         // repaint the editor column when the selection changes.
         let explorer = cx.new(Explorer::new);
-        let _explorer = cx.observe(&explorer, |_, _, cx| cx.notify());
+        let table_editor = cx.new(TableEditor::new);
+        let dialog_editor = cx.new(DialogEditor::new);
+        let _explorer = cx.observe(&explorer, |this, _, cx| {
+            this.sync_editors(cx);
+            cx.notify();
+        });
 
         Self {
             _appearance,
             _bounds,
             menu_bar,
             explorer,
+            table_editor,
+            dialog_editor,
+            tab: EditorTab::Table,
+            tab_node: None,
             _explorer,
         }
     }
 
-    /// The editor column: the open project's identity, then the node selected
-    /// in the navigation tree (or an honest empty workspace).
+    /// Shows the selected node's editor. Tables and curves share the grid: a
+    /// curve resolves as a one-row table, so its bins and values edit the same
+    /// way. Dialogs get the grid they embed, with their constants behind a tab,
+    /// or the constants alone. Every other kind keeps the placeholder.
+    fn sync_editors(&mut self, cx: &mut Context<Self>) {
+        let selected = self.explorer.read(cx).selected().cloned();
+        let node_id = selected.as_ref().map(|node| node.id.clone());
+        if node_id != self.tab_node {
+            self.tab_node = node_id;
+            self.tab = EditorTab::Table;
+        }
+
+        let (table_target, dialog_target, label) = match selected {
+            Some(node) => {
+                let open_table =
+                    node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve;
+                let dialog_has_grid = node.kind == MenuNodeKind::Dialog && node.embedded.is_some();
+                let table_target = if open_table {
+                    node.target.clone()
+                } else if dialog_has_grid && self.tab == EditorTab::Table {
+                    node.embedded.clone()
+                } else {
+                    None
+                };
+                let dialog_target = if node.kind == MenuNodeKind::Dialog
+                    && !(dialog_has_grid && self.tab == EditorTab::Table)
+                {
+                    node.target.clone()
+                } else {
+                    None
+                };
+                (
+                    table_target,
+                    dialog_target,
+                    gpui_kit::SharedString::from(node.label),
+                )
+            }
+            None => (None, None, t!("app.editor.nothing_selected")),
+        };
+
+        self.table_editor.update(cx, |editor, cx| {
+            editor.show(label.clone(), table_target.as_deref(), cx);
+        });
+        self.dialog_editor.update(cx, |editor, cx| {
+            editor.show(label, dialog_target.as_deref(), cx);
+        });
+    }
+
+    /// The editor column: the node selected in the navigation tree (or an
+    /// honest empty workspace).
+    ///
+    /// Project identity lives in the title bar and the Projects dialog; the
+    /// editor shows only the selected node, plus a read-only banner when the
+    /// workspace itself is read-only.
     fn render_editor_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The editor names what the core owns. `AppState::last_project` only
         // remembers the path between launches.
         let status = crate::core::CoreService::status(cx);
         let project = status.project.clone();
-        let definition = status
-            .definition()
-            .map(|definition| (definition.label.clone(), definition.signature.clone()));
+        let has_definition = status.definition().is_some();
         let selected = self.explorer.read(cx).selected().cloned();
         let has_selection = selected.is_some();
-        let has_project = project.is_some();
-        let has_definition = definition.is_some();
-
-        let identity = project
+        let is_table = selected.as_ref().is_some_and(|node| {
+            node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve
+        });
+        let is_dialog = selected
             .as_ref()
-            .map(|project| {
-                (
-                    project::display_name(&project.root),
-                    project.tune_path.display().to_string(),
-                )
-            })
-            .or(definition);
+            .is_some_and(|node| node.kind == MenuNodeKind::Dialog);
+        let dialog_has_grid = is_dialog
+            && selected
+                .as_ref()
+                .is_some_and(|node| node.embedded.is_some());
+        let show_table = is_table || (dialog_has_grid && self.tab == EditorTab::Table);
+        let show_dialog = is_dialog && !show_table;
+        let has_project = project.is_some();
 
         let read_only = project.as_ref().is_some_and(|project| project.read_only);
         let reasons = project
@@ -172,51 +261,6 @@ impl Shell {
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // The window's identity lives in the title bar, so this band
-            // carries the workspace's own line. It is deliberately not part of
-            // the bar: it never drags the window.
-            .when_some(identity, |this, (title, subtitle)| {
-                this.child(
-                    h_flex()
-                        .h_9()
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .px_4()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(subtitle),
-                                ),
-                        )
-                        .when(has_project, |this| {
-                            this.child(
-                                Button::new("choose-another-project")
-                                    .ghost()
-                                    .small()
-                                    .label(t!("app.editor.choose_another"))
-                                    .on_click(|_, _, cx| project::choose(cx)),
-                            )
-                        }),
-                )
-            })
             // A read-only tune is a property of the workspace, not of the
             // selected node, so it stays visible above the editor body.
             .when(read_only, |this| {
@@ -236,61 +280,110 @@ impl Shell {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .px_6()
-                    .when_some(selected, |this, node| {
-                        this.child(
-                            Icon::new(explorer::icon(node.kind))
-                                .large()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(node.label.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(explorer::summary(&node)),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(440.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(explorer::hint(node.kind)),
-                        )
+                    .when(dialog_has_grid, |this| this.child(self.render_tabs(cx)))
+                    .when(show_table, |this| {
+                        this.child(div().flex_1().min_h_0().child(self.table_editor.clone()))
                     })
-                    .when(!has_selection, |this| {
-                        this.child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(heading),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(440.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(empty_hint),
-                        )
-                        .when(!has_definition, |this| {
-                            this.child(
-                                Button::new("open-project")
-                                    .label(t!("app.editor.open_project"))
-                                    .on_click(|_, _, cx| project::choose(cx)),
-                            )
-                        })
+                    .when(show_dialog, |this| {
+                        this.child(div().flex_1().min_h_0().child(self.dialog_editor.clone()))
+                    })
+                    .when(!show_table && !show_dialog, |this| {
+                        this.items_center()
+                            .justify_center()
+                            .gap_3()
+                            .px_6()
+                            .when_some(selected, |this, node| {
+                                this.child(
+                                    Icon::new(explorer::icon(node.kind))
+                                        .large()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(node.label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(explorer::summary(&node)),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(440.))
+                                        .text_sm()
+                                        .text_center()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(explorer::hint(node.kind)),
+                                )
+                            })
+                            .when(!has_selection, |this| {
+                                this.child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(heading),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(440.))
+                                        .text_sm()
+                                        .text_center()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(empty_hint),
+                                )
+                                .when(!has_definition, |this| {
+                                    this.child(
+                                        Button::new("open-project")
+                                            .label(t!("app.editor.open_project"))
+                                            .on_click(|_, window, cx| {
+                                                project_dialog::show(window, cx);
+                                            }),
+                                    )
+                                })
+                            })
                     }),
             )
+    }
+
+    /// The grid/constants switch above a dialog that wraps a table.
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h_9()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("editor-tab-table")
+                    .label(t!("app.editor.tab_table"))
+                    .small()
+                    .ghost()
+                    .selected(self.tab == EditorTab::Table)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Table, cx))),
+            )
+            .child(
+                Button::new("editor-tab-constants")
+                    .label(t!("app.editor.tab_constants"))
+                    .small()
+                    .ghost()
+                    .selected(self.tab == EditorTab::Constants)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Constants, cx))),
+            )
+    }
+
+    /// Switches which view a dialog-backed node shows.
+    fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.sync_editors(cx);
+        cx.notify();
     }
 
     /// The panel toggles at the trailing edge of the main bar.

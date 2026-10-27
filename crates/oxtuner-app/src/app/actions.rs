@@ -11,6 +11,8 @@ gpui_kit::actions!(
         About,
         OpenDefinition,
         OpenProject,
+        ManageProjects,
+        CloseProject,
         SaveTune,
         OpenHomepage,
         Settings,
