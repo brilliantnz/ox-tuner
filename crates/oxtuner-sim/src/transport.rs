@@ -1,6 +1,7 @@
 //! The virtual ECU as a [`Transport`].
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use oxtuner_ini::Definition;
@@ -16,6 +17,13 @@ use crate::scenario::Scenario;
 
 /// The longest a `Delay` fault blocks, so a scenario cannot stall CI.
 const MAX_FAULT_DELAY: Duration = Duration::from_millis(500);
+
+/// How many exchanges the transcript keeps.
+///
+/// The transcript is for determinism tests and debugging, not a datalog: a
+/// ring of the last 10 000 exchanges bounds memory through a long session while
+/// keeping more than any test compares.
+const MAX_TRANSCRIPT_ENTRIES: usize = 10_000;
 
 /// How the virtual ECU behaves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,18 +88,23 @@ pub struct TranscriptEntry {
 }
 
 /// Everything that crossed the virtual wire.
+///
+/// Keeps the **last** [`MAX_TRANSCRIPT_ENTRIES`] exchanges; older ones are
+/// dropped, and [`Self::dropped`] says how many. Use it for assertions, not as
+/// a session log — the trace recorder is the unbounded-until-capped record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Transcript {
-    entries: Vec<TranscriptEntry>,
+    entries: VecDeque<TranscriptEntry>,
+    dropped: u64,
 }
 
 impl Transcript {
-    /// The entries, in order.
-    pub fn entries(&self) -> &[TranscriptEntry] {
-        &self.entries
+    /// The retained entries, oldest first.
+    pub fn entries(&self) -> impl Iterator<Item = &TranscriptEntry> + '_ {
+        self.entries.iter()
     }
 
-    /// Number of exchanges.
+    /// Number of retained exchanges.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -101,19 +114,32 @@ impl Transcript {
         self.entries.is_empty()
     }
 
+    /// Exchanges dropped after the ring filled.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn push(&mut self, entry: TranscriptEntry) {
+        if self.entries.len() == MAX_TRANSCRIPT_ENTRIES {
+            self.entries.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.entries.push_back(entry);
+    }
+
     /// A deterministic text rendering: `TX`/`RX` hex, like a trace.
     pub fn to_text(&self) -> String {
         let mut text = String::new();
         for entry in &self.entries {
             text.push_str("TX");
             for byte in &entry.request {
-                text.push_str(&format!(" {byte:02x}"));
+                let _ = write!(text, " {byte:02x}");
             }
             text.push('\n');
             if !entry.reply.is_empty() {
                 text.push_str("RX");
                 for byte in &entry.reply {
-                    text.push_str(&format!(" {byte:02x}"));
+                    let _ = write!(text, " {byte:02x}");
                 }
                 text.push('\n');
             }
@@ -497,7 +523,7 @@ impl Transport for SimTransport {
             return Err(TransportError::Closed);
         }
         let reply = self.exchange(bytes)?;
-        self.transcript.entries.push(TranscriptEntry {
+        self.transcript.push(TranscriptEntry {
             request: bytes.to_vec(),
             reply: reply.clone(),
         });
@@ -583,5 +609,29 @@ impl Transport for SimTransport {
         self.open = false;
         self.connected = false;
         self.output.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_transcript_keeps_the_last_entries_and_counts_the_drops() {
+        let mut transcript = Transcript::default();
+        for index in 0..=MAX_TRANSCRIPT_ENTRIES {
+            transcript.push(TranscriptEntry {
+                request: vec![u8::try_from(index).unwrap_or(0)],
+                reply: Vec::new(),
+            });
+        }
+
+        assert_eq!(transcript.len(), MAX_TRANSCRIPT_ENTRIES);
+        assert_eq!(transcript.dropped(), 1);
+        assert_eq!(
+            transcript.entries().next().map(|entry| entry.request[0]),
+            Some(1),
+            "the oldest entry was dropped"
+        );
     }
 }
