@@ -57,12 +57,16 @@ pub(crate) fn open(path: PathBuf, cx: &mut App) {
     core::open_project(&path, cx);
 }
 
-/// Reopens the project the last session left, when it is still on disk.
+/// Reopens the project the last session left, when the user asked for it.
 ///
-/// Called once at start-up, after the core is running. A folder that has since
-/// moved is left alone rather than reported as a start-up failure: the empty
-/// state already offers the picker, and a stale path is not worth a red banner.
+/// Called once at start-up, after the core is running. Gated on the Settings
+/// `auto_reopen` switch (off by default): a tune is opened deliberately, never
+/// as a side effect of launching. A folder that has since moved is left alone
+/// rather than reported as a start-up failure.
 pub fn reopen_last(cx: &mut App) {
+    if !AppSettings::auto_reopen(cx) {
+        return;
+    }
     let path = cx
         .global::<AppState>()
         .last_project()

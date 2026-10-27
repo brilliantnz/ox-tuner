@@ -36,6 +36,7 @@ const RECENT_PROJECTS_MAX: usize = 20;
 pub(crate) struct Settings {
     pub(crate) schema_version: u32,
     pub(crate) ui: UiSettings,
+    pub(crate) project: ProjectSettings,
     pub(crate) connection: ConnectionSettings,
     pub(crate) safety: SafetySettings,
     pub(crate) recent: RecentSettings,
@@ -47,6 +48,7 @@ impl Default for Settings {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             ui: UiSettings::default(),
+            project: ProjectSettings::default(),
             connection: ConnectionSettings::default(),
             safety: SafetySettings::default(),
             recent: RecentSettings::default(),
@@ -188,6 +190,14 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
 pub(crate) fn apply_language(code: &str, cx: &mut App) {
     gpui_kit::component::set_locale(code);
     cx.refresh_windows();
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ProjectSettings {
+    /// Reopen the last project at start-up. Off by default: a tune is opened
+    /// deliberately, never as a side effect of launching the app.
+    pub(crate) auto_reopen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -379,6 +389,16 @@ impl AppSettings {
         Self::update(cx, |settings| settings.recent.remember(path));
     }
 
+    /// Whether the last project reopens at start-up.
+    pub(crate) fn auto_reopen(cx: &App) -> bool {
+        cx.global::<Self>().settings.project.auto_reopen
+    }
+
+    /// Changes the start-up project behavior and persists it.
+    pub(crate) fn set_auto_reopen(cx: &mut App, reopen: bool) {
+        Self::update(cx, |settings| settings.project.auto_reopen = reopen);
+    }
+
     /// Replaces the in-memory document and path; used by tests.
     #[cfg(test)]
     fn with(settings: Settings) -> Self {
@@ -448,6 +468,7 @@ mod tests {
                 disclaimer_accepted: true,
                 read_only_default: false,
             },
+            project: ProjectSettings { auto_reopen: true },
             recent: RecentSettings {
                 projects: vec![PathBuf::from("/projects/roadster")],
             },

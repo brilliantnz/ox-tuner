@@ -1,4 +1,4 @@
-//! The primary sidebar: project identity, recent folders, navigation.
+//! The primary sidebar: navigation.
 //!
 //! It starts **below** the main bar — the bar spans the whole window and carries
 //! the traffic lights, the menus and the panel toggles — so this column draws no
@@ -9,15 +9,13 @@
 //! core owns; this view only lays it out and decorates its rows. A definition
 //! that declares no `[Menu]` sections says so instead of showing an empty tree.
 //!
-//! A split bar (a drag strip per column, the sidebar reaching the window's top
-//! edge) is still available via [`super::titlebar::DragTop`] and is what the
-//! Settings window uses.
+//! Project handling (current project, recent folders, choosing another folder)
+//! lives in the Projects dialog, not here: the sidebar is for navigation.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tree::{TreeEntry, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
@@ -29,7 +27,7 @@ use gpui_kit::{
 use oxtuner_core::{MenuNode, MenuNodeKind};
 
 use super::explorer::{self, Explorer};
-use crate::{core::CoreService, i18n::t, project, settings::preferences::AppSettings};
+use crate::{core::CoreService, i18n::t};
 
 /// The navigation column.
 #[derive(IntoElement)]
@@ -45,20 +43,7 @@ impl PrimarySidebar {
 
 impl RenderOnce for PrimarySidebar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // The sidebar names what the core actually owns, not the last path the
-        // user picked: a failed open must not look like an open project.
-        let status = CoreService::status(cx);
-        let project = status.project.as_ref().map(|project| project.root.clone());
-        let has_definition = status.definition().is_some();
-        let has_project = project.is_some();
-        let recent: Vec<PathBuf> = cx
-            .global::<AppSettings>()
-            .settings()
-            .recent_projects()
-            .iter()
-            .take(5)
-            .cloned()
-            .collect();
+        let has_definition = CoreService::status(cx).definition().is_some();
 
         let explorer = self.explorer.read(cx);
         let state = explorer.tree().clone();
@@ -70,50 +55,6 @@ impl RenderOnce for PrimarySidebar {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .pt_2()
-            .child(section_label(t!("app.primary_sidebar.project"), cx))
-            .child(
-                v_flex()
-                    .px_3()
-                    .pt_1()
-                    .gap_0p5()
-                    .when_some(project, |this, path| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .truncate()
-                                .child(project::display_name(&path)),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(path.display().to_string()),
-                        )
-                    })
-                    .when(!has_project, |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(t!("app.primary_sidebar.no_project")),
-                        )
-                    }),
-            )
-            .when(!recent.is_empty(), |this| {
-                this.child(section_label(t!("app.primary_sidebar.recent"), cx))
-                    .child(v_flex().px_2().pt_1().gap_0p5().children(
-                        recent.into_iter().enumerate().map(|(index, path)| {
-                            Button::new(("recent-project", index))
-                                .ghost()
-                                .small()
-                                .label(project::display_name(&path))
-                                .w_full()
-                                .on_click(move |_, _, cx| project::open(path.clone(), cx))
-                        }),
-                    ))
-            })
             .child(section_label(t!("app.primary_sidebar.navigation"), cx))
             .child(
                 div()
@@ -198,7 +139,7 @@ fn tree_row(
         .rounded(cx.theme().radius)
         .pl_2()
         .pr_2()
-        .text_sm()
+        .text_xs()
         .text_color(cx.theme().sidebar_foreground)
         .when(selected, |this| {
             this.bg(cx.theme().tokens.sidebar_accent)
@@ -248,7 +189,7 @@ fn tree_row(
 
     ListItem::new(entry.item().id.clone())
         .px_0()
-        .py_1()
+        .py_0p5()
         .accessibility_label(entry.item().label.clone())
         .child(
             div()

@@ -25,3 +25,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [lints]
 workspace = true
+
+# Headless UI tests need the Kit's observation helpers.
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }

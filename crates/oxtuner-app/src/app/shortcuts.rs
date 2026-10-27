@@ -24,27 +24,17 @@ use gpui_kit::{
 };
 
 use super::actions::{
-    OpenProject, Quit, SaveTune, Settings, ToggleBottomPanel, TogglePrimarySidebar,
-    ToggleSecondarySidebar,
+    CloseProject, ManageProjects, OpenProject, Quit, SaveTune, Settings, ToggleBottomPanel,
+    TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::i18n::t;
 
-/// The groups of Settings › Shortcuts, in the order the page shows them.
+/// A shortcut's category. Kept on each entry for ordering and future filtering;
+/// the settings page shows one flat list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutGroup {
     General,
     View,
-}
-
-impl ShortcutGroup {
-    pub const ALL: [Self; 2] = [Self::General, Self::View];
-
-    pub fn title(self) -> SharedString {
-        match self {
-            Self::General => t!("app.shortcut_group.general"),
-            Self::View => t!("app.shortcut_group.view"),
-        }
-    }
 }
 
 /// One shortcut: what it does, what it is called, and the keys on each
@@ -104,7 +94,7 @@ macro_rules! shortcut {
 /// The panel toggles the primary sidebar on the main modifier
 /// plus `B`, the bottom panel plus `J`, and the secondary sidebar on the
 /// neighbouring `Alt+B` so the three read as a family.
-pub static SHORTCUTS: [Shortcut; 7] = [
+pub static SHORTCUTS: [Shortcut; 9] = [
     shortcut!(
         "open-settings",
         "app.shortcut.open_settings",
@@ -122,6 +112,24 @@ pub static SHORTCUTS: [Shortcut; 7] = [
         "cmd-o",
         "ctrl-o",
         OpenProject
+    ),
+    shortcut!(
+        "manage-projects",
+        "app.shortcut.manage_projects",
+        General,
+        &[],
+        "cmd-shift-o",
+        "ctrl-shift-o",
+        ManageProjects
+    ),
+    shortcut!(
+        "close-project",
+        "app.shortcut.close_project",
+        General,
+        &[],
+        "cmd-shift-w",
+        "ctrl-shift-w",
+        CloseProject
     ),
     shortcut!(
         "save-tune",

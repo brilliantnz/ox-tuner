@@ -313,7 +313,11 @@ pub(crate) fn hint(kind: MenuNodeKind) -> SharedString {
     match kind {
         MenuNodeKind::Menu | MenuNodeKind::Group => t!("app.editor.folder_hint"),
         MenuNodeKind::Missing => t!("app.editor.missing_hint"),
-        _ => t!("app.editor.unbuilt_hint"),
+        MenuNodeKind::Table | MenuNodeKind::Curve | MenuNodeKind::Dialog => {
+            t!("app.editor.unbuilt_hint")
+        }
+        MenuNodeKind::Standard => t!("app.editor.standard_hint"),
+        MenuNodeKind::Help => t!("app.editor.help_hint"),
     }
 }
 

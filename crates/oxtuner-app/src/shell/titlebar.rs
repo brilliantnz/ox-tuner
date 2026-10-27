@@ -76,6 +76,34 @@ pub(crate) fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOption
     }
 }
 
+/// The centred title: `{project} - Ox Tuner`, or just `Ox Tuner`.
+///
+/// A leading `•` marks unsaved table or dialog edits, the way document windows
+/// do: the mark reads the core's snapshot (`changed` flags), not view state,
+/// so it clears on save and survives switching between nodes.
+pub(crate) fn window_title(cx: &App) -> SharedString {
+    let status = crate::core::CoreService::status(cx);
+    let dirty = status
+        .table
+        .as_ref()
+        .is_some_and(|table| table.changed.iter().any(|changed| *changed))
+        || status
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.changed > 0);
+    match status.project.as_ref() {
+        Some(project) => {
+            let name = crate::project::display_name(&project.root);
+            if dirty {
+                format!("• {name} - {APP_NAME}").into()
+            } else {
+                format!("{name} - {APP_NAME}").into()
+            }
+        }
+        None => APP_NAME.into(),
+    }
+}
+
 fn is_macos() -> bool {
     cfg!(target_os = "macos")
 }
@@ -329,6 +357,7 @@ impl RenderOnce for MainBar {
         } else {
             px(0.)
         };
+        let title = window_title(cx);
 
         h_flex()
             .relative()
@@ -361,7 +390,7 @@ impl RenderOnce for MainBar {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .truncate()
-                                    .child(APP_NAME),
+                                    .child(title.clone()),
                             ),
                     )
                     .child(

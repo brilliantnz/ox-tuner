@@ -1,0 +1,516 @@
+//! The table editor: toolbar, grid, and the line under them.
+//!
+//! This view owns the relationship between the grid and the core. The grid asks
+//! for edits; this sends them as commands and feeds the echoed snapshot back.
+//! The Y-axis flip is a workspace view preference, persisted with the panel
+//! layout so it survives a restart.
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Selectable as _};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, FontWeight, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+};
+use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
+
+use crate::core::{CoreService, edit_table, read_table};
+use crate::i18n::t;
+use crate::state::session::{AppState, schedule_save};
+use crate::table::{GridAction, TableGrid, TableGridEvent};
+
+/// The table editor for the node selected in the navigation tree.
+pub(crate) struct TableEditor {
+    grid: Entity<TableGrid>,
+    /// The menu label, shown until the snapshot arrives and if it never does.
+    label: SharedString,
+    /// The table id the selection asked for.
+    requested: Option<String>,
+    /// Last save seen, so its echo refreshes the "changed" marks.
+    last_save: Option<SaveSummary>,
+    /// The failure that stopped this table from appearing or saving.
+    failure: Option<Failure>,
+    flip_y: bool,
+    _core: Subscription,
+    _grid: Subscription,
+}
+
+impl TableEditor {
+    /// An editor with no table loaded yet.
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        let grid = cx.new(TableGrid::new);
+        let _grid = cx.subscribe(&grid, |this, _, event, cx| this.on_grid(event, cx));
+        let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
+        let flip_y = cx
+            .try_global::<AppState>()
+            .is_some_and(|state| state.data().layout.table_low_at_top);
+
+        let editor = Self {
+            grid,
+            label: SharedString::default(),
+            requested: None,
+            last_save: None,
+            failure: None,
+            flip_y,
+            _core,
+            _grid,
+        };
+        editor
+            .grid
+            .update(cx, |grid, cx| grid.set_flip_y(flip_y, cx));
+        editor
+    }
+
+    /// Points the editor at a selected node.
+    ///
+    /// `target` is the definition object the node opens; `None` is a menu, a
+    /// group or a kind with no editor yet.
+    pub(crate) fn show(
+        &mut self,
+        label: SharedString,
+        target: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.label = label;
+        let Some(name) = target else {
+            self.requested = None;
+            self.failure = None;
+            cx.notify();
+            return;
+        };
+
+        let already_shown = self.requested.as_deref() == Some(name)
+            && self
+                .grid
+                .read(cx)
+                .model()
+                .table()
+                .is_some_and(|table| table.id == name);
+        if already_shown {
+            cx.notify();
+            return;
+        }
+
+        self.requested = Some(name.to_owned());
+        self.failure = None;
+        let existing = CoreService::status(cx)
+            .table
+            .as_ref()
+            .filter(|table| table.id == name)
+            .cloned();
+        if let Some(table) = existing {
+            self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
+        } else {
+            // Do not show the previous table's values while the next snapshot
+            // travels through the core; an empty grid plus "Loading" is honest.
+            self.grid.update(cx, TableGrid::clear_table);
+            read_table(name, cx);
+        }
+        cx.notify();
+    }
+
+    /// Follows core events: a new snapshot, a failure, or a save that makes the
+    /// changed marks stale.
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let mut snapshot = None;
+        let mut failure = None;
+        let mut edit_failed = false;
+        let mut cleared = false;
+        let mut saved = false;
+        let mut reload = None;
+        let mut table_matches = false;
+
+        {
+            let status = CoreService::status(cx);
+            if let Some(requested) = &self.requested {
+                match status.table.as_ref().filter(|table| &table.id == requested) {
+                    Some(table) => {
+                        table_matches = true;
+                        let seen = self.grid.read(cx).model().table() == Some(table);
+                        if !seen {
+                            snapshot = Some(table.clone());
+                        }
+                    }
+                    None => {
+                        if status
+                            .failure
+                            .as_ref()
+                            .is_some_and(|failure| failure.code == FailureCode::TableUnavailable)
+                        {
+                            cleared = true;
+                        }
+                    }
+                }
+            }
+            if let Some(failure_now) = &status.failure
+                && matches!(
+                    failure_now.code,
+                    FailureCode::TableUnavailable | FailureCode::TableEditRejected
+                )
+            {
+                edit_failed = failure_now.code == FailureCode::TableEditRejected;
+                failure = Some(failure_now.clone());
+            }
+            if status.last_save != self.last_save {
+                self.last_save = status.last_save.clone();
+                if self.last_save.is_some() {
+                    saved = true;
+                    reload = self.requested.clone();
+                }
+            }
+        }
+
+        if let Some(table) = snapshot {
+            self.failure = None;
+            self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
+        }
+        if table_matches {
+            // The next successful core state proves the previous table failure
+            // stale, even when the snapshot is identical.
+            self.failure = None;
+        }
+        if cleared {
+            self.grid.update(cx, TableGrid::clear_table);
+        }
+        if failure.is_some() {
+            self.failure = failure;
+        }
+        if edit_failed {
+            self.grid.update(cx, TableGrid::reject_pending);
+        }
+        if saved && let Some(name) = reload {
+            read_table(&name, cx);
+        }
+        cx.notify();
+    }
+
+    fn on_grid(&mut self, event: &TableGridEvent, cx: &mut Context<Self>) {
+        match event {
+            TableGridEvent::EditRequested { name, edits } => {
+                edit_table(name, edits.clone(), cx);
+            }
+            TableGridEvent::AxisEditRequested { table, axis, edits } => {
+                crate::core::edit_axis(table, *axis, edits.clone(), cx);
+            }
+            TableGridEvent::SelectionChanged => cx.notify(),
+        }
+    }
+
+    fn toggle_flip_y(&mut self, cx: &mut Context<Self>) {
+        self.flip_y = !self.flip_y;
+        self.grid
+            .update(cx, |grid, cx| grid.set_flip_y(self.flip_y, cx));
+        AppState::update_global(cx, |data| {
+            data.layout.table_low_at_top = self.flip_y;
+        });
+        schedule_save(cx);
+        cx.notify();
+    }
+
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        if let Some(name) = self.requested.clone() {
+            read_table(&name, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_header(&self, table: Option<&TableSummary>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let title: SharedString =
+            table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
+        let axes = table.map(|table| {
+            format!(
+                "{} · {}",
+                axis_caption(&table.x_axis),
+                axis_caption(&table.y_axis)
+            )
+        });
+        let read_only = table.is_some_and(|table| !table.writable);
+        let has_table = table.is_some();
+
+        let copy = self.grid.clone();
+        let paste = self.grid.clone();
+
+        let changed = table.map_or(0, |table| table.changed_cells());
+        let toolbar = Toolbar::new("table-toolbar")
+            .child(
+                Button::new("table-copy")
+                    .icon(IconName::Copy)
+                    .label(t!("app.table.copy"))
+                    .tooltip(t!("app.table.copy_tooltip"))
+                    .disabled(!has_table)
+                    .on_click(move |_, window, cx| {
+                        let focus = copy.read(cx).focus_handle(cx);
+                        copy.update(cx, |grid, cx| grid.copy_selection(cx));
+                        window.focus(&focus, cx);
+                    }),
+            )
+            .child(
+                Button::new("table-paste")
+                    .label(t!("app.table.paste"))
+                    .tooltip(t!("app.table.paste_tooltip"))
+                    .disabled(!has_table || read_only)
+                    .on_click(move |_, window, cx| {
+                        let focus = paste.read(cx).focus_handle(cx);
+                        paste.update(cx, |grid, cx| grid.paste_clipboard(cx));
+                        window.focus(&focus, cx);
+                    }),
+            )
+            .child(
+                Button::new("table-save")
+                    .icon(IconName::HardDrive)
+                    .label(t!("app.table.save"))
+                    .tooltip(t!("app.table.save_tooltip"))
+                    .disabled(!has_table || read_only || changed == 0)
+                    .on_click(|_, _, cx| crate::core::save_tune(cx)),
+            )
+            .content(Separator::vertical().h_5())
+            .child(
+                Button::new("table-flip-y")
+                    .icon(IconName::ChevronsUpDown)
+                    .label(t!("app.table.flip_y"))
+                    .tooltip(t!("app.table.flip_y_tooltip"))
+                    .selected(self.flip_y)
+                    .disabled(!has_table)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_flip_y(cx);
+                        let focus = this.grid.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
+                    })),
+            );
+
+        h_flex()
+            .h_10()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(title),
+                    )
+                    .when_some(axes, |this, axes| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(axes),
+                        )
+                    })
+                    .when(read_only, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.danger)
+                                .child(t!("app.table.read_only")),
+                        )
+                    }),
+            )
+            .child(toolbar)
+            .into_any_element()
+    }
+
+    fn render_content(
+        &self,
+        has_table: bool,
+        failure: Option<&Failure>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        if has_table {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(self.grid.clone())
+                .into_any_element();
+        }
+
+        let body =
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .px_6()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                    if failure.is_some() {
+                        t!("app.table.unavailable")
+                    } else {
+                        t!("app.table.loading")
+                    },
+                ));
+
+        if let Some(failure) = failure {
+            body.child(
+                div()
+                    .max_w(px(440.))
+                    .text_sm()
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child(failure.message.clone()),
+            )
+            .child(
+                Button::new("table-retry")
+                    .label(t!("app.table.retry"))
+                    .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+            )
+            .into_any_element()
+        } else {
+            body.into_any_element()
+        }
+    }
+
+    fn render_status(&self, table: &TableSummary, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let model = self.grid.read(cx).model();
+        let cursor = model.selection().cursor;
+        // Bins come from the model so an optimistic header edit shows in the
+        // same frame the key was pressed, before the core echoes it.
+        let x_value = model.axis_value(oxtuner_core::AxisKind::X, cursor.column);
+        let y_value = model.axis_value(oxtuner_core::AxisKind::Y, cursor.row);
+        let x_text = format!(
+            "{} {} {}",
+            table.x_axis.label,
+            format_value(x_value, table.x_axis.digits),
+            table.x_axis.units
+        )
+        .trim_end()
+        .to_owned();
+        let y_text = format!(
+            "{} {} {}",
+            table.y_axis.label,
+            format_value(y_value, table.y_axis.digits),
+            table.y_axis.units
+        )
+        .trim_end()
+        .to_owned();
+        let cell_value = model.value(cursor);
+        let value_text = if table.units.is_empty() {
+            format_value(cell_value, table.digits)
+        } else {
+            format!("{} {}", format_value(cell_value, table.digits), table.units)
+        };
+        let axis_warning = if !model.axis_monotonic(oxtuner_core::AxisKind::X) {
+            Some(t!(
+                "app.table.axis_order",
+                axis = table.x_axis.label.clone()
+            ))
+        } else if !model.axis_monotonic(oxtuner_core::AxisKind::Y) {
+            Some(t!(
+                "app.table.axis_order",
+                axis = table.y_axis.label.clone()
+            ))
+        } else {
+            None
+        };
+
+        let changed = table.changed_cells();
+        let action = model.action().map(|action| match action {
+            GridAction::Copied { cells } => t!("app.table.copied", count = cells.to_string()),
+            GridAction::Pasted { cells } => t!("app.table.pasted", count = cells.to_string()),
+            GridAction::PasteRejected => t!("app.table.paste_rejected"),
+        });
+
+        h_flex()
+            .h_8()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .px_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_4()
+                    .child(t!("app.table.position", x = x_text, y = y_text))
+                    .when_some(self.failure.as_ref(), |this, failure| {
+                        this.child(
+                            div()
+                                .max_w(px(360.))
+                                .truncate()
+                                .text_color(theme.danger)
+                                .child(failure.message.clone()),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_4()
+                    .child(t!(
+                        "app.table.selection",
+                        count = model.selection().cell_count().to_string()
+                    ))
+                    .child(t!("app.table.cursor_value", value = value_text.clone()))
+                    .when(changed > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(theme.warning)
+                                .child(t!("app.table.changed", count = changed.to_string())),
+                        )
+                    })
+                    .when_some(axis_warning, |this, warning| {
+                        this.child(div().text_color(theme.danger).child(warning))
+                    })
+                    .when_some(action, |this, action| this.child(action)),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for TableEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        // One small snapshot clone per frame keeps the borrow of the grid out
+        // of the render helpers, which need `cx` mutably for their buttons.
+        let table = self.grid.read(cx).model().table().cloned();
+        let has_table = table.is_some();
+        let failure = self.failure.as_ref();
+        let header = self.render_header(table.as_ref(), cx);
+        let content = self.render_content(has_table, failure, cx);
+        let status = table.as_ref().map(|table| self.render_status(table, cx));
+
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(header)
+            .child(content)
+            .when_some(status, |this, status| this.child(status))
+    }
+}
+
+fn axis_caption(axis: &oxtuner_core::AxisSummary) -> String {
+    if axis.units.is_empty() {
+        axis.label.clone()
+    } else {
+        format!("{} ({})", axis.label, axis.units)
+    }
+}
+
+fn format_value(value: f64, digits: u8) -> String {
+    format!("{value:.digits$}", digits = usize::from(digits))
+}

@@ -103,7 +103,10 @@ impl AppStateData {
 
         match version {
             STATE_SCHEMA_VERSION => {}
-            0 => {}
+            0 => {
+                // A file written before the field existed picks the current
+                // default through serde; nothing needs rewriting here.
+            }
             version if version < STATE_SCHEMA_VERSION => {
                 return Err(format!(
                     "state schema {version} is older than the supported range"
@@ -278,6 +281,13 @@ pub(crate) struct LayoutState {
     /// default is named explicitly.
     #[serde(default = "default_true")]
     pub(crate) bottom_visible: bool,
+    /// Whether the table grid draws its Y axis downward: low bins at the top.
+    ///
+    /// The default draws it upward like a chart, so the low bin is at the
+    /// bottom and the column header sits under the table, the way TunerStudio
+    /// opens a table.
+    #[serde(default)]
+    pub(crate) table_low_at_top: bool,
 }
 
 const fn default_true() -> bool {
@@ -293,6 +303,7 @@ impl Default for LayoutState {
             primary_visible: true,
             secondary_visible: true,
             bottom_visible: true,
+            table_low_at_top: false,
         }
     }
 }
@@ -588,6 +599,7 @@ mod tests {
                 primary_visible: true,
                 secondary_visible: false,
                 bottom_visible: false,
+                table_low_at_top: true,
             },
             last_project: Some(PathBuf::from("/projects/roadster")),
         };
@@ -617,6 +629,10 @@ mod tests {
         assert!(data.layout.primary_visible);
         assert!(data.layout.secondary_visible);
         assert!(data.layout.bottom_visible);
+        assert!(
+            !data.layout.table_low_at_top,
+            "the chart orientation is the default for files that predate the toggle"
+        );
     }
 
     #[test]

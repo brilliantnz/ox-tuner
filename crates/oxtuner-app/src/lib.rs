@@ -25,12 +25,16 @@ pub mod app;
 pub mod constants;
 pub mod core;
 pub mod disclaimer;
+mod editor;
 pub mod i18n;
+pub mod icons;
 pub mod platform;
 pub mod project;
 pub mod settings;
 pub mod shell;
 pub mod state;
+mod table;
+pub mod theme;
 
 /// Initialize GPUI Kit, the interface language, the keymap and the app-level
 /// action handlers. Call once inside `Application::run`, before creating any

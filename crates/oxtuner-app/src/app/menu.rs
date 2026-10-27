@@ -17,8 +17,8 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::actions::{
-    About, OpenDefinition, OpenHomepage, OpenProject, Quit, SaveTune, Settings, ShowDisclaimer,
-    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
+    About, CloseProject, ManageProjects, OpenDefinition, OpenHomepage, OpenProject, Quit, SaveTune,
+    Settings, ShowDisclaimer, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::constants::APP_NAME;
 
@@ -101,8 +101,10 @@ fn file_items() -> Vec<MenuItem> {
     let mut items = vec![
         MenuItem::action(t!("app.menu.open_definition"), OpenDefinition),
         MenuItem::action(t!("app.menu.open_project_folder"), OpenProject),
+        MenuItem::action(t!("app.menu.manage_projects"), ManageProjects),
         MenuItem::separator(),
         MenuItem::action(t!("app.menu.save_tune"), SaveTune),
+        MenuItem::action(t!("app.menu.close_project"), CloseProject),
     ];
     if !cfg!(target_os = "macos") {
         items.push(MenuItem::separator());

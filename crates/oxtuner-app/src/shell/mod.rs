@@ -38,8 +38,11 @@ use gpui_kit::{
 pub mod bottom_panel;
 mod explorer;
 pub mod primary_sidebar;
+pub mod project_dialog;
 pub mod secondary_sidebar;
 pub mod titlebar;
+
+use oxtuner_core::MenuNodeKind;
 
 use self::{
     bottom_panel::BottomPanel, explorer::Explorer, primary_sidebar::PrimarySidebar,
@@ -47,6 +50,7 @@ use self::{
 };
 use crate::{
     app::{self, menu},
+    editor::{dialog::DialogEditor, table::TableEditor},
     i18n::t,
     project,
     settings::preferences::AppSettings,
@@ -68,6 +72,12 @@ pub(crate) struct Shell {
     /// The definition-driven navigation tree. The sidebar renders it; the
     /// editor column shows what is selected.
     explorer: Entity<Explorer>,
+    /// The table editor; one instance so the Y-axis preference and cursor
+    /// survive switching between nodes.
+    table_editor: Entity<TableEditor>,
+    /// The dialog editor; one instance so the edit-in-progress survives a
+    /// core echo.
+    dialog_editor: Entity<DialogEditor>,
     /// Keeps the selection observer alive so the editor repaints on a click.
     _explorer: Subscription,
 }
@@ -109,41 +119,81 @@ impl Shell {
         // tree state and keeps the selection. The shell watches it only to
         // repaint the editor column when the selection changes.
         let explorer = cx.new(Explorer::new);
-        let _explorer = cx.observe(&explorer, |_, _, cx| cx.notify());
+        let table_editor = cx.new(TableEditor::new);
+        let dialog_editor = cx.new(DialogEditor::new);
+        let _explorer = cx.observe(&explorer, |this, _, cx| {
+            this.sync_editors(cx);
+            cx.notify();
+        });
 
         Self {
             _appearance,
             _bounds,
             menu_bar,
             explorer,
+            table_editor,
+            dialog_editor,
             _explorer,
         }
     }
 
-    /// The editor column: the open project's identity, then the node selected
-    /// in the navigation tree (or an honest empty workspace).
+    /// Shows the selected node's editor. Tables and curves share the grid: a
+    /// curve resolves as a one-row table, so its bins and values edit the same
+    /// way. Dialogs get the scalar list. Every other kind keeps the
+    /// placeholder.
+    fn sync_editors(&mut self, cx: &mut Context<Self>) {
+        let selected = self.explorer.read(cx).selected().cloned();
+        let (table_target, dialog_target, label) = match selected {
+            Some(node) => {
+                let table_target =
+                    if node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve {
+                        node.target.clone()
+                    } else {
+                        None
+                    };
+                let dialog_target = if node.kind == MenuNodeKind::Dialog {
+                    node.target.clone()
+                } else {
+                    None
+                };
+                (
+                    table_target,
+                    dialog_target,
+                    gpui_kit::SharedString::from(node.label),
+                )
+            }
+            None => (None, None, t!("app.editor.nothing_selected")),
+        };
+
+        self.table_editor.update(cx, |editor, cx| {
+            editor.show(label.clone(), table_target.as_deref(), cx);
+        });
+        self.dialog_editor.update(cx, |editor, cx| {
+            editor.show(label, dialog_target.as_deref(), cx);
+        });
+    }
+
+    /// The editor column: the node selected in the navigation tree (or an
+    /// honest empty workspace).
+    ///
+    /// Project identity lives in the title bar and the Projects dialog; the
+    /// editor shows only the selected node, plus a read-only banner when the
+    /// workspace itself is read-only.
     fn render_editor_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The editor names what the core owns. `AppState::last_project` only
         // remembers the path between launches.
         let status = crate::core::CoreService::status(cx);
         let project = status.project.clone();
-        let definition = status
-            .definition()
-            .map(|definition| (definition.label.clone(), definition.signature.clone()));
+        let has_definition = status.definition().is_some();
         let selected = self.explorer.read(cx).selected().cloned();
         let has_selection = selected.is_some();
-        let has_project = project.is_some();
-        let has_definition = definition.is_some();
-
-        let identity = project
+        let is_table = selected.as_ref().is_some_and(|node| {
+            node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve
+        });
+        let is_dialog = selected
             .as_ref()
-            .map(|project| {
-                (
-                    project::display_name(&project.root),
-                    project.tune_path.display().to_string(),
-                )
-            })
-            .or(definition);
+            .is_some_and(|node| node.kind == MenuNodeKind::Dialog);
+        let has_project = project.is_some();
 
         let read_only = project.as_ref().is_some_and(|project| project.read_only);
         let reasons = project
@@ -172,51 +222,6 @@ impl Shell {
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // The window's identity lives in the title bar, so this band
-            // carries the workspace's own line. It is deliberately not part of
-            // the bar: it never drags the window.
-            .when_some(identity, |this, (title, subtitle)| {
-                this.child(
-                    h_flex()
-                        .h_9()
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .px_4()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(subtitle),
-                                ),
-                        )
-                        .when(has_project, |this| {
-                            this.child(
-                                Button::new("choose-another-project")
-                                    .ghost()
-                                    .small()
-                                    .label(t!("app.editor.choose_another"))
-                                    .on_click(|_, _, cx| project::choose(cx)),
-                            )
-                        }),
-                )
-            })
             // A read-only tune is a property of the workspace, not of the
             // selected node, so it stays visible above the editor body.
             .when(read_only, |this| {
@@ -236,59 +241,65 @@ impl Shell {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .px_6()
-                    .when_some(selected, |this, node| {
-                        this.child(
-                            Icon::new(explorer::icon(node.kind))
-                                .large()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(node.label.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(explorer::summary(&node)),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(440.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(explorer::hint(node.kind)),
-                        )
-                    })
-                    .when(!has_selection, |this| {
-                        this.child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(heading),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(440.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(empty_hint),
-                        )
-                        .when(!has_definition, |this| {
-                            this.child(
-                                Button::new("open-project")
-                                    .label(t!("app.editor.open_project"))
-                                    .on_click(|_, _, cx| project::choose(cx)),
-                            )
-                        })
+                    .when(is_table, |this| this.child(self.table_editor.clone()))
+                    .when(is_dialog, |this| this.child(self.dialog_editor.clone()))
+                    .when(!is_table && !is_dialog, |this| {
+                        this.items_center()
+                            .justify_center()
+                            .gap_3()
+                            .px_6()
+                            .when_some(selected, |this, node| {
+                                this.child(
+                                    Icon::new(explorer::icon(node.kind))
+                                        .large()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(node.label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(explorer::summary(&node)),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(440.))
+                                        .text_sm()
+                                        .text_center()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(explorer::hint(node.kind)),
+                                )
+                            })
+                            .when(!has_selection, |this| {
+                                this.child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(heading),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(440.))
+                                        .text_sm()
+                                        .text_center()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(empty_hint),
+                                )
+                                .when(!has_definition, |this| {
+                                    this.child(
+                                        Button::new("open-project")
+                                            .label(t!("app.editor.open_project"))
+                                            .on_click(|_, window, cx| {
+                                                project_dialog::show(window, cx);
+                                            }),
+                                    )
+                                })
+                            })
                     }),
             )
     }

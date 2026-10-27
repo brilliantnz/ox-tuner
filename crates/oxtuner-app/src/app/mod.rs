@@ -45,7 +45,25 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &actions::OpenDefinition, cx| {
         core::choose_definition(cx);
     });
-    cx.on_action(|_: &actions::OpenProject, cx| project::choose(cx));
+    cx.on_action(|_: &actions::OpenProject, cx| {
+        // The folder picker, for the tuner who knows the path.
+        project::choose(cx);
+    });
+    cx.on_action(|_: &actions::ManageProjects, cx| {
+        // The Projects dialog, for everything else about a project.
+        cx.defer(|cx| {
+            if let Some(window) = window::main(cx) {
+                window
+                    .update(cx, |_, window, cx| {
+                        shell::project_dialog::show(window, cx);
+                    })
+                    .ok();
+            }
+        });
+    });
+    cx.on_action(|_: &actions::CloseProject, cx| {
+        core::close_project(cx);
+    });
     cx.on_action(|_: &actions::SaveTune, cx| core::save_tune(cx));
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");
