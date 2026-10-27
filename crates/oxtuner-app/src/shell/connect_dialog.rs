@@ -24,8 +24,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, ElementId, FontWeight, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px,
 };
 use oxtuner_core::{
     ConnectionSummary, FailureCode, LinkMode, PortChoice, PortSummary, SignatureVerdict,
@@ -214,16 +215,19 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         let port_section = if mode == Mode::Serial {
             let rows: Vec<AnyElement> = ports
                 .iter()
-                .enumerate()
-                .map(|(index, port)| {
+                .map(|port| {
                     let name = port.name.clone();
                     let checked = chosen
                         .as_ref()
                         .is_some_and(|choice| choice.label() == port.name);
+                    // Keyed by device path, not list position: a rescan that
+                    // reorders or removes ports must not move a check mark to
+                    // a different device.
+                    let id = ElementId::Name(format!("connect-port-{}", port.name).into());
                     div()
                         .py_0p5()
                         .child(
-                            Checkbox::new(("connect-port", index))
+                            Checkbox::new(id)
                                 .label(port.label.clone())
                                 .checked(checked)
                                 .on_change({
