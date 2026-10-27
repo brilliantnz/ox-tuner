@@ -7,6 +7,9 @@ use libfuzzer_sys::fuzz_target;
 use oxtuner_transport::Trace;
 
 fuzz_target!(|data: &[u8]| {
+    // Bound the input so the fuzzer explores parser errors, not the allocator's
+    // ability to hold a giant string.
+    let data = &data[..data.len().min(64 * 1024)];
     let text = String::from_utf8_lossy(data);
     if let Ok(trace) = Trace::parse(&text) {
         // A parsed trace re-serialises and parses again to the same frames.

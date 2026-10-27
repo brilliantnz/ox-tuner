@@ -115,10 +115,10 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Frame decoder (60 s)
         working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run decode_frame -- -max_total_time=60
+        run: cargo +nightly fuzz run decode_frame -- -max_total_time=60 -max_len=65536
       - name: Trace parser (60 s)
         working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run replay_trace -- -max_total_time=60
+        run: cargo +nightly fuzz run replay_trace -- -max_total_time=60 -max_len=65536
 
   fuzz-long:
     name: fuzz (scheduled, 20 min per target)
