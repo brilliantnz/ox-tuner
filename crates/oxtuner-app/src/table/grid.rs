@@ -10,21 +10,24 @@
 //! body's scroll offset. The column band follows the low end of the Y axis: at
 //! the bottom by default and at the top when the axis is flipped.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
+use gpui_kit::component::{ActiveTheme as _, ThemeStyled as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, ClipboardItem, Context, ElementId, EventEmitter, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Pixels, Render, Rgba, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px, rgb,
+    App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Render, Rgba, Role,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _,
+    UTF16Selection, Window, canvas, div, px, rgb,
 };
 
 use oxtuner_core::{CellEdit, TableSummary};
 
-use super::model::{CellPos, Selection, TableModel};
+use super::model::{BulkOp, CellPos, HistoryStep, Selection, TableModel};
 
 /// Width of one cell, in pixels.
 pub const CELL_WIDTH: f32 = 52.0;
@@ -86,6 +89,108 @@ impl EventEmitter<TableGridEvent> for TableGrid {}
 impl Focusable for TableGrid {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+/// Text input for the in-cell editor.
+///
+/// The grid draws its own editor instead of an `Input`, so it registers this
+/// handler through a canvas to receive composed text (IME) and platform paste.
+/// The edit language is ASCII, so a UTF-16 index is a byte index and the caret
+/// always sits at the end of the typed text.
+impl EntityInputHandler for TableGrid {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let text = self.model.edit_text()?;
+        let start = range.start.min(text.len());
+        let end = range.end.min(text.len()).max(start);
+        *adjusted_range = Some(start..end);
+        Some(text[start..end].to_owned())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let text = self.model.edit_text()?;
+        Some(UTF16Selection {
+            range: text.len()..text.len(),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Typing into an idle grid starts an edit at the cursor, exactly as a
+        // key press did before text came through the platform handler.
+        if self.model.edit_text().is_none() {
+            let mut characters = text.chars();
+            let Some(first) = characters.find(|character| is_edit_start(*character)) else {
+                return;
+            };
+            if !self.model.begin_edit(Some(first)) {
+                return;
+            }
+            for character in characters {
+                self.model.push_char(character);
+            }
+        } else if !self.model.replace_edit_text(range, text) {
+            return;
+        }
+        cx.emit(TableGridEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        _: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_text_in_range(range, new_text, window, cx);
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: gpui_kit::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        self.model.edit_text().map(str::len)
     }
 }
 
@@ -163,6 +268,58 @@ impl TableGrid {
         }
     }
 
+    /// Applies a bulk operation to the selection.
+    pub(crate) fn bulk(&mut self, op: BulkOp, cx: &mut Context<Self>) {
+        match self.model.bulk_edit(op) {
+            Ok(edits) => {
+                if !edits.is_empty() {
+                    self.request_edits(edits, cx);
+                }
+                cx.notify();
+            }
+            Err(_) => cx.notify(),
+        }
+    }
+
+    /// Takes the newest edit back and asks the core to write the old values.
+    pub(crate) fn undo(&mut self, cx: &mut Context<Self>) {
+        if let Some(step) = self.model.undo() {
+            self.request_step(step, cx);
+        }
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Re-applies the newest undone edit.
+    pub(crate) fn redo(&mut self, cx: &mut Context<Self>) {
+        if let Some(step) = self.model.redo() {
+            self.request_step(step, cx);
+        }
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Spaces one axis onto even steps between its endpoints.
+    pub(crate) fn rebin(&mut self, axis: oxtuner_core::AxisKind, cx: &mut Context<Self>) {
+        match self.model.rebin_axis(axis) {
+            Ok(edits) => {
+                if edits.is_empty() {
+                    cx.notify();
+                } else {
+                    self.request_axis_edits(axis, edits, cx);
+                }
+            }
+            Err(_) => cx.notify(),
+        }
+    }
+
+    fn request_step(&mut self, step: HistoryStep, cx: &mut Context<Self>) {
+        match step {
+            HistoryStep::Cells(edits) => self.request_edits(edits, cx),
+            HistoryStep::Axis { axis, edits } => self.request_axis_edits(axis, edits, cx),
+        }
+    }
+
     /// The keyboard contract, in one place so tests can drive it through real
     /// events and a reader can see the whole rule set.
     pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -198,14 +355,9 @@ impl TableGrid {
                     self.model.pop_axis_char();
                     cx.notify();
                 }
-                _ => {
-                    if let Some(text) = &event.keystroke.key_char {
-                        for character in text.chars() {
-                            self.model.push_axis_char(character);
-                        }
-                    }
-                    cx.notify();
-                }
+                // Printable text arrives through the platform input handler
+                // below, which is what makes IME composition work.
+                _ => {}
             }
             cx.emit(TableGridEvent::SelectionChanged);
             return;
@@ -230,13 +382,7 @@ impl TableGrid {
                 }
                 "escape" => self.model.cancel_edit(),
                 "backspace" => self.model.pop_char(),
-                _ => {
-                    if let Some(text) = &event.keystroke.key_char {
-                        for character in text.chars() {
-                            self.model.push_char(character);
-                        }
-                    }
-                }
+                _ => {}
             }
             cx.emit(TableGridEvent::SelectionChanged);
             cx.notify();
@@ -251,6 +397,14 @@ impl TableGrid {
                     self.model.select_all();
                     cx.notify();
                 }
+                "z" => {
+                    if modifiers.shift {
+                        self.redo(cx);
+                    } else {
+                        self.undo(cx);
+                    }
+                }
+                "y" => self.redo(cx),
                 _ => {}
             }
             return;
@@ -270,14 +424,9 @@ impl TableGrid {
             "end" => self.model.move_to_edge(false, extend),
             "pageup" => self.model.move_page(false, extend),
             "pagedown" => self.model.move_page(true, extend),
-            _ => {
-                if let Some(text) = &event.keystroke.key_char
-                    && let Some(first) = text.chars().next()
-                    && is_edit_start(first)
-                {
-                    self.model.begin_edit(Some(first));
-                }
-            }
+            // Printable text starts an edit when the platform handler delivers
+            // it; see `replace_text_in_range`.
+            _ => {}
         }
 
         self.ensure_cursor_visible();
@@ -832,9 +981,45 @@ impl Render for TableGrid {
                     .scrollbar(&self.body_scroll, ScrollbarAxis::Both),
             );
 
+        // Native text services need a handler registered while the frame
+        // paints. A canvas fills the grid without taking part in layout or hit
+        // testing; it only gives IME and platform paste somewhere to attach.
+        let input = {
+            let focus = self.focus.clone();
+            let entity = cx.entity();
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    window.handle_input(
+                        &focus,
+                        ElementInputHandler::new(bounds, entity.clone()),
+                        cx,
+                    );
+                },
+            )
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+        };
+        let aria = format!("{}: {} rows by {} columns", table.title, rows, columns);
+        let focused = self.focus.is_focused(window);
+
         // The column band follows the low end of the Y axis, which is the
         // bottom by default (chart orientation) and the top when flipped.
-        let root = v_flex()
+        let mut bands = v_flex()
+            .relative()
+            .size_full()
+            .min_h_0()
+            .when(focused, |this| this.focus_ring_style(window, cx))
+            .child(input);
+        if flipped {
+            bands = bands.child(header_band).child(body_band);
+        } else {
+            bands = bands.child(body_band).child(header_band);
+        }
+
+        v_flex()
             .id("table-grid")
             .size_full()
             .min_h_0()
@@ -842,6 +1027,7 @@ impl Render for TableGrid {
             .bg(background)
             .text_color(foreground)
             .role(Role::Grid)
+            .aria_label(aria)
             .track_focus(&self.focus)
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
@@ -849,12 +1035,9 @@ impl Render for TableGrid {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &gpui_kit::MouseUpEvent, _, _| this.dragging = false),
-            );
-        if flipped {
-            root.child(header_band).child(body_band).into_any_element()
-        } else {
-            root.child(body_band).child(header_band).into_any_element()
-        }
+            )
+            .child(bands)
+            .into_any_element()
     }
 }
 

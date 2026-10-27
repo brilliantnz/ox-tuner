@@ -10,6 +10,7 @@
 //! [`TableModel::data_row`] and [`TableModel::display_row`].
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use oxtuner_core::{AxisEdit, AxisKind, CellEdit, CellState, TableSummary};
@@ -116,6 +117,12 @@ pub enum EditError {
     OutOfBounds,
     /// A pasted block has rows of different widths.
     RaggedPaste,
+    /// The selection is too small for the operation.
+    SelectionTooSmall,
+    /// The axis has too few bins to respace.
+    AxisTooSmall,
+    /// A percent sign was typed without a `+` or `-`.
+    UnsupportedPercent,
 }
 
 /// What the last command did, for a localized status line.
@@ -133,6 +140,70 @@ pub enum GridAction {
     },
     /// The clipboard did not fit or did not parse.
     PasteRejected,
+    /// A selection was interpolated.
+    Interpolated {
+        /// Number of cells written.
+        cells: usize,
+    },
+    /// A selection was smoothed.
+    Smoothed {
+        /// Number of cells written.
+        cells: usize,
+    },
+    /// A selection was equalized.
+    Equalized {
+        /// Number of cells written.
+        cells: usize,
+    },
+    /// A row or column was filled from its first line.
+    Filled {
+        /// Number of cells written.
+        cells: usize,
+    },
+    /// A table edit was undone.
+    Undone {
+        /// Number of cells restored.
+        cells: usize,
+    },
+    /// A table edit was redone.
+    Redone {
+        /// Number of cells rewritten.
+        cells: usize,
+    },
+    /// An axis bin edit was undone.
+    UndoneAxis {
+        /// Number of bins restored.
+        bins: usize,
+    },
+    /// An axis bin edit was redone.
+    RedoneAxis {
+        /// Number of bins rewritten.
+        bins: usize,
+    },
+    /// The selection is too small for the requested operation.
+    TooSmall,
+    /// An axis was respaced onto even steps.
+    RebinnedAxis {
+        /// Number of bins that moved.
+        bins: usize,
+    },
+}
+
+/// A bulk operation over the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BulkOp {
+    /// Draw a straight line across each selected row.
+    InterpolateRows,
+    /// Draw a straight line down each selected column.
+    InterpolateColumns,
+    /// Average each cell with its orthogonal neighbours inside the selection.
+    Smooth,
+    /// Replace every selected cell with the selection's mean.
+    Equalize,
+    /// Copy the top displayed row down through the selected rows.
+    FillDown,
+    /// Copy the leftmost selected column across the selected columns.
+    FillRight,
 }
 
 /// How a typed number applies to the selected cells.
@@ -146,7 +217,32 @@ pub enum EditOp {
     Multiply,
     /// Divide by the typed divisor.
     Divide,
+    /// Change by a percentage of each cell's current value.
+    Percent,
 }
+
+/// One recorded command, as the values on each side of it.
+#[derive(Clone)]
+pub enum HistoryStep {
+    /// Cell values.
+    Cells(Vec<CellEdit>),
+    /// Axis bins.
+    Axis {
+        /// Which axis the bins belong to.
+        axis: AxisKind,
+        /// The bins.
+        edits: Vec<AxisEdit>,
+    },
+}
+
+/// A recorded command: what to write to undo it and what to write to redo it.
+struct HistoryEntry {
+    before: HistoryStep,
+    after: HistoryStep,
+}
+
+/// How many commands the grid remembers.
+const HISTORY_LIMIT: usize = 100;
 
 /// The table grid's model.
 pub struct TableModel {
@@ -158,6 +254,10 @@ pub struct TableModel {
     pending: HashMap<(usize, usize), f64>,
     pending_axis: HashMap<(bool, usize), f64>,
     action: Option<GridAction>,
+    /// Commands that can be undone, oldest first.
+    undo: Vec<HistoryEntry>,
+    /// Commands that can be redone, most recently undone last.
+    redo: Vec<HistoryEntry>,
     /// Formatted cell values, rebuilt when the snapshot or an optimistic value
     /// changes. Rendering 1 024 cells must not format 1 024 strings per frame.
     display: Vec<Arc<str>>,
@@ -183,6 +283,8 @@ impl TableModel {
             pending: HashMap::new(),
             pending_axis: HashMap::new(),
             action: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             display: Vec::new(),
             aria: Vec::new(),
         }
@@ -211,6 +313,8 @@ impl TableModel {
             self.axis_editing = None;
             self.pending.clear();
             self.pending_axis.clear();
+            self.undo.clear();
+            self.redo.clear();
         } else {
             self.pending.retain(|(row, column), pending| {
                 table
@@ -252,6 +356,8 @@ impl TableModel {
         self.axis_editing = None;
         self.selection = Selection::single(CellPos { row: 0, column: 0 });
         self.action = None;
+        self.undo.clear();
+        self.redo.clear();
     }
 
     /// The rendered snapshot.
@@ -311,10 +417,58 @@ impl TableModel {
     }
 
     /// Forgets optimistic values after the core rejected an edit.
+    ///
+    /// The rejected command is the newest history entry: the core answers one
+    /// command at a time, so dropping it keeps undo from re-sending a write the
+    /// tune never accepted.
     pub fn reject_pending(&mut self) {
+        // The same failure can be observed more than once. Only a write that
+        // still has an optimistic value has an entry to drop; a second call
+        // must not eat an older, confirmed step.
+        if self.pending.is_empty() && self.pending_axis.is_empty() {
+            return;
+        }
+        self.undo.pop();
+        self.redo.clear();
         self.pending.clear();
         self.pending_axis.clear();
         self.rebuild_labels();
+    }
+
+    /// Whether there is a command to undo.
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Whether there is a command to redo.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Takes the newest command back, returning the values that restore it.
+    pub fn undo(&mut self) -> Option<HistoryStep> {
+        let entry = self.undo.pop()?;
+        let step = entry.before.clone();
+        self.apply_step(&step);
+        self.action = Some(match &step {
+            HistoryStep::Cells(edits) => GridAction::Undone { cells: edits.len() },
+            HistoryStep::Axis { edits, .. } => GridAction::UndoneAxis { bins: edits.len() },
+        });
+        self.redo.push(entry);
+        Some(step)
+    }
+
+    /// Re-applies the newest undone command, returning the values to write.
+    pub fn redo(&mut self) -> Option<HistoryStep> {
+        let entry = self.redo.pop()?;
+        let step = entry.after.clone();
+        self.apply_step(&step);
+        self.action = Some(match &step {
+            HistoryStep::Cells(edits) => GridAction::Redone { cells: edits.len() },
+            HistoryStep::Axis { edits, .. } => GridAction::RedoneAxis { bins: edits.len() },
+        });
+        self.undo.push(entry);
+        Some(step)
     }
 
     /// The displayed value, including an optimistic edit not yet echoed by the
@@ -438,15 +592,41 @@ impl TableModel {
         true
     }
 
-    /// Appends a typed character while editing a header bin.
-    pub fn push_axis_char(&mut self, character: char) {
-        if let Some(editing) = self.axis_editing.as_mut()
-            && is_edit_character(character)
-        {
-            editing.text.push(character);
+    /// Replaces part (or all) of the text being typed, for IME and platform
+    /// input. Characters that cannot start an edit are dropped.
+    ///
+    /// Ranges are UTF-16 units; the edit language is ASCII, so a unit is a
+    /// byte and the clamp cannot split a character.
+    pub fn replace_edit_text(&mut self, range: Option<Range<usize>>, text: &str) -> bool {
+        let filtered: String = text
+            .chars()
+            .filter(|character| is_edit_character(*character))
+            .collect();
+        if let Some(editing) = self.editing.as_mut() {
+            editing.text = replace_range(&editing.text, range, &filtered);
             editing.invalid = false;
             self.action = None;
+            return true;
         }
+        if let Some(editing) = self.axis_editing.as_mut() {
+            editing.text = replace_range(&editing.text, range, &filtered);
+            editing.invalid = false;
+            self.action = None;
+            return true;
+        }
+        false
+    }
+
+    /// The text being typed, cell or header bin.
+    pub fn edit_text(&self) -> Option<&str> {
+        self.editing
+            .as_ref()
+            .map(|editing| editing.text.as_str())
+            .or_else(|| {
+                self.axis_editing
+                    .as_ref()
+                    .map(|editing| editing.text.as_str())
+            })
     }
 
     /// Removes the last typed character while editing a header bin.
@@ -492,22 +672,31 @@ impl TableModel {
             EditOp::Add => current + amount,
             EditOp::Multiply => current * amount,
             EditOp::Divide => current / amount,
+            EditOp::Percent => current * (1.0 + amount / 100.0),
         };
         if !value.is_finite() {
             return Err(EditError::NotANumber);
         }
-        let key = (
-            matches!(editing.target.axis, AxisKind::X),
-            editing.target.index,
+        let axis = editing.target.axis;
+        let index = editing.target.index;
+        let key = (matches!(axis, AxisKind::X), index);
+        self.record(
+            HistoryStep::Axis {
+                axis,
+                edits: vec![AxisEdit {
+                    index,
+                    value: current,
+                }],
+            },
+            HistoryStep::Axis {
+                axis,
+                edits: vec![AxisEdit { index, value }],
+            },
         );
         self.pending_axis.insert(key, value);
-        let edit = AxisEdit {
-            index: editing.target.index,
-            value,
-        };
         self.axis_editing = None;
         self.action = None;
-        Ok(vec![edit])
+        Ok(vec![AxisEdit { index, value }])
     }
 
     /// The data row drawn at `display_row`.
@@ -736,8 +925,248 @@ impl TableModel {
         let (operation, amount) = operation;
         let edits = self.edits_for_selection(operation, amount)?;
         self.editing = None;
+        self.record_cells(&edits);
         self.apply_pending(&edits);
         Ok(edits)
+    }
+
+    /// Applies a bulk operation to the selection.
+    ///
+    /// Every operation reads the values as they are before the command and
+    /// writes the whole result at once, so smoothing never sees its own
+    /// intermediate values. Values are rounded to the table's digits.
+    pub fn bulk_edit(&mut self, op: BulkOp) -> Result<Vec<CellEdit>, EditError> {
+        if self.table.is_none() {
+            return Err(EditError::NoTable);
+        }
+        if !self.is_writable() {
+            return Err(EditError::ReadOnly);
+        }
+        if !self.bulk_available(op) {
+            self.action = Some(GridAction::TooSmall);
+            return Err(EditError::SelectionTooSmall);
+        }
+
+        let (top, left, bottom, right) = self.selection.bounds();
+        let digits = self
+            .table
+            .as_ref()
+            .map_or(0, |table| usize::from(table.digits));
+        let mut edits = Vec::new();
+
+        match op {
+            BulkOp::InterpolateRows => {
+                let span = (right - left) as f64;
+                for row in top..=bottom {
+                    let first = self.value(CellPos { row, column: left });
+                    let last = self.value(CellPos { row, column: right });
+                    for column in left + 1..right {
+                        let fraction = (column - left) as f64 / span;
+                        let value = first + (last - first) * fraction;
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: round_to_digits(value, digits),
+                        });
+                    }
+                }
+            }
+            BulkOp::InterpolateColumns => {
+                let span = (bottom - top) as f64;
+                for column in left..=right {
+                    let first = self.value(CellPos { row: top, column });
+                    let last = self.value(CellPos {
+                        row: bottom,
+                        column,
+                    });
+                    for row in top + 1..bottom {
+                        let fraction = (row - top) as f64 / span;
+                        let value = first + (last - first) * fraction;
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: round_to_digits(value, digits),
+                        });
+                    }
+                }
+            }
+            BulkOp::Smooth => {
+                for row in top..=bottom {
+                    for column in left..=right {
+                        let mut total = self.value(CellPos { row, column }) * 2.0;
+                        let mut count = 2.0;
+                        for (row_step, column_step) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)]
+                        {
+                            let neighbour_row = row as isize + row_step;
+                            let neighbour_column = column as isize + column_step;
+                            if neighbour_row < top as isize
+                                || neighbour_row > bottom as isize
+                                || neighbour_column < left as isize
+                                || neighbour_column > right as isize
+                            {
+                                continue;
+                            }
+                            total += self.value(CellPos {
+                                row: neighbour_row as usize,
+                                column: neighbour_column as usize,
+                            });
+                            count += 1.0;
+                        }
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: round_to_digits(total / count, digits),
+                        });
+                    }
+                }
+            }
+            BulkOp::Equalize => {
+                let mut total = 0.0;
+                for row in top..=bottom {
+                    for column in left..=right {
+                        total += self.value(CellPos { row, column });
+                    }
+                }
+                let count = ((bottom - top + 1) * (right - left + 1)) as f64;
+                let mean = round_to_digits(total / count, digits);
+                for row in top..=bottom {
+                    for column in left..=right {
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: mean,
+                        });
+                    }
+                }
+            }
+            BulkOp::FillDown => {
+                let mut displayed: Vec<usize> = (top..=bottom).collect();
+                displayed.sort_by_key(|row| self.display_row(*row));
+                let source = displayed[0];
+                for row in displayed.into_iter().skip(1) {
+                    for column in left..=right {
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: self.value(CellPos {
+                                row: source,
+                                column,
+                            }),
+                        });
+                    }
+                }
+            }
+            BulkOp::FillRight => {
+                for row in top..=bottom {
+                    let source = self.value(CellPos { row, column: left });
+                    for column in left + 1..=right {
+                        edits.push(CellEdit {
+                            row,
+                            column,
+                            value: source,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !edits.is_empty() {
+            self.record_cells(&edits);
+            self.apply_pending(&edits);
+        }
+        self.action = Some(match op {
+            BulkOp::InterpolateRows | BulkOp::InterpolateColumns => {
+                GridAction::Interpolated { cells: edits.len() }
+            }
+            BulkOp::Smooth => GridAction::Smoothed { cells: edits.len() },
+            BulkOp::Equalize => GridAction::Equalized { cells: edits.len() },
+            BulkOp::FillDown | BulkOp::FillRight => GridAction::Filled { cells: edits.len() },
+        });
+        Ok(edits)
+    }
+
+    /// Whether the selection has the shape a bulk operation needs.
+    pub fn bulk_available(&self, op: BulkOp) -> bool {
+        if self.table.is_none() || !self.is_writable() {
+            return false;
+        }
+        let (top, left, bottom, right) = self.selection.bounds();
+        let rows = bottom - top + 1;
+        let columns = right - left + 1;
+        match op {
+            BulkOp::InterpolateRows => columns >= 3,
+            BulkOp::InterpolateColumns => rows >= 3,
+            BulkOp::Smooth => rows * columns >= 3,
+            BulkOp::Equalize => rows * columns >= 1,
+            BulkOp::FillDown => rows >= 2,
+            BulkOp::FillRight => columns >= 2,
+        }
+    }
+
+    /// Whether an axis has enough bins to respace.
+    pub fn can_rebin(&self, axis: AxisKind) -> bool {
+        self.table.is_some() && self.is_writable() && self.axis_len(axis) >= 3
+    }
+
+    /// Evenly spaces the interior bins of one axis between its endpoints.
+    ///
+    /// The endpoints keep their values, so the table still covers the same
+    /// range; only the breakpoints between them move. This is how a hand-edited
+    /// axis is straightened without touching the cells.
+    pub fn rebin_axis(&mut self, axis: AxisKind) -> Result<Vec<AxisEdit>, EditError> {
+        let Some(table) = &self.table else {
+            return Err(EditError::NoTable);
+        };
+        if !self.is_writable() {
+            return Err(EditError::ReadOnly);
+        }
+        let len = self.axis_len(axis);
+        if len < 3 {
+            self.action = Some(GridAction::TooSmall);
+            return Err(EditError::AxisTooSmall);
+        }
+        let digits = usize::from(match axis {
+            AxisKind::X => table.x_axis.digits,
+            AxisKind::Y => table.y_axis.digits,
+        });
+        let first = self.axis_value(axis, 0);
+        let last = self.axis_value(axis, len - 1);
+
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for index in 1..len - 1 {
+            let current = self.axis_value(axis, index);
+            let value = round_to_digits(
+                first + (last - first) * index as f64 / (len - 1) as f64,
+                digits,
+            );
+            if value != current {
+                before.push(AxisEdit {
+                    index,
+                    value: current,
+                });
+                after.push(AxisEdit { index, value });
+            }
+        }
+
+        if !after.is_empty() {
+            self.record(
+                HistoryStep::Axis {
+                    axis,
+                    edits: before,
+                },
+                HistoryStep::Axis {
+                    axis,
+                    edits: after.clone(),
+                },
+            );
+            let key = matches!(axis, AxisKind::X);
+            for edit in &after {
+                self.pending_axis.insert((key, edit.index), edit.value);
+            }
+        }
+        self.action = Some(GridAction::RebinnedAxis { bins: after.len() });
+        Ok(after)
     }
 
     /// The selection as tab-separated values.
@@ -831,6 +1260,7 @@ impl TableModel {
             }
         }
 
+        self.record_cells(&edits);
         self.apply_pending(&edits);
         let end_row = if self.flip_y {
             anchor + rows.len() - 1
@@ -870,6 +1300,7 @@ impl TableModel {
                     EditOp::Add => current + amount,
                     EditOp::Multiply => current * amount,
                     EditOp::Divide => current / amount,
+                    EditOp::Percent => current * (1.0 + amount / 100.0),
                 };
                 if !value.is_finite() {
                     return Err(EditError::NotANumber);
@@ -884,6 +1315,71 @@ impl TableModel {
         for edit in edits {
             self.pending.insert((edit.row, edit.column), edit.value);
             self.update_label(edit.row, edit.column, edit.value);
+        }
+    }
+
+    /// Records a cell command from the values it is about to overwrite.
+    fn record_cells(&mut self, after: &[CellEdit]) {
+        let before = after
+            .iter()
+            .map(|edit| CellEdit {
+                row: edit.row,
+                column: edit.column,
+                value: self.value(CellPos {
+                    row: edit.row,
+                    column: edit.column,
+                }),
+            })
+            .collect();
+        self.record(
+            HistoryStep::Cells(before),
+            HistoryStep::Cells(after.to_vec()),
+        );
+    }
+
+    fn record(&mut self, before: HistoryStep, after: HistoryStep) {
+        self.undo.push(HistoryEntry { before, after });
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Shows a history step optimistically and selects what it touched.
+    fn apply_step(&mut self, step: &HistoryStep) {
+        match step {
+            HistoryStep::Cells(edits) => {
+                self.apply_pending(edits);
+                let Some(first) = edits.first() else {
+                    return;
+                };
+                let mut top = first.row;
+                let mut left = first.column;
+                let mut bottom = first.row;
+                let mut right = first.column;
+                for edit in edits.iter().skip(1) {
+                    top = top.min(edit.row);
+                    left = left.min(edit.column);
+                    bottom = bottom.max(edit.row);
+                    right = right.max(edit.column);
+                }
+                self.selection = Selection {
+                    anchor: CellPos {
+                        row: top,
+                        column: left,
+                    },
+                    cursor: CellPos {
+                        row: bottom,
+                        column: right,
+                    },
+                };
+            }
+            HistoryStep::Axis { axis, edits } => {
+                let key = matches!(axis, AxisKind::X);
+                for edit in edits {
+                    self.pending_axis.insert((key, edit.index), edit.value);
+                }
+            }
         }
     }
 
@@ -1000,25 +1496,45 @@ pub fn parse_edit(text: &str) -> Result<Option<(EditOp, f64)>, EditError> {
         return Ok(None);
     }
 
-    let (operation, rest) = match text.as_bytes()[0] {
-        b'+' => (EditOp::Add, &text[1..]),
-        b'-' => (EditOp::Add, &text[1..]),
-        b'*' => (EditOp::Multiply, &text[1..]),
-        b'/' => (EditOp::Divide, &text[1..]),
-        b'=' => (EditOp::Set, &text[1..]),
-        _ => (EditOp::Set, text),
+    // A trailing `%` makes a relative change a percentage of the current
+    // value: `+5%` raises each cell by five percent. Only `+` and `-` take it,
+    // because "set to 5% of itself" and "multiply by 5%" would be readings of
+    // the same text.
+    let percent = text.ends_with('%');
+    let body = if percent {
+        text[..text.len() - 1].trim_end()
+    } else {
+        text
     };
+    if body.is_empty() {
+        return Err(EditError::NotANumber);
+    }
+
+    let (mut operation, rest) = match body.as_bytes()[0] {
+        b'+' => (EditOp::Add, &body[1..]),
+        b'-' => (EditOp::Add, &body[1..]),
+        b'*' => (EditOp::Multiply, &body[1..]),
+        b'/' => (EditOp::Divide, &body[1..]),
+        b'=' => (EditOp::Set, &body[1..]),
+        _ => (EditOp::Set, body),
+    };
+    if percent {
+        if operation != EditOp::Add {
+            return Err(EditError::UnsupportedPercent);
+        }
+        operation = EditOp::Percent;
+    }
 
     // A bare `+` or `-` nudges by one step: the tuner pressed the key and then
     // Enter, rather than typing a relative amount like `+2`.
-    if text == "+" {
+    if !percent && body == "+" {
         return Ok(Some((EditOp::Add, 1.0)));
     }
-    if text == "-" {
+    if !percent && body == "-" {
         return Ok(Some((EditOp::Add, -1.0)));
     }
 
-    let number = if text.starts_with('-') {
+    let number = if body.starts_with('-') {
         format!("-{rest}")
     } else {
         rest.to_owned()
@@ -1036,8 +1552,33 @@ pub fn parse_edit(text: &str) -> Result<Option<(EditOp, f64)>, EditError> {
     Ok(Some((operation, value)))
 }
 
+/// Replaces a UTF-16 range in an ASCII edit string.
+fn replace_range(current: &str, range: Option<Range<usize>>, text: &str) -> String {
+    let mut next = current.to_owned();
+    match range {
+        Some(range) => {
+            let start = range.start.min(next.len());
+            let end = range.end.min(next.len()).max(start);
+            next.replace_range(start..end, text);
+        }
+        None => next.push_str(text),
+    }
+    next
+}
+
+/// Rounds to the digits the table shows, so a fraction does not hide in a
+/// cell the tuner only sees as a whole number.
+fn round_to_digits(value: f64, digits: usize) -> f64 {
+    let factor = 10f64.powi(digits as i32);
+    (value * factor).round() / factor
+}
+
 fn is_edit_character(character: char) -> bool {
-    character.is_ascii_digit() || matches!(character, '.' | '-' | '+' | '*' | '/' | '=' | 'e' | 'E')
+    character.is_ascii_digit()
+        || matches!(
+            character,
+            '.' | '-' | '+' | '*' | '/' | '=' | '%' | 'e' | 'E'
+        )
 }
 
 fn clamp_signed(current: usize, delta: isize, last: usize) -> usize {
@@ -1333,9 +1874,7 @@ mod tests {
         {
             model.pop_axis_char();
         }
-        for character in "2500".chars() {
-            model.push_axis_char(character);
-        }
+        model.replace_edit_text(None, "2500");
         let edits = model.commit_axis_edit().expect("a valid bin");
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].index, 1);
@@ -1358,9 +1897,7 @@ mod tests {
         {
             model.pop_axis_char();
         }
-        for character in "600".chars() {
-            model.push_axis_char(character);
-        }
+        model.replace_edit_text(None, "600");
         model.commit_axis_edit().expect("a valid bin");
         assert!(
             !model.axis_monotonic(AxisKind::X),
@@ -1377,5 +1914,382 @@ mod tests {
         let mut model = TableModel::new();
         model.set_table(summary);
         assert!(!model.begin_axis_edit(AxisKind::X, 0));
+    }
+
+    fn table_with(rows: usize, columns: usize, cells: &[f64], digits: u8) -> TableSummary {
+        let mut summary = table(rows, columns);
+        summary.cells = cells.to_vec();
+        summary.digits = digits;
+        summary
+    }
+
+    #[test]
+    fn a_percent_edit_changes_each_cell_relative_to_itself() {
+        assert_eq!(parse_edit("+5%"), Ok(Some((EditOp::Percent, 5.0))));
+        assert_eq!(parse_edit("-10%"), Ok(Some((EditOp::Percent, -10.0))));
+        assert_eq!(parse_edit("+5 %"), Ok(Some((EditOp::Percent, 5.0))));
+        assert_eq!(parse_edit("5%"), Err(EditError::UnsupportedPercent));
+        assert_eq!(parse_edit("*5%"), Err(EditError::UnsupportedPercent));
+        assert_eq!(parse_edit("/5%"), Err(EditError::UnsupportedPercent));
+        assert_eq!(parse_edit("=5%"), Err(EditError::UnsupportedPercent));
+        assert_eq!(parse_edit("%"), Err(EditError::NotANumber));
+
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 2, &[10.0, 20.0], 2));
+        model.select_all();
+        model.begin_edit(Some('+'));
+        model.push_char('5');
+        model.push_char('%');
+        model.commit_edit().expect("a valid percent edit");
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 10.5);
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 21.0);
+    }
+
+    #[test]
+    fn interpolation_draws_a_line_between_the_selected_ends() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 3, &[0.0, 42.0, 100.0], 0));
+        model.select_all();
+        let edits = model
+            .bulk_edit(BulkOp::InterpolateRows)
+            .expect("three columns");
+        assert_eq!(
+            edits,
+            vec![CellEdit {
+                row: 0,
+                column: 1,
+                value: 50.0,
+            }]
+        );
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 50.0);
+        assert_eq!(model.action(), Some(GridAction::Interpolated { cells: 1 }));
+
+        let mut column = TableModel::new();
+        column.set_table(table_with(3, 1, &[0.0, 42.0, 100.0], 0));
+        column.select_all();
+        let edits = column
+            .bulk_edit(BulkOp::InterpolateColumns)
+            .expect("three rows");
+        assert_eq!(
+            edits,
+            vec![CellEdit {
+                row: 1,
+                column: 0,
+                value: 50.0,
+            }]
+        );
+        assert_eq!(column.value(CellPos { row: 1, column: 0 }), 50.0);
+    }
+
+    #[test]
+    fn smoothing_averages_with_orthogonal_neighbours_once() {
+        let mut cells = vec![0.0; 9];
+        cells[4] = 9.0;
+        let mut model = TableModel::new();
+        model.set_table(table_with(3, 3, &cells, 0));
+        model.select_all();
+        let edits = model.bulk_edit(BulkOp::Smooth).expect("nine cells");
+        assert_eq!(edits.len(), 9);
+        assert_eq!(
+            model.value(CellPos { row: 1, column: 1 }),
+            3.0,
+            "the centre averages itself twice with four zero neighbours"
+        );
+        assert_eq!(
+            model.value(CellPos { row: 0, column: 1 }),
+            2.0,
+            "an edge uses the original centre, not its smoothed value"
+        );
+        assert_eq!(model.action(), Some(GridAction::Smoothed { cells: 9 }));
+    }
+
+    #[test]
+    fn equalizing_sets_every_selected_cell_to_the_mean() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(2, 2, &[0.0, 2.0, 4.0, 6.0], 0));
+        model.select_all();
+        let edits = model.bulk_edit(BulkOp::Equalize).expect("four cells");
+        assert_eq!(edits.len(), 4);
+        for edit in &edits {
+            assert_eq!(edit.value, 3.0);
+        }
+        assert_eq!(model.action(), Some(GridAction::Equalized { cells: 4 }));
+    }
+
+    #[test]
+    fn filling_down_uses_the_top_displayed_row() {
+        // Default orientation: the highest data row is drawn on top, so row 1
+        // is the source and row 0 the copy.
+        let mut model = TableModel::new();
+        model.set_table(table_with(2, 2, &[1.0, 2.0, 3.0, 4.0], 0));
+        model.select_all();
+        let edits = model.bulk_edit(BulkOp::FillDown).expect("two rows");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.row == 0));
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 3.0);
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 4.0);
+        assert_eq!(
+            model.value(CellPos { row: 1, column: 0 }),
+            3.0,
+            "the source row keeps its own values"
+        );
+
+        // Flipped: the lowest data row is on top and becomes the source.
+        let mut flipped = TableModel::new();
+        flipped.set_flip_y(true);
+        flipped.set_table(table_with(2, 2, &[1.0, 2.0, 3.0, 4.0], 0));
+        flipped.select_all();
+        flipped.bulk_edit(BulkOp::FillDown).expect("two rows");
+        assert_eq!(flipped.value(CellPos { row: 0, column: 0 }), 1.0);
+        assert_eq!(flipped.value(CellPos { row: 1, column: 0 }), 1.0);
+        assert_eq!(flipped.value(CellPos { row: 1, column: 1 }), 2.0);
+    }
+
+    #[test]
+    fn filling_right_copies_the_leftmost_selected_column() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(2, 2, &[1.0, 2.0, 3.0, 4.0], 0));
+        model.select_all();
+        let edits = model.bulk_edit(BulkOp::FillRight).expect("two columns");
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.column == 1));
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 1.0);
+        assert_eq!(model.value(CellPos { row: 1, column: 1 }), 3.0);
+    }
+
+    #[test]
+    fn a_bulk_operation_needs_the_shape_it_reads() {
+        let mut model = TableModel::new();
+        model.set_table(table(2, 2));
+        model.select_all();
+        assert!(!model.bulk_available(BulkOp::InterpolateRows));
+        assert!(!model.bulk_available(BulkOp::InterpolateColumns));
+        assert!(model.bulk_available(BulkOp::Smooth));
+        assert!(model.bulk_available(BulkOp::Equalize));
+        assert!(model.bulk_available(BulkOp::FillDown));
+        assert!(model.bulk_available(BulkOp::FillRight));
+
+        model.select(CellPos { row: 0, column: 0 });
+        assert!(!model.bulk_available(BulkOp::Smooth));
+        assert!(!model.bulk_available(BulkOp::FillDown));
+        assert!(!model.bulk_available(BulkOp::FillRight));
+        assert_eq!(
+            model.bulk_edit(BulkOp::Smooth),
+            Err(EditError::SelectionTooSmall)
+        );
+        assert_eq!(model.action(), Some(GridAction::TooSmall));
+    }
+
+    #[test]
+    fn a_committed_edit_can_be_undone_and_redone() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 1, &[10.0], 0));
+        model.select(CellPos { row: 0, column: 0 });
+        model.begin_edit(Some('5'));
+        model.commit_edit().expect("a valid edit");
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 5.0);
+        assert!(model.can_undo());
+        assert!(!model.can_redo());
+
+        let step = model.undo().expect("a command to undo");
+        match step {
+            HistoryStep::Cells(edits) => assert_eq!(
+                edits,
+                vec![CellEdit {
+                    row: 0,
+                    column: 0,
+                    value: 10.0,
+                }]
+            ),
+            HistoryStep::Axis { .. } => panic!("a cell edit must undo as cells"),
+        }
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 10.0);
+        assert_eq!(model.action(), Some(GridAction::Undone { cells: 1 }));
+        assert!(!model.can_undo());
+        assert!(model.can_redo());
+
+        let step = model.redo().expect("a command to redo");
+        match step {
+            HistoryStep::Cells(edits) => assert_eq!(
+                edits,
+                vec![CellEdit {
+                    row: 0,
+                    column: 0,
+                    value: 5.0,
+                }]
+            ),
+            HistoryStep::Axis { .. } => panic!("a cell edit must redo as cells"),
+        }
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 5.0);
+        assert_eq!(model.action(), Some(GridAction::Redone { cells: 1 }));
+    }
+
+    #[test]
+    fn a_header_bin_edit_is_undoable_too() {
+        use oxtuner_core::AxisKind;
+
+        let mut model = TableModel::new();
+        model.set_table(table(1, 2));
+        assert!(model.begin_axis_edit(AxisKind::X, 1));
+        while model
+            .axis_editing()
+            .is_some_and(|editing| !editing.text.is_empty())
+        {
+            model.pop_axis_char();
+        }
+        model.replace_edit_text(None, "2500");
+        model.commit_axis_edit().expect("a valid bin");
+        assert_eq!(model.axis_value(AxisKind::X, 1), 2500.0);
+
+        let step = model.undo().expect("a command to undo");
+        match step {
+            HistoryStep::Axis { axis, edits } => {
+                assert_eq!(axis, AxisKind::X);
+                assert_eq!(
+                    edits,
+                    vec![oxtuner_core::AxisEdit {
+                        index: 1,
+                        value: 500.0,
+                    }]
+                );
+            }
+            HistoryStep::Cells(_) => panic!("a bin edit must undo as an axis step"),
+        }
+        assert_eq!(model.axis_value(AxisKind::X, 1), 500.0);
+        assert_eq!(model.action(), Some(GridAction::UndoneAxis { bins: 1 }));
+
+        model.redo().expect("a command to redo");
+        assert_eq!(model.axis_value(AxisKind::X, 1), 2500.0);
+        assert_eq!(model.action(), Some(GridAction::RedoneAxis { bins: 1 }));
+    }
+
+    #[test]
+    fn a_rejected_command_leaves_the_history() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 1, &[10.0], 0));
+        model.begin_edit(Some('5'));
+        model.commit_edit().expect("a valid edit");
+        assert!(model.can_undo());
+
+        model.reject_pending();
+        assert_eq!(
+            model.value(CellPos { row: 0, column: 0 }),
+            10.0,
+            "the optimistic value is dropped"
+        );
+        assert!(
+            !model.can_undo(),
+            "a write the core refused must not be undoable"
+        );
+        assert!(!model.can_redo());
+
+        // The same failure may be observed again. With an older, confirmed
+        // step in the stack, a second report must not eat it.
+        model.set_table(table_with(1, 1, &[10.0], 0));
+        model.begin_edit(Some('3'));
+        model.commit_edit().expect("a valid edit");
+        model.set_table(table_with(1, 1, &[3.0], 0));
+        model.begin_edit(Some('7'));
+        model.commit_edit().expect("a valid edit");
+        model.reject_pending();
+        assert!(model.can_undo(), "the confirmed step is still undoable");
+        model.reject_pending();
+        assert!(
+            model.can_undo(),
+            "a repeated rejection has nothing left to drop"
+        );
+    }
+
+    #[test]
+    fn selecting_another_table_forgets_the_history() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 1, &[10.0], 0));
+        model.begin_edit(Some('5'));
+        model.commit_edit().expect("a valid edit");
+        assert!(model.can_undo());
+
+        let mut other = table_with(1, 1, &[10.0], 0);
+        other.id = "other".to_owned();
+        model.set_table(other);
+        assert!(!model.can_undo());
+        assert!(!model.can_redo());
+    }
+
+    #[test]
+    fn a_bulk_command_undoes_as_one_step() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 3, &[0.0, 42.0, 100.0], 0));
+        model.select_all();
+        model
+            .bulk_edit(BulkOp::InterpolateRows)
+            .expect("three columns");
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 50.0);
+
+        model.undo().expect("one step for the whole line");
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 42.0);
+        assert!(!model.can_undo());
+    }
+
+    #[test]
+    fn re_binning_spaces_an_axis_evenly_and_undoes() {
+        use oxtuner_core::AxisKind;
+
+        let mut summary = table(2, 4);
+        summary.x_axis.values = vec![0.0, 100.0, 400.0, 1000.0];
+        let mut model = TableModel::new();
+        model.set_table(summary);
+        assert!(model.can_rebin(AxisKind::X));
+
+        let edits = model.rebin_axis(AxisKind::X).expect("four bins");
+        assert_eq!(
+            edits,
+            vec![
+                oxtuner_core::AxisEdit {
+                    index: 1,
+                    value: 333.0,
+                },
+                oxtuner_core::AxisEdit {
+                    index: 2,
+                    value: 667.0,
+                },
+            ]
+        );
+        assert_eq!(model.axis_value(AxisKind::X, 1), 333.0);
+        assert_eq!(model.axis_value(AxisKind::X, 2), 667.0);
+        assert_eq!(model.action(), Some(GridAction::RebinnedAxis { bins: 2 }));
+
+        model.undo().expect("one step for the axis");
+        assert_eq!(model.axis_value(AxisKind::X, 1), 100.0);
+        assert_eq!(model.axis_value(AxisKind::X, 2), 400.0);
+    }
+
+    #[test]
+    fn a_two_bin_axis_cannot_be_rebinned() {
+        use oxtuner_core::AxisKind;
+
+        let mut model = TableModel::new();
+        model.set_table(table(2, 2));
+        assert!(!model.can_rebin(AxisKind::X));
+        assert_eq!(model.rebin_axis(AxisKind::X), Err(EditError::AxisTooSmall));
+        assert_eq!(model.action(), Some(GridAction::TooSmall));
+    }
+
+    #[test]
+    fn platform_text_replaces_the_typed_range() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 1, &[0.0], 0));
+        model.begin_edit(Some('5'));
+        assert!(model.replace_edit_text(None, "12"));
+        assert_eq!(model.edit_text(), Some("512"));
+        assert!(model.replace_edit_text(Some(1..3), "4"));
+        assert_eq!(model.edit_text(), Some("54"));
+        assert!(model.replace_edit_text(None, "a"));
+        assert_eq!(
+            model.edit_text(),
+            Some("54"),
+            "characters outside the edit language are dropped"
+        );
+        model.cancel_edit();
+        assert_eq!(model.edit_text(), None);
     }
 }

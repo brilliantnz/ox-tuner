@@ -10,6 +10,7 @@ use std::{collections::HashMap, path::PathBuf};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::Button;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Selectable as _};
@@ -23,7 +24,7 @@ use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
 use crate::core::{CoreService, edit_table, read_table};
 use crate::i18n::t;
 use crate::state::session::{AppState, schedule_save};
-use crate::table::{GridAction, TableGrid, TableGridEvent};
+use crate::table::{BulkOp, GridAction, TableGrid, TableGridEvent};
 
 /// The table editor for the node selected in the navigation tree.
 pub(crate) struct TableEditor {
@@ -263,9 +264,123 @@ impl TableEditor {
 
         let copy = self.grid.clone();
         let paste = self.grid.clone();
+        let undo = self.grid.clone();
+        let redo = self.grid.clone();
+        let operations = self.grid.clone();
+
+        // A menu entry that cannot run is shown disabled: the selection's shape
+        // decides, and the operation explains itself in its label.
+        let (can_undo, can_redo, bulk, rebin) = {
+            let model = self.grid.read(cx).model();
+            (
+                model.can_undo(),
+                model.can_redo(),
+                [
+                    model.bulk_available(BulkOp::InterpolateRows),
+                    model.bulk_available(BulkOp::InterpolateColumns),
+                    model.bulk_available(BulkOp::Smooth),
+                    model.bulk_available(BulkOp::Equalize),
+                    model.bulk_available(BulkOp::FillDown),
+                    model.bulk_available(BulkOp::FillRight),
+                ],
+                [
+                    model.can_rebin(oxtuner_core::AxisKind::X),
+                    model.can_rebin(oxtuner_core::AxisKind::Y),
+                ],
+            )
+        };
+        let [
+            interpolate_rows,
+            interpolate_columns,
+            smooth,
+            equalize,
+            fill_down,
+            fill_right,
+        ] = bulk;
+        let [rebin_x, rebin_y] = rebin;
 
         let changed = table.map_or(0, |table| table.changed_cells());
+        let operations_button = Button::new("table-operations")
+            .label(t!("app.table.operations"))
+            .dropdown_caret(true)
+            .disabled(!has_table || read_only)
+            .dropdown_menu(move |menu, _, _| {
+                menu.item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.interpolate_rows"),
+                    BulkOp::InterpolateRows,
+                    !interpolate_rows,
+                ))
+                .item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.interpolate_columns"),
+                    BulkOp::InterpolateColumns,
+                    !interpolate_columns,
+                ))
+                .item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.smooth"),
+                    BulkOp::Smooth,
+                    !smooth,
+                ))
+                .item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.equalize"),
+                    BulkOp::Equalize,
+                    !equalize,
+                ))
+                .item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.fill_down"),
+                    BulkOp::FillDown,
+                    !fill_down,
+                ))
+                .item(bulk_item(
+                    operations.clone(),
+                    t!("app.table.fill_right"),
+                    BulkOp::FillRight,
+                    !fill_right,
+                ))
+                .separator()
+                .item(rebin_item(
+                    operations.clone(),
+                    t!("app.table.rebin_x"),
+                    oxtuner_core::AxisKind::X,
+                    !rebin_x,
+                ))
+                .item(rebin_item(
+                    operations.clone(),
+                    t!("app.table.rebin_y"),
+                    oxtuner_core::AxisKind::Y,
+                    !rebin_y,
+                ))
+            });
         let toolbar = Toolbar::new("table-toolbar")
+            .child(
+                Button::new("table-undo")
+                    .icon(IconName::Undo2)
+                    .accessibility_label(t!("app.table.undo"))
+                    .tooltip(t!("app.table.undo_tooltip"))
+                    .disabled(!can_undo)
+                    .on_click(move |_, window, cx| {
+                        let focus = undo.read(cx).focus_handle(cx);
+                        undo.update(cx, |grid, cx| grid.undo(cx));
+                        window.focus(&focus, cx);
+                    }),
+            )
+            .child(
+                Button::new("table-redo")
+                    .icon(IconName::Redo2)
+                    .accessibility_label(t!("app.table.redo"))
+                    .tooltip(t!("app.table.redo_tooltip"))
+                    .disabled(!can_redo)
+                    .on_click(move |_, window, cx| {
+                        let focus = redo.read(cx).focus_handle(cx);
+                        redo.update(cx, |grid, cx| grid.redo(cx));
+                        window.focus(&focus, cx);
+                    }),
+            )
+            .content(Separator::vertical().h_5())
             .child(
                 Button::new("table-copy")
                     .icon(IconName::Copy)
@@ -351,7 +466,13 @@ impl TableEditor {
                         )
                     }),
             )
-            .child(toolbar)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(operations_button)
+                    .child(toolbar),
+            )
             .into_any_element()
     }
 
@@ -456,6 +577,24 @@ impl TableEditor {
             GridAction::Copied { cells } => t!("app.table.copied", count = cells.to_string()),
             GridAction::Pasted { cells } => t!("app.table.pasted", count = cells.to_string()),
             GridAction::PasteRejected => t!("app.table.paste_rejected"),
+            GridAction::Interpolated { cells } => {
+                t!("app.table.interpolated", count = cells.to_string())
+            }
+            GridAction::Smoothed { cells } => t!("app.table.smoothed", count = cells.to_string()),
+            GridAction::Equalized { cells } => t!("app.table.equalized", count = cells.to_string()),
+            GridAction::Filled { cells } => t!("app.table.filled", count = cells.to_string()),
+            GridAction::Undone { cells } => t!("app.table.undone", count = cells.to_string()),
+            GridAction::Redone { cells } => t!("app.table.redone", count = cells.to_string()),
+            GridAction::UndoneAxis { bins } => {
+                t!("app.table.undone_axis", count = bins.to_string())
+            }
+            GridAction::RedoneAxis { bins } => {
+                t!("app.table.redone_axis", count = bins.to_string())
+            }
+            GridAction::TooSmall => t!("app.table.too_small"),
+            GridAction::RebinnedAxis { bins } => {
+                t!("app.table.rebinned_axis", count = bins.to_string())
+            }
         });
 
         h_flex()
@@ -530,6 +669,36 @@ impl Render for TableEditor {
             .child(content)
             .when_some(status, |this, status| this.child(status))
     }
+}
+
+fn bulk_item(
+    grid: Entity<TableGrid>,
+    label: SharedString,
+    op: BulkOp,
+    disabled: bool,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .disabled(disabled)
+        .on_click(move |_, window, cx| {
+            let focus = grid.read(cx).focus_handle(cx);
+            grid.update(cx, |grid, cx| grid.bulk(op, cx));
+            window.focus(&focus, cx);
+        })
+}
+
+fn rebin_item(
+    grid: Entity<TableGrid>,
+    label: SharedString,
+    axis: oxtuner_core::AxisKind,
+    disabled: bool,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label)
+        .disabled(disabled)
+        .on_click(move |_, window, cx| {
+            let focus = grid.read(cx).focus_handle(cx);
+            grid.update(cx, |grid, cx| grid.rebin(axis, cx));
+            window.focus(&focus, cx);
+        })
 }
 
 fn axis_caption(axis: &oxtuner_core::AxisSummary) -> String {

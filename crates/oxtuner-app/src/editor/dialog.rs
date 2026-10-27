@@ -339,6 +339,7 @@ impl DialogEditor {
             EditOp::Add => current + amount,
             EditOp::Multiply => current * amount,
             EditOp::Divide => current / amount,
+            EditOp::Percent => current * (1.0 + amount / 100.0),
         };
         if !value.is_finite() {
             self.editing = Some(RowEditing {

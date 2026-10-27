@@ -184,6 +184,52 @@ app:
       en: Pasted %{count} cells
     paste_rejected:
       en: The clipboard does not fit here
+    undo:
+      en: Undo
+    undo_tooltip:
+      en: Undo the last table edit
+    redo:
+      en: Redo
+    redo_tooltip:
+      en: Redo the last undone table edit
+    operations:
+      en: Operations
+    interpolate_rows:
+      en: Interpolate across rows
+    interpolate_columns:
+      en: Interpolate down columns
+    smooth:
+      en: Smooth
+    equalize:
+      en: Equalize
+    fill_down:
+      en: Fill down
+    fill_right:
+      en: Fill right
+    rebin_x:
+      en: Re-bin X bins
+    rebin_y:
+      en: Re-bin Y bins
+    rebinned_axis:
+      en: Respaced %{count} bins
+    interpolated:
+      en: Interpolated %{count} cells
+    smoothed:
+      en: Smoothed %{count} cells
+    equalized:
+      en: Set %{count} cells to the mean
+    filled:
+      en: Filled %{count} cells
+    undone:
+      en: Undid %{count} cells
+    redone:
+      en: Redid %{count} cells
+    undone_axis:
+      en: Undid %{count} bins
+    redone_axis:
+      en: Redid %{count} bins
+    too_small:
+      en: Select more cells for this operation
   dialog:
     save:
       en: Save

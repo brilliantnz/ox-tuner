@@ -412,6 +412,81 @@ fn the_column_band_sits_next_to_the_body(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// A keystroke with the platform's command modifier: Cmd on macOS, Ctrl
+/// elsewhere. The grid reads `modifiers.platform`, so the test must press the
+/// same key a user would.
+fn shortcut(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("cmd-{key}")
+    } else {
+        format!("ctrl-{key}")
+    }
+}
+
+#[gpui_kit::test]
+fn undo_and_redo_keys_write_the_old_and_new_values(cx: &mut TestAppContext) {
+    let (handle, grid, events) = open(cx, 8, 8);
+    let position = CellPos { row: 2, column: 3 };
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(cell(2, 3, 8), cx);
+        window.press("5", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    assert_eq!(cx.update(|cx| grid.read(cx).model().value(position)), 5.0);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.press(&shortcut("z"), cx);
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| grid.read(cx).model().value(position)),
+        19.0,
+        "undo restores the value the edit replaced"
+    );
+    let undone = events.borrow().iter().rev().find_map(|event| match event {
+        TableGridEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
+        _ => None,
+    });
+    assert_eq!(undone, Some(19.0), "undo is sent to the core as an edit");
+
+    cx.update_window(handle, |_, window, cx| {
+        window.press(&shortcut("shift-z"), cx);
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| grid.read(cx).model().value(position)),
+        5.0,
+        "redo writes the edit again"
+    );
+    let redone = events.borrow().iter().rev().find_map(|event| match event {
+        TableGridEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
+        _ => None,
+    });
+    assert_eq!(redone, Some(5.0));
+}
+
+#[gpui_kit::test]
+fn a_128x128_table_lays_out_only_the_cells_on_screen(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 128, 128);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // The default orientation draws data row 127 at the top and the first
+        // columns at the left. The far corner is outside the viewport.
+        assert!(
+            window.try_find(cell(127, 0, 128)).is_some(),
+            "the top-left cell must be built"
+        );
+        assert!(
+            window.try_find(cell(127, 127, 128)).is_none(),
+            "a cell outside the viewport must not be built, or 128x128 builds 16k elements"
+        );
+    })
+    .unwrap();
+}
+
 /// 1-minute load average (macOS `sysctl vm.loadavg`), or 0 when unavailable.
 fn load_1min() -> f64 {
     let Ok(output) = std::process::Command::new("sysctl")
@@ -484,6 +559,69 @@ fn renders_32x32_within_the_60fps_budget(cx: &mut TestAppContext) {
     let allowed = judged_budget_ms();
     eprintln!(
         "table grid perf 32x32: median batch p95 {median_p95:.3} ms, budget {allowed:.1} ms \
+         (load {:.2})",
+        load_1min()
+    );
+
+    assert!(
+        median_p95 < allowed,
+        "median batch p95 must stay inside the 60 fps budget, got {median_p95:.3} ms \
+         (batches: {batch_p95:?}, load {:.2})",
+        load_1min()
+    );
+}
+
+/// A 128×128 table is the widest the definitions declare. Virtualisation must
+/// keep it on the same frame budget as a 32×32 one: only the visible window of
+/// cells is built, so the table's area must not matter.
+#[gpui_kit::test]
+fn renders_128x128_within_the_60fps_budget(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 128, 128);
+    let frames = 120;
+    let mut batch_p95 = Vec::new();
+    let mut batch_stats = Vec::new();
+
+    cx.update_window(handle, |_, window, cx| {
+        for _ in 0..3 {
+            let mut samples = Vec::with_capacity(frames);
+            for frame in 0..frames {
+                grid.update(cx, |grid, cx| {
+                    grid.nudge_selection(cx);
+                    grid.set_realtime(
+                        Some(RealtimePoint {
+                            row: frame % 128,
+                            column: (frame * 7) % 128,
+                            value: 42.0,
+                        }),
+                        cx,
+                    );
+                });
+                let started = Instant::now();
+                window.render_frame(cx);
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let p50 = samples[samples.len() / 2];
+            let p95 = samples[samples.len() * 95 / 100];
+            let p99 = samples[samples.len() * 99 / 100];
+            let max = samples[samples.len() - 1];
+            batch_stats.push(format!(
+                "mean {mean:.3}, p50 {p50:.3}, p95 {p95:.3}, p99 {p99:.3}, max {max:.3}"
+            ));
+            batch_p95.push(p95);
+        }
+    })
+    .unwrap();
+
+    for (batch, stats) in batch_stats.iter().enumerate() {
+        eprintln!("table grid perf 128x128 batch {batch}: {stats} ms");
+    }
+    batch_p95.sort_by(f64::total_cmp);
+    let median_p95 = batch_p95[1];
+    let allowed = judged_budget_ms();
+    eprintln!(
+        "table grid perf 128x128: median batch p95 {median_p95:.3} ms, budget {allowed:.1} ms \
          (load {:.2})",
         load_1min()
     );

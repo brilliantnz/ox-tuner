@@ -9,7 +9,7 @@ mod grid;
 mod model;
 
 pub(crate) use grid::{TableGrid, TableGridEvent};
-pub(crate) use model::{EditOp, GridAction, parse_edit};
+pub(crate) use model::{BulkOp, EditOp, GridAction, parse_edit};
 
 #[cfg(test)]
 mod tests;
