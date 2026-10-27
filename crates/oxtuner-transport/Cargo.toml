@@ -1,0 +1,16 @@
+[package]
+name = "oxtuner-transport"
+description = "Byte transports for ox-tuner: serial, trace recording and replay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serial2 = "0.2.39"
+tracing = "0.1.44"
+
+[lints]
+workspace = true
