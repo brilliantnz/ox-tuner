@@ -10,6 +10,10 @@ on:
   issue_comment:
     types: [created]
   workflow_dispatch:
+  # Long-running fuzz targets. The short runs are part of every pull request;
+  # this one finds the deep inputs on a schedule.
+  schedule:
+    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
@@ -97,6 +101,42 @@ jobs:
         with:
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The protocol and trace parsers take untrusted bytes. The short runs below
+  # gate a PR; the scheduled job (fuzz-long) runs the same targets for longer.
+  fuzz:
+    name: fuzz (protocol, quick)
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Frame decoder (60 s)
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run decode_frame -- -max_total_time=60
+      - name: Trace parser (60 s)
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run replay_trace -- -max_total_time=60
+
+  fuzz-long:
+    name: fuzz (scheduled, 20 min per target)
+    needs: gate
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Frame decoder
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run decode_frame -- -max_total_time=1200
+      - name: Trace parser
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run replay_trace -- -max_total_time=1200
 
   # CI: clippy -D warnings and tests must pass on Windows, macOS, Linux.
   build-test:
