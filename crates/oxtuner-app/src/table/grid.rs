@@ -647,7 +647,7 @@ impl TableGrid {
 }
 
 impl Render for TableGrid {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(table) = self.model.table() else {
             return div().size_full().into_any_element();
         };
@@ -663,12 +663,17 @@ impl Render for TableGrid {
         let body_width =
             px(columns as f32 * CELL_WIDTH + columns.saturating_sub(1) as f32 * CELL_GAP);
         let body_height = px(rows as f32 * CELL_HEIGHT + rows.saturating_sub(1) as f32 * CELL_GAP);
-        let bounds = self.body_scroll.bounds();
+        // The scroll handle's bounds are only refreshed after a paint, so they
+        // still describe the previous table on the frame a new one opens. A
+        // short table would then report a viewport too small for a tall one and
+        // the bottom rows would stay unbuilt until something repainted. The
+        // window is an upper bound on the body, which over-renders a little but
+        // can never hide a row that is on screen.
+        let viewport = window.viewport_size();
         let step_x = CELL_WIDTH + CELL_GAP;
         let step_y = CELL_HEIGHT + CELL_GAP;
-        let (first_column, last_column) =
-            visible_range(offset.x, bounds.size.width, step_x, columns);
-        let (first_row, last_row) = visible_range(offset.y, bounds.size.height, step_y, rows);
+        let (first_column, last_column) = visible_range(offset.x, viewport.width, step_x, columns);
+        let (first_row, last_row) = visible_range(offset.y, viewport.height, step_y, rows);
 
         let theme = cx.theme();
         let background = theme.background;

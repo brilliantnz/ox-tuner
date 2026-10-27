@@ -192,6 +192,30 @@ fn a_flipped_y_axis_puts_the_lowest_row_on_top(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_taller_table_lays_out_every_row_on_the_frame_it_opens(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 4, 4);
+
+    cx.update(|cx| {
+        grid.update(cx, |grid, cx| grid.set_table(table(16, 16), cx));
+    });
+
+    // One frame only: the scroll handle still holds the 4x4 body's bounds, so
+    // deriving the viewport from it used to skip the lower rows until the
+    // pointer moved. Data row 0 is the bottom row of the default display.
+    let bottom = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(cell(5, 0, 16))
+        })
+        .unwrap();
+
+    assert!(
+        bottom.is_some(),
+        "the whole table must be laid out as soon as it opens"
+    );
+}
+
+#[gpui_kit::test]
 fn typing_an_edit_requests_it_and_shows_it_immediately(cx: &mut TestAppContext) {
     let (handle, grid, events) = open(cx, 8, 8);
 
