@@ -213,13 +213,17 @@ impl Transport for SerialTransport {
                 };
             }
 
+            // Never read more than the caller asked to keep: bytes taken
+            // from the OS and then discarded would desynchronise the next
+            // conversation.
+            let remaining = max - (sink.len() - before);
+            let take = remaining.min(buffer.len());
             let port = self.port()?;
-            match port.read(&mut buffer) {
+            match port.read(&mut buffer[..take]) {
                 Ok(0) => {}
                 Ok(read) => {
-                    let take = read.min(max - (sink.len() - before));
-                    sink.extend_from_slice(&buffer[..take]);
-                    if buffer[..take].contains(&terminator) {
+                    sink.extend_from_slice(&buffer[..read]);
+                    if buffer[..read].contains(&terminator) {
                         return Ok(());
                     }
                 }

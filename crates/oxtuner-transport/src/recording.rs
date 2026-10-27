@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::Transport;
 use crate::error::TransportError;
-use crate::trace::{Direction, Trace, TraceFrame};
+use crate::trace::{Direction, MAX_TRACE_FRAMES, Trace, TraceFrame};
 
 /// Records every byte a wrapped transport sends or receives.
 ///
@@ -17,6 +17,8 @@ pub struct RecordingTransport {
     started: Instant,
     frames: Vec<TraceFrame>,
     headers: Vec<String>,
+    /// Set when the frame cap was reached; later frames are not recorded.
+    truncated: bool,
 }
 
 impl RecordingTransport {
@@ -27,6 +29,7 @@ impl RecordingTransport {
             started: Instant::now(),
             frames: Vec::new(),
             headers: vec!["# ox-tuner trace v1".to_owned()],
+            truncated: false,
         }
     }
 
@@ -44,16 +47,32 @@ impl RecordingTransport {
         &self.frames
     }
 
+    /// Whether the frame cap stopped the recording.
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// The headers, with a note when the recording hit its cap.
+    fn headers(&self) -> Vec<String> {
+        let mut headers = self.headers.clone();
+        if self.truncated {
+            headers.push(format!("# truncated after {} frames", self.frames.len()));
+        }
+        headers
+    }
+
     /// The trace recorded so far, owned.
     pub fn trace(&self) -> Trace {
-        Trace::from_parts(self.frames.clone(), self.headers.clone())
+        Trace::from_parts(self.frames.clone(), self.headers())
     }
 
     /// Saves the trace recorded so far and returns its frame count.
+    ///
+    /// The frames are borrowed, not cloned: a session trace can hold tens of
+    /// thousands of frames and saving should not double that.
     pub fn save(&self, path: &std::path::Path) -> Result<usize, TransportError> {
-        let trace = self.trace();
-        trace.save(path)?;
-        Ok(trace.len())
+        crate::trace::write(path, &self.headers(), &self.frames)?;
+        Ok(self.frames.len())
     }
 
     /// Number of frames recorded so far.
@@ -70,6 +89,10 @@ impl RecordingTransport {
         // An empty write/read is not a frame: a trace should not gain lines for
         // operations that moved no bytes.
         if bytes.is_empty() {
+            return;
+        }
+        if self.frames.len() >= MAX_TRACE_FRAMES {
+            self.truncated = true;
             return;
         }
         self.frames.push(TraceFrame::new(
