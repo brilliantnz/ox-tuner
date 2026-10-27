@@ -1,0 +1,29 @@
+[package]
+name = "oxtuner-protocol-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A separate workspace: `cargo fuzz` builds with nightly and a sanitizer, which
+# the normal workspace build must never inherit.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxtuner-protocol = { path = ".." }
+oxtuner-transport = { path = "../../oxtuner-transport" }
+
+[[bin]]
+name = "decode_frame"
+path = "fuzz_targets/decode_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "replay_trace"
+path = "fuzz_targets/replay_trace.rs"
+test = false
+doc = false

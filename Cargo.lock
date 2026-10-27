@@ -5004,6 +5004,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxtuner-protocol"
+version = "0.0.0"
+dependencies = [
+ "oxtuner-ini",
+ "oxtuner-transport",
+ "proptest",
+ "tracing",
+]
+
+[[package]]
 name = "oxtuner-transport"
 version = "0.0.0"
 dependencies = [

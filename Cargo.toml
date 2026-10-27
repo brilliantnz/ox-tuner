@@ -10,6 +10,7 @@ members = [
   "crates/oxtuner-core",
   "crates/oxtuner-ini",
   "crates/oxtuner-project",
+  "crates/oxtuner-protocol",
   "crates/oxtuner-transport",
   "crates/oxtuner-tune",
 ]
@@ -26,6 +27,7 @@ gpui-kit = "=0.8.1"
 oxtuner-core = { path = "./crates/oxtuner-core" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
 oxtuner-project = { path = "./crates/oxtuner-project" }
+oxtuner-protocol = { path = "./crates/oxtuner-protocol" }
 oxtuner-transport = { path = "./crates/oxtuner-transport" }
 oxtuner-tune = { path = "./crates/oxtuner-tune" }
 
