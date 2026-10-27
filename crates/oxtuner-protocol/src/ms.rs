@@ -135,7 +135,12 @@ const SIGNATURE_TIMEOUT: Duration = Duration::from_millis(1500);
 const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
 
 /// The longest signature reply accepted.
-const SIGNATURE_MAX: usize = 128;
+///
+/// Generous on purpose: rusEFI and board-generated INIs append a version and a
+/// board name, and a cut-off signature would be reported as a mismatch. The
+/// serial reader stops at the quiet window, so this bound is a safety net, not
+/// the normal end of the reply.
+const SIGNATURE_MAX: usize = 512;
 
 /// The chunk size used when a definition omits `blockingFactor`.
 ///
@@ -385,7 +390,10 @@ impl MsProtocol {
             )));
         }
         let size = usize::try_from(spec.size).unwrap_or(0);
-        let mut bytes = Vec::with_capacity(size);
+        // A definition can state a page size up to `u32::MAX`; do not reserve
+        // that up front. The read itself is chunked and fails on the first
+        // offset that no longer fits the wire.
+        let mut bytes = Vec::with_capacity(size.min(64 * 1024));
         let mut offset = 0usize;
         while offset < size {
             let chunk = self.blocking_factor.min(size - offset);
@@ -568,6 +576,14 @@ impl MsProtocol {
         let mut header = [0u8; 2];
         io.read_exact_timeout(&mut header, self.block_read_timeout)?;
         let length = Frame::length(header);
+        // Reject a corrupt length before allocating or waiting for bytes that
+        // cannot belong to a valid reply.
+        if length > crate::frame::MAX_PAYLOAD {
+            return Err(ProtocolError::BadFrame(format!(
+                "the reply declares {length} payload bytes, the limit is {}",
+                crate::frame::MAX_PAYLOAD
+            )));
+        }
         let mut rest = vec![0u8; length + 4];
         io.read_exact_timeout(&mut rest, self.block_read_timeout)?;
 

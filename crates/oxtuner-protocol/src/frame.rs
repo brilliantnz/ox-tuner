@@ -166,7 +166,20 @@ impl FrameDecoder {
     }
 
     /// Appends bytes and returns every complete frame they finished.
+    ///
+    /// A decoder that sees an invalid length, a bad CRC or more buffered bytes
+    /// than any frame can hold **resets itself** and returns the error. A
+    /// caller that keeps feeding a wedged buffer would otherwise re-hit the
+    /// same bad bytes forever; after a reset, the next `push` starts clean.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, FrameError> {
+        // One call may carry at most one frame's worth of bytes. A stream is
+        // fed in pieces anyway, and this keeps a single huge slice from being
+        // copied into the buffer before the first length check.
+        if bytes.len() > MAX_PAYLOAD + 6 {
+            return Err(FrameError::TooLarge {
+                declared: bytes.len(),
+            });
+        }
         self.buffer.extend_from_slice(bytes);
         let mut frames = Vec::new();
 
@@ -176,15 +189,29 @@ impl FrameDecoder {
             }
             let declared = Frame::length([self.buffer[0], self.buffer[1]]);
             if declared > MAX_PAYLOAD {
+                self.buffer.clear();
                 return Err(FrameError::TooLarge { declared });
             }
             let total = declared + 6;
             if self.buffer.len() < total {
+                // A partial frame can never be larger than the maximum frame.
+                if self.buffer.len() > MAX_PAYLOAD + 6 {
+                    let buffered = self.buffer.len();
+                    self.buffer.clear();
+                    return Err(FrameError::TooLarge { declared: buffered });
+                }
                 break;
             }
-            let frame = Frame::parse(&self.buffer[..total])?;
-            self.buffer.drain(..total);
-            frames.push(frame);
+            match Frame::parse(&self.buffer[..total]) {
+                Ok(frame) => {
+                    self.buffer.drain(..total);
+                    frames.push(frame);
+                }
+                Err(error) => {
+                    self.buffer.clear();
+                    return Err(error);
+                }
+            }
         }
 
         Ok(frames)
@@ -230,6 +257,31 @@ mod tests {
             Frame::parse(&encoded),
             Err(FrameError::Length { .. })
         ));
+    }
+
+    #[test]
+    fn a_decoder_that_sees_garbage_resets_instead_of_staying_poisoned() {
+        let mut decoder = FrameDecoder::new();
+        // A corrupt length field is rejected and the bad bytes are dropped.
+        assert!(decoder.push(&[0xFF, 0xFF]).is_err());
+        assert_eq!(decoder.pending(), 0);
+
+        let encoded = Frame::encode(b"ok").expect("encodes");
+        let frames = decoder.push(&encoded).expect("the next frame parses");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload, b"ok");
+    }
+
+    #[test]
+    fn the_decoder_rejects_a_push_larger_than_any_frame() {
+        let mut decoder = FrameDecoder::new();
+
+        let error = decoder
+            .push(&vec![0u8; MAX_PAYLOAD + 7])
+            .expect_err("too many bytes for one frame");
+
+        assert!(matches!(error, FrameError::TooLarge { .. }));
+        assert_eq!(decoder.pending(), 0);
     }
 
     #[test]
