@@ -156,12 +156,18 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
         };
         match variable.shape {
             EntryShape::Text { len } => {
+                // A text constant whose address did not land inside the page is
+                // skipped, like an unresolved numeric one. `start == len` is a
+                // valid empty write; beyond it is a definition bug.
+                if start >= bytes.len() {
+                    continue;
+                }
                 let Ok(text) = tune.text(&variable.name) else {
                     continue;
                 };
                 let source = text.as_bytes();
                 let end = start.saturating_add(len).min(bytes.len());
-                let take = source.len().min(end.saturating_sub(start));
+                let take = source.len().min(end - start);
                 bytes[start..start + take].copy_from_slice(&source[..take]);
             }
             EntryShape::Scalar => {
@@ -440,6 +446,37 @@ value = scalar, U08, 2, \"x\", 1.0, 0.0
         assert_eq!(report.skipped, 1);
         assert_eq!(tune.raw_at("broken", 0).unwrap(), 0.0);
         assert_eq!(tune.raw_at("value", 0).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn a_text_constant_past_the_page_end_is_skipped_not_a_panic() {
+        // A mis-resolved string address must be ignored, not sliced out of
+        // bounds. `encode_page` has no report, so the observable contract is:
+        // it returns without panicking and writes nothing there.
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+name = string, ASCII, 99, 4
+value = scalar, U08, 0, \"x\", 1.0, 0.0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        // The text address (99) lies past the 4-byte page: a definition bug the
+        // encoder must skip instead of slicing out of bounds.
+        let layout = Layout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+
+        let bytes = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+
+        assert_eq!(bytes.len(), 4);
     }
 
     #[test]
