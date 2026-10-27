@@ -235,12 +235,14 @@ mod tests {
             kind: MenuNodeKind::Menu,
             detail: None,
             target: None,
+            embedded: None,
             children: vec![MenuNode {
                 id: "menu:0/0".to_owned(),
                 label: "VE Table".to_owned(),
                 kind: MenuNodeKind::Table,
                 detail: None,
                 target: Some("veTableTbl".to_owned()),
+                embedded: None,
                 children: Vec::new(),
             }],
         }]

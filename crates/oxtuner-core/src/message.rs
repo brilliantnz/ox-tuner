@@ -12,9 +12,9 @@
 //!   [`Event::DefinitionUnloaded`], [`Event::Failed`] or [`Event::Rejected`] —
 //!   never twice, never silently.
 
-use std::{fmt, path::PathBuf};
+use std::{collections::HashSet, fmt, path::PathBuf};
 
-use oxtuner_ini::{Definition, SettingsContext, Severity};
+use oxtuner_ini::{Definition, DialogRow, RowKind, SettingsContext, Severity};
 use oxtuner_project::Project;
 use oxtuner_tune::CellState;
 
@@ -486,7 +486,18 @@ pub struct SaveSummary {
     pub cells: usize,
 }
 
-/// One scalar row of a dialog, shaped for the constant list.
+/// What a dialog row holds, for the UI to pick a presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogFieldKind {
+    /// A scalar value from `field`, `displayOnlyField`, `slider` or a setting.
+    Value,
+    /// A boolean from `checkbox` or `radio`; the value is 0 or 1.
+    Toggle,
+    /// Text with no variable: a hint or a warning the definition shows.
+    Note,
+}
+
+/// One row of a dialog, shaped for the constant list.
 ///
 /// Values are in **user units**. The UI keeps no tune values of its own: it
 /// renders this snapshot and asks for edits by variable.
@@ -494,11 +505,11 @@ pub struct SaveSummary {
 pub struct DialogFieldSummary {
     /// Label from the row, unquoted.
     pub label: String,
-    /// Tune variable the row writes.
+    /// Tune variable the row writes, empty for a note.
     pub variable: String,
     /// User value, for scalar numbers.
     pub value: Option<f64>,
-    /// Text, for string variables.
+    /// Text, for string variables and notes.
     pub text: Option<String>,
     /// Units of the value.
     pub units: String,
@@ -510,24 +521,33 @@ pub struct DialogFieldSummary {
     pub display_only: bool,
     /// Whether the session may store an edit to this row.
     pub writable: bool,
+    /// What the row holds, so a toggle is not drawn as a plain number.
+    pub kind: DialogFieldKind,
+    /// The nested panel title the row came from, empty at the dialog's top.
+    pub section: String,
+    /// Whether a note is a warning (`!` or `#` before the text).
+    pub warning: bool,
 }
 
-/// One dialog, shaped for the constant list: its scalar rows in document order.
+/// One dialog, shaped for the constant list.
 ///
-/// Panels, gauges and embedded tables are navigation, not rows: they open from
-/// the tree. Only `field`-style rows that name a tune variable appear here.
+/// Panels are flattened into the field list: a dialog like `Engine Constants`
+/// is a border layout of panels, and its constants live one or two levels down.
+/// Tables and curves a panel embeds stay out; the menu opens them as grids.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DialogSummary {
     /// The definition's dialog name.
     pub id: String,
     /// Window title from the definition, or the dialog name.
     pub title: String,
-    /// Scalar rows in document order.
+    /// Rows in document order, panels flattened in place.
     pub fields: Vec<DialogFieldSummary>,
     /// Number of fields that differ from the file baseline.
     pub changed: usize,
     /// Whether the session may store edits.
     pub writable: bool,
+    /// Built-in `std_*` panels this dialog embeds, which this build cannot draw.
+    pub unavailable: Vec<String>,
 }
 
 /// One table, shaped for the grid.
@@ -633,6 +653,15 @@ impl TableSummary {
                 .is_some_and(|bins| bins.array.eq_ignore_ascii_case(name))
         }) {
             return Self::from_curve(project, curve);
+        }
+
+        // A menu's `VE Table` is a dialog whose panel holds the map; opening it
+        // by the dialog name must still reach the grid inside.
+        if let Some(dialog) = definition.dialogs.get_ci(name)
+            && let Some(embedded) =
+                crate::menu::embedded_target(&dialog.name, definition, &mut HashSet::new())
+        {
+            return Self::from_project(project, &embedded.id);
         }
 
         Err(format!("the definition has no table named `{name}`"))
@@ -900,12 +929,17 @@ fn axis_summary(
 }
 
 impl DialogSummary {
-    /// Reads one dialog's scalar rows from an open project.
+    /// Reads one dialog's rows from an open project, panels flattened.
     ///
-    /// Rows that do not name a tune variable (panels, buttons, help text) are
-    /// navigation or decoration, not values, and are skipped. A dialog with no
-    /// scalar rows is an empty list, not an error: some dialogs only embed
-    /// tables, which open from the tree.
+    /// A dialog is a layout: `Engine Constants` is a border of panels, and the
+    /// constants sit one or two levels down. Reading only its own rows would
+    /// show an empty list, so panels are walked in place and their rows keep the
+    /// nested title as a section. Rows that name no tune variable and carry one
+    /// field are the definition's own text, kept as notes. A built-in `std_*`
+    /// panel cannot be drawn from the definition and is reported by name.
+    ///
+    /// Tables and curves a panel embeds are grids, not rows: the menu opens
+    /// them, and only the grid's snapshot carries their values.
     pub(crate) fn from_project(project: &Project, name: &str) -> Result<Self, String> {
         let definition = project.definition();
         let dialog = definition
@@ -913,88 +947,16 @@ impl DialogSummary {
             .get_ci(name)
             .ok_or_else(|| format!("the definition has no dialog named `{name}`"))?;
 
-        let tune = project.tune();
-        let baseline = project.images().baseline();
-        let read_only = project.is_read_only();
         let mut fields = Vec::new();
-
-        for row in &dialog.rows {
-            let display_only = matches!(row.kind, oxtuner_ini::RowKind::DisplayOnlyField);
-            if !matches!(
-                row.kind,
-                oxtuner_ini::RowKind::Field
-                    | oxtuner_ini::RowKind::DisplayOnlyField
-                    | oxtuner_ini::RowKind::Slider
-            ) {
-                continue;
-            }
-            let label = row
-                .fields
-                .first()
-                .map(|field| oxtuner_ini::fields::unquote(field).to_owned())
-                .unwrap_or_default();
-            // Either order: the variable is the first field that names one.
-            let variable = row
-                .fields
-                .iter()
-                .skip(1)
-                .map(|field| oxtuner_ini::fields::unquote(field).trim())
-                .find(|field| project.layout().variable(field).is_some())
-                .or_else(|| {
-                    // A row that names no other variable may itself be one.
-                    let first = row
-                        .fields
-                        .first()
-                        .map(|field| oxtuner_ini::fields::unquote(field).trim())
-                        .unwrap_or_default();
-                    (!first.is_empty() && project.layout().variable(first).is_some())
-                        .then_some(first)
-                });
-            let Some(variable) = variable else {
-                continue;
-            };
-            let Ok(spec) = tune.variable(variable) else {
-                continue;
-            };
-
-            let (value, text) = if spec.shape.is_scalar() && spec.shape.is_numeric() {
-                (tune.user_at(variable, 0).ok(), None)
-            } else if !spec.shape.is_numeric() {
-                (None, tune.text(variable).ok().map(str::to_owned))
-            } else {
-                (None, None)
-            };
-            let changed = if spec.shape.is_scalar() && spec.shape.is_numeric() {
-                matches!(
-                    (tune.raw_at(variable, 0), baseline.raw_at(variable, 0)),
-                    (Ok(current), Ok(saved)) if current != saved
-                )
-            } else {
-                false
-            };
-            let writable =
-                !display_only && !read_only && tune.is_writable(variable) && value.is_some();
-
-            fields.push(DialogFieldSummary {
-                label: if label.is_empty() {
-                    variable.to_owned()
-                } else {
-                    label
-                },
-                variable: variable.to_owned(),
-                value,
-                text,
-                units: if spec.shape.is_numeric() {
-                    spec.units.clone()
-                } else {
-                    String::new()
-                },
-                digits: spec.digits,
-                changed,
-                display_only,
-                writable,
-            });
-        }
+        let mut unavailable = Vec::new();
+        collect_rows(
+            project,
+            &dialog.name,
+            "",
+            &mut HashSet::new(),
+            &mut fields,
+            &mut unavailable,
+        );
 
         let changed = fields.iter().filter(|field| field.changed).count();
         Ok(Self {
@@ -1006,9 +968,184 @@ impl DialogSummary {
                 .unwrap_or_else(|| dialog.name.clone()),
             fields,
             changed,
-            writable: !read_only,
+            writable: !project.is_read_only(),
+            unavailable,
         })
     }
+}
+
+/// Collects a dialog's rows, walking its panels in place.
+///
+/// `visited` holds lowercased dialog names: definitions reference panels in
+/// cycles, and a dialog that appears twice in one layout is drawn once.
+fn collect_rows(
+    project: &Project,
+    name: &str,
+    section: &str,
+    visited: &mut HashSet<String>,
+    fields: &mut Vec<DialogFieldSummary>,
+    unavailable: &mut Vec<String>,
+) {
+    if !visited.insert(name.to_ascii_lowercase()) {
+        return;
+    }
+    let definition = project.definition();
+    let Some(dialog) = definition.dialogs.get_ci(name) else {
+        return;
+    };
+
+    for row in &dialog.rows {
+        match row.kind {
+            RowKind::Panel => {
+                let Some(target) = row
+                    .fields
+                    .first()
+                    .map(|field| oxtuner_ini::fields::unquote(field).trim())
+                else {
+                    continue;
+                };
+                if target.is_empty() {
+                    continue;
+                }
+                if let Some(nested) = definition.dialogs.get_ci(target) {
+                    let title = nested
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty());
+                    collect_rows(
+                        project,
+                        &nested.name,
+                        title.unwrap_or(section),
+                        visited,
+                        fields,
+                        unavailable,
+                    );
+                } else if target.to_ascii_lowercase().starts_with("std_")
+                    && !unavailable
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(target))
+                {
+                    unavailable.push(target.to_owned());
+                }
+            }
+            RowKind::Field
+            | RowKind::DisplayOnlyField
+            | RowKind::Slider
+            | RowKind::Checkbox
+            | RowKind::Radio
+            | RowKind::SettingSelector => {
+                if let Some(field) = field_row(project, row, section) {
+                    fields.push(field);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One readable row of a dialog.
+///
+/// The variable is the first field after the label that names a tune constant;
+/// a row with one field and no variable is text the definition shows (a hint or
+/// a warning), not a value.
+fn field_row(project: &Project, row: &DialogRow, section: &str) -> Option<DialogFieldSummary> {
+    let label = row
+        .fields
+        .first()
+        .map(|field| oxtuner_ini::fields::unquote(field).to_owned())
+        .unwrap_or_default();
+
+    let tune = project.tune();
+    let variable = row
+        .fields
+        .iter()
+        .skip(1)
+        .map(|field| oxtuner_ini::fields::unquote(field).trim())
+        .find(|field| project.layout().variable(field).is_some())
+        .or_else(|| {
+            // A row that names no other variable may itself be one.
+            let first = row
+                .fields
+                .first()
+                .map(|field| oxtuner_ini::fields::unquote(field).trim())
+                .unwrap_or_default();
+            (!first.is_empty() && project.layout().variable(first).is_some()).then_some(first)
+        });
+
+    let Some(variable) = variable else {
+        if row.fields.len() != 1 || label.is_empty() {
+            return None;
+        }
+        let warning = matches!(label.chars().next(), Some('!' | '#'));
+        let text = if warning {
+            label.get(1..).map(str::trim).unwrap_or_default().to_owned()
+        } else {
+            label
+        };
+        return Some(DialogFieldSummary {
+            label: text.clone(),
+            variable: String::new(),
+            value: None,
+            text: Some(text),
+            units: String::new(),
+            digits: 0,
+            changed: false,
+            display_only: true,
+            writable: false,
+            kind: DialogFieldKind::Note,
+            section: section.to_owned(),
+            warning,
+        });
+    };
+
+    let spec = tune.variable(variable).ok()?;
+    let baseline = project.images().baseline();
+    let (value, text) = if spec.shape.is_scalar() && spec.shape.is_numeric() {
+        (tune.user_at(variable, 0).ok(), None)
+    } else if !spec.shape.is_numeric() {
+        (None, tune.text(variable).ok().map(str::to_owned))
+    } else {
+        (None, None)
+    };
+    let changed = if spec.shape.is_scalar() && spec.shape.is_numeric() {
+        matches!(
+            (tune.raw_at(variable, 0), baseline.raw_at(variable, 0)),
+            (Ok(current), Ok(saved)) if current != saved
+        )
+    } else {
+        false
+    };
+    let display_only = row.kind == RowKind::DisplayOnlyField;
+    let writable =
+        !display_only && !project.is_read_only() && tune.is_writable(variable) && value.is_some();
+    let kind = match row.kind {
+        RowKind::Checkbox | RowKind::Radio => DialogFieldKind::Toggle,
+        _ => DialogFieldKind::Value,
+    };
+
+    Some(DialogFieldSummary {
+        label: if label.is_empty() {
+            variable.to_owned()
+        } else {
+            label
+        },
+        variable: variable.to_owned(),
+        value,
+        text,
+        units: if spec.shape.is_numeric() {
+            spec.units.clone()
+        } else {
+            String::new()
+        },
+        digits: spec.digits,
+        changed,
+        display_only,
+        writable,
+        kind,
+        section: section.to_owned(),
+        warning: false,
+    })
 }
 
 /// One command plus the id it will be answered under.

@@ -15,9 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use oxtuner_ini::{
-    Curve, Definition, Dialog, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table,
-};
+use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
 /// What a node in the navigation tree is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +77,12 @@ pub struct MenuNode {
     /// dialog its name. The editor asks the core for that id; it never reads the
     /// definition itself.
     pub target: Option<String>,
+    /// The table or curve a dialog's panels embed, when it declares one.
+    ///
+    /// `VE Table` in the Speeduino menu is a dialog whose north panel is the
+    /// 16×16 fuel map: opening the dialog name alone would lose the grid, so the
+    /// id travels beside the dialog target and the editor can show both.
+    pub embedded: Option<String>,
     /// Child nodes, in definition order.
     pub children: Vec<MenuNode>,
 }
@@ -125,6 +129,7 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         kind: MenuNodeKind::Menu,
         detail: None,
         target: None,
+        embedded: None,
         children,
     }
 }
@@ -155,6 +160,7 @@ fn build_item(
             kind: MenuNodeKind::Group,
             detail: None,
             target: None,
+            embedded: None,
             children: Vec::new(),
         },
         MenuTargetKind::Standard => MenuNode {
@@ -163,6 +169,7 @@ fn build_item(
             kind: MenuNodeKind::Standard,
             detail: None,
             target: None,
+            embedded: None,
             children: Vec::new(),
         },
         MenuTargetKind::Panel => resolve(id, label, &item.target, definition),
@@ -186,6 +193,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             kind: MenuNodeKind::Table,
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
@@ -197,6 +205,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             kind: MenuNodeKind::Table,
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
@@ -207,16 +216,24 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             kind: MenuNodeKind::Curve,
             detail: curve_detail(curve, definition),
             target: Some(curve.name.clone()),
+            embedded: None,
             children: Vec::new(),
         };
     }
     if let Some(dialog) = definition.dialogs.get_ci(target) {
+        let embedded = embedded_target(&dialog.name, definition, &mut HashSet::new());
         return MenuNode {
             id,
             label,
             kind: MenuNodeKind::Dialog,
-            detail: dialog_detail(dialog, definition),
+            detail: embedded
+                .as_ref()
+                .map(|found| found.detail)
+                .or(Some(MenuDetail::Dialog {
+                    rows: dialog.rows.len(),
+                })),
             target: Some(dialog.name.clone()),
+            embedded: embedded.map(|found| found.id),
             children: Vec::new(),
         };
     }
@@ -227,6 +244,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             kind: MenuNodeKind::Help,
             detail: None,
             target: Some(target.to_owned()),
+            embedded: None,
             children: Vec::new(),
         };
     }
@@ -236,6 +254,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
         kind: MenuNodeKind::Missing,
         detail: None,
         target: Some(target.to_owned()),
+        embedded: None,
         children: Vec::new(),
     }
 }
@@ -264,31 +283,28 @@ fn table_by_target<'a>(target: &str, definition: &'a Definition) -> Option<&'a T
     })
 }
 
-/// The size a dialog node shows.
+/// A table or curve a dialog's panels carry.
 ///
-/// A menu entry usually opens a dialog, and the size the reader cares about is
-/// the grid of the table the dialog embeds. `VE Table` in the Speeduino menu is
-/// a two-panel dialog whose north panel holds the 16x16 fuel map, so a row
-/// count there reads like the table has two rows. The first embedded table with
-/// a fixed grid wins. When the dialog carries no such table the row count is
-/// the only honest thing left to show.
-fn dialog_detail(dialog: &Dialog, definition: &Definition) -> Option<MenuDetail> {
-    let mut visited = HashSet::new();
-    embedded_table_detail(&dialog.name, definition, &mut visited).or(Some(MenuDetail::Dialog {
-        rows: dialog.rows.len(),
-    }))
+/// The id is the one the core reads snapshots by, and the detail is its size,
+/// so a menu node can show the grid instead of the dialog's row count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddedTarget {
+    pub(crate) id: String,
+    pub(crate) detail: MenuDetail,
 }
 
-/// Walks a dialog and the dialogs its panels embed, looking for a table.
+/// Walks a dialog and the dialogs its panels embed, looking for a table or curve.
 ///
-/// Panels nest (a dialog panel may hold another dialog that holds the table),
-/// and definitions can reference each other in cycles, so visited names are
-/// remembered and cut the walk short.
-fn embedded_table_detail(
+/// Panels nest (a dialog panel may hold another dialog that holds the map), and
+/// definitions can reference each other in cycles, so visited names are
+/// remembered and cut the walk short. A table wins over a curve in the same
+/// dialog because a grid is the larger thing to open; the first one found in
+/// row order is used.
+pub(crate) fn embedded_target(
     name: &str,
     definition: &Definition,
     visited: &mut HashSet<String>,
-) -> Option<MenuDetail> {
+) -> Option<EmbeddedTarget> {
     if !visited.insert(name.to_ascii_lowercase()) {
         return None;
     }
@@ -304,10 +320,21 @@ fn embedded_table_detail(
         if let Some(table) = table_by_target(target, definition)
             && let Some(detail) = table_detail(table, definition)
         {
-            return Some(detail);
+            return Some(EmbeddedTarget {
+                id: table.id.clone(),
+                detail,
+            });
         }
-        if let Some(detail) = embedded_table_detail(target, definition, visited) {
-            return Some(detail);
+        if let Some(curve) = definition.curves.get_ci(target)
+            && let Some(detail) = curve_detail(curve, definition)
+        {
+            return Some(EmbeddedTarget {
+                id: curve.name.clone(),
+                detail,
+            });
+        }
+        if let Some(found) = embedded_target(target, definition, visited) {
+            return Some(found);
         }
     }
     None
@@ -471,6 +498,7 @@ menu = \"3D &Tuning Maps\"
             "the dialog embeds the table, so its grid is the useful size"
         );
         assert_eq!(group.children[0].target.as_deref(), Some("veTableDialog"));
+        assert_eq!(group.children[0].embedded.as_deref(), Some("veTable1Tbl"));
         assert_eq!(group.children[1].kind, MenuNodeKind::Missing);
 
         let table = node(&menu.children, "VE Table");
@@ -568,6 +596,11 @@ menu = \"&Fuel\"
             Some(MenuDetail::Table { cols: 16, rows: 16 }),
             "the embedded table's grid is the size the reader cares about"
         );
+        assert_eq!(
+            ve_table.embedded.as_deref(),
+            Some("veTable1Tbl"),
+            "the editor can open the grid the dialog wraps"
+        );
 
         let plain = &tree[0].children[1];
         assert_eq!(
@@ -575,6 +608,7 @@ menu = \"&Fuel\"
             Some(MenuDetail::Dialog { rows: 1 }),
             "a dialog without a table keeps its row count"
         );
+        assert_eq!(plain.embedded, None);
 
         let cycle = &tree[0].children[2];
         assert_eq!(
@@ -582,6 +616,7 @@ menu = \"&Fuel\"
             Some(MenuDetail::Dialog { rows: 1 }),
             "panels that reference each other end the walk, not the program"
         );
+        assert_eq!(cycle.embedded, None);
     }
 
     #[test]

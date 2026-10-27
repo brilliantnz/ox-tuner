@@ -42,6 +42,9 @@ pub(crate) struct CoreStatus {
     pub(crate) dialog: Option<DialogSummary>,
     /// The last command failure, kept until a command succeeds.
     pub(crate) failure: Option<Failure>,
+    /// Bumped whenever an edit or a save may have moved tune values, so a view
+    /// can tell that copies it kept are no longer trustworthy.
+    pub(crate) tune_revision: u64,
 }
 
 impl CoreStatus {
@@ -159,12 +162,34 @@ fn apply(event: Event, cx: &mut App) {
             );
             (Update::Saved(outcome), None)
         }
-        Event::TableRead { table, .. } | Event::TableEdited { table, .. } => {
-            (Update::Table(table), None)
-        }
-        Event::DialogRead { dialog, .. } | Event::DialogEdited { dialog, .. } => {
-            (Update::Dialog(dialog), None)
-        }
+        Event::TableRead { table, .. } => (
+            Update::Table {
+                table,
+                edited: false,
+            },
+            None,
+        ),
+        Event::TableEdited { table, .. } => (
+            Update::Table {
+                table,
+                edited: true,
+            },
+            None,
+        ),
+        Event::DialogRead { dialog, .. } => (
+            Update::Dialog {
+                dialog,
+                edited: false,
+            },
+            None,
+        ),
+        Event::DialogEdited { dialog, .. } => (
+            Update::Dialog {
+                dialog,
+                edited: true,
+            },
+            None,
+        ),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => {
             tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
@@ -187,8 +212,8 @@ enum Update {
     Loaded(DefinitionSummary),
     Opened(ProjectSummary),
     Saved(SaveSummary),
-    Table(TableSummary),
-    Dialog(DialogSummary),
+    Table { table: TableSummary, edited: bool },
+    Dialog { dialog: DialogSummary, edited: bool },
     Unloaded,
     Failed(Failure),
     Nothing,
@@ -216,16 +241,23 @@ impl CoreStatus {
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
                 self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
             }
-            Update::Table(table) => {
+            Update::Table { table, edited } => {
                 self.table = Some(table);
                 // A successful table operation also proves the earlier failure
                 // is stale.
                 self.failure = None;
+                if edited {
+                    self.tune_revision = self.tune_revision.wrapping_add(1);
+                }
             }
-            Update::Dialog(dialog) => {
+            Update::Dialog { dialog, edited } => {
                 self.dialog = Some(dialog);
                 self.failure = None;
+                if edited {
+                    self.tune_revision = self.tune_revision.wrapping_add(1);
+                }
             }
             Update::Unloaded => *self = Self::default(),
             Update::Failed(failure) => {
@@ -499,6 +531,40 @@ mod tests {
             code,
             message: "boom".to_owned(),
         }
+    }
+
+    fn dialog() -> DialogSummary {
+        DialogSummary {
+            id: "engine".to_owned(),
+            title: "Engine".to_owned(),
+            fields: Vec::new(),
+            changed: 0,
+            writable: true,
+            unavailable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_an_edit_or_a_save_moves_the_tune_revision() {
+        let mut status = CoreStatus::default();
+
+        status.apply(Update::Dialog {
+            dialog: dialog(),
+            edited: false,
+        });
+        assert_eq!(status.tune_revision, 0, "a read is not a change");
+
+        status.apply(Update::Dialog {
+            dialog: dialog(),
+            edited: true,
+        });
+        assert_eq!(status.tune_revision, 1);
+
+        status.apply(Update::Saved(SaveSummary {
+            path: "/projects/roadster/CurrentTune.msq".into(),
+            cells: 3,
+        }));
+        assert_eq!(status.tune_revision, 2);
     }
 
     #[test]

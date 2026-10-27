@@ -7,7 +7,7 @@
 //! the only owner of tune values: a commit becomes a scalar command and the
 //! echoed snapshot clears the optimistic value.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::Button;
@@ -19,7 +19,7 @@ use gpui_kit::{
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{DialogSummary, Failure, FailureCode, SaveSummary};
+use oxtuner_core::{DialogFieldKind, DialogSummary, Failure, FailureCode, SaveSummary};
 
 use crate::core::CoreService;
 use crate::i18n::t;
@@ -49,6 +49,14 @@ pub(crate) struct DialogEditor {
     last_save: Option<SaveSummary>,
     /// The failure that stopped this dialog from appearing or saving.
     failure: Option<Failure>,
+    /// Snapshots by dialog id, so a dialog that was open once draws on the next
+    /// click instead of waiting for the core to answer again.
+    cache: HashMap<String, DialogSummary>,
+    /// The project the cache belongs to, so another folder starts clean.
+    project_root: Option<PathBuf>,
+    /// The tune revision the cache was filled at. An edit or a save elsewhere
+    /// can move a value another dialog shows, so the cache drops then too.
+    cache_revision: u64,
     /// The row being typed into, by field index.
     editing: Option<RowEditing>,
     /// Optimistic values not yet echoed by the core.
@@ -67,6 +75,9 @@ impl DialogEditor {
             dialog: None,
             last_save: None,
             failure: None,
+            cache: HashMap::new(),
+            project_root: None,
+            cache_revision: 0,
             editing: None,
             pending: HashMap::new(),
             _core,
@@ -104,7 +115,7 @@ impl DialogEditor {
             .as_ref()
             .filter(|dialog| dialog.id == name)
             .cloned();
-        if let Some(dialog) = existing {
+        if let Some(dialog) = existing.or_else(|| self.cache.get(name).cloned()) {
             self.dialog = Some(dialog);
         } else {
             self.dialog = None;
@@ -123,6 +134,18 @@ impl DialogEditor {
         let mut saved = false;
         let mut reload = None;
         let mut dialog_matches = false;
+
+        // A different project invalidates every snapshot: the values and the
+        // changed marks belong to the folder that produced them. An edit or a
+        // save moves the tune itself, so cached rows elsewhere are stale too.
+        let status = CoreService::status(cx);
+        let root = status.project.as_ref().map(|project| project.root.clone());
+        let revision = status.tune_revision;
+        if root != self.project_root || revision != self.cache_revision {
+            self.project_root = root;
+            self.cache_revision = revision;
+            self.cache.clear();
+        }
 
         {
             let status = CoreService::status(cx);
@@ -173,12 +196,16 @@ impl DialogEditor {
             // different stays optimistic.
             self.pending
                 .retain(|variable, pending| field_value(&dialog, variable) != Some(*pending));
+            self.cache.insert(dialog.id.clone(), dialog.clone());
             self.dialog = Some(dialog);
         }
         if dialog_matches {
             self.failure = None;
         }
         if cleared {
+            if let Some(name) = &self.requested {
+                self.cache.remove(name);
+            }
             self.dialog = None;
             self.editing = None;
             self.pending.clear();
@@ -233,6 +260,29 @@ impl DialogEditor {
             invalid: false,
         });
         window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Flips a checkbox or radio row.
+    ///
+    /// A toggle has two states, so a click is the whole edit; there is no text
+    /// to type and no reason to open an input for it.
+    fn toggle_field(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialog.as_ref() else {
+            return;
+        };
+        let Some(field) = dialog.fields.get(index) else {
+            return;
+        };
+        if !field.writable || field.kind != DialogFieldKind::Toggle {
+            return;
+        }
+        let current = self.value(dialog, index).unwrap_or(0.0);
+        let next = if current == 0.0 { 1.0 } else { 0.0 };
+        let (dialog_id, variable) = (dialog.id.clone(), field.variable.clone());
+        self.pending.insert(variable.clone(), next);
+        self.failure = None;
+        crate::core::edit_scalar(&dialog_id, &variable, next, cx);
         cx.notify();
     }
 
@@ -478,42 +528,79 @@ impl DialogEditor {
 
     fn render_rows(&self, dialog: &DialogSummary, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let mut rows = Vec::new();
+        let mut section = "";
 
-        v_flex()
-            .id("dialog-fields")
-            .flex_1()
-            .min_h_0()
-            .overflow_scroll()
-            .py_2()
-            .children(dialog.fields.iter().enumerate().map(|(index, field)| {
-                let value = self.value(dialog, index);
-                let text = value.map_or_else(
-                    || {
-                        field
-                            .text
-                            .clone()
-                            .unwrap_or_else(|| t!("app.dialog.no_value").to_string())
-                    },
-                    |value| {
-                        let rendered =
-                            format!("{value:.digits$}", digits = usize::from(field.digits));
-                        if field.units.is_empty() {
-                            rendered
+        for (index, field) in dialog.fields.iter().enumerate() {
+            if field.section != section && !field.section.is_empty() {
+                section = &field.section;
+                rows.push(
+                    div()
+                        .px_4()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(field.section.clone())
+                        .into_any_element(),
+                );
+            }
+
+            // Text the definition prints between values is not a row to edit.
+            if field.kind == DialogFieldKind::Note {
+                let color = if field.warning {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                };
+                rows.push(
+                    div()
+                        .px_4()
+                        .py_1()
+                        .text_sm()
+                        .text_color(color)
+                        .child(field.label.clone())
+                        .into_any_element(),
+                );
+                continue;
+            }
+
+            let value = self.value(dialog, index);
+            let text = value.map_or_else(
+                || {
+                    field
+                        .text
+                        .clone()
+                        .unwrap_or_else(|| t!("app.dialog.no_value").to_string())
+                },
+                |value| {
+                    if field.kind == DialogFieldKind::Toggle {
+                        return if value == 0.0 {
+                            t!("app.dialog.toggle_off").to_string()
                         } else {
-                            format!("{rendered} {}", field.units)
-                        }
-                    },
-                );
-                let editing = self
-                    .editing
-                    .as_ref()
-                    .filter(|editing| editing.index == index);
-                let invalid = editing.as_ref().is_some_and(|editing| editing.invalid);
-                let shown: SharedString = editing.map_or_else(
-                    || text.clone().into(),
-                    |editing| editing.text.clone().into(),
-                );
+                            t!("app.dialog.toggle_on").to_string()
+                        };
+                    }
+                    let rendered = format!("{value:.digits$}", digits = usize::from(field.digits));
+                    if field.units.is_empty() {
+                        rendered
+                    } else {
+                        format!("{rendered} {}", field.units)
+                    }
+                },
+            );
+            let editing = self
+                .editing
+                .as_ref()
+                .filter(|editing| editing.index == index);
+            let invalid = editing.as_ref().is_some_and(|editing| editing.invalid);
+            let shown: SharedString = editing.map_or_else(
+                || text.clone().into(),
+                |editing| editing.text.clone().into(),
+            );
+            let toggle = field.kind == DialogFieldKind::Toggle;
 
+            rows.push(
                 h_flex()
                     .min_h(px(32.))
                     .items_center()
@@ -546,7 +633,11 @@ impl DialogEditor {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                            this.begin_edit(index, window, cx);
+                                            if toggle {
+                                                this.toggle_field(index, cx);
+                                            } else {
+                                                this.begin_edit(index, window, cx);
+                                            }
                                         }),
                                     )
                             })
@@ -562,8 +653,32 @@ impl DialogEditor {
                             })
                             .child(shown),
                     )
-                    .into_any_element()
-            }))
+                    .into_any_element(),
+            );
+        }
+
+        if !dialog.unavailable.is_empty() {
+            rows.push(
+                div()
+                    .px_4()
+                    .pt_3()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t!(
+                        "app.dialog.unavailable_panels",
+                        names = dialog.unavailable.join(", ")
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        v_flex()
+            .id("dialog-fields")
+            .flex_1()
+            .min_h_0()
+            .overflow_scroll()
+            .py_2()
+            .children(rows)
             .into_any_element()
     }
 
@@ -575,7 +690,7 @@ impl DialogEditor {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(dialog) = dialog {
-            if dialog.fields.is_empty() {
+            if dialog.fields.is_empty() && dialog.unavailable.is_empty() {
                 return div()
                     .flex_1()
                     .min_h_0()

@@ -5,6 +5,8 @@
 //! The Y-axis flip is a workspace view preference, persisted with the panel
 //! layout so it survives a restart.
 
+use std::{collections::HashMap, path::PathBuf};
+
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::Button;
@@ -34,6 +36,14 @@ pub(crate) struct TableEditor {
     last_save: Option<SaveSummary>,
     /// The failure that stopped this table from appearing or saving.
     failure: Option<Failure>,
+    /// Snapshots by table id, so a table that was open once draws on the next
+    /// click instead of waiting for the core to answer again.
+    cache: HashMap<String, TableSummary>,
+    /// The project the cache belongs to, so another folder starts clean.
+    project_root: Option<PathBuf>,
+    /// The tune revision the cache was filled at. An edit or a save elsewhere
+    /// can move a value another dialog shows, so the cache drops then too.
+    cache_revision: u64,
     flip_y: bool,
     _core: Subscription,
     _grid: Subscription,
@@ -55,6 +65,9 @@ impl TableEditor {
             requested: None,
             last_save: None,
             failure: None,
+            cache: HashMap::new(),
+            project_root: None,
+            cache_revision: 0,
             flip_y,
             _core,
             _grid,
@@ -102,7 +115,7 @@ impl TableEditor {
             .as_ref()
             .filter(|table| table.id == name)
             .cloned();
-        if let Some(table) = existing {
+        if let Some(table) = existing.or_else(|| self.cache.get(name).cloned()) {
             self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
         } else {
             // Do not show the previous table's values while the next snapshot
@@ -123,6 +136,18 @@ impl TableEditor {
         let mut saved = false;
         let mut reload = None;
         let mut table_matches = false;
+
+        // A different project invalidates every snapshot: the values and the
+        // changed marks belong to the folder that produced them. An edit or a
+        // save moves the tune itself, so cached rows elsewhere are stale too.
+        let status = CoreService::status(cx);
+        let root = status.project.as_ref().map(|project| project.root.clone());
+        let revision = status.tune_revision;
+        if root != self.project_root || revision != self.cache_revision {
+            self.project_root = root;
+            self.cache_revision = revision;
+            self.cache.clear();
+        }
 
         {
             let status = CoreService::status(cx);
@@ -166,6 +191,7 @@ impl TableEditor {
 
         if let Some(table) = snapshot {
             self.failure = None;
+            self.cache.insert(table.id.clone(), table.clone());
             self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
         }
         if table_matches {
@@ -174,6 +200,9 @@ impl TableEditor {
             self.failure = None;
         }
         if cleared {
+            if let Some(name) = &self.requested {
+                self.cache.remove(name);
+            }
             self.grid.update(cx, TableGrid::clear_table);
         }
         if failure.is_some() {

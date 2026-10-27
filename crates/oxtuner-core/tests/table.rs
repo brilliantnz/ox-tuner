@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oxtuner_core::{
-    BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId,
-    TableSummary, start,
+    BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, DialogFieldKind, Event,
+    FailureCode, OpId, TableSummary, start,
 };
 use oxtuner_project::TUNE_FILE;
 
@@ -46,6 +46,15 @@ curve = idleCurve, "Idle Curve"
 [UserDefined]
 dialog = engineDialog, "Engine"
   field = "Req. Fuel", reqFuel
+
+dialog = southDialog, "South"
+  field = "Req. Fuel", reqFuel
+  field = "!Values must be sane"
+
+dialog = boardDialog, "Board"
+  panel = southDialog, Center
+  panel = std_injection, North
+  panel = veTableTbl, South
 
 [Menu]
 menuDialog = main
@@ -463,6 +472,71 @@ fn a_dialog_reads_its_scalar_rows() {
     assert_eq!(dialog.fields[0].value, Some(12.0));
     assert_eq!(dialog.fields[0].units, "ms");
     assert!(dialog.fields[0].writable);
+}
+
+#[test]
+fn a_dialog_flattens_the_panels_it_embeds() {
+    let dir = TempDir::new("dialog-panels");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .read_dialog("boardDialog")
+        .expect("the read is queued");
+    let Event::DialogRead {
+        op: answered,
+        dialog,
+    } = core.next()
+    else {
+        panic!("expected a dialog read");
+    };
+
+    assert_eq!(answered, op);
+    assert_eq!(dialog.title, "Board");
+    let labels: Vec<&str> = dialog
+        .fields
+        .iter()
+        .map(|field| field.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["Req. Fuel", "Values must be sane"],
+        "the panel's rows are the dialog's rows"
+    );
+    assert_eq!(dialog.fields[0].section, "South");
+    assert_eq!(dialog.fields[0].value, Some(12.0));
+    assert!(dialog.fields[0].writable);
+    assert_eq!(dialog.fields[1].kind, DialogFieldKind::Note);
+    assert!(dialog.fields[1].warning, "the `!` marker is a warning");
+    assert_eq!(
+        dialog.unavailable,
+        vec!["std_injection"],
+        "a built-in panel is named, not silently dropped"
+    );
+}
+
+#[test]
+fn a_dialog_id_opens_the_table_it_embeds() {
+    let dir = TempDir::new("dialog-table");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .read_table("boardDialog")
+        .expect("the read is queued");
+    let Event::TableRead {
+        op: answered,
+        table,
+    } = core.next()
+    else {
+        panic!("expected a table read");
+    };
+
+    assert_eq!(answered, op);
+    assert_eq!(table.id, "veTableTbl");
+    assert_eq!((table.cols, table.rows), (2, 2));
 }
 
 #[test]

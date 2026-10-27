@@ -28,7 +28,9 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar};
+use gpui_kit::component::{
+    ActiveTheme as _, Selectable as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
@@ -78,8 +80,25 @@ pub(crate) struct Shell {
     /// The dialog editor; one instance so the edit-in-progress survives a
     /// core echo.
     dialog_editor: Entity<DialogEditor>,
+    /// Which view a dialog-backed node shows: its grid or its constants.
+    tab: EditorTab,
+    /// The node the tab belongs to, so a new selection starts on the grid.
+    tab_node: Option<String>,
     /// Keeps the selection observer alive so the editor repaints on a click.
     _explorer: Subscription,
+}
+
+/// The two views a dialog that wraps a table offers.
+///
+/// `Tuning ▸ VE Table` is a dialog, not a table: its north panel holds the
+/// 16×16 map and its south panel holds a few options. The grid is what the
+/// reader came for, so it opens first; the constants are one click away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorTab {
+    /// The grid of the table or curve the dialog embeds.
+    Table,
+    /// The dialog's own rows.
+    Constants,
 }
 
 impl Shell {
@@ -133,25 +152,39 @@ impl Shell {
             explorer,
             table_editor,
             dialog_editor,
+            tab: EditorTab::Table,
+            tab_node: None,
             _explorer,
         }
     }
 
     /// Shows the selected node's editor. Tables and curves share the grid: a
     /// curve resolves as a one-row table, so its bins and values edit the same
-    /// way. Dialogs get the scalar list. Every other kind keeps the
-    /// placeholder.
+    /// way. Dialogs get the grid they embed, with their constants behind a tab,
+    /// or the constants alone. Every other kind keeps the placeholder.
     fn sync_editors(&mut self, cx: &mut Context<Self>) {
         let selected = self.explorer.read(cx).selected().cloned();
+        let node_id = selected.as_ref().map(|node| node.id.clone());
+        if node_id != self.tab_node {
+            self.tab_node = node_id;
+            self.tab = EditorTab::Table;
+        }
+
         let (table_target, dialog_target, label) = match selected {
             Some(node) => {
-                let table_target =
-                    if node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve {
-                        node.target.clone()
-                    } else {
-                        None
-                    };
-                let dialog_target = if node.kind == MenuNodeKind::Dialog {
+                let open_table =
+                    node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve;
+                let dialog_has_grid = node.kind == MenuNodeKind::Dialog && node.embedded.is_some();
+                let table_target = if open_table {
+                    node.target.clone()
+                } else if dialog_has_grid && self.tab == EditorTab::Table {
+                    node.embedded.clone()
+                } else {
+                    None
+                };
+                let dialog_target = if node.kind == MenuNodeKind::Dialog
+                    && !(dialog_has_grid && self.tab == EditorTab::Table)
+                {
                     node.target.clone()
                 } else {
                     None
@@ -193,6 +226,12 @@ impl Shell {
         let is_dialog = selected
             .as_ref()
             .is_some_and(|node| node.kind == MenuNodeKind::Dialog);
+        let dialog_has_grid = is_dialog
+            && selected
+                .as_ref()
+                .is_some_and(|node| node.embedded.is_some());
+        let show_table = is_table || (dialog_has_grid && self.tab == EditorTab::Table);
+        let show_dialog = is_dialog && !show_table;
         let has_project = project.is_some();
 
         let read_only = project.as_ref().is_some_and(|project| project.read_only);
@@ -241,9 +280,14 @@ impl Shell {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(is_table, |this| this.child(self.table_editor.clone()))
-                    .when(is_dialog, |this| this.child(self.dialog_editor.clone()))
-                    .when(!is_table && !is_dialog, |this| {
+                    .when(dialog_has_grid, |this| this.child(self.render_tabs(cx)))
+                    .when(show_table, |this| {
+                        this.child(div().flex_1().min_h_0().child(self.table_editor.clone()))
+                    })
+                    .when(show_dialog, |this| {
+                        this.child(div().flex_1().min_h_0().child(self.dialog_editor.clone()))
+                    })
+                    .when(!show_table && !show_dialog, |this| {
                         this.items_center()
                             .justify_center()
                             .gap_3()
@@ -302,6 +346,44 @@ impl Shell {
                             })
                     }),
             )
+    }
+
+    /// The grid/constants switch above a dialog that wraps a table.
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h_9()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("editor-tab-table")
+                    .label(t!("app.editor.tab_table"))
+                    .small()
+                    .ghost()
+                    .selected(self.tab == EditorTab::Table)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Table, cx))),
+            )
+            .child(
+                Button::new("editor-tab-constants")
+                    .label(t!("app.editor.tab_constants"))
+                    .small()
+                    .ghost()
+                    .selected(self.tab == EditorTab::Constants)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Constants, cx))),
+            )
+    }
+
+    /// Switches which view a dialog-backed node shows.
+    fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.sync_editors(cx);
+        cx.notify();
     }
 
     /// The panel toggles at the trailing edge of the main bar.

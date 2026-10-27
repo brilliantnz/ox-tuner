@@ -354,6 +354,7 @@ mod tests {
             },
             detail: None,
             target: None,
+            embedded: None,
             children,
         }
     }

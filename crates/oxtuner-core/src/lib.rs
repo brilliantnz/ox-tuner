@@ -69,9 +69,9 @@ mod service;
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
-    AxisEdit, AxisKind, AxisSummary, CellEdit, Command, DefinitionSummary, DialogFieldSummary,
-    DialogSummary, Event, Failure, FailureCode, OpId, ProjectSummary, RejectReason, SaveSummary,
-    TableSummary,
+    AxisEdit, AxisKind, AxisSummary, CellEdit, Command, DefinitionSummary, DialogFieldKind,
+    DialogFieldSummary, DialogSummary, Event, Failure, FailureCode, OpId, ProjectSummary,
+    RejectReason, SaveSummary, TableSummary,
 };
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
