@@ -14,9 +14,10 @@ use oxtuner_app::{
     app, core, init,
     platform::{logging, paths::AppPaths},
     project,
-    settings::preferences::{AppSettings, apply_theme},
+    settings::preferences::AppSettings,
     shell,
     state::session::AppState,
+    theme,
 };
 
 fn main() {
@@ -25,6 +26,10 @@ fn main() {
     let paths = AppPaths::discover();
     let settings = AppSettings::load(&paths);
     let session = AppState::load(&paths);
+
+    // The bundled OxTuner themes are seeded next to the settings file before
+    // anything reads them; the watcher installed later picks up user edits.
+    theme::seed(&paths);
 
     // Keep the writer guard alive for the process; dropping it stops flushing
     // the last records.
@@ -58,9 +63,10 @@ fn main() {
         cx.set_global(settings);
         cx.set_global(session);
 
-        // Follow the stored preference, not always the OS: choosing Light or
-        // Dark in Settings has to survive a restart.
-        apply_theme(cx.global::<AppSettings>().theme(), cx);
+        // Install the OxTuner light/dark pair, then follow the stored
+        // preference: choosing Light or Dark in Settings has to survive a
+        // restart, and System follows the OS from here on.
+        theme::register(&paths, cx);
 
         // The headless core: one thread that owns the open project (definition
         // and tune) and, later, the ECU session. Started before the first window
