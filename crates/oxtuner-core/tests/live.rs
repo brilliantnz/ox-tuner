@@ -512,3 +512,37 @@ fn a_test_connection_while_connected_is_refused() {
     harness.wait(|event| matches!(event, Event::Disconnected { .. }));
     harness.thread.join();
 }
+
+#[test]
+fn replacing_the_session_answers_an_in_flight_read() {
+    let harness = Harness::start();
+    harness.load();
+    harness.wait_loaded();
+    harness.connect(SimConfig {
+        faults: vec![FaultRule::new(
+            SimOp::ReadPage,
+            Fault::Delay {
+                delay: Duration::from_millis(300),
+            },
+            1,
+        )],
+        ..SimConfig::default()
+    });
+    harness.wait_connected();
+
+    let read = harness.handle.read_all().expect("queued");
+    // Replace the session while the read is still on the wire. Its command must
+    // be answered, not dropped with the connection.
+    harness.load();
+    let Event::Failed { op, failure } =
+        harness.wait(|event| matches!(event, Event::Failed { op, .. } if *op == read))
+    else {
+        unreachable!()
+    };
+    assert_eq!(op, read);
+    assert_eq!(failure.code, FailureCode::ReadFailed);
+    assert!(failure.message.contains("closed"));
+    harness.wait(|event| matches!(event, Event::DefinitionLoaded { .. }));
+
+    harness.thread.join();
+}

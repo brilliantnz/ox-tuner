@@ -347,9 +347,7 @@ fn run(
         service_live(&mut live, &mut session, &events, &latest, &mut report);
     }
 
-    if let Some(live) = live.take() {
-        live.thread.shutdown();
-    }
+    teardown(&mut live, &latest, &events);
 
     // Close the door first: from here on no command can be queued, so draining
     // below really is the last word. Without this, a send racing the shutdown
@@ -699,7 +697,7 @@ fn handle(
                     // dropped here, never handed back to a caller. A live
                     // connection belongs to the definition it was built from,
                     // so it is torn down first.
-                    teardown(live, latest);
+                    teardown(live, latest, events);
                     *session = Session::Definition(Box::new(parsed));
                     report.loads += 1;
                     send(events, Event::DefinitionLoaded { op, summary });
@@ -737,7 +735,7 @@ fn handle(
                         read_only = summary.read_only,
                         "project opened"
                     );
-                    teardown(live, latest);
+                    teardown(live, latest, events);
                     *session = Session::Project(Box::new(project));
                     report.projects_opened += 1;
                     send(events, Event::ProjectOpened { op, summary });
@@ -1137,7 +1135,7 @@ fn handle(
         }
         Command::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
-            teardown(live, latest);
+            teardown(live, latest, events);
             *session = Session::Empty;
             tracing::debug!(%op, had_session, "session unloaded");
             send(events, Event::DefinitionUnloaded { op });
@@ -1511,11 +1509,35 @@ impl Live {
 }
 
 /// Stops a live session, releases its port and forgets its frame.
-fn teardown(live: &mut Option<Live>, latest: &LatestFrame) {
-    if let Some(live) = live.take() {
-        live.thread.shutdown();
-        latest.clear();
+///
+/// Every command still waiting for the wire is answered before the port is
+/// closed. A session can be replaced by a project load or an explicit unload
+/// while a page read is in flight; without this, that `OpId` would never get an
+/// answer and the UI would wait forever.
+fn teardown(live: &mut Option<Live>, latest: &LatestFrame, events: &MTx<mpmc::Array<Event>>) {
+    let Some(mut live) = live.take() else {
+        return;
+    };
+    for pending in std::mem::take(&mut live.pending).into_values() {
+        match pending.kind {
+            // Background work the UI never asked for: no answer to send.
+            PendingKind::Realtime | PendingKind::Reconnect => {}
+            // The intent of a disconnect is fulfilled by closing the session.
+            PendingKind::Disconnect => send(events, Event::Disconnected { op: pending.op }),
+            _ => send(
+                events,
+                Event::Failed {
+                    op: pending.op,
+                    failure: Failure {
+                        code: failure_code(pending.kind),
+                        message: "the session was closed before the operation completed".to_owned(),
+                    },
+                },
+            ),
+        }
     }
+    live.thread.shutdown();
+    latest.clear();
 }
 
 /// How long the core may wait for the next command.
@@ -1696,7 +1718,7 @@ fn service_live(
     while let Ok(reply) = connection.replies.try_recv() {
         let keep = on_reply(connection, reply, session, events, latest, report);
         if !keep {
-            teardown(live, latest);
+            teardown(live, latest, events);
             return;
         }
     }
