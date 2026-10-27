@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use oxtuner_ini::{ConstantClass, DataType, Definition, Number, Shape};
+use oxtuner_ini::{ConstantClass, DataType, Definition, Endianness, Number, Shape};
 
 use crate::IniPage;
 
@@ -132,6 +132,12 @@ pub struct VariableSpec {
     pub shape: EntryShape,
     /// Wire storage type.
     pub data_type: DataType,
+    /// Offset inside the page, when the definition resolved one.
+    ///
+    /// `None` means the address could not be resolved (an unknown expression
+    /// or a malformed offset); such a variable cannot be taken from or written
+    /// to a page image, and the page codec reports it rather than guessing.
+    pub address: Option<u32>,
     /// Display units (empty when the definition writes a text expression).
     pub units: String,
     /// `user = (raw + translate) × scale`.
@@ -176,6 +182,8 @@ pub struct PageLayout {
     pub page: IniPage,
     /// Page size in bytes, from the definition.
     pub size: u32,
+    /// Base address added to every constant offset (`parameterStartOffset`).
+    pub start_offset: u32,
     /// Indices into [`Layout::variables`], in definition order.
     pub variables: Vec<usize>,
 }
@@ -255,6 +263,7 @@ impl fmt::Display for LayoutIssue {
 #[derive(Debug, Clone)]
 pub struct Layout {
     signature: String,
+    endianness: Endianness,
     variables: Vec<VariableSpec>,
     lookup: HashMap<String, usize>,
     pages: Vec<PageLayout>,
@@ -270,6 +279,7 @@ impl Layout {
     pub fn build(definition: &Definition, values: &dyn Fn(&str) -> Option<f64>) -> Self {
         let mut layout = Self {
             signature: definition.signature.clone(),
+            endianness: definition.endianness,
             variables: Vec::new(),
             lookup: HashMap::new(),
             pages: Vec::new(),
@@ -326,6 +336,7 @@ impl Layout {
                 owner: Owner::Page(page),
                 shape,
                 data_type: constant.data_type,
+                address: constant.address,
                 units: constant.units.literal().unwrap_or_default().to_owned(),
                 scale: attributes.scale,
                 translate: attributes.translate,
@@ -359,6 +370,8 @@ impl Layout {
                 owner: Owner::Pc,
                 shape,
                 data_type: variable.data_type,
+                // PC variables live in the project file, not on a page.
+                address: None,
                 units: variable.units.literal().unwrap_or_default().to_owned(),
                 scale: Some(1.0),
                 translate: Some(0.0),
@@ -405,6 +418,7 @@ impl Layout {
                 // zero here would be a definition bug, not a tune concern.
                 page: IniPage::new(page.number).unwrap_or(IniPage::FIRST),
                 size: page.size,
+                start_offset: page.start_offset,
                 variables: Vec::new(),
             })
             .collect();
@@ -429,6 +443,7 @@ impl Layout {
                     pages.push(PageLayout {
                         page,
                         size: 0,
+                        start_offset: 0,
                         variables: vec![index],
                     });
                 }
@@ -442,6 +457,11 @@ impl Layout {
     /// The firmware signature the layout was built for.
     pub fn signature(&self) -> &str {
         &self.signature
+    }
+
+    /// The byte order calibration values use.
+    pub fn endianness(&self) -> Endianness {
+        self.endianness
     }
 
     /// Every variable, in definition order (constants first, then PC variables).

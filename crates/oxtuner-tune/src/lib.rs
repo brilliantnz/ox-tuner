@@ -4,7 +4,7 @@
 //! calibration cell, interpreted through the definition's scale, translate,
 //! shape and units. This crate owns that model and nothing else (ADR-0010):
 //!
-//! - **no I/O** — `.msq` files are [`oxtuner_project`]'s job;
+//! - **no I/O** — `.msq` files are `oxtuner-project`'s job;
 //! - **no wire** — write intents are data ([`WriteIntent`]); only the core
 //!   executes them (ADR-0008/0011);
 //! - **no UI** — GPUI lives in `oxtuner-ui`/`oxtuner-app` (ADR-0001).
@@ -79,6 +79,7 @@ mod layout;
 mod page;
 mod tune;
 mod value;
+mod wire;
 
 pub use diff::TuneDiff;
 pub use images::{
@@ -92,3 +93,4 @@ pub use layout::{
 pub use page::{IniPage, MsqPage};
 pub use tune::{EditOutcome, Tune, TuneError};
 pub use value::{AttributeError, RawConversion, Values, is_integer, storage_range};
+pub use wire::{DecodeReport, decode_page, encode_page};

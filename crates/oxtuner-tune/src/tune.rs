@@ -15,7 +15,7 @@ use std::time::SystemTime;
 
 use oxtuner_ini::Definition;
 
-use crate::{AttributeError, EntryShape, Layout, RawConversion, Values, VariableSpec};
+use crate::{AttributeError, EntryShape, IniPage, Layout, RawConversion, Values, VariableSpec};
 
 /// One edited cell, for the edit log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -80,6 +80,20 @@ pub enum TuneError {
     },
     /// Two tunes built from different layouts were combined.
     LayoutMismatch,
+    /// The layout has no page with that number.
+    UnknownPage {
+        /// The page asked for.
+        page: IniPage,
+    },
+    /// A page image is shorter than the definition's page size.
+    ShortPage {
+        /// The page asked for.
+        page: IniPage,
+        /// Bytes supplied.
+        got: usize,
+        /// Bytes the definition declares.
+        expected: usize,
+    },
 }
 
 impl std::fmt::Display for TuneError {
@@ -98,6 +112,15 @@ impl std::fmt::Display for TuneError {
             Self::Conversion { source } => write!(formatter, "{source}"),
             Self::LayoutMismatch => formatter.write_str(
                 "the tunes were built from different definitions and cannot be compared",
+            ),
+            Self::UnknownPage { page } => write!(formatter, "the layout has no page {page}"),
+            Self::ShortPage {
+                page,
+                got,
+                expected,
+            } => write!(
+                formatter,
+                "page {page} arrived with {got} of {expected} bytes"
             ),
         }
     }
@@ -288,6 +311,32 @@ impl Tune {
         }
         self.edits.insert(Cell { variable, index }, at);
         Ok(())
+    }
+
+    /// Stores a raw value from a page image, without recording an edit.
+    ///
+    /// Image loads (an ECU read-back, a snapshot restored from a file) are not
+    /// user edits: marking them would make the whole tune look typed into.
+    /// Only [`crate::decode_page`] and the image layers call this.
+    pub fn set_image_raw(&mut self, name: &str, index: usize, raw: f64) -> Result<(), TuneError> {
+        let variable = self.index_of(name)?;
+        let len = self.values[variable].len();
+        if index >= len {
+            return Err(TuneError::IndexOutOfRange {
+                name: name.to_owned(),
+                index,
+            });
+        }
+        match &mut self.values[variable] {
+            Values::Numbers(numbers) => {
+                numbers[index] = raw;
+                Ok(())
+            }
+            Values::Text(_) => Err(TuneError::WrongKind {
+                name: name.to_owned(),
+                expected: "number",
+            }),
+        }
     }
 
     /// Converts a user value and stores its raw form.
