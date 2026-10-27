@@ -11,6 +11,7 @@ members = [
   "crates/oxtuner-ini",
   "crates/oxtuner-project",
   "crates/oxtuner-protocol",
+  "crates/oxtuner-sim",
   "crates/oxtuner-transport",
   "crates/oxtuner-tune",
 ]
@@ -28,6 +29,7 @@ oxtuner-core = { path = "./crates/oxtuner-core" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
 oxtuner-project = { path = "./crates/oxtuner-project" }
 oxtuner-protocol = { path = "./crates/oxtuner-protocol" }
+oxtuner-sim = { path = "./crates/oxtuner-sim" }
 oxtuner-transport = { path = "./crates/oxtuner-transport" }
 oxtuner-tune = { path = "./crates/oxtuner-tune" }
 
