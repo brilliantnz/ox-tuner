@@ -7,6 +7,8 @@
 //!
 //! On Windows a release build is a GUI program, so opening it should not also
 //! bring up a console window. Debug builds keep theirs for the logs.
+//!
+//! `--sim` connects the simulator as soon as a project or definition is open.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -23,6 +25,7 @@ use oxtuner_app::{
 fn main() {
     // Read before anything is built: the settings choose the language every
     // text is in, and the session decides where the window opens.
+    let auto_sim = std::env::args().any(|argument| argument == "--sim");
     let paths = AppPaths::discover();
     let settings = AppSettings::load(&paths);
     let session = AppState::load(&paths);
@@ -69,9 +72,11 @@ fn main() {
         theme::register(&paths, cx);
 
         // The headless core: one thread that owns the open project (definition
-        // and tune) and, later, the ECU session. Started before the first window
-        // so a view can never render core state that has nowhere to come from.
-        core::start(cx);
+        // and tune) and the ECU session. Started before the first window so a
+        // view can never render core state that has nowhere to come from.
+        // `--sim` connects to the simulator as soon as a definition is open,
+        // which is the hardware-free development loop.
+        core::start(cx, auto_sim);
 
         // The core is running, so the project the last session left can be
         // reopened. It reads on the core thread; the window opens meanwhile.

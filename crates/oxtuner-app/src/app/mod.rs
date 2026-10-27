@@ -11,6 +11,7 @@
 //! handler never holds a stale window just because it was registered early.
 
 pub mod actions;
+pub mod dialog;
 pub mod menu;
 pub mod shortcuts;
 pub mod window;
@@ -65,6 +66,9 @@ pub fn init(cx: &mut App) {
         core::close_project(cx);
     });
     cx.on_action(|_: &actions::SaveTune, cx| core::save_tune(cx));
+    cx.on_action(|_: &actions::ConnectEcu, cx| core::request_connect(cx));
+    cx.on_action(|_: &actions::DisconnectEcu, cx| core::disconnect(cx));
+    cx.on_action(|_: &actions::SaveSessionTrace, cx| core::save_trace(cx));
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");
     });

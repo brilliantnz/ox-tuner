@@ -18,6 +18,8 @@ app:
   menu:
     file:
       en: File
+    connection:
+      en: Connection
     edit:
       en: Edit
     selection:
@@ -60,6 +62,12 @@ app:
       en: Open ECU Definition…
     save_tune:
       en: Save Tune
+    connect:
+      en: Connect to ECU…
+    disconnect:
+      en: Disconnect
+    save_session_trace:
+      en: Save Session Trace…
     safety_disclaimer:
       en: Safety Disclaimer
     github:
@@ -112,6 +120,81 @@ app:
       en: Nothing selected
     select_hint:
       en: Select a table or a cell to inspect it here.
+  connect:
+    title:
+      en: Connect to ECU
+    mode:
+      en: Connection Mode
+    mode_serial:
+      en: Serial / USB
+    mode_simulator:
+      en: Simulator
+    simulator_hint:
+      en: A virtual ECU built from the loaded definition. No hardware needed.
+    port:
+      en: Serial Port
+    ports:
+      en: 'Serial ports · %{count} found'
+    refresh:
+      en: Refresh
+    scanning:
+      en: Scanning for serial ports…
+    no_ports:
+      en: No serial ports found. Plug in the ECU and refresh.
+    last_port:
+      en: 'Last successful port: %{port}'
+    baud:
+      en: Baud Rate
+    baud_hint:
+      en: 8N1, no flow control. The ECU's own settings decide the protocol timeouts.
+    framing:
+      en: Framing
+    framing_auto:
+      en: Auto (definition)
+    framing_legacy:
+      en: Legacy
+    framing_envelope:
+      en: Envelope
+    framing_hint:
+      en: Auto uses messageEnvelopeFormat from the definition. Legacy is the fallback for a firmware whose framed path misbehaves.
+    no_definition:
+      en: Open a project or a definition first; its message set is what the session speaks.
+    test_hint:
+      en: Test reads only the ECU's signature, never a tune page or a write.
+    test:
+      en: Test Connection
+    testing:
+      en: Testing…
+    connect:
+      en: Connect
+    connecting:
+      en: Connecting…
+    disconnect:
+      en: Disconnect
+    close:
+      en: Close
+    status_connected:
+      en: 'Connected · %{signature}'
+    status_read_only:
+      en: Read-only
+    status_testing:
+      en: 'Reading the signature from %{port}…'
+    status_connecting:
+      en: 'Connecting to %{port}…'
+    status_not_connected:
+      en: Not connected
+    status_link_lost:
+      en: 'The link was lost: %{reason}'
+    test_match:
+      en: 'Signature matches: %{signature}'
+    test_port:
+      en: 'on %{port}'
+    test_mismatch:
+      en: 'Signature differs: the ECU reports %{signature}, the definition expects %{expected}'
+    test_failed:
+      en: 'Test failed on %{port}: %{message}'
+    connect_failed:
+      en: 'The connection failed: %{message}'
   bottom_panel:
     title:
       en: Output
@@ -143,6 +226,18 @@ app:
       en: The table could not be read or changed.
     dialog_failed:
       en: The dialog could not be read or changed.
+    connected:
+      en: '%{signature} on %{port} · %{framing} framing'
+    ecu_read_only:
+      en: 'Read-only session: %{reason}'
+    link_lost:
+      en: 'The link was lost: %{reason}'
+    pages_read:
+      en: '%{pages} pages read · %{bytes} bytes · %{constants} constants'
+    trace_saved:
+      en: 'Trace saved (%{frames} frames) to %{path}'
+    no_live_values:
+      en: Waiting for realtime values…
   table:
     copy:
       en: Copy
@@ -289,6 +384,14 @@ app:
   status:
     not_connected:
       en: Not connected
+    connected:
+      en: '%{signature} on %{port} · %{framing}'
+    link_lost:
+      en: 'Link lost: %{reason}'
+    read_only:
+      en: Read-only session
+    live:
+      en: Live
   panels:
     toggle_primary_sidebar:
       en: Toggle primary sidebar
@@ -307,6 +410,10 @@ app:
       en: Close project
     save_tune:
       en: Save tune
+    connect:
+      en: Connect to ECU
+    disconnect:
+      en: Disconnect from ECU
     quit:
       en: Quit
     toggle_primary_sidebar:

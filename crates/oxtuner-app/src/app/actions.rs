@@ -19,6 +19,9 @@ gpui_kit::actions!(
         ShowDisclaimer,
         TogglePrimarySidebar,
         ToggleSecondarySidebar,
-        ToggleBottomPanel
+        ToggleBottomPanel,
+        ConnectEcu,
+        DisconnectEcu,
+        SaveSessionTrace
     ]
 );

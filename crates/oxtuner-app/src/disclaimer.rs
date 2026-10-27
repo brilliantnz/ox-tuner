@@ -5,7 +5,7 @@
 //! per installation rather than once per window.
 
 use gpui_kit::base::v_flex;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName};
 use gpui_kit::{App, ParentElement as _, Styled as _, Window, div, px};
 use rust_i18n::t;
 
@@ -22,7 +22,7 @@ use crate::settings::preferences::AppSettings;
 /// it is the one way past the gate. Closing the whole window still works, and
 /// the dialog returns on the next launch because acceptance was never recorded.
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
-    window.open_alert_dialog(cx, |alert, _, cx| {
+    crate::app::dialog::open_alert(window, cx, |alert, _, cx| {
         let muted = cx.theme().muted_foreground;
 
         alert

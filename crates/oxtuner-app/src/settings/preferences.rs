@@ -331,6 +331,11 @@ impl AppSettings {
         &self.settings.logging.level
     }
 
+    /// The connection preferences the dialog starts from.
+    pub(crate) fn connection(&self) -> &ConnectionSettings {
+        &self.settings.connection
+    }
+
     /// Mutates the document and writes it back immediately.
     ///
     /// A write failure is logged rather than surfaced: losing a preference is

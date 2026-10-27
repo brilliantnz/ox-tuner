@@ -16,12 +16,14 @@
 //! the task (ADR-0005). The `gpui*` → core direction is a plain channel send,
 //! so nothing core-side knows a UI exists.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui_kit::{App, Global, PathPromptOptions};
 use oxtuner_core::{
-    AxisEdit, AxisKind, CellEdit, CoreConfig, CoreHandle, CoreParts, CoreThread, DefinitionSummary,
-    DialogSummary, Event, EventStream, Failure, FailureCode, ProjectSummary, SaveSummary,
+    AxisEdit, AxisKind, CellEdit, ConnectionSummary, CoreConfig, CoreHandle, CoreParts, CoreThread,
+    DefinitionSummary, DialogSummary, Event, EventStream, Failure, FailureCode, LatestFrame,
+    LinkMode, PortChoice, PortSummary, ProjectSummary, ReadAllSummary, RealtimeFrame, SaveSummary,
     TableSummary,
 };
 use rust_i18n::t;
@@ -45,6 +47,44 @@ pub(crate) struct CoreStatus {
     /// Bumped whenever an edit or a save may have moved tune values, so a view
     /// can tell that copies it kept are no longer trustworthy.
     pub(crate) tune_revision: u64,
+    /// The ECU session, when one is up.
+    pub(crate) connection: Option<ConnectionSummary>,
+    /// Why the link died, until a reconnect succeeds.
+    pub(crate) link_lost: Option<String>,
+    /// The last complete page read.
+    pub(crate) pages_read: Option<ReadAllSummary>,
+    /// Whether realtime polling is running.
+    pub(crate) realtime: bool,
+    /// The last saved session trace.
+    pub(crate) last_trace: Option<TraceSaved>,
+    /// The serial ports the last scan found.
+    pub(crate) ports: Vec<PortSummary>,
+    /// Whether a port scan is running.
+    pub(crate) scanning: bool,
+    /// The port a signature test is running against.
+    pub(crate) testing: Option<String>,
+    /// The last signature test.
+    pub(crate) test: Option<TestResult>,
+    /// The connection request that is still being answered.
+    pub(crate) pending_connect: Option<PortChoice>,
+}
+
+/// The outcome of a signature test.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TestResult {
+    /// The port the test ran against.
+    pub(crate) port: String,
+    /// The summary, or the failure message.
+    pub(crate) outcome: Result<ConnectionSummary, String>,
+}
+
+/// A saved session trace, for the output panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TraceSaved {
+    /// Where it was written.
+    pub(crate) path: PathBuf,
+    /// Frames recorded.
+    pub(crate) frames: usize,
 }
 
 impl CoreStatus {
@@ -67,6 +107,10 @@ pub(crate) struct CoreService {
     handle: Option<CoreHandle>,
     thread: Option<CoreThread>,
     status: CoreStatus,
+    /// The freshest realtime frame (ADR-0014).
+    latest: LatestFrame,
+    /// `--sim`: connect to the simulator as soon as a definition is loaded.
+    auto_sim: bool,
 }
 
 impl Global for CoreService {}
@@ -85,6 +129,11 @@ impl CoreService {
     pub(crate) fn handle(cx: &App) -> Option<CoreHandle> {
         cx.global::<Self>().handle.clone()
     }
+
+    /// The newest realtime frame, for the live-values view.
+    pub(crate) fn latest(cx: &App) -> Option<Arc<RealtimeFrame>> {
+        cx.global::<Self>().latest.get()
+    }
 }
 
 /// Starts the core and the task that carries its events to the views.
@@ -92,11 +141,12 @@ impl CoreService {
 /// The global is installed either way: views read it every frame, and a missing
 /// core is a status to render, not a reason to panic. When the core does not
 /// start, its handle is `None` and every command reports a failure.
-pub fn start(cx: &mut App) {
+pub fn start(cx: &mut App, auto_sim: bool) {
     let service = match oxtuner_core::start(CoreConfig::default()) {
         Ok(CoreParts {
             handle,
             events,
+            latest,
             thread,
         }) => {
             spawn_event_pump(events, cx);
@@ -104,6 +154,8 @@ pub fn start(cx: &mut App) {
                 handle: Some(handle),
                 thread: Some(thread),
                 status: CoreStatus::default(),
+                latest,
+                auto_sim,
             }
         }
         Err(error) => {
@@ -114,6 +166,8 @@ pub fn start(cx: &mut App) {
                 handle: None,
                 thread: None,
                 status: CoreStatus::default(),
+                latest: LatestFrame::default(),
+                auto_sim,
             }
         }
     };
@@ -137,6 +191,16 @@ fn spawn_event_pump(events: EventStream, cx: &mut App) {
 
 /// Folds one event into the status and repaints.
 fn apply(event: Event, cx: &mut App) {
+    // The port list is stored for the dialog, which stays open while it scans:
+    // closing and reopening would lose the user's selection and scroll.
+    if let Event::PortsListed { ports, .. } = event {
+        let service = cx.global_mut::<CoreService>();
+        service.status.ports = ports;
+        service.status.scanning = false;
+        cx.refresh_windows();
+        return;
+    }
+
     let (update, remember) = match event {
         Event::DefinitionLoaded { summary, .. } => {
             tracing::info!(signature = %summary.signature, "definition loaded");
@@ -190,12 +254,49 @@ fn apply(event: Event, cx: &mut App) {
             },
             None,
         ),
+        Event::ConnectionTested { summary, .. } => (Update::Tested(summary), None),
+        Event::Connected { summary, .. } => (Update::Connected(summary), None),
+        Event::Reconnected { summary } => (Update::Reconnected(summary), None),
+        Event::ConnectionLost { reason } => (Update::LinkLost(reason), None),
+        Event::Disconnected { .. } => (Update::Disconnected, None),
+        Event::PagesRead { summary, .. } => (Update::PagesRead(summary), None),
+        Event::RealtimeState { running, .. } => (Update::Realtime(running), None),
+        Event::TraceSaved { path, frames, .. } => (
+            Update::Trace {
+                saved: TraceSaved { path, frames },
+            },
+            None,
+        ),
+        Event::RealtimeFrame { .. } => (Update::RealtimeFrame, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => {
             tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
             (Update::Failed(failure), None)
         }
+        Event::PortsListed { .. } => (Update::Nothing, None),
         Event::Rejected { .. } | Event::Stopped => (Update::Nothing, None),
+    };
+
+    let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
+        && cx.global::<CoreService>().auto_sim
+        && cx.global::<CoreService>().status.connection.is_none();
+    let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
+    let poll = matches!(&update, Update::PagesRead(_));
+    // Remember the port that worked, so the next dialog opens on it.
+    let persist_port = match &update {
+        Update::Connected(connection) if !connection.simulator => {
+            let baud = cx
+                .global::<CoreService>()
+                .status
+                .pending_connect
+                .as_ref()
+                .and_then(|pending| match pending {
+                    PortChoice::Serial { baud, .. } => Some(*baud),
+                    PortChoice::Simulator(_) => None,
+                });
+            Some((connection.port.clone(), baud))
+        }
+        _ => None,
     };
 
     if !matches!(&update, Update::Nothing) {
@@ -206,14 +307,49 @@ fn apply(event: Event, cx: &mut App) {
         // Only the shell shows the core status; the Settings window does not.
         cx.refresh_windows();
     }
+
+    if let Some((port, baud)) = persist_port {
+        crate::settings::preferences::AppSettings::update(cx, |settings| {
+            settings.connection.last_port = Some(port);
+            settings.connection.baud_override = baud;
+        });
+    }
+    if auto_connect {
+        connect_to_simulator(cx);
+    }
+    if read_pages {
+        // The session is read-only until proven otherwise; pulling the tune in
+        // is the first thing it does, and it is also what fills the grid's
+        // write-state after a reconnect.
+        read_all(cx);
+    }
+    if poll {
+        // The connection settings hold the user's poll rate; the core clamps it.
+        let hz = cx
+            .global::<crate::settings::preferences::AppSettings>()
+            .settings()
+            .connection
+            .poll_rate_hz
+            .clamp(1, 50);
+        start_realtime(1000 / hz, cx);
+    }
 }
 
 enum Update {
     Loaded(DefinitionSummary),
+    Tested(ConnectionSummary),
     Opened(ProjectSummary),
     Saved(SaveSummary),
     Table { table: TableSummary, edited: bool },
     Dialog { dialog: DialogSummary, edited: bool },
+    Connected(ConnectionSummary),
+    Reconnected(ConnectionSummary),
+    LinkLost(String),
+    Disconnected,
+    PagesRead(ReadAllSummary),
+    Realtime(bool),
+    Trace { saved: TraceSaved },
+    RealtimeFrame,
     Unloaded,
     Failed(Failure),
     Nothing,
@@ -259,6 +395,57 @@ impl CoreStatus {
                     self.tune_revision = self.tune_revision.wrapping_add(1);
                 }
             }
+            Update::Tested(summary) => {
+                let port = summary.port.clone();
+                self.test = Some(TestResult {
+                    port,
+                    outcome: Ok(summary),
+                });
+                self.testing = None;
+                self.failure = None;
+            }
+            Update::Connected(connection) => {
+                self.connection = Some(connection);
+                self.link_lost = None;
+                self.pages_read = None;
+                self.realtime = false;
+                self.failure = None;
+                self.pending_connect = None;
+                self.testing = None;
+                self.test = None;
+            }
+            Update::Reconnected(connection) => {
+                self.connection = Some(connection);
+                self.link_lost = None;
+                self.pages_read = None;
+                self.realtime = false;
+                self.failure = None;
+            }
+            Update::LinkLost(reason) => {
+                self.link_lost = Some(reason);
+                self.realtime = false;
+                self.pending_connect = None;
+            }
+            Update::Disconnected => {
+                self.connection = None;
+                self.link_lost = None;
+                self.pending_connect = None;
+                // The last read still describes what the tune image holds.
+                self.realtime = false;
+            }
+            Update::PagesRead(summary) => {
+                self.pages_read = Some(summary);
+                self.failure = None;
+                // The ECU image moved: a table kept on screen can no longer
+                // trust the write-state marks it drew from the old one.
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::Realtime(running) => self.realtime = running,
+            Update::Trace { saved } => {
+                self.last_trace = Some(saved);
+                self.failure = None;
+            }
+            Update::RealtimeFrame => {}
             Update::Unloaded => *self = Self::default(),
             Update::Failed(failure) => {
                 // A table or dialog that could not be read must not stay on
@@ -269,6 +456,21 @@ impl CoreStatus {
                 }
                 if failure.code == FailureCode::DialogUnavailable {
                     self.dialog = None;
+                }
+                // A failed scan or test must not leave the dialog stuck on
+                // "working". The message stays for the dialog to show.
+                if failure.code == FailureCode::ConnectFailed {
+                    self.scanning = false;
+                }
+                if failure.code == FailureCode::TestFailed {
+                    let port = self.testing.take().unwrap_or_default();
+                    self.test = Some(TestResult {
+                        port,
+                        outcome: Err(failure.message.clone()),
+                    });
+                }
+                if failure.code == FailureCode::ConnectFailed {
+                    self.pending_connect = None;
                 }
                 self.failure = Some(failure);
             }
@@ -300,6 +502,112 @@ pub(crate) fn save_tune(cx: &mut App) {
     if let Err(error) = handle.save_tune() {
         tracing::warn!(%error, "the core refused the save");
         report_failure(cx, FailureCode::TuneSaveFailed, error.to_string());
+    }
+}
+
+/// Starts a connection to the simulator with the default configuration.
+pub(crate) fn connect_to_simulator(cx: &mut App) {
+    connect(PortChoice::simulator(), None, cx);
+}
+
+/// Asks for the port list, then opens the connect dialog when it arrives.
+pub(crate) fn request_connect(cx: &mut App) {
+    // The dialog opens at once and stays open; its port list fills in when the
+    // scan answers, so a refresh never costs the user their selection.
+    cx.defer(|cx| {
+        if let Some(window) = crate::app::window::main(cx) {
+            window
+                .update(cx, |_, window, cx| {
+                    crate::shell::connect_dialog::show(window, cx);
+                })
+                .ok();
+        }
+    });
+    refresh_ports(cx);
+}
+
+/// Rescans the serial ports without touching the dialog.
+pub(crate) fn refresh_ports(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ConnectFailed) else {
+        return;
+    };
+    cx.global_mut::<CoreService>().status.scanning = true;
+    if let Err(error) = handle.list_ports() {
+        tracing::warn!(%error, "the core refused the port scan");
+        cx.global_mut::<CoreService>().status.scanning = false;
+        report_failure(cx, FailureCode::ConnectFailed, error.to_string());
+    }
+}
+
+/// Reads a port's signature without opening a session.
+pub(crate) fn test_connection(port: PortChoice, framing: Option<LinkMode>, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TestFailed) else {
+        return;
+    };
+    let label = port.label();
+    cx.global_mut::<CoreService>().status.testing = Some(label);
+    if let Err(error) = handle.test_connection(port, framing) {
+        tracing::warn!(%error, "the core refused the connection test");
+        cx.global_mut::<CoreService>().status.testing = None;
+        report_failure(cx, FailureCode::TestFailed, error.to_string());
+    }
+}
+
+/// Opens a connection.
+pub(crate) fn connect(port: PortChoice, framing: Option<LinkMode>, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ConnectFailed) else {
+        return;
+    };
+    cx.global_mut::<CoreService>().status.pending_connect = Some(port.clone());
+    if let Err(error) = handle.connect(port, framing) {
+        tracing::warn!(%error, "the core refused the connection");
+        cx.global_mut::<CoreService>().status.pending_connect = None;
+        report_failure(cx, FailureCode::ConnectFailed, error.to_string());
+    }
+}
+
+/// Starts periodic realtime polling at the configured rate.
+pub(crate) fn start_realtime(interval_ms: u32, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::RealtimeRejected) else {
+        return;
+    };
+    if let Err(error) = handle.start_realtime(interval_ms) {
+        tracing::warn!(%error, "the core refused the realtime start");
+        report_failure(cx, FailureCode::RealtimeRejected, error.to_string());
+    }
+}
+
+/// Closes the connection.
+pub(crate) fn disconnect(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::NotConnected) else {
+        return;
+    };
+    if let Err(error) = handle.disconnect() {
+        tracing::warn!(%error, "the core refused the disconnect");
+        report_failure(cx, FailureCode::NotConnected, error.to_string());
+    }
+}
+
+/// Reads every page into the tune images.
+pub(crate) fn read_all(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ReadFailed) else {
+        return;
+    };
+    if let Err(error) = handle.read_all() {
+        tracing::warn!(%error, "the core refused the page read");
+        report_failure(cx, FailureCode::ReadFailed, error.to_string());
+    }
+}
+
+/// Saves the session trace to the app's trace directory.
+pub(crate) fn save_trace(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::TraceFailed) else {
+        return;
+    };
+    let path = crate::platform::paths::AppPaths::discover().next_trace_path();
+    if let Err(error) = handle.save_trace(path) {
+        tracing::warn!(%error, "the core refused the trace save");
+        report_failure(cx, FailureCode::TraceFailed, error.to_string());
     }
 }
 
@@ -628,6 +936,69 @@ mod tests {
             status.failure.as_ref().map(|failure| failure.code),
             Some(FailureCode::ProjectRejected)
         );
+    }
+
+    fn connection() -> ConnectionSummary {
+        ConnectionSummary {
+            port: "/dev/cu.usbmodem21201".to_owned(),
+            simulator: false,
+            signature: "speeduino 202501".to_owned(),
+            definition_signature: "speeduino 202501".to_owned(),
+            verdict: oxtuner_core::SignatureVerdict::Match,
+            read_only: false,
+            read_only_reason: None,
+            behavior: "speeduino".to_owned(),
+            framing: "envelope",
+            pages: 15,
+            realtime_block: Some(130),
+        }
+    }
+
+    #[test]
+    fn a_connection_replaces_the_previous_one_and_clears_a_loss() {
+        let mut status = CoreStatus {
+            link_lost: Some("old".to_owned()),
+            ..CoreStatus::default()
+        };
+
+        status.apply(Update::Connected(connection()));
+
+        assert!(status.connection.is_some());
+        assert_eq!(status.link_lost, None);
+        assert_eq!(status.failure, None);
+    }
+
+    #[test]
+    fn a_lost_link_keeps_the_summary_but_stops_polling() {
+        let mut status = CoreStatus::default();
+        status.apply(Update::Connected(connection()));
+        status.apply(Update::Realtime(true));
+
+        status.apply(Update::LinkLost("unplugged".to_owned()));
+
+        assert!(status.connection.is_some(), "the session is still known");
+        assert_eq!(status.link_lost.as_deref(), Some("unplugged"));
+        assert!(!status.realtime);
+    }
+
+    #[test]
+    fn a_page_read_moves_the_tune_revision_but_a_disconnect_keeps_the_read() {
+        let mut status = CoreStatus::default();
+        status.apply(Update::Connected(connection()));
+
+        status.apply(Update::PagesRead(ReadAllSummary {
+            pages: 15,
+            bytes: 3408,
+            constants: 817,
+            skipped: 0,
+            signature_verified: true,
+        }));
+        assert_eq!(status.tune_revision, 1);
+        assert_eq!(status.pages_read.as_ref().map(|read| read.pages), Some(15));
+
+        status.apply(Update::Disconnected);
+        assert!(status.connection.is_none());
+        assert!(status.pages_read.is_some(), "the read still happened");
     }
 
     #[test]

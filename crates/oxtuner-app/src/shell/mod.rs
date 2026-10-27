@@ -38,6 +38,7 @@ use gpui_kit::{
 };
 
 pub mod bottom_panel;
+pub mod connect_dialog;
 mod explorer;
 pub mod primary_sidebar;
 pub mod project_dialog;
@@ -463,6 +464,26 @@ impl Shell {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = crate::core::CoreService::status(cx);
+        let connection = status.connection.clone();
+        let lost = status.link_lost.clone();
+        let read_only = connection.as_ref().is_some_and(|state| state.read_only);
+        let live = status.realtime;
+        let danger = cx.theme().danger;
+
+        let link = match connection {
+            Some(connection) => t!(
+                "app.status.connected",
+                signature = connection.signature.clone(),
+                port = connection.port.clone(),
+                framing = connection.framing.to_owned(),
+            ),
+            None => match lost {
+                Some(reason) => t!("app.status.link_lost", reason = reason),
+                None => t!("app.status.not_connected"),
+            },
+        };
+
         h_flex()
             .h_8()
             .flex_shrink_0()
@@ -472,11 +493,17 @@ impl Shell {
             .border_color(cx.theme().border)
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            // The connection, signature, write-state and realtime indicators
-            // join this row as the core lands; until then it states what is
-            // actually true.
-            .child(t!("app.status.not_connected"))
-            .child(concat!("v", env!("CARGO_PKG_VERSION")))
+            .child(link)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .when(read_only, |this| {
+                        this.child(div().text_color(danger).child(t!("app.status.read_only")))
+                    })
+                    .when(live, |this| this.child(t!("app.status.live")))
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+            )
     }
 }
 

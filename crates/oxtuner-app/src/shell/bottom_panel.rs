@@ -18,6 +18,26 @@ use oxtuner_core::FailureCode;
 use crate::core::CoreService;
 use crate::i18n::t;
 
+/// The channels worth a place in the output panel, in this order.
+///
+/// The definition may declare hundreds of channels; these are the ones a tuner
+/// watches while the engine is running. A definition that names none of them
+/// falls back to its first few visible channels.
+const PREFERRED_CHANNELS: [&str; 12] = [
+    "rpm",
+    "map",
+    "tps",
+    "coolant",
+    "clt",
+    "iat",
+    "mat",
+    "afr",
+    "ego",
+    "batteryVoltage",
+    "baro",
+    "advance",
+];
+
 /// The output panel.
 #[derive(IntoElement)]
 pub(crate) struct BottomPanel;
@@ -136,6 +156,49 @@ fn core_status(cx: &App) -> AnyElement {
         ))
     });
 
+    let connection = status.connection.as_ref().map(|connection| {
+        v_flex()
+            .gap_1()
+            .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(t!(
+                "app.bottom_panel.connected",
+                signature = connection.signature.clone(),
+                port = connection.port.clone(),
+                framing = connection.framing.to_owned(),
+            )))
+            .when(connection.read_only, |this| {
+                this.child(div().text_xs().text_color(danger).child(t!(
+                    "app.bottom_panel.ecu_read_only",
+                    reason = connection.read_only_reason.clone().unwrap_or_default(),
+                )))
+            })
+    });
+
+    let lost = status.link_lost.as_ref().map(|reason| {
+        div()
+            .text_xs()
+            .text_color(danger)
+            .child(t!("app.bottom_panel.link_lost", reason = reason.clone()))
+    });
+
+    let pages = status.pages_read.as_ref().map(|read| {
+        div().text_xs().text_color(muted).child(t!(
+            "app.bottom_panel.pages_read",
+            pages = read.pages.to_string(),
+            bytes = read.bytes.to_string(),
+            constants = read.constants.to_string(),
+        ))
+    });
+
+    let trace = status.last_trace.as_ref().map(|trace| {
+        div().text_xs().text_color(muted).child(t!(
+            "app.bottom_panel.trace_saved",
+            frames = trace.frames.to_string(),
+            path = trace.path.display().to_string(),
+        ))
+    });
+
+    let live = live_values(cx, muted);
+
     let failure = status.failure.as_ref().map(|failure| {
         let heading = match failure.code {
             FailureCode::DefinitionRejected => t!("app.bottom_panel.definition_failed"),
@@ -174,7 +237,64 @@ fn core_status(cx: &App) -> AnyElement {
         .gap_1()
         .child(headline)
         .when_some(tune, |this, tune| this.child(tune))
+        .when_some(connection, |this, connection| this.child(connection))
+        .when_some(lost, |this, lost| this.child(lost))
+        .when_some(pages, |this, pages| this.child(pages))
+        .when_some(live, |this, live| this.child(live))
+        .when_some(trace, |this, trace| this.child(trace))
         .when_some(saved, |this, saved| this.child(saved))
         .when_some(failure, |this, failure| this.child(failure))
         .into_any_element()
+}
+
+/// The latest realtime frame, as a compact row of values.
+///
+/// This is the M6 live-values surface. It reads the shared frame, never the
+/// event payload: a slow repaint shows the newest value, and no frame is
+/// queued behind the render (ADR-0014).
+fn live_values(cx: &App, muted: gpui_kit::Hsla) -> Option<AnyElement> {
+    let frame = CoreService::latest(cx)?;
+    let mut chosen: Vec<&oxtuner_core::LiveValue> = frame
+        .values
+        .iter()
+        .filter(|value| {
+            PREFERRED_CHANNELS
+                .iter()
+                .any(|name| value.name.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if chosen.is_empty() {
+        chosen = frame.values.iter().take(10).collect();
+    }
+    if chosen.is_empty() {
+        return Some(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(t!("app.bottom_panel.no_live_values"))
+                .into_any_element(),
+        );
+    }
+
+    Some(
+        h_flex()
+            .flex_wrap()
+            .gap_x_4()
+            .gap_y_1()
+            .children(chosen.into_iter().map(|value| {
+                h_flex()
+                    .gap_1()
+                    .items_baseline()
+                    .child(div().text_xs().text_color(muted).child(value.name.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(value.text.clone()),
+                    )
+                    .child(div().text_xs().text_color(muted).child(value.units.clone()))
+                    .into_any_element()
+            }))
+            .into_any_element(),
+    )
 }
