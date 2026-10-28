@@ -3393,12 +3393,44 @@ fn advance_write(
     match outcome {
         IoOutcome::Pages { pages } => match transaction.phase {
             TxnPhase::ReadBase => {
+                // The bytes the tune image was built from. A fresh read that
+                // disagrees with them means the ECU moved since the last read:
+                // a read that raced the reboot, or a tune changed behind our
+                // back. Patching would put values over a tune we never saw, so
+                // stop and let the user read again (ADR-0010).
+                let drifted: Vec<u8> = pages
+                    .iter()
+                    .filter(|read| {
+                        live.page_bytes
+                            .get(&read.page)
+                            .is_some_and(|known| known != &read.bytes)
+                    })
+                    .map(|read| read.page)
+                    .collect();
                 transaction.base = pages
                     .iter()
                     .map(|read| (read.page, read.bytes.clone()))
                     .collect();
                 for read in &pages {
                     live.page_bytes.insert(read.page, read.bytes.clone());
+                }
+                if !drifted.is_empty() {
+                    let action = match transaction.kind {
+                        TxnKind::Write => "writing",
+                        TxnKind::Burn => "burning",
+                    };
+                    finish_refused(
+                        live,
+                        transaction,
+                        events,
+                        report,
+                        &format!(
+                            "page(s) {} changed on the ECU since the last read; read every page \
+                             again before {action}",
+                            journal::pages_label(&drifted)
+                        ),
+                    );
+                    return;
                 }
 
                 match transaction.kind {

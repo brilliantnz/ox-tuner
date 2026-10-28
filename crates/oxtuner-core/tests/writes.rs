@@ -163,9 +163,17 @@ impl Harness {
     }
 
     fn connect(&self, config: SimConfig) -> oxtuner_core::ConnectionSummary {
+        self.connect_with(config, None)
+    }
+
+    fn connect_with(
+        &self,
+        config: SimConfig,
+        framing: Option<oxtuner_core::LinkMode>,
+    ) -> oxtuner_core::ConnectionSummary {
         let op = self
             .handle
-            .connect(support::simulator_with(config), None)
+            .connect(support::simulator_with(config), framing)
             .expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
             Event::Connected { summary, .. } => summary,
@@ -327,6 +335,61 @@ fn an_ecu_value_outside_the_declared_range_is_left_alone() {
     assert_eq!(
         summary.cells, 1,
         "the ECU's out-of-range bin must not be clamped into the write"
+    );
+
+    core.close();
+}
+
+#[test]
+fn a_page_that_moved_under_the_writer_is_refused() {
+    let dir = TempDir::new("drift");
+    // The settle loop reads page 1 twice at connect; the third read is the
+    // write's own base, and it comes back with a different last byte. The
+    // writer must see that the page moved and stop before sending anything.
+    let config = SimConfig {
+        faults: vec![
+            FaultRule::new(
+                SimOp::ReadPage,
+                Fault::Delay {
+                    delay: Duration::ZERO,
+                },
+                2,
+            ),
+            FaultRule::once(SimOp::ReadPage, Fault::Corrupt { at: 15 }),
+        ],
+        ..SimConfig::default()
+    };
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect_with(config, Some(oxtuner_core::LinkMode::Legacy));
+    core.read_all();
+    core.edit_cell(77.0);
+
+    let (code, message) = failure(&core.write());
+    assert_eq!(code, FailureCode::WriteRefused);
+    assert!(
+        message.contains("page(s) 1 changed on the ECU since the last read"),
+        "{message}"
+    );
+
+    // Nothing reached the controller: a fresh read still holds the old tune, so
+    // the edit is still one cell away and the next write verifies.
+    core.read_all();
+    let Event::TuneWritten { summary, .. } = core.write() else {
+        panic!("the write after a fresh read must succeed");
+    };
+    assert!(summary.verified);
+    assert!(summary.cells >= 1);
+    assert_eq!(core.table().cells[0], 77.0);
+
+    let (_, entries) = core.journal();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.phase == "result" && entry.result == "ok")
+            .count(),
+        1,
+        "only the second write may record a result"
     );
 
     core.close();
