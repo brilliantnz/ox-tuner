@@ -1,0 +1,19 @@
+[package]
+name = "oxtuner-ui"
+description = "Custom reusable GPUI widgets for ox-tuner: the live chart today, the table grid and 3D surface next."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+gpui-kit = { workspace = true, default-features = false }
+oxtuner-core.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, default-features = false, features = ["test-support"] }
