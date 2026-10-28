@@ -14,10 +14,12 @@
 
 use std::{collections::HashSet, fmt, path::PathBuf};
 
+use oxtuner_datalog::LogSummary;
 use oxtuner_ini::{Definition, DialogRow, RowKind, SettingsContext, Severity};
 use oxtuner_project::Project;
 use oxtuner_protocol::LinkMode;
-use oxtuner_tune::CellState;
+use oxtuner_tune::{CellState, TuneStatus};
+use serde::{Deserialize, Serialize};
 
 use crate::menu::MenuNode;
 
@@ -228,6 +230,78 @@ pub enum Command {
         /// Where to write the trace file.
         path: PathBuf,
     },
+    /// Send the changed working values to ECU RAM.
+    ///
+    /// This is the only command that starts a RAM write. The core clamps the
+    /// values, reads the pages it will patch, writes only the variables that
+    /// changed, reads them back and verifies the result. It never burns.
+    /// `pages` is an optional restriction; an empty list means every page with
+    /// a change. S1, S2, S3, S6, S7 and S8 apply to this path.
+    WriteToRam {
+        /// INI page numbers, or empty for every changed page.
+        pages: Vec<u8>,
+    },
+    /// Burn RAM content to flash.
+    ///
+    /// Only an explicit user command reaches this variant (S5: no auto-burn).
+    /// The core snapshots the working image, burns the selected pages (or every
+    /// burnable page), waits for the protocol's activation delay, reads the
+    /// pages back and verifies them. The working image must already match ECU
+    /// RAM: burning older RAM while edits are unwritten is refused.
+    BurnToFlash {
+        /// INI page numbers, or empty for every burnable page.
+        pages: Vec<u8>,
+    },
+    /// Discard local edits and return to the file baseline.
+    ///
+    /// A snapshot of the working image is written first (S4).
+    RevertTune,
+    /// Import another `.msq` into the working image.
+    ///
+    /// A tune whose signature differs from the loaded definition needs
+    /// `consented: true` (S9); without it the core refuses with
+    /// [`FailureCode::ImportNeedsConsent`] and changes nothing.
+    ImportTune {
+        /// The `.msq` to import.
+        path: PathBuf,
+        /// Whether the user approved a different-signature import.
+        consented: bool,
+    },
+    /// Restore one of the project's own snapshots.
+    ///
+    /// The current working image is snapshotted first, then the snapshot is
+    /// imported. Snapshots carry the definition's signature, so no consent is
+    /// needed for a first-party snapshot.
+    RestoreSnapshot {
+        /// A `.msq` under `.ox-tuner/snapshots/`.
+        path: PathBuf,
+    },
+    /// List the project's snapshots, oldest first.
+    ListSnapshots,
+    /// Turn the global write path on or off (S8).
+    ///
+    /// Writes start disabled. Enabling is an explicit user choice; disabling is
+    /// immediate and always allowed.
+    SetWritesEnabled {
+        /// Whether writes may run from now on.
+        enabled: bool,
+    },
+    /// Clear a halted write path after the user reviewed a failed write (S3).
+    AcknowledgeWriteFailure,
+    /// Read the write journal for the open project.
+    ReadJournal,
+    /// Refresh the derived tune status (unsaved, not sent, not burned).
+    RefreshTuneStatus,
+    /// Start a CSV session log in `directory`.
+    ///
+    /// The core names the file, writes the definition's channel order and
+    /// appends every realtime frame. Only one log runs at a time.
+    StartLog {
+        /// Where the session file is created.
+        directory: PathBuf,
+    },
+    /// Stop the session log, flushing it before the reply.
+    StopLog,
     /// List the serial ports the connect dialog can offer.
     ListPorts,
     /// Drop the loaded definition and tune.
@@ -264,6 +338,18 @@ impl Command {
             Self::StartRealtime { .. } => "start-realtime",
             Self::StopRealtime => "stop-realtime",
             Self::SaveTrace { .. } => "save-trace",
+            Self::WriteToRam { .. } => "write-to-ram",
+            Self::BurnToFlash { .. } => "burn-to-flash",
+            Self::RevertTune => "revert-tune",
+            Self::ImportTune { .. } => "import-tune",
+            Self::RestoreSnapshot { .. } => "restore-snapshot",
+            Self::ListSnapshots => "list-snapshots",
+            Self::SetWritesEnabled { .. } => "set-writes-enabled",
+            Self::AcknowledgeWriteFailure => "acknowledge-write-failure",
+            Self::ReadJournal => "read-journal",
+            Self::RefreshTuneStatus => "refresh-tune-status",
+            Self::StartLog { .. } => "start-log",
+            Self::StopLog => "stop-log",
             Self::ListPorts => "list-ports",
             Self::UnloadDefinition => "unload-definition",
             Self::Shutdown => "shutdown",
@@ -329,6 +415,40 @@ pub enum Event {
         path: PathBuf,
         frames: usize,
     },
+    /// Changed values were written to ECU RAM and verified by a read-back.
+    TuneWritten { op: OpId, summary: WriteSummary },
+    /// RAM was burned to flash and read back.
+    TuneBurned { op: OpId, summary: BurnSummary },
+    /// Local edits were discarded, after a snapshot.
+    TuneReverted { op: OpId, summary: RevertSummary },
+    /// Another tune was imported into the working image.
+    TuneImported { op: OpId, summary: ImportSummary },
+    /// The project's snapshots, oldest first.
+    SnapshotsListed { op: OpId, paths: Vec<PathBuf> },
+    /// The derived write state after a read, edit, write, burn or import.
+    TuneStatusRead { op: OpId, status: TuneStatus },
+    /// The global write switch changed (S8).
+    WriteAccessChanged {
+        op: OpId,
+        writes_enabled: bool,
+        /// The live session's summary after the change, when one is open.
+        connection: Option<ConnectionSummary>,
+    },
+    /// A halted write path was cleared after review.
+    WriteFailureAcknowledged { op: OpId },
+    /// The project's write journal, newest last.
+    JournalRead {
+        op: OpId,
+        path: Option<PathBuf>,
+        entries: Vec<JournalEntry>,
+    },
+    /// A session log started or stopped.
+    LogState {
+        op: OpId,
+        running: bool,
+        /// What a stopped log wrote.
+        summary: Option<LogSummary>,
+    },
     /// The link died; the core is either reconnecting or waiting for a command.
     ConnectionLost {
         /// Why, in text the UI can show.
@@ -364,6 +484,16 @@ impl Event {
             | Self::PagesRead { op, .. }
             | Self::RealtimeState { op, .. }
             | Self::TraceSaved { op, .. }
+            | Self::TuneWritten { op, .. }
+            | Self::TuneBurned { op, .. }
+            | Self::TuneReverted { op, .. }
+            | Self::TuneImported { op, .. }
+            | Self::SnapshotsListed { op, .. }
+            | Self::TuneStatusRead { op, .. }
+            | Self::WriteAccessChanged { op, .. }
+            | Self::WriteFailureAcknowledged { op }
+            | Self::JournalRead { op, .. }
+            | Self::LogState { op, .. }
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
@@ -440,6 +570,29 @@ pub enum FailureCode {
     /// Realtime polling was refused (no connection, or the definition has no
     /// realtime block).
     RealtimeRejected,
+    /// A write was refused before any byte was sent: writes are off (S8), the
+    /// signature does not match (S1), the path is halted after a failed
+    /// verification (S3), the session is not connected, or nothing changed.
+    WriteRefused,
+    /// A page write or its read-back verification failed. The ECU image is
+    /// reloaded from the read-back and the write path halts until reviewed.
+    WriteFailed,
+    /// A burn was refused before any byte was sent (guardrails, no burnable
+    /// page, or unwritten edits).
+    BurnRefused,
+    /// A burn failed, or its read-back did not match.
+    BurnFailed,
+    /// The tune could not be imported (unreadable, unparseable, wrong shape).
+    ImportRejected,
+    /// The imported tune has a different signature and the user has not
+    /// approved the import (S9).
+    ImportNeedsConsent,
+    /// The snapshot before a risky operation could not be written.
+    SnapshotFailed,
+    /// The write journal could not be written, so the operation was refused.
+    JournalFailed,
+    /// The session log could not be started or stopped.
+    LogFailed,
 }
 
 impl FailureCode {
@@ -460,6 +613,15 @@ impl FailureCode {
             Self::ReadFailed => "read-failed",
             Self::TraceFailed => "trace-failed",
             Self::RealtimeRejected => "realtime-rejected",
+            Self::WriteRefused => "write-refused",
+            Self::WriteFailed => "write-failed",
+            Self::BurnRefused => "burn-refused",
+            Self::BurnFailed => "burn-failed",
+            Self::ImportRejected => "import-rejected",
+            Self::ImportNeedsConsent => "import-needs-consent",
+            Self::SnapshotFailed => "snapshot-failed",
+            Self::JournalFailed => "journal-failed",
+            Self::LogFailed => "log-failed",
         }
     }
 }
@@ -614,6 +776,94 @@ pub struct SaveSummary {
     pub path: PathBuf,
     /// Number of values that changed and were written.
     pub cells: usize,
+}
+
+/// What a verified RAM write did.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteSummary {
+    /// Pages written.
+    pub pages: usize,
+    /// Cells whose values changed and were sent.
+    pub cells: usize,
+    /// Variables those cells belong to.
+    pub variables: usize,
+    /// Whether the read-back matched the bytes written.
+    pub verified: bool,
+    /// The snapshot taken before the write, when one was needed.
+    pub snapshot: Option<PathBuf>,
+    /// The journal file the entries went to.
+    pub journal: Option<PathBuf>,
+}
+
+/// What a verified burn did.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BurnSummary {
+    /// Pages burned.
+    pub pages: usize,
+    /// Whether the read-back matched RAM after the burn.
+    pub verified: bool,
+    /// The snapshot taken before the burn.
+    pub snapshot: Option<PathBuf>,
+    /// The journal file the entries went to.
+    pub journal: Option<PathBuf>,
+}
+
+/// What reverting to the file baseline did.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertSummary {
+    /// Cells that were restored.
+    pub cells: usize,
+    /// The snapshot taken before the revert.
+    pub snapshot: Option<PathBuf>,
+}
+
+/// What importing another tune did.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSummary {
+    /// The file that was imported.
+    pub path: PathBuf,
+    /// Cells whose working values changed.
+    pub cells: usize,
+    /// Variables those cells belong to.
+    pub variables: usize,
+    /// Whether the import was approved despite a signature difference (S9).
+    pub consented: bool,
+    /// The snapshot taken before the import.
+    pub snapshot: Option<PathBuf>,
+}
+
+/// One line in the append-only write journal.
+///
+/// A write or burn writes a `begin` entry before touching the ECU and a `result`
+/// entry when it finishes, so a crash leaves evidence of the attempt. Entries are
+/// JSON lines in `.ox-tuner/write-journal.log`, capped by rotation.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalEntry {
+    /// UTC time, RFC 3339.
+    pub at: String,
+    /// `write`, `burn`, `revert`, `import` or `restore`.
+    pub operation: String,
+    /// `begin` or `result`.
+    pub phase: String,
+    /// The link the operation ran on (`simulator`, a device path).
+    pub port: String,
+    /// The ECU signature the session saw.
+    pub signature: String,
+    /// Page numbers, comma separated, or `all`.
+    pub pages: String,
+    /// Cells touched.
+    pub cells: usize,
+    /// Variables touched.
+    pub variables: usize,
+    /// `ok`, `failed`, `refused` or `pending`.
+    pub result: String,
+    /// The verification outcome or failure text.
+    pub detail: String,
 }
 
 /// What a dialog row holds, for the UI to pick a presentation.
@@ -1376,6 +1626,8 @@ pub struct ConnectionSummary {
     pub read_only: bool,
     /// Why, when it does.
     pub read_only_reason: Option<String>,
+    /// Whether the global write switch is on (S8). Off by default.
+    pub writes_enabled: bool,
     /// The `EcuBehavior` that claimed the definition.
     pub behavior: String,
     /// Framing in use: `legacy` or `envelope`.

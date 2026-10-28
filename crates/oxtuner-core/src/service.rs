@@ -8,39 +8,46 @@
 //! What this thread owns is the **session** — nothing, a standalone definition,
 //! or an open project (definition + tune images) — and the live ECU session's
 //! state machine: the I/O thread handle, pending conversations, the poll and
-//! reconnect timers, and the last read summary. The write path and the datalog
-//! ring buffer arrive with M7/M8 and land **here**, not in the UI — that is the
-//! point of the crate (`docs/architecture/crates/oxtuner-core.md`). Nothing in
-//! this module is a stub for them.
+//! reconnect timers, write/burn transactions, the session log and the last read
+//! summary. The write path, guardrails, chart history and logger all land here
+//! rather than in the UI — that is the point of the crate
+//! (`docs/architecture/crates/oxtuner-core.md`).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io,
+    path::PathBuf,
     sync::{Arc, atomic::AtomicU64},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use crossfire::{MRx, MTx, RecvTimeoutError, Rx, mpmc, spsc};
+use oxtuner_datalog::{LogColumn, LogStatus, Logger};
 use oxtuner_ini::Definition;
 use oxtuner_project::Project;
 use oxtuner_protocol::{Behavior, LinkMode};
-use oxtuner_tune::{IniPage, Tune, decode_page};
+use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
 use crate::handle::{CoreHandle, EventStream, Gate};
+use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
     self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, LinkChoice, PageRead,
-    RequestId,
+    PageWrite, RequestId,
 };
+use crate::journal::{self, Journal};
 use crate::message::{
-    AxisEdit, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary, Envelope,
-    Event, Failure, FailureCode, OpId, PortChoice, PortSummary, ProjectSummary, ReadAllSummary,
-    SaveSummary, SignatureVerdict, TableSummary,
+    AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary,
+    Envelope, Event, Failure, FailureCode, ImportSummary, JournalEntry, OpId, PortChoice,
+    PortSummary, ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SignatureVerdict,
+    TableSummary, WriteSummary,
 };
-use crate::realtime::{LatestFrame, RealtimeDecoder};
+use crate::realtime::{LatestFrame, RealtimeDecoder, RealtimeFrame};
+use crate::safety::{Safety, clamp_user};
+use crate::snapshot;
 
 /// Queue sizes and thread behaviour.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CoreConfig {
     /// Commands that may wait for the core. Small on purpose: a deep queue
     /// only hides a stalled core, and every queued command has to be answered
@@ -52,6 +59,14 @@ pub struct CoreConfig {
     /// accepted command plus [`Event::Stopped`] fits without the UI consuming —
     /// otherwise the shutdown drain could block on the queue.
     pub event_capacity: usize,
+    /// Whether the global write switch starts on (S8). Off unless the user
+    /// enabled it in the settings and the app passed that choice in.
+    pub writes_enabled: bool,
+    /// Where a standalone definition's write journal and logs live. A project
+    /// always uses its own `.ox-tuner/` sidecar.
+    pub journal_dir: Option<PathBuf>,
+    /// Frames retained for the live charts. 6 000 holds one minute at 100 Hz.
+    pub history_capacity: usize,
 }
 
 impl Default for CoreConfig {
@@ -59,6 +74,9 @@ impl Default for CoreConfig {
         Self {
             command_capacity: 64,
             event_capacity: 1024,
+            writes_enabled: false,
+            journal_dir: None,
+            history_capacity: 6_000,
         }
     }
 }
@@ -121,6 +139,16 @@ pub struct CoreReport {
     pub page_reads: u64,
     /// Realtime frames decoded.
     pub realtime_frames: u64,
+    /// Verified RAM writes completed.
+    pub writes: u64,
+    /// Verified burns completed.
+    pub burns: u64,
+    /// Read-back verifications that matched.
+    pub verifications: u64,
+    /// Read-back verifications that differed.
+    pub verification_failures: u64,
+    /// Log frames dropped because the writer queue was full.
+    pub log_drops: u64,
     /// Slowest command, measured from dequeue to reply.
     pub max_op_latency: Duration,
     /// Sum of command durations, for the mean.
@@ -188,6 +216,10 @@ pub struct CoreParts {
     pub events: EventStream,
     /// The newest realtime frame, read without an event round trip (ADR-0014).
     pub latest: LatestFrame,
+    /// The bounded realtime history the charts read (ADR-0014/0015).
+    pub history: ChartHistory,
+    /// The session log's live counters, when one is running.
+    pub log: LogStatus,
     /// The thread, which joins on shutdown.
     pub thread: CoreThread,
 }
@@ -267,11 +299,28 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
     let gate = Arc::new(Gate::default());
     let core_gate = Arc::clone(&gate);
     let latest = LatestFrame::default();
+    let history = ChartHistory::new(config.history_capacity);
+    let log = LogStatus::new();
+    let safety = Safety::new(config.writes_enabled);
+    let journal_dir = config.journal_dir.clone();
     let core_latest = latest.clone();
+    let core_history = history.clone();
+    let core_log = log.clone();
 
     let join = thread::Builder::new()
         .name("oxtuner-core".to_owned())
-        .spawn(move || run(command_rx, event_tx, core_gate, core_latest))
+        .spawn(move || {
+            run(
+                command_rx,
+                event_tx,
+                core_gate,
+                core_latest,
+                core_history,
+                core_log,
+                safety,
+                journal_dir,
+            )
+        })
         .map_err(CoreError::Spawn)?;
 
     tracing::debug!("core thread started");
@@ -284,6 +333,8 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
         },
         events: EventStream { events },
         latest,
+        history,
+        log,
         thread: CoreThread {
             join: Some(join),
             commands,
@@ -295,11 +346,16 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
 ///
 /// Blocks on the queue: with no poller yet there is nothing to do while idle,
 /// and a timed wait would only wake the thread for nothing.
+#[allow(clippy::too_many_arguments)]
 fn run(
     commands: MRx<mpmc::Array<Envelope>>,
     events: MTx<mpmc::Array<Event>>,
     gate: Arc<Gate>,
     latest: LatestFrame,
+    history: ChartHistory,
+    log: LogStatus,
+    mut safety: Safety,
+    journal_dir: Option<PathBuf>,
 ) -> CoreReport {
     let started = Instant::now();
     let mut report = CoreReport::default();
@@ -327,8 +383,12 @@ fn run(
                 envelope,
                 &mut session,
                 &mut live,
+                &mut safety,
+                journal_dir.as_deref(),
                 &events,
                 &latest,
+                &history,
+                &log,
                 &mut report,
             );
             let took = op_started.elapsed();
@@ -344,10 +404,29 @@ fn run(
 
         // Replies and timers are serviced after every command and every wait,
         // so a poll or a reconnect never depends on another command arriving.
-        service_live(&mut live, &mut session, &events, &latest, &mut report);
+        service_live(
+            &mut live,
+            &mut session,
+            &mut safety,
+            journal_dir.as_deref(),
+            &events,
+            &latest,
+            &history,
+            &log,
+            &mut report,
+        );
     }
 
-    teardown(&mut live, &latest, &events);
+    teardown(
+        &mut live,
+        &mut session,
+        &mut safety,
+        journal_dir.as_deref(),
+        &latest,
+        &events,
+        &history,
+        &log,
+    );
 
     // Close the door first: from here on no command can be queued, so draining
     // below really is the last word. Without this, a send racing the shutdown
@@ -423,20 +502,55 @@ impl Session {
         }
     }
 
+    /// The open project, when it is the project shape.
+    fn project(&self) -> Option<&Project> {
+        match self {
+            Self::Project(project) => Some(project),
+            Self::Definition(_) | Self::Empty => None,
+        }
+    }
+
+    /// The open project for mutation.
+    fn project_mut(&mut self) -> Option<&mut Project> {
+        match self {
+            Self::Project(project) => Some(project),
+            Self::Definition(_) | Self::Empty => None,
+        }
+    }
+
+    /// The derived write state, when a project is open.
+    fn tune_status(&self) -> Option<TuneStatus> {
+        self.project().map(|project| project.images().status())
+    }
+
     /// Everything unproven on the ECU side becomes unknown (ADR-0010).
     fn mark_unknown(&mut self) {
         if let Self::Project(project) = self {
             project.images_mut().mark_unknown();
         }
     }
+
+    /// The journal this session writes: the project sidecar, or the configured
+    /// fallback for a standalone definition. `None` when neither exists.
+    fn journal(&self, fallback: Option<&std::path::Path>) -> Option<Journal> {
+        match self {
+            Self::Project(project) => Some(Journal::new(journal::project_path(project.root()))),
+            Self::Definition(_) | Self::Empty => fallback.map(Journal::new),
+        }
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle(
     envelope: Envelope,
     session: &mut Session,
     live: &mut Option<Live>,
+    safety: &mut Safety,
+    journal_dir: Option<&std::path::Path>,
     events: &MTx<mpmc::Array<Event>>,
     latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
     report: &mut CoreReport,
 ) -> Outcome {
     let Envelope { op, command } = envelope;
@@ -477,6 +591,9 @@ fn handle(
             Outcome::Continue
         }
         Command::Connect { port, framing } => {
+            if let Some(definition) = session.definition() {
+                configure_history(history, definition);
+            }
             connect(op, session, live, events, report, port, framing, false)
         }
         Command::TestConnection { port, framing } => {
@@ -546,6 +663,20 @@ fn handle(
                         failure: Failure {
                             code: FailureCode::ReadFailed,
                             message: "a page read is already running".to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
+            if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::ReadFailed,
+                            message: "a write or burn is running; read the pages after it finishes"
+                                .to_owned(),
                         },
                     },
                 );
@@ -633,6 +764,142 @@ fn handle(
             }
             Outcome::Continue
         }
+        Command::SetWritesEnabled { enabled } => {
+            safety.set_writes_enabled(enabled);
+            let connection = live
+                .as_ref()
+                .map(|connection| connection.summary(safety.writes_enabled()));
+            tracing::info!(%op, enabled, "global write switch changed");
+            send(
+                events,
+                Event::WriteAccessChanged {
+                    op,
+                    writes_enabled: enabled,
+                    connection,
+                },
+            );
+            Outcome::Continue
+        }
+        Command::AcknowledgeWriteFailure => {
+            let was_halted = safety.halted().is_some();
+            safety.clear_halt();
+            tracing::info!(%op, was_halted, "write failure acknowledged");
+            send(events, Event::WriteFailureAcknowledged { op });
+            Outcome::Continue
+        }
+        Command::RefreshTuneStatus => {
+            match session.tune_status() {
+                Some(status) => {
+                    send(events, Event::TuneStatusRead { op, status });
+                }
+                None => send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::NothingToSave,
+                            message: "no tune is open".to_owned(),
+                        },
+                    },
+                ),
+            }
+            Outcome::Continue
+        }
+        Command::ReadJournal => {
+            let Some(journal) = session.journal(journal_dir) else {
+                send(
+                    events,
+                    Event::JournalRead {
+                        op,
+                        path: None,
+                        entries: Vec::new(),
+                    },
+                );
+                return Outcome::Continue;
+            };
+            match journal.read(journal::JOURNAL_READ_LIMIT) {
+                Ok(entries) => send(
+                    events,
+                    Event::JournalRead {
+                        op,
+                        path: Some(journal.path().to_owned()),
+                        entries,
+                    },
+                ),
+                Err(error) => {
+                    tracing::warn!(%op, %error, "the write journal could not be read");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::JournalFailed,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                }
+            }
+            Outcome::Continue
+        }
+        Command::WriteToRam { pages } => write_to_ram(
+            op,
+            session,
+            live,
+            safety,
+            journal_dir,
+            events,
+            report,
+            pages,
+        ),
+        Command::BurnToFlash { pages } => burn_to_flash(
+            op,
+            session,
+            live,
+            safety,
+            journal_dir,
+            events,
+            report,
+            pages,
+        ),
+        Command::RevertTune => revert_tune(op, session, journal_dir, events, report),
+        Command::ImportTune { path, consented } => import_tune(
+            op,
+            session,
+            journal_dir,
+            events,
+            report,
+            &path,
+            consented,
+            "import",
+        ),
+        Command::RestoreSnapshot { path } => import_tune(
+            op,
+            session,
+            journal_dir,
+            events,
+            report,
+            &path,
+            true,
+            "restore",
+        ),
+        Command::ListSnapshots => {
+            let Some(project) = session.project() else {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::SnapshotFailed,
+                    "no project is open",
+                );
+            };
+            let paths = snapshot::list(project.root());
+            send(events, Event::SnapshotsListed { op, paths });
+            Outcome::Continue
+        }
+        Command::StartLog { directory } => start_log(op, live, events, report, &directory, log),
+        Command::StopLog => stop_log(op, live, events, report),
         Command::SaveTrace { path } => {
             let Some(connection) = live.as_mut() else {
                 send(
@@ -697,7 +964,17 @@ fn handle(
                     // dropped here, never handed back to a caller. A live
                     // connection belongs to the definition it was built from,
                     // so it is torn down first.
-                    teardown(live, latest, events);
+                    teardown(
+                        live,
+                        session,
+                        safety,
+                        journal_dir,
+                        latest,
+                        events,
+                        history,
+                        log,
+                    );
+                    configure_history(history, &parsed);
                     *session = Session::Definition(Box::new(parsed));
                     report.loads += 1;
                     send(events, Event::DefinitionLoaded { op, summary });
@@ -735,7 +1012,17 @@ fn handle(
                         read_only = summary.read_only,
                         "project opened"
                     );
-                    teardown(live, latest, events);
+                    teardown(
+                        live,
+                        session,
+                        safety,
+                        journal_dir,
+                        latest,
+                        events,
+                        history,
+                        log,
+                    );
+                    configure_history(history, project.definition());
                     *session = Session::Project(Box::new(project));
                     report.projects_opened += 1;
                     send(events, Event::ProjectOpened { op, summary });
@@ -852,7 +1139,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::EditTable { name, edits } => {
+        Command::EditTable { name, mut edits } => {
             let Session::Project(project) = session else {
                 send(
                     events,
@@ -882,7 +1169,11 @@ fn handle(
                 return Outcome::Continue;
             }
 
-            for edit in &edits {
+            for edit in &mut edits {
+                if let Some(spec) = project.layout().variable(&name) {
+                    let (clamped, _) = clamp_user(spec, edit.value);
+                    edit.value = clamped;
+                }
                 // Validation above covers every error `set_cell_user` can
                 // report, so a failure here would be a bug; report it rather
                 // than swallow it, and keep the snapshot truthful.
@@ -929,7 +1220,11 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::EditAxis { table, axis, edits } => {
+        Command::EditAxis {
+            table,
+            axis,
+            mut edits,
+        } => {
             let Session::Project(project) = session else {
                 send(
                     events,
@@ -976,7 +1271,11 @@ fn handle(
                 return Outcome::Continue;
             }
 
-            for edit in &edits {
+            for edit in &mut edits {
+                if let Some(spec) = project.layout().variable(&variable) {
+                    let (clamped, _) = clamp_user(spec, edit.value);
+                    edit.value = clamped;
+                }
                 if let Err(error) = project
                     .tune_mut()
                     .set_user_at(&variable, edit.index, edit.value)
@@ -1064,7 +1363,7 @@ fn handle(
         Command::EditScalar {
             dialog,
             name,
-            value,
+            mut value,
         } => {
             let Session::Project(project) = session else {
                 send(
@@ -1093,6 +1392,11 @@ fn handle(
                     },
                 );
                 return Outcome::Continue;
+            }
+
+            if let Some(spec) = project.layout().variable(&name) {
+                let (clamped, _) = clamp_user(spec, value);
+                value = clamped;
             }
 
             if let Err(error) = project.tune_mut().set_user_at(&name, 0, value) {
@@ -1135,12 +1439,1006 @@ fn handle(
         }
         Command::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
-            teardown(live, latest, events);
+            teardown(
+                live,
+                session,
+                safety,
+                journal_dir,
+                latest,
+                events,
+                history,
+                log,
+            );
             *session = Session::Empty;
+            history.configure(Vec::new());
             tracing::debug!(%op, had_session, "session unloaded");
             send(events, Event::DefinitionUnloaded { op });
             Outcome::Continue
         }
+    }
+}
+
+/// Counts the cells and variables where `other` differs from the project's
+/// working image. Used for an imported tune, whose layout is a separate
+/// allocation but describes the same definition.
+fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
+    let mut cells = 0usize;
+    let mut variables = 0usize;
+    for spec in project.layout().variables() {
+        let Some(current) = project.tune().value(&spec.name) else {
+            continue;
+        };
+        let Some(imported) = other.value(&spec.name) else {
+            continue;
+        };
+        let changed = current.changed_cells(imported);
+        if changed > 0 {
+            cells += changed;
+            variables += 1;
+        }
+    }
+    (cells, variables)
+}
+
+/// Clamps every non-controller tune value to its definition range (S2).
+///
+/// Edits are already clamped when they enter the core. An imported tune or a
+/// file written by another tool can still carry an out-of-range value, and the
+/// write path must not send those blindly. Controller-owned values are not part
+/// of the write plan. Returns how many cells changed.
+fn clamp_working_changes(project: &mut Project) -> usize {
+    let mut clamped: Vec<(String, usize, f64)> = Vec::new();
+    for spec in project.layout().variables() {
+        if spec.is_controller_owned() {
+            continue;
+        }
+        for index in 0..spec.element_count() {
+            let Ok(value) = project.images().working().user_at(&spec.name, index) else {
+                continue;
+            };
+            let (wanted, changed) = clamp_user(spec, value);
+            if changed {
+                clamped.push((spec.name.clone(), index, wanted));
+            }
+        }
+    }
+    let count = clamped.len();
+    for (name, index, value) in clamped {
+        if let Err(error) = project.tune_mut().set_user_at(&name, index, value) {
+            tracing::warn!(%name, %error, "a clamped value could not be stored");
+        }
+    }
+    count
+}
+
+/// The values that differ from ECU RAM, in layout order.
+///
+/// This is a tune **sync**, not a replay of edit timestamps: it survives saving
+/// the `.msq` (which moves the file baseline) and an ECU that holds different
+/// values from the file. Controller-owned values are excluded — the ECU owns
+/// them, and writing a default over one is exactly the kind of damage S1–S10
+/// exists to prevent.
+fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize) {
+    let working = project.images().working();
+    let Some(ram) = project.images().ecu_ram() else {
+        return (Vec::new(), Vec::new(), 0);
+    };
+    let mut variables = Vec::new();
+    let mut pages = std::collections::BTreeSet::new();
+    let mut cells = 0usize;
+    for spec in project.layout().variables() {
+        if spec.is_controller_owned() {
+            continue;
+        }
+        let Some(page) = spec.ini_page() else {
+            // PC-side values are stored in the tune file, never sent to the ECU.
+            continue;
+        };
+        if spec.address.is_none() {
+            // An unresolved address cannot be placed in a page image; skipping
+            // it is honest, writing a guessed offset would not be.
+            continue;
+        }
+        let (Some(after), Some(sent)) = (working.value(&spec.name), ram.value(&spec.name)) else {
+            continue;
+        };
+        let remaining = after.changed_cells(sent);
+        if remaining == 0 {
+            continue;
+        }
+        variables.push(spec.name.clone());
+        cells += remaining;
+        pages.insert(page.get());
+    }
+    (variables, pages.into_iter().collect(), cells)
+}
+
+/// The unsent variables and cells on `pages`.
+fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>, usize) {
+    let (variables, _, _) = unsent_changes(project);
+    let working = project.images().working();
+    let Some(ram) = project.images().ecu_ram() else {
+        return (Vec::new(), 0);
+    };
+    let mut kept = Vec::new();
+    let mut cells = 0usize;
+    for name in variables {
+        let Some(spec) = project.layout().variable(&name) else {
+            continue;
+        };
+        if spec
+            .ini_page()
+            .is_none_or(|page| !pages.contains(&page.get()))
+        {
+            continue;
+        }
+        let (Some(after), Some(sent)) = (working.value(&name), ram.value(&name)) else {
+            continue;
+        };
+        let remaining = after.changed_cells(sent);
+        if remaining == 0 {
+            continue;
+        }
+        cells += remaining;
+        kept.push(name);
+    }
+    (kept, cells)
+}
+
+/// Counts edits that have not reached ECU RAM.
+///
+/// A burn persists whatever RAM holds, so an edit that is only in the working
+/// image would be silently left behind. The comparison is working → RAM: a
+/// value the ECU already holds is not an unsent edit.
+fn unsent_edits(project: &Project) -> (usize, usize) {
+    let (variables, _, cells) = unsent_changes(project);
+    (cells, variables.len())
+}
+
+/// Starts a verified RAM write (S1–S3, S6–S8).
+#[allow(clippy::too_many_arguments)]
+fn write_to_ram(
+    op: OpId,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    safety: &Safety,
+    journal_dir: Option<&std::path::Path>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    requested: Vec<u8>,
+) -> Outcome {
+    let Some(connection) = live.as_ref() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "connect to the ECU before writing",
+        );
+    };
+    if connection.write_tx.is_some() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "a write or burn is already running",
+        );
+    }
+    if connection.pending_kind(PendingKind::ReadAll) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "a page read is running; write after it finishes",
+        );
+    }
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "open a project before writing",
+        );
+    };
+    let read_only = project.report().read_only_reasons().join("; ");
+    if let Err(reason) = safety.gate(
+        connection.connected,
+        connection.verdict == SignatureVerdict::Match,
+        true,
+        (!read_only.is_empty()).then_some(read_only.as_str()),
+    ) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            reason.as_str(),
+        );
+    }
+    if project.images().ecu_ram().is_none() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "read the ECU into the tune image before writing (the session does this after connecting)",
+        );
+    }
+    if !connection.pages_complete {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "read every page before writing; an incomplete ECU image cannot be edited safely",
+        );
+    }
+    let clamped = clamp_working_changes(project);
+    if clamped > 0 {
+        tracing::info!(%op, clamped, "out-of-range values clamped before writing (S2)");
+    }
+    let (changed_variables, changed_pages, _) = unsent_changes(project);
+    if changed_variables.is_empty() || changed_pages.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "there are no values that differ from ECU RAM",
+        );
+    }
+
+    let targets = if requested.is_empty() {
+        changed_pages
+    } else {
+        let mut chosen = Vec::new();
+        for page in requested {
+            let Some(declared) = project
+                .definition()
+                .pages
+                .iter()
+                .find(|entry| entry.number == page)
+            else {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::WriteRefused,
+                    &format!("page {page} is not in the definition"),
+                );
+            };
+            if !declared.is_writable() {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::WriteRefused,
+                    &format!("page {page} has no write command"),
+                );
+            }
+            if !changed_pages.contains(&page) {
+                continue;
+            }
+            chosen.push(page);
+        }
+        chosen.sort_unstable();
+        chosen.dedup();
+        chosen
+    };
+    if targets.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "the selected pages have no values that differ from ECU RAM",
+        );
+    }
+    let (changed_variables, cells) = unsent_for_pages(project, &targets);
+    if changed_variables.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "the selected pages hold no values that still need sending",
+        );
+    }
+    let variables = changed_variables.len();
+
+    let snapshot = match snapshot::write(project, "write") {
+        Ok(path) => path,
+        Err(message) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::SnapshotFailed,
+                message.as_str(),
+            );
+        }
+    };
+    let Some(journal) = session.journal(journal_dir) else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            "no write journal can be written for this session; refusing an unjournaled write",
+        );
+    };
+    let begin = JournalEntry {
+        at: journal::timestamp(),
+        operation: "write".to_owned(),
+        phase: "begin".to_owned(),
+        port: connection.link_label.clone(),
+        signature: connection.signature.clone(),
+        pages: journal::pages_label(&targets),
+        cells,
+        variables,
+        result: "pending".to_owned(),
+        detail: format!("snapshot {}", snapshot.display()),
+    };
+    if let Err(error) = journal.append(&begin) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            &format!("the write journal could not be written: {error}"),
+        );
+    }
+
+    let Some(connection) = live.as_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "the session closed before the write started",
+        );
+    };
+    connection.begin_transaction(WriteTxn {
+        op,
+        kind: TxnKind::Write,
+        phase: TxnPhase::ReadBase,
+        pages: targets.clone(),
+        base: BTreeMap::new(),
+        expected: BTreeMap::new(),
+        readback: BTreeMap::new(),
+        changed_variables,
+        cells,
+        variables,
+        snapshot: Some(snapshot),
+        journal: Some(journal),
+    });
+    if let Err(error) =
+        connection.request(op, PendingKind::Write, IoOp::ReadPages { pages: targets })
+    {
+        connection.abort_transaction("the write could not be queued");
+        report.failures += 1;
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::WriteRefused,
+                    message: error.to_string(),
+                },
+            },
+        );
+    }
+    Outcome::Continue
+}
+
+/// Starts a verified burn (S3–S5, S7, S8).
+#[allow(clippy::too_many_arguments)]
+fn burn_to_flash(
+    op: OpId,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    safety: &Safety,
+    journal_dir: Option<&std::path::Path>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    requested: Vec<u8>,
+) -> Outcome {
+    let Some(connection) = live.as_ref() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "connect to the ECU before burning",
+        );
+    };
+    if connection.write_tx.is_some() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "a write or burn is already running",
+        );
+    }
+    if connection.pending_kind(PendingKind::ReadAll) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "a page read is running; burn after it finishes",
+        );
+    }
+    let Some(project) = session.project() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "open a project before burning",
+        );
+    };
+    let read_only = project.report().read_only_reasons().join("; ");
+    if let Err(reason) = safety.gate(
+        connection.connected,
+        connection.verdict == SignatureVerdict::Match,
+        true,
+        (!read_only.is_empty()).then_some(read_only.as_str()),
+    ) {
+        return refuse(events, report, op, FailureCode::BurnRefused, &reason);
+    }
+    if !connection.pages_complete {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "read every page before burning",
+        );
+    }
+    if project.images().ecu_ram().is_none() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "the ECU image is unknown; read it first",
+        );
+    }
+    let (unsent, _) = unsent_edits(project);
+    if unsent > 0 {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "the working image has edits that are not in ECU RAM. Write them first; burning would persist the older RAM values",
+        );
+    }
+
+    let burnable: Vec<u8> = project
+        .definition()
+        .pages
+        .iter()
+        .filter(|page| page.is_burnable())
+        .map(|page| page.number)
+        .collect();
+    if burnable.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "the definition declares no burnable page",
+        );
+    }
+    let targets = if requested.is_empty() {
+        burnable
+    } else {
+        let mut chosen = Vec::new();
+        for page in requested {
+            if !burnable.contains(&page) {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::BurnRefused,
+                    &format!("page {page} cannot be burned"),
+                );
+            }
+            chosen.push(page);
+        }
+        chosen.sort_unstable();
+        chosen.dedup();
+        chosen
+    };
+
+    let snapshot = match snapshot::write(project, "burn") {
+        Ok(path) => path,
+        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+    };
+    let Some(journal) = session.journal(journal_dir) else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            "no write journal can be written for this session",
+        );
+    };
+    let begin = JournalEntry {
+        at: journal::timestamp(),
+        operation: "burn".to_owned(),
+        phase: "begin".to_owned(),
+        port: connection.link_label.clone(),
+        signature: connection.signature.clone(),
+        pages: journal::pages_label(&targets),
+        cells: 0,
+        variables: 0,
+        result: "pending".to_owned(),
+        detail: format!("snapshot {}", snapshot.display()),
+    };
+    if let Err(error) = journal.append(&begin) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            &format!("the write journal could not be written: {error}"),
+        );
+    }
+
+    let Some(connection) = live.as_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "the session closed before the burn started",
+        );
+    };
+    connection.begin_transaction(WriteTxn {
+        op,
+        kind: TxnKind::Burn,
+        phase: TxnPhase::ReadBase,
+        pages: targets.clone(),
+        base: BTreeMap::new(),
+        expected: BTreeMap::new(),
+        readback: BTreeMap::new(),
+        changed_variables: Vec::new(),
+        cells: 0,
+        variables: 0,
+        snapshot: Some(snapshot),
+        journal: Some(journal),
+    });
+    if let Err(error) =
+        connection.request(op, PendingKind::Write, IoOp::ReadPages { pages: targets })
+    {
+        connection.abort_transaction("the burn could not be queued");
+        report.failures += 1;
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::BurnRefused,
+                    message: error.to_string(),
+                },
+            },
+        );
+    }
+    Outcome::Continue
+}
+
+/// Discards local edits after snapshotting the working image.
+fn revert_tune(
+    op: OpId,
+    session: &mut Session,
+    journal_dir: Option<&std::path::Path>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+) -> Outcome {
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "no tune is open",
+        );
+    };
+    let Ok(diff) = TuneDiff::between(project.images().working(), project.images().baseline())
+    else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "the tune images do not share a layout",
+        );
+    };
+    let snapshot = match snapshot::write(project, "revert") {
+        Ok(path) => path,
+        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+    };
+    project.images_mut().revert_to_baseline();
+    tracing::info!(%op, cells = diff.cells, "tune reverted to the file baseline");
+    let snapshot_detail = format!("snapshot {}", snapshot.display());
+    send(
+        events,
+        Event::TuneReverted {
+            op,
+            summary: RevertSummary {
+                cells: diff.cells,
+                snapshot: Some(snapshot),
+            },
+        },
+    );
+    send_status(events, op, project);
+    record_local_journal(
+        session,
+        journal_dir,
+        "revert",
+        diff.cells,
+        0,
+        "ok",
+        &snapshot_detail,
+    );
+    Outcome::Continue
+}
+
+/// Imports one `.msq` into the working image (S4, S9).
+#[allow(clippy::too_many_arguments)]
+fn import_tune(
+    op: OpId,
+    session: &mut Session,
+    journal_dir: Option<&std::path::Path>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    path: &std::path::Path,
+    consented: bool,
+    operation: &str,
+) -> Outcome {
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ImportRejected,
+            "no tune is open",
+        );
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::ImportRejected,
+                &format!("{} could not be read: {error}", path.display()),
+            );
+        }
+    };
+    let msq = match oxtuner_project::Msq::parse(&bytes) {
+        Ok(msq) => msq,
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::ImportRejected,
+                &format!("{} is not a readable .msq: {error}", path.display()),
+            );
+        }
+    };
+    let check = oxtuner_project::check(&msq, project.definition());
+    let signature_mismatch = check
+        .blockers
+        .iter()
+        .any(|issue| issue.kind == oxtuner_project::IssueKind::SignatureMismatch);
+    let other_blocker = check
+        .blockers
+        .iter()
+        .find(|issue| issue.kind != oxtuner_project::IssueKind::SignatureMismatch);
+    if let Some(blocker) = other_blocker {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ImportRejected,
+            &format!("the tune cannot be imported: {}", blocker.message),
+        );
+    }
+    if signature_mismatch && !consented {
+        report.failures += 1;
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::ImportNeedsConsent,
+                    message: format!(
+                        "the tune in {} was written for a different ECU signature. Importing it \
+                         needs explicit consent (S9)",
+                        path.display()
+                    ),
+                },
+            },
+        );
+        return Outcome::Continue;
+    }
+
+    let loaded = oxtuner_project::load::load(&msq, project.definition());
+    let (cells, variables) = changed_against(project, &loaded.tune);
+    let snapshot = match snapshot::write(project, operation) {
+        Ok(path) => path,
+        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+    };
+    if let Err(error) = project.images_mut().import(loaded.tune) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ImportRejected,
+            &error.to_string(),
+        );
+    }
+    tracing::info!(
+        %op,
+        path = %path.display(),
+        cells,
+        consented = signature_mismatch && consented,
+        "tune imported"
+    );
+    let snapshot_detail = format!("snapshot {}", snapshot.display());
+    send(
+        events,
+        Event::TuneImported {
+            op,
+            summary: ImportSummary {
+                path: path.to_owned(),
+                cells,
+                variables,
+                consented: signature_mismatch && consented,
+                snapshot: Some(snapshot),
+            },
+        },
+    );
+    send_status(events, op, project);
+    record_local_journal(
+        session,
+        journal_dir,
+        operation,
+        cells,
+        variables,
+        "ok",
+        &snapshot_detail,
+    );
+    Outcome::Continue
+}
+
+/// Starts a CSV session log.
+fn start_log(
+    op: OpId,
+    live: &mut Option<Live>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    directory: &std::path::Path,
+    log: &LogStatus,
+) -> Outcome {
+    let Some(connection) = live.as_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "connect to the ECU before logging",
+        );
+    };
+    if connection.logger.is_some() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "a session log is already running",
+        );
+    }
+    if !connection.connected {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "the link is lost; reconnect before logging",
+        );
+    }
+
+    let columns = connection
+        .decoder
+        .columns()
+        .into_iter()
+        .map(|(name, units)| LogColumn::new(name, units))
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "the definition declares no realtime channel to log",
+        );
+    }
+    let column_names: Vec<String> = columns.iter().map(|column| column.name.clone()).collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let path = directory.join(format!("oxtuner-{stamp}.csv"));
+    match Logger::start(&path, columns, log.clone()) {
+        Ok(logger) => {
+            tracing::info!(%op, path = %logger.path().display(), "session log started");
+            connection.log_columns = column_names;
+            connection.logger = Some(logger);
+            send(
+                events,
+                Event::LogState {
+                    op,
+                    running: true,
+                    summary: None,
+                },
+            );
+        }
+        Err(error) => {
+            report.failures += 1;
+            send(
+                events,
+                Event::Failed {
+                    op,
+                    failure: Failure {
+                        code: FailureCode::LogFailed,
+                        message: format!("{} could not be created: {error}", path.display()),
+                    },
+                },
+            );
+        }
+    }
+    Outcome::Continue
+}
+
+/// Stops the session log and flushes it.
+fn stop_log(
+    op: OpId,
+    live: &mut Option<Live>,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+) -> Outcome {
+    let Some(connection) = live.as_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "there is no session to stop logging",
+        );
+    };
+    let Some(logger) = connection.logger.take() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::LogFailed,
+            "no session log is running",
+        );
+    };
+    match logger.stop() {
+        Ok(summary) => {
+            tracing::info!(
+                %op,
+                path = %summary.path.display(),
+                frames = summary.frames,
+                dropped = summary.dropped,
+                "session log stopped"
+            );
+            send(
+                events,
+                Event::LogState {
+                    op,
+                    running: false,
+                    summary: Some(summary),
+                },
+            );
+        }
+        Err(error) => {
+            report.failures += 1;
+            send(
+                events,
+                Event::Failed {
+                    op,
+                    failure: Failure {
+                        code: FailureCode::LogFailed,
+                        message: error.to_string(),
+                    },
+                },
+            );
+        }
+    }
+    Outcome::Continue
+}
+
+/// Sends a refusal as [`Event::Failed`].
+fn refuse(
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    op: OpId,
+    code: FailureCode,
+    message: &str,
+) -> Outcome {
+    tracing::warn!(%op, code = code.as_str(), %message, "write-path command refused");
+    report.failures += 1;
+    send(
+        events,
+        Event::Failed {
+            op,
+            failure: Failure {
+                code,
+                message: message.to_owned(),
+            },
+        },
+    );
+    Outcome::Continue
+}
+
+/// Sends the derived tune status after a change.
+fn send_status(events: &MTx<mpmc::Array<Event>>, op: OpId, project: &Project) {
+    send(
+        events,
+        Event::TuneStatusRead {
+            op,
+            status: project.images().status(),
+        },
+    );
+}
+
+/// Appends a local (non-ECU) operation's result to the journal, best effort.
+///
+/// Writes and burns fail closed when the journal cannot be written; revert,
+/// import and restore have already changed only the working image and a
+/// snapshot exists, so a journal failure is logged instead of turning a
+/// completed operation into an error.
+fn record_local_journal(
+    session: &Session,
+    journal_dir: Option<&std::path::Path>,
+    operation: &str,
+    cells: usize,
+    variables: usize,
+    result: &str,
+    detail: &str,
+) {
+    let Some(journal) = session.journal(journal_dir) else {
+        return;
+    };
+    let entry = JournalEntry {
+        at: journal::timestamp(),
+        operation: operation.to_owned(),
+        phase: "result".to_owned(),
+        port: "local".to_owned(),
+        signature: session
+            .definition()
+            .map_or_else(String::new, |definition| definition.signature.clone()),
+        pages: String::new(),
+        cells,
+        variables,
+        result: result.to_owned(),
+        detail: detail.to_owned(),
+    };
+    if let Err(error) = journal.append(&entry) {
+        tracing::warn!(%error, "the local journal result could not be written");
     }
 }
 
@@ -1294,9 +2592,9 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
 
 /// The default realtime poll rate.
 ///
-/// 10 Hz is the rate the realtime spec targets for gauges and the pre-chart
-/// value display; the charts (M8) will own their own schedule.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// 20 Hz is the default the settings ship with; the charts and the logger read
+/// the same polled frames rather than running a second schedule.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The slowest and fastest accepted poll rates.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -1320,6 +2618,8 @@ enum PendingKind {
     Realtime,
     /// A trace save.
     Trace,
+    /// A write or burn transaction phase.
+    Write,
     /// A requested disconnect.
     Disconnect,
     /// A reconnect attempt (no command owns it).
@@ -1345,6 +2645,76 @@ struct Poll {
 struct Reconnect {
     attempts: u32,
     next_at: Instant,
+}
+
+/// What a transaction will do with the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnKind {
+    /// Write changed variables, then read back.
+    Write,
+    /// Burn RAM pages, then read back.
+    Burn,
+}
+
+impl TxnKind {
+    const fn journal_name(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Burn => "burn",
+        }
+    }
+
+    const fn failure_code(self) -> FailureCode {
+        match self {
+            Self::Write => FailureCode::WriteFailed,
+            Self::Burn => FailureCode::BurnFailed,
+        }
+    }
+
+    const fn event(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Burn => "burn",
+        }
+    }
+}
+
+/// Where a write/burn transaction is in its sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnPhase {
+    /// Fresh page read before patching or burning.
+    ReadBase,
+    /// Sending page images to RAM.
+    Write,
+    /// Sending burn commands.
+    Burn,
+    /// Reading pages back for verification.
+    Verify,
+}
+
+/// One write or burn, owned by the live session until it finishes.
+///
+/// A transaction is the only path from a command to `IoOp::WritePages` or
+/// `IoOp::BurnPages`, which is what makes "no auto-burn" structural (S5).
+#[derive(Debug)]
+struct WriteTxn {
+    op: OpId,
+    kind: TxnKind,
+    phase: TxnPhase,
+    /// Pages the transaction covers, sorted.
+    pages: Vec<u8>,
+    /// Fresh page bytes read before patching or burning.
+    base: BTreeMap<u8, Vec<u8>>,
+    /// Bytes expected after a write, or before a burn; used for verification.
+    expected: BTreeMap<u8, Vec<u8>>,
+    /// Bytes read back during verification.
+    readback: BTreeMap<u8, Vec<u8>>,
+    /// Variables whose values this write sends; empty for a burn.
+    changed_variables: Vec<String>,
+    cells: usize,
+    variables: usize,
+    snapshot: Option<PathBuf>,
+    journal: Option<Journal>,
 }
 
 /// A live ECU session: the I/O thread, its pending conversations and the
@@ -1377,6 +2747,20 @@ struct Live {
     /// The last signature verdict, kept for reconnects and the summary.
     signature: String,
     verdict: SignatureVerdict,
+    /// The transaction in flight, if a write or burn is running.
+    write_tx: Option<WriteTxn>,
+    /// The live session log, when one is recording.
+    logger: Option<Logger>,
+    /// Channel names in the running log's column order.
+    log_columns: Vec<String>,
+    /// Raw page bytes last read from or written to the ECU.
+    page_bytes: BTreeMap<u8, Vec<u8>>,
+    /// Whether every declared page was read and applied without skips.
+    pages_complete: bool,
+    /// The first realtime frame's monotonic time, the chart/log time origin.
+    first_frame: Option<Instant>,
+    /// Monotonic seconds of the last decoded frame.
+    last_frame_time: f64,
 }
 
 impl Live {
@@ -1419,6 +2803,13 @@ impl Live {
             probe: false,
             signature: String::new(),
             verdict: SignatureVerdict::Mismatch,
+            write_tx: None,
+            logger: None,
+            log_columns: Vec::new(),
+            page_bytes: BTreeMap::new(),
+            pages_complete: false,
+            first_frame: None,
+            last_frame_time: 0.0,
         }
     }
 
@@ -1429,6 +2820,37 @@ impl Live {
         self.next_id = self.next_id.next();
         self.pending.insert(id.0, Pending { op, kind });
         Ok(())
+    }
+
+    /// Records the transaction the next replies belong to.
+    fn begin_transaction(&mut self, transaction: WriteTxn) {
+        self.write_tx = Some(transaction);
+    }
+
+    /// Forgets a transaction whose first request could not be queued.
+    fn abort_transaction(&mut self, reason: &str) {
+        let Some(transaction) = self.write_tx.take() else {
+            return;
+        };
+        if let Some(journal) = &transaction.journal {
+            let entry = JournalEntry {
+                at: journal::timestamp(),
+                operation: transaction.kind.journal_name().to_owned(),
+                phase: "result".to_owned(),
+                port: self.link_label.clone(),
+                signature: self.signature.clone(),
+                pages: journal::pages_label(&transaction.pages),
+                cells: transaction.cells,
+                variables: transaction.variables,
+                result: "refused".to_owned(),
+                detail: reason.to_owned(),
+            };
+            if let Err(error) = journal.append(&entry) {
+                tracing::warn!(%error, "the journal result could not be written");
+            }
+        }
+        // The poll schedule resumes on the next tick; no write reached the wire.
+        self.polled();
     }
 
     /// Whether a request of this kind is already in flight.
@@ -1473,7 +2895,7 @@ impl Live {
     }
 
     /// The summary to show for this session.
-    fn summary(&self) -> ConnectionSummary {
+    fn summary(&self, writes_enabled: bool) -> ConnectionSummary {
         let read_only = self.verdict == SignatureVerdict::Mismatch;
         ConnectionSummary {
             port: self.link_label.clone(),
@@ -1488,6 +2910,7 @@ impl Live {
                     self.signature, self.definition_signature
                 )
             }),
+            writes_enabled,
             behavior: self.behavior.clone(),
             framing: self.framing,
             pages: self.pages,
@@ -1505,6 +2928,10 @@ impl Live {
         self.signature = signature;
         self.connected = true;
         self.reconnect = None;
+        // A fresh handshake proves the link, not the page image: the app reads
+        // every page next, and a write in between would act on stale RAM.
+        self.pages_complete = false;
+        self.page_bytes.clear();
     }
 }
 
@@ -1514,10 +2941,54 @@ impl Live {
 /// closed. A session can be replaced by a project load or an explicit unload
 /// while a page read is in flight; without this, that `OpId` would never get an
 /// answer and the UI would wait forever.
-fn teardown(live: &mut Option<Live>, latest: &LatestFrame, events: &MTx<mpmc::Array<Event>>) {
+///
+/// A transaction that was in flight is failed loudly and the write path halts:
+/// a closed session must never look like a successful write.
+#[allow(clippy::too_many_arguments)]
+fn teardown(
+    live: &mut Option<Live>,
+    session: &mut Session,
+    safety: &mut Safety,
+    _journal_dir: Option<&std::path::Path>,
+    latest: &LatestFrame,
+    events: &MTx<mpmc::Array<Event>>,
+    history: &ChartHistory,
+    log: &LogStatus,
+) {
     let Some(mut live) = live.take() else {
         return;
     };
+
+    if let Some(transaction) = live.write_tx.take() {
+        let reason = "the session was closed while the write was running";
+        safety.halt(reason);
+        if let Some(journal) = &transaction.journal {
+            let entry = JournalEntry {
+                at: journal::timestamp(),
+                operation: transaction.kind.journal_name().to_owned(),
+                phase: "result".to_owned(),
+                port: live.link_label.clone(),
+                signature: live.signature.clone(),
+                pages: journal::pages_label(&transaction.pages),
+                cells: transaction.cells,
+                variables: transaction.variables,
+                result: "failed".to_owned(),
+                detail: reason.to_owned(),
+            };
+            if let Err(error) = journal.append(&entry) {
+                tracing::warn!(%error, "the journal result could not be written");
+            }
+        }
+        session.mark_unknown();
+        tracing::warn!(operation = transaction.kind.event(), %reason, "write interrupted");
+    }
+
+    // Dropping the logger flushes it; the shared status stops.
+    if live.logger.take().is_some() {
+        tracing::info!("the session log was closed with the session");
+    }
+    log.mark_stopped();
+
     for pending in std::mem::take(&mut live.pending).into_values() {
         match pending.kind {
             // Background work the UI never asked for: no answer to send.
@@ -1538,6 +3009,7 @@ fn teardown(live: &mut Option<Live>, latest: &LatestFrame, events: &MTx<mpmc::Ar
     }
     live.thread.shutdown();
     latest.clear();
+    history.clear();
 }
 
 /// How long the core may wait for the next command.
@@ -1561,6 +3033,34 @@ fn next_wait(live: &Option<Live>) -> Option<Duration> {
         (Some(wait), None) | (None, Some(wait)) => Some(wait.max(Duration::from_millis(1))),
         (None, None) => None,
     }
+}
+
+/// Rebuilds the chart history's channel list from a definition, clearing old
+/// frames because their names belong to the previous definition.
+fn configure_history(history: &ChartHistory, definition: &Definition) {
+    let channels = RealtimeDecoder::new(definition)
+        .columns()
+        .into_iter()
+        .map(|(name, units)| ChannelInfo::new(name, units))
+        .collect();
+    history.configure(channels);
+}
+
+/// Places a decoded frame's values into the log's column order.
+///
+/// A decoder may skip a channel that cannot be read from a short or malformed
+/// block, and a computed channel may not resolve. The log keeps its full header
+/// and writes an empty cell for those, rather than shifting every later column.
+fn align_log_values(columns: &[String], frame: &RealtimeFrame) -> Vec<f64> {
+    let lookup: std::collections::HashMap<&str, f64> = frame
+        .values
+        .iter()
+        .map(|value| (value.name.as_str(), value.value))
+        .collect();
+    columns
+        .iter()
+        .map(|name| lookup.get(name.as_str()).copied().unwrap_or(f64::NAN))
+        .collect()
 }
 
 /// Starts a connection for `Connect`.
@@ -1704,11 +3204,16 @@ fn default_framing(definition: &Definition) -> LinkMode {
 }
 
 /// Drains replies and runs the poll/reconnect timers.
+#[allow(clippy::too_many_arguments)]
 fn service_live(
     live: &mut Option<Live>,
     session: &mut Session,
+    safety: &mut Safety,
+    journal_dir: Option<&std::path::Path>,
     events: &MTx<mpmc::Array<Event>>,
     latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
     report: &mut CoreReport,
 ) {
     let Some(connection) = live.as_mut() else {
@@ -1716,9 +3221,20 @@ fn service_live(
     };
 
     while let Ok(reply) = connection.replies.try_recv() {
-        let keep = on_reply(connection, reply, session, events, latest, report);
+        let keep = on_reply(
+            connection, reply, session, safety, events, latest, history, log, report,
+        );
         if !keep {
-            teardown(live, latest, events);
+            teardown(
+                live,
+                session,
+                safety,
+                journal_dir,
+                latest,
+                events,
+                history,
+                log,
+            );
             return;
         }
     }
@@ -1739,7 +3255,9 @@ fn service_live(
     if connection.poll_due()
         && !connection.pending_kind(PendingKind::Realtime)
         && !connection.pending_kind(PendingKind::ReadAll)
+        && !connection.pending_kind(PendingKind::Write)
         && !connection.pending_kind(PendingKind::Reconnect)
+        && connection.write_tx.is_none()
     {
         if let Err(error) =
             connection.request(OpId::new(0), PendingKind::Realtime, IoOp::ReadRealtime)
@@ -1752,13 +3270,745 @@ fn service_live(
     }
 }
 
+/// Moves one write or burn transaction through its read → write/burn → verify
+/// sequence.
+#[allow(clippy::too_many_arguments)]
+fn advance_write(
+    live: &mut Live,
+    op: OpId,
+    outcome: IoOutcome,
+    session: &mut Session,
+    safety: &mut Safety,
+    events: &MTx<mpmc::Array<Event>>,
+    latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
+    report: &mut CoreReport,
+) {
+    let Some(mut transaction) = live.write_tx.take() else {
+        tracing::warn!(%op, "a write reply arrived without a transaction");
+        return;
+    };
+    debug_assert_eq!(transaction.op, op);
+
+    match outcome {
+        IoOutcome::Pages { pages } => match transaction.phase {
+            TxnPhase::ReadBase => {
+                transaction.base = pages
+                    .iter()
+                    .map(|read| (read.page, read.bytes.clone()))
+                    .collect();
+                for read in &pages {
+                    live.page_bytes.insert(read.page, read.bytes.clone());
+                }
+
+                match transaction.kind {
+                    TxnKind::Write => {
+                        let Some(project) = session.project_mut() else {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                "the project closed during the write".to_owned(),
+                                false,
+                            );
+                            return;
+                        };
+                        let Some(mut image) = project.images().ecu_ram().cloned() else {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                "the ECU image is unknown; refusing to patch it".to_owned(),
+                                false,
+                            );
+                            return;
+                        };
+                        let layout = Arc::clone(project.layout());
+                        for read in &pages {
+                            let Some(page) = IniPage::new(read.page) else {
+                                fail_transaction(
+                                    live,
+                                    transaction,
+                                    session,
+                                    safety,
+                                    events,
+                                    report,
+                                    format!("page {} is not a valid page number", read.page),
+                                    false,
+                                );
+                                return;
+                            };
+                            if let Err(error) = decode_page(&layout, page, &read.bytes, &mut image)
+                            {
+                                fail_transaction(
+                                    live,
+                                    transaction,
+                                    session,
+                                    safety,
+                                    events,
+                                    report,
+                                    format!("page {} could not be decoded: {error}", read.page),
+                                    false,
+                                );
+                                return;
+                            }
+                        }
+                        // The fresh read is the truth about RAM: use it for the
+                        // delta instead of the image from connect time.
+                        if let Err(error) = project.images_mut().set_ecu_ram(image) {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                format!("the fresh ECU image could not be stored: {error}"),
+                                false,
+                            );
+                            return;
+                        }
+                        let (variables, changed_pages, _) = unsent_changes(project);
+                        if variables.is_empty() {
+                            finish_refused(
+                                live,
+                                transaction,
+                                events,
+                                report,
+                                "the ECU already holds these values",
+                            );
+                            return;
+                        }
+                        let target_set: HashSet<u8> = transaction.pages.iter().copied().collect();
+                        let targets: Vec<u8> = changed_pages
+                            .into_iter()
+                            .filter(|page| target_set.contains(page))
+                            .collect();
+                        if targets.is_empty() {
+                            finish_refused(
+                                live,
+                                transaction,
+                                events,
+                                report,
+                                "there are no values that differ from ECU RAM on these pages",
+                            );
+                            return;
+                        }
+                        let (variables, cells) = unsent_for_pages(project, &targets);
+                        if variables.is_empty() {
+                            finish_refused(
+                                live,
+                                transaction,
+                                events,
+                                report,
+                                "the selected pages hold no values that still need sending",
+                            );
+                            return;
+                        }
+                        transaction.changed_variables = variables.clone();
+                        transaction.cells = cells;
+                        transaction.variables = variables.len();
+                        transaction.pages = targets.clone();
+
+                        let mut writes = Vec::with_capacity(targets.len());
+                        for page in &targets {
+                            let Some(base) = transaction.base.get(page) else {
+                                fail_transaction(
+                                    live,
+                                    transaction,
+                                    session,
+                                    safety,
+                                    events,
+                                    report,
+                                    format!("page {page} was not read before the write"),
+                                    false,
+                                );
+                                return;
+                            };
+                            let Some(ini_page) = IniPage::new(*page) else {
+                                continue;
+                            };
+                            match patch_page(
+                                &layout,
+                                ini_page,
+                                base,
+                                project.tune(),
+                                &transaction.changed_variables,
+                            ) {
+                                Ok(bytes) => {
+                                    transaction.expected.insert(*page, bytes.clone());
+                                    writes.push(PageWrite {
+                                        page: *page,
+                                        data: bytes,
+                                    });
+                                }
+                                Err(error) => {
+                                    fail_transaction(
+                                        live,
+                                        transaction,
+                                        session,
+                                        safety,
+                                        events,
+                                        report,
+                                        format!("page {page} could not be patched: {error}"),
+                                        false,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+
+                        transaction.phase = TxnPhase::Write;
+                        live.write_tx = Some(transaction);
+                        if let Err(error) =
+                            live.request(op, PendingKind::Write, IoOp::WritePages { pages: writes })
+                        {
+                            let Some(transaction) = live.write_tx.take() else {
+                                return;
+                            };
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                error.to_string(),
+                                false,
+                            );
+                        }
+                    }
+                    TxnKind::Burn => {
+                        let Some(project) = session.project_mut() else {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                "the project closed during the burn".to_owned(),
+                                false,
+                            );
+                            return;
+                        };
+                        let Some(mut image) = project.images().ecu_ram().cloned() else {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                "the ECU image is unknown; refusing to burn".to_owned(),
+                                false,
+                            );
+                            return;
+                        };
+                        let layout = Arc::clone(project.layout());
+                        let burn_pages = transaction.pages.clone();
+                        for page in &burn_pages {
+                            let Some(bytes) = transaction.base.get(page) else {
+                                fail_transaction(
+                                    live,
+                                    transaction,
+                                    session,
+                                    safety,
+                                    events,
+                                    report,
+                                    format!("page {page} was not read before the burn"),
+                                    false,
+                                );
+                                return;
+                            };
+                            let Some(ini_page) = IniPage::new(*page) else {
+                                continue;
+                            };
+                            if let Err(error) = decode_page(&layout, ini_page, bytes, &mut image) {
+                                fail_transaction(
+                                    live,
+                                    transaction,
+                                    session,
+                                    safety,
+                                    events,
+                                    report,
+                                    format!("page {page} could not be decoded: {error}"),
+                                    false,
+                                );
+                                return;
+                            }
+                        }
+                        if let Err(error) = project.images_mut().set_ecu_ram(image) {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                format!("the fresh ECU image could not be stored: {error}"),
+                                false,
+                            );
+                            return;
+                        }
+                        let (unsent, _) = unsent_edits(project);
+                        if unsent > 0 {
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                "the working image has edits that are not in ECU RAM. Write them first; burning would persist the older RAM values".to_owned(),
+                                false,
+                            );
+                            return;
+                        }
+                        transaction.expected = transaction.base.clone();
+                        transaction.phase = TxnPhase::Burn;
+                        let pages = transaction.pages.clone();
+                        live.write_tx = Some(transaction);
+                        if let Err(error) =
+                            live.request(op, PendingKind::Write, IoOp::BurnPages { pages })
+                        {
+                            let Some(transaction) = live.write_tx.take() else {
+                                return;
+                            };
+                            fail_transaction(
+                                live,
+                                transaction,
+                                session,
+                                safety,
+                                events,
+                                report,
+                                error.to_string(),
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
+            TxnPhase::Verify => {
+                if !verify_pages(&mut transaction, &pages) {
+                    let reason = verification_message(&transaction);
+                    fail_transaction(
+                        live,
+                        transaction,
+                        session,
+                        safety,
+                        events,
+                        report,
+                        reason,
+                        false,
+                    );
+                    return;
+                }
+                succeed_transaction(live, transaction, session, safety, events, report);
+            }
+            TxnPhase::Write | TxnPhase::Burn => {
+                tracing::warn!(%op, "an unexpected page read arrived during a transaction");
+                live.write_tx = Some(transaction);
+            }
+        },
+        IoOutcome::Written { pages, bytes } => {
+            tracing::debug!(%op, pages, bytes, "pages written; reading them back");
+            transaction.phase = TxnPhase::Verify;
+            let pages = transaction.pages.clone();
+            live.write_tx = Some(transaction);
+            if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
+                let Some(transaction) = live.write_tx.take() else {
+                    return;
+                };
+                fail_transaction(
+                    live,
+                    transaction,
+                    session,
+                    safety,
+                    events,
+                    report,
+                    error.to_string(),
+                    false,
+                );
+            }
+        }
+        IoOutcome::Burned { pages } => {
+            tracing::debug!(%op, pages, "pages burned; reading them back");
+            transaction.phase = TxnPhase::Verify;
+            let pages = transaction.pages.clone();
+            live.write_tx = Some(transaction);
+            if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
+                let Some(transaction) = live.write_tx.take() else {
+                    return;
+                };
+                fail_transaction(
+                    live,
+                    transaction,
+                    session,
+                    safety,
+                    events,
+                    report,
+                    error.to_string(),
+                    false,
+                );
+            }
+        }
+        IoOutcome::Failed(failure) => {
+            let link_lost = matches!(
+                failure.kind,
+                IoFailureKind::LinkLost | IoFailureKind::Timeout
+            );
+            fail_transaction(
+                live,
+                transaction,
+                session,
+                safety,
+                events,
+                report,
+                failure.message.clone(),
+                link_lost,
+            );
+            if link_lost {
+                connection_lost(live, session, events, latest, failure.message);
+                history.clear();
+                log.mark_stopped();
+            }
+        }
+        other => {
+            tracing::warn!(%op, ?other, "an unexpected reply arrived during a transaction");
+            live.write_tx = Some(transaction);
+        }
+    }
+}
+
+/// Compares each page read back with what the transaction expected.
+fn verify_pages(transaction: &mut WriteTxn, pages: &[PageRead]) -> bool {
+    for read in pages {
+        transaction.readback.insert(read.page, read.bytes.clone());
+    }
+    transaction.pages.iter().all(|page| {
+        let expected = transaction.expected.get(page);
+        let actual = transaction.readback.get(page);
+        expected.is_some() && expected == actual
+    })
+}
+
+fn verification_message(transaction: &WriteTxn) -> String {
+    let mismatched: Vec<String> = transaction
+        .pages
+        .iter()
+        .filter(|page| {
+            let expected = transaction.expected.get(page);
+            let actual = transaction.readback.get(page);
+            expected.is_none() || expected != actual
+        })
+        .map(|page| page.to_string())
+        .collect();
+    format!(
+        "the read-back did not match on page {}. The ECU image was reloaded from the read-back; \
+         the write path is halted until you review the tune",
+        mismatched.join(", ")
+    )
+}
+
+/// Applies a verified write or burn and reports it.
+fn succeed_transaction(
+    live: &mut Live,
+    transaction: WriteTxn,
+    session: &mut Session,
+    safety: &mut Safety,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+) {
+    if session.project().is_none() {
+        fail_transaction(
+            live,
+            transaction,
+            session,
+            safety,
+            events,
+            report,
+            "the project closed during the operation".to_owned(),
+            false,
+        );
+        return;
+    }
+
+    let applied = match transaction.kind {
+        TxnKind::Write => apply_verified_write(live, &transaction, session),
+        TxnKind::Burn => apply_verified_burn(&transaction, session),
+    };
+    if let Err(reason) = applied {
+        fail_transaction(
+            live,
+            transaction,
+            session,
+            safety,
+            events,
+            report,
+            reason,
+            false,
+        );
+        return;
+    }
+
+    match transaction.kind {
+        TxnKind::Write => {
+            report.writes = report.writes.saturating_add(1);
+            report.verifications = report.verifications.saturating_add(1);
+            record_result(&transaction, live, "ok", "read-back matched");
+            send(
+                events,
+                Event::TuneWritten {
+                    op: transaction.op,
+                    summary: WriteSummary {
+                        pages: transaction.pages.len(),
+                        cells: transaction.cells,
+                        variables: transaction.variables,
+                        verified: true,
+                        snapshot: transaction.snapshot.clone(),
+                        journal: transaction
+                            .journal
+                            .as_ref()
+                            .map(|journal| journal.path().to_owned()),
+                    },
+                },
+            );
+        }
+        TxnKind::Burn => {
+            report.burns = report.burns.saturating_add(1);
+            report.verifications = report.verifications.saturating_add(1);
+            record_result(&transaction, live, "ok", "read-back matched");
+            send(
+                events,
+                Event::TuneBurned {
+                    op: transaction.op,
+                    summary: BurnSummary {
+                        pages: transaction.pages.len(),
+                        verified: true,
+                        snapshot: transaction.snapshot.clone(),
+                        journal: transaction
+                            .journal
+                            .as_ref()
+                            .map(|journal| journal.path().to_owned()),
+                    },
+                },
+            );
+        }
+    }
+
+    if let Some(project) = session.project() {
+        send_status(events, transaction.op, project);
+    }
+    live.polled();
+}
+
+/// Applies the read-back of a verified write to the ECU image.
+fn apply_verified_write(
+    live: &mut Live,
+    transaction: &WriteTxn,
+    session: &mut Session,
+) -> Result<(), String> {
+    let Some(project) = session.project_mut() else {
+        return Err("the project closed during the write".to_owned());
+    };
+    let Some(mut image) = project.images().ecu_ram().cloned() else {
+        return Err("the ECU image disappeared during the write".to_owned());
+    };
+    let layout = Arc::clone(project.layout());
+    for (page, bytes) in &transaction.readback {
+        let Some(ini_page) = IniPage::new(*page) else {
+            continue;
+        };
+        decode_page(&layout, ini_page, bytes, &mut image)
+            .map_err(|error| format!("the verified page {page} could not be decoded: {error}"))?;
+    }
+    project
+        .images_mut()
+        .set_ecu_ram(image)
+        .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
+    project.images_mut().clear_write_failures();
+    live.page_bytes.extend(
+        transaction
+            .readback
+            .iter()
+            .map(|(page, bytes)| (*page, bytes.clone())),
+    );
+    Ok(())
+}
+
+/// Records that flash now holds the read-back RAM image.
+fn apply_verified_burn(transaction: &WriteTxn, session: &mut Session) -> Result<(), String> {
+    let Some(project) = session.project_mut() else {
+        return Err("the project closed during the burn".to_owned());
+    };
+    let burnable = project
+        .definition()
+        .pages
+        .iter()
+        .filter(|page| page.is_burnable())
+        .count();
+    if transaction.pages.len() < burnable {
+        // Only some pages were burned; the flash image of the rest is still
+        // whatever it was, so claiming the whole image is verified would be a
+        // lie. The journal and the summary still record the verified pages.
+        return Ok(());
+    }
+    let Some(ram) = project.images().ecu_ram().cloned() else {
+        return Err("the ECU image disappeared during the burn".to_owned());
+    };
+    project
+        .images_mut()
+        .set_ecu_flash(ram)
+        .map_err(|error| format!("the verified flash image could not be stored: {error}"))?;
+    Ok(())
+}
+
+/// Ends a transaction that failed (or could not be sent), halting writes.
+#[allow(clippy::too_many_arguments)]
+fn fail_transaction(
+    live: &mut Live,
+    transaction: WriteTxn,
+    session: &mut Session,
+    safety: &mut Safety,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    reason: String,
+    link_lost: bool,
+) {
+    let code = transaction.kind.failure_code();
+    if transaction.kind == TxnKind::Write {
+        if let Some(project) = session.project_mut() {
+            if !transaction.readback.is_empty()
+                && let Some(mut image) = project.images().ecu_ram().cloned()
+            {
+                let layout = Arc::clone(project.layout());
+                for (page, bytes) in &transaction.readback {
+                    let Some(ini_page) = IniPage::new(*page) else {
+                        continue;
+                    };
+                    let _ = decode_page(&layout, ini_page, bytes, &mut image);
+                }
+                if let Err(error) = project.images_mut().set_ecu_ram(image) {
+                    tracing::warn!(%error, "the failed write's read-back could not be stored");
+                }
+            }
+            mark_failed_cells(project, &transaction.changed_variables);
+        }
+        if link_lost {
+            session.mark_unknown();
+        }
+    }
+    safety.halt(reason.clone());
+    report.failures = report.failures.saturating_add(1);
+    if !transaction.expected.is_empty() || !transaction.readback.is_empty() {
+        report.verification_failures = report.verification_failures.saturating_add(1);
+    }
+    tracing::warn!(
+        op = %transaction.op,
+        operation = transaction.kind.event(),
+        %reason,
+        link_lost,
+        "write transaction failed"
+    );
+    record_result(&transaction, live, "failed", &reason);
+    send(
+        events,
+        Event::Failed {
+            op: transaction.op,
+            failure: Failure {
+                code,
+                message: reason,
+            },
+        },
+    );
+    live.polled();
+}
+
+/// Marks every cell of the changed variables as a failed write.
+fn mark_failed_cells(project: &mut Project, names: &[String]) {
+    let mut cells: Vec<(String, usize, usize)> = Vec::new();
+    for name in names {
+        let Some(spec) = project.layout().variable(name) else {
+            continue;
+        };
+        let (columns, rows) = spec.shape.dimensions().unwrap_or((1, 1));
+        for row in 0..rows {
+            for column in 0..columns {
+                cells.push((name.clone(), row, column));
+            }
+        }
+    }
+    for (name, row, column) in cells {
+        if let Err(error) = project.images_mut().mark_write_failed(&name, row, column) {
+            tracing::warn!(%name, %error, "a failed cell could not be marked");
+        }
+    }
+}
+
+/// Records the result line for a transaction's journal, best effort.
+fn record_result(transaction: &WriteTxn, live: &Live, result: &str, detail: &str) {
+    let Some(journal) = &transaction.journal else {
+        return;
+    };
+    let entry = JournalEntry {
+        at: journal::timestamp(),
+        operation: transaction.kind.journal_name().to_owned(),
+        phase: "result".to_owned(),
+        port: live.link_label.clone(),
+        signature: live.signature.clone(),
+        pages: journal::pages_label(&transaction.pages),
+        cells: transaction.cells,
+        variables: transaction.variables,
+        result: result.to_owned(),
+        detail: detail.to_owned(),
+    };
+    if let Err(error) = journal.append(&entry) {
+        tracing::warn!(%error, "the journal result could not be written");
+    }
+}
+
+/// Ends a transaction before the wire saw it, without halting.
+fn finish_refused(
+    live: &mut Live,
+    transaction: WriteTxn,
+    events: &MTx<mpmc::Array<Event>>,
+    report: &mut CoreReport,
+    reason: &str,
+) {
+    report.failures = report.failures.saturating_add(1);
+    record_result(&transaction, live, "refused", reason);
+    send(
+        events,
+        Event::Failed {
+            op: transaction.op,
+            failure: Failure {
+                code: FailureCode::WriteRefused,
+                message: reason.to_owned(),
+            },
+        },
+    );
+    live.polled();
+}
+
 /// Handles one I/O reply. Returns `false` when the session is finished.
+#[allow(clippy::too_many_arguments)]
 fn on_reply(
     live: &mut Live,
     reply: IoReply,
     session: &mut Session,
+    safety: &mut Safety,
     events: &MTx<mpmc::Array<Event>>,
     latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
     report: &mut CoreReport,
 ) -> bool {
     let Some(pending) = live.pending.remove(&reply.id) else {
@@ -1769,7 +4019,7 @@ fn on_reply(
     match (pending.kind, reply.outcome) {
         (PendingKind::Connect, IoOutcome::Signature { signature }) => {
             live.set_signature(signature);
-            let summary = live.summary();
+            let summary = live.summary(safety.writes_enabled());
             if live.probe {
                 tracing::info!(
                     port = %summary.port,
@@ -1847,6 +4097,11 @@ fn on_reply(
                         "pages read"
                     );
                     report.page_reads += 1;
+                    live.page_bytes = pages
+                        .iter()
+                        .map(|read| (read.page, read.bytes.clone()))
+                        .collect();
+                    live.pages_complete = summary.is_complete();
                     // The documented connect flow is signature → read all pages
                     // → start the poller. Starting it earlier would interleave
                     // realtime replies with the page read on the wire.
@@ -1887,9 +4142,30 @@ fn on_reply(
             if frame.values.is_empty() {
                 return true;
             }
+            let first = *live.first_frame.get_or_insert_with(Instant::now);
+            let time = first.elapsed().as_secs_f64();
+            live.last_frame_time = time;
+            let named: Vec<(&str, f64)> = frame
+                .values
+                .iter()
+                .map(|value| (value.name.as_str(), value.value))
+                .collect();
+            history.push_frame(time, &named);
+            if let Some(logger) = &live.logger {
+                let values = align_log_values(&live.log_columns, &frame);
+                if !logger.try_log(time, &values) {
+                    report.log_drops = report.log_drops.saturating_add(1);
+                }
+            }
             latest.set(frame);
             report.realtime_frames += 1;
             send(events, Event::RealtimeFrame { sequence });
+            true
+        }
+        (PendingKind::Write, outcome) => {
+            advance_write(
+                live, pending.op, outcome, session, safety, events, latest, history, log, report,
+            );
             true
         }
         (PendingKind::Trace, IoOutcome::TraceSaved { path, frames }) => {
@@ -1906,7 +4182,7 @@ fn on_reply(
         }
         (PendingKind::Reconnect, IoOutcome::Reconnected { signature }) => {
             live.set_signature(signature);
-            let summary = live.summary();
+            let summary = live.summary(safety.writes_enabled());
             tracing::info!(
                 signature = %summary.signature,
                 verdict = summary.verdict.as_str(),
@@ -1973,6 +4249,7 @@ fn failure_code(kind: PendingKind) -> FailureCode {
         PendingKind::ReadAll => FailureCode::ReadFailed,
         PendingKind::Realtime => FailureCode::RealtimeRejected,
         PendingKind::Trace => FailureCode::TraceFailed,
+        PendingKind::Write => FailureCode::WriteFailed,
         PendingKind::Disconnect | PendingKind::Reconnect => FailureCode::NotConnected,
     }
 }
@@ -1990,6 +4267,11 @@ fn connection_lost(
     live.stop_polling();
     session.mark_unknown();
     latest.clear();
+    // A lost link ends the log's input; close it cleanly rather than leave an
+    // open file that grows only when a reconnect happens.
+    if live.logger.take().is_some() {
+        tracing::info!("the session log was closed because the link was lost");
+    }
 
     // Every conversation that was waiting is answered now: a vanished link
     // must not leave a command unanswered.

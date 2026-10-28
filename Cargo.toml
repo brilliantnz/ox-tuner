@@ -8,6 +8,7 @@ resolver = "3"
 members = [
   "crates/oxtuner-app",
   "crates/oxtuner-core",
+  "crates/oxtuner-datalog",
   "crates/oxtuner-ini",
   "crates/oxtuner-project",
   "crates/oxtuner-protocol",
@@ -26,6 +27,7 @@ repository = "https://github.com/brilliantnz/ox-tuner"
 [workspace.dependencies]
 gpui-kit = "=0.8.1"
 oxtuner-core = { path = "./crates/oxtuner-core" }
+oxtuner-datalog = { path = "./crates/oxtuner-datalog" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
 oxtuner-project = { path = "./crates/oxtuner-project" }
 oxtuner-protocol = { path = "./crates/oxtuner-protocol" }

@@ -88,28 +88,14 @@ pub(crate) struct IoPlan {
 pub(crate) enum IoOp {
     /// Read the firmware signature.
     Signature,
-    /// Read one whole page.
-    #[expect(
-        dead_code,
-        reason = "the M7 write path and the M5 protocol suite use it; the M6 session reads all pages"
-    )]
-    ReadPage { page: u8 },
+    /// Read a list of whole pages, in order.
+    ReadPages { pages: Vec<u8> },
     /// Read every declared page.
     ReadAll,
-    /// Write a page chunk. No command creates one yet (M7 owns that path); the
-    /// protocol suite exercises it against the simulator.
-    #[expect(
-        dead_code,
-        reason = "the M7 write path is not exposed as a command yet"
-    )]
-    WritePage {
-        page: u8,
-        offset: u16,
-        data: Vec<u8>,
-    },
-    /// Burn one page. Same note as [`Self::WritePage`].
-    #[expect(dead_code, reason = "the M7 burn path is not exposed as a command yet")]
-    Burn { page: u8 },
+    /// Write one or more pages, already encoded by the core.
+    WritePages { pages: Vec<PageWrite> },
+    /// Burn a list of pages.
+    BurnPages { pages: Vec<u8> },
     /// Read one realtime block.
     ReadRealtime,
     /// Reopen the link and read the signature again.
@@ -118,6 +104,15 @@ pub(crate) enum IoOp {
     SaveTrace { path: PathBuf },
     /// Close the link and stop.
     Close,
+}
+
+/// One page write: the page number and the encoded byte image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageWrite {
+    /// INI page number.
+    pub(crate) page: u8,
+    /// Bytes to write from offset 0.
+    pub(crate) data: Vec<u8>,
 }
 
 /// One request with its identity.
@@ -183,17 +178,14 @@ pub(crate) struct IoFailure {
 pub(crate) enum IoOutcome {
     /// The ECU's signature.
     Signature { signature: String },
-    /// One page.
-    #[expect(dead_code, reason = "see IoOp::ReadPage")]
-    Page(PageRead),
+    /// A requested list of pages.
+    Pages { pages: Vec<PageRead> },
     /// Every page, in definition order. Complete: a partial read is an error.
     All { pages: Vec<PageRead> },
-    /// A write was sent.
-    #[expect(dead_code, reason = "see IoOp::WritePage")]
-    Written { page: u8, offset: u16, bytes: usize },
-    /// A burn was sent.
-    #[expect(dead_code, reason = "see IoOp::Burn")]
-    Burned { page: u8 },
+    /// Pages were written.
+    Written { pages: usize, bytes: usize },
+    /// Pages were burned.
+    Burned { pages: usize },
     /// One realtime block.
     Realtime { block: Vec<u8> },
     /// The link reopened and answered again.
@@ -426,10 +418,25 @@ fn execute(
             Ok(signature) => (IoOutcome::Signature { signature }, false),
             Err(error) => (failure(error), false),
         },
-        IoOp::ReadPage { page } => match protocol.read_page_all(transport, page) {
-            Ok(bytes) => (IoOutcome::Page(PageRead { page, bytes }), false),
-            Err(error) => (failure(error), false),
-        },
+        IoOp::ReadPages { pages } => {
+            let mut read = Vec::with_capacity(pages.len());
+            for page in pages {
+                if stop.load(Ordering::Relaxed) {
+                    return (
+                        IoOutcome::Failed(IoFailure {
+                            kind: IoFailureKind::Stopped,
+                            message: "the page read was stopped".to_owned(),
+                        }),
+                        true,
+                    );
+                }
+                match protocol.read_page_all(transport, page) {
+                    Ok(bytes) => read.push(PageRead { page, bytes }),
+                    Err(error) => return (failure(error), false),
+                }
+            }
+            (IoOutcome::Pages { pages: read }, false)
+        }
         IoOp::ReadAll => {
             let mut pages = Vec::new();
             for spec in protocol.pages() {
@@ -455,24 +462,50 @@ fn execute(
             }
             (IoOutcome::All { pages }, false)
         }
-        IoOp::WritePage { page, offset, data } => {
-            let bytes = data.len();
-            match protocol.write_page(transport, page, offset, &data) {
-                Ok(()) => (
-                    IoOutcome::Written {
-                        page,
-                        offset,
-                        bytes,
-                    },
-                    false,
-                ),
-                Err(error) => (failure(error), false),
+        IoOp::WritePages { pages } => {
+            let count = pages.len();
+            let mut bytes = 0;
+            for page in pages {
+                if stop.load(Ordering::Relaxed) {
+                    return (
+                        IoOutcome::Failed(IoFailure {
+                            kind: IoFailureKind::Stopped,
+                            message: "the page write was stopped".to_owned(),
+                        }),
+                        true,
+                    );
+                }
+                bytes += page.data.len();
+                if let Err(error) = protocol.write_page(transport, page.page, 0, &page.data) {
+                    return (failure(error), false);
+                }
             }
+            (
+                IoOutcome::Written {
+                    pages: count,
+                    bytes,
+                },
+                false,
+            )
         }
-        IoOp::Burn { page } => match protocol.burn(transport, page) {
-            Ok(()) => (IoOutcome::Burned { page }, false),
-            Err(error) => (failure(error), false),
-        },
+        IoOp::BurnPages { pages } => {
+            let count = pages.len();
+            for page in pages {
+                if stop.load(Ordering::Relaxed) {
+                    return (
+                        IoOutcome::Failed(IoFailure {
+                            kind: IoFailureKind::Stopped,
+                            message: "the burn was stopped".to_owned(),
+                        }),
+                        true,
+                    );
+                }
+                if let Err(error) = protocol.burn(transport, page) {
+                    return (failure(error), false);
+                }
+            }
+            (IoOutcome::Burned { pages: count }, false)
+        }
         IoOp::ReadRealtime => match protocol.read_realtime(transport) {
             Ok(block) => (IoOutcome::Realtime { block }, false),
             Err(error) => (failure(error), false),

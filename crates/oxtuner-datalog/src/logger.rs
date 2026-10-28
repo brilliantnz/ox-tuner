@@ -1,0 +1,339 @@
+//! The logger thread and the live status the UI reads.
+
+use std::{
+    fs::File,
+    io::{self, BufWriter, Write as _},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+use crossfire::{TrySendError, spsc};
+
+use crate::csv::{LogColumn, header, row};
+
+/// How many frames may wait for the writer. At 100 Hz this is over a minute of
+/// slack; a faster producer is dropping frames because the disk cannot keep up,
+/// which is exactly the condition the drop counter reports.
+const QUEUE_CAPACITY: usize = 8_192;
+
+/// How often buffered rows are flushed even when the queue is quiet.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Flush after this many rows regardless of time, so a fast session does not
+/// accumulate a large unwritten buffer.
+const FLUSH_ROWS: u64 = 64;
+
+/// How long stopping may wait for room to queue the stop message.
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// A session logger: one bounded queue, one writer thread.
+///
+/// The poller holds a [`Logger`] and calls [`Logger::try_log`], which never
+/// blocks. Dropping it flushes and joins; [`Logger::stop`] also reports what the
+/// session wrote.
+pub struct Logger {
+    sender: Option<crossfire::Tx<spsc::Array<Message>>>,
+    join: Option<JoinHandle<io::Result<()>>>,
+    status: LogStatus,
+    path: PathBuf,
+}
+
+/// One message for the writer thread.
+enum Message {
+    /// A decoded frame, in user units.
+    Frame { time: f64, values: Vec<f64> },
+    /// Flush and finish.
+    Stop,
+}
+
+/// The live view of a running (or last) log.
+///
+/// Cloneable; the UI reads it on its render tick instead of waiting for a
+/// per-frame event.
+#[derive(Debug, Clone, Default)]
+pub struct LogStatus {
+    inner: Arc<StatusInner>,
+}
+
+#[derive(Debug, Default)]
+struct StatusInner {
+    running: AtomicBool,
+    frames: AtomicU64,
+    dropped: AtomicU64,
+    bytes: AtomicU64,
+    path: RwLock<Option<PathBuf>>,
+}
+
+/// A frozen copy of [`LogStatus`], for one render or one dialog.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogSnapshot {
+    /// Whether the writer thread is accepting frames.
+    pub running: bool,
+    /// The file being written, when a log has been started.
+    pub path: Option<PathBuf>,
+    /// Frames written to the file.
+    pub frames: u64,
+    /// Frames refused because the writer queue was full.
+    pub dropped: u64,
+    /// Bytes written, counted after formatting.
+    pub bytes: u64,
+}
+
+/// What a finished log wrote.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogSummary {
+    /// The CSV file.
+    pub path: PathBuf,
+    /// Frames written.
+    pub frames: u64,
+    /// Frames the queue refused.
+    pub dropped: u64,
+    /// Bytes written.
+    pub bytes: u64,
+}
+
+impl LogSnapshot {
+    /// Builds a snapshot, for callers that keep their own copy (the app's
+    /// output panel does, after a stop event).
+    pub fn new(
+        running: bool,
+        path: Option<PathBuf>,
+        frames: u64,
+        dropped: u64,
+        bytes: u64,
+    ) -> Self {
+        Self {
+            running,
+            path,
+            frames,
+            dropped,
+            bytes,
+        }
+    }
+}
+
+impl LogStatus {
+    /// A status that is not running.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the writer is accepting frames.
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::Relaxed)
+    }
+
+    /// The current file, while one is open.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.inner
+            .path
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// Frames written so far.
+    pub fn frames(&self) -> u64 {
+        self.inner.frames.load(Ordering::Relaxed)
+    }
+
+    /// Frames refused so far.
+    pub fn dropped(&self) -> u64 {
+        self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Bytes written so far.
+    pub fn bytes(&self) -> u64 {
+        self.inner.bytes.load(Ordering::Relaxed)
+    }
+
+    /// A frozen copy for rendering.
+    pub fn snapshot(&self) -> LogSnapshot {
+        LogSnapshot {
+            running: self.is_running(),
+            path: self.path(),
+            frames: self.frames(),
+            dropped: self.dropped(),
+            bytes: self.bytes(),
+        }
+    }
+
+    /// Marks the status stopped without a logger (session teardown).
+    pub fn mark_stopped(&self) {
+        self.stopped();
+    }
+
+    fn started(&self, path: &Path) {
+        self.inner.running.store(true, Ordering::Relaxed);
+        self.inner.frames.store(0, Ordering::Relaxed);
+        self.inner.dropped.store(0, Ordering::Relaxed);
+        self.inner.bytes.store(0, Ordering::Relaxed);
+        *self
+            .inner
+            .path
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(path.to_owned());
+    }
+
+    fn stopped(&self) {
+        self.inner.running.store(false, Ordering::Relaxed);
+    }
+}
+
+impl std::fmt::Debug for Logger {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Logger")
+            .field("path", &self.path)
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+impl Logger {
+    /// Creates `path`, writes the header and starts the writer thread.
+    ///
+    /// The header write happens before the thread starts, so an unwritable file
+    /// is an error the caller can report instead of a silently empty log.
+    pub fn start(
+        path: impl AsRef<Path>,
+        columns: Vec<LogColumn>,
+        status: LogStatus,
+    ) -> io::Result<Self> {
+        let path = path.as_ref().to_owned();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = File::create(&path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(header(&columns).as_bytes())?;
+        writer.flush()?;
+
+        let (sender, receiver) = spsc::bounded_blocking(QUEUE_CAPACITY);
+        let thread_status = status.clone();
+        let join = thread::Builder::new()
+            .name("oxtuner-datalog".to_owned())
+            .spawn(move || writer_loop(writer, &columns, receiver, thread_status))?;
+
+        status.started(&path);
+        Ok(Self {
+            sender: Some(sender),
+            join: Some(join),
+            status,
+            path,
+        })
+    }
+
+    /// Queues one frame. Never blocks.
+    ///
+    /// Returns `false` when the frame was dropped, and counts it. A stopped
+    /// logger also refuses frames; the caller can inspect [`Self::status`].
+    pub fn try_log(&self, time: f64, values: &[f64]) -> bool {
+        let Some(sender) = &self.sender else {
+            return false;
+        };
+        let message = Message::Frame {
+            time,
+            values: values.to_vec(),
+        };
+        match sender.try_send(message) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.status.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.status.stopped();
+                false
+            }
+        }
+    }
+
+    /// The live status, for the UI.
+    pub fn status(&self) -> &LogStatus {
+        &self.status
+    }
+
+    /// The file being written.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Stops the writer, flushes and returns what the session wrote.
+    pub fn stop(mut self) -> io::Result<LogSummary> {
+        self.finish()?;
+        Ok(LogSummary {
+            path: self.path.clone(),
+            frames: self.status.frames(),
+            dropped: self.status.dropped(),
+            bytes: self.status.bytes(),
+        })
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if let Some(sender) = self.sender.take() {
+            // The stop message must not be lost to a full queue. If it cannot
+            // be queued, dropping the sender ends the loop after the drain and
+            // the writer still flushes on its way out.
+            let _ = sender.send_timeout(Message::Stop, STOP_WAIT);
+        }
+        let result = self.join.take().map_or(Ok(()), |join| {
+            join.join()
+                .unwrap_or_else(|_| Err(io::Error::other("the datalog thread panicked")))
+        });
+        self.status.stopped();
+        result
+    }
+}
+
+impl Drop for Logger {
+    fn drop(&mut self) {
+        if let Err(error) = self.finish() {
+            tracing::warn!(%error, "the datalog writer did not stop cleanly");
+        }
+    }
+}
+
+/// The writer loop: format, buffer, flush, finish.
+fn writer_loop(
+    mut writer: BufWriter<File>,
+    columns: &[LogColumn],
+    receiver: crossfire::Rx<spsc::Array<Message>>,
+    status: LogStatus,
+) -> io::Result<()> {
+    let mut since_flush = 0u64;
+    let mut last_flush = Instant::now();
+    let mut frames = 0u64;
+    let mut bytes = 0u64;
+
+    while let Ok(message) = receiver.recv() {
+        match message {
+            Message::Frame { time, values } => {
+                let line = row(time, columns, &values);
+                writer.write_all(line.as_bytes())?;
+                frames = frames.saturating_add(1);
+                bytes = bytes.saturating_add(line.len() as u64);
+                since_flush = since_flush.saturating_add(1);
+                status.inner.frames.store(frames, Ordering::Relaxed);
+                status.inner.bytes.store(bytes, Ordering::Relaxed);
+            }
+            Message::Stop => break,
+        }
+
+        if since_flush >= FLUSH_ROWS || last_flush.elapsed() >= FLUSH_INTERVAL {
+            writer.flush()?;
+            since_flush = 0;
+            last_flush = Instant::now();
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}

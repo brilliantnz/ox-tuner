@@ -180,6 +180,30 @@ impl RealtimeDecoder {
         self.block_size
     }
 
+    /// The visible channels, in definition order, with their units.
+    ///
+    /// These are the columns a session log writes and the channels a chart can
+    /// offer. Hidden channels stay out, matching [`RealtimeFrame::values`].
+    pub fn columns(&self) -> Vec<(String, String)> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                Source::Measured {
+                    name,
+                    units,
+                    hidden,
+                    ..
+                }
+                | Source::Computed {
+                    name,
+                    units,
+                    hidden,
+                    ..
+                } => (!hidden).then(|| (name.clone(), units.clone())),
+            })
+            .collect()
+    }
+
     /// Decodes one block.
     ///
     /// A block whose length is not the declared one produces no values: a

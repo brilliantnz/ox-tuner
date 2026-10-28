@@ -34,12 +34,12 @@
 //!   `Shutdown`, answers whatever is still queued with `Rejected`, emits
 //!   `Stopped`, and joins.
 //!
-//! # What lands here next
+//! # Scope
 //!
-//! The write path and guardrails S2–S10 (ADR-0010/0011, M7) and the datalog
-//! ring buffer (ADR-0014, M8) belong to this crate — not to the UI. The live
-//! read-only session (connect, signature verdict, page reads, polling, trace,
-//! reconnect) is implemented; what it claims, it does.
+//! The write path and guardrails S2–S10 (ADR-0010/0011, M7), the bounded chart
+//! history (ADR-0014, M8) and the CSV logger are implemented in this crate. The
+//! M9 surface data belongs in the shared `history` module; no UI work belongs
+//! here.
 //!
 //! # Example
 //!
@@ -67,20 +67,30 @@
 //! ```
 
 mod handle;
+mod history;
 mod io_thread;
+mod journal;
 mod menu;
 mod message;
 mod realtime;
+mod safety;
 mod service;
+mod snapshot;
 
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
+pub use history::{
+    ChannelInfo, ChartHistory, HistoryStats, NearestSample, Sample, SeriesPoints, TimeWindow,
+    decimate, nice_ticks, padded_range,
+};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
-    AxisEdit, AxisKind, AxisSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary,
-    DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure, FailureCode, OpId,
-    PortChoice, PortSummary, ProjectSummary, ReadAllSummary, RejectReason, SaveSummary,
-    SignatureVerdict, TableSummary,
+    AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary,
+    DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
+    FailureCode, ImportSummary, JournalEntry, OpId, PortChoice, PortSummary, ProjectSummary,
+    ReadAllSummary, RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
+    WriteSummary,
 };
+pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
 pub use realtime::{LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame};
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
@@ -88,8 +98,9 @@ pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, star
 /// a dependency on `oxtuner-ini` themselves.
 pub use oxtuner_ini::SettingsContext;
 
-/// Re-exported for the table grid's per-cell write-state decoration.
-pub use oxtuner_tune::CellState;
+/// Re-exported for the table grid's per-cell write-state decoration and the
+/// write dialogs' pending counts.
+pub use oxtuner_tune::{CellState, TuneStatus};
 
 /// Re-exported so a caller can pick the connection's framing without taking a
 /// dependency on `oxtuner-protocol`.

@@ -215,6 +215,7 @@ fn every_accepted_command_is_answered_exactly_once_under_concurrent_producers() 
     let core = Harness::start_with(CoreConfig {
         command_capacity: 8,
         event_capacity: 4096,
+        ..CoreConfig::default()
     });
 
     let mut producers = Vec::new();
@@ -413,6 +414,7 @@ fn a_slow_consumer_backpressures_the_core_without_losing_answers() {
     let core = Harness::start_with(CoreConfig {
         command_capacity: 16,
         event_capacity: 8,
+        ..CoreConfig::default()
     });
 
     let mut accepted = Vec::new();

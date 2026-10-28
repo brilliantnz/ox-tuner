@@ -228,6 +228,84 @@ impl CoreHandle {
         self.send(Command::SaveTrace { path: path.into() })
     }
 
+    /// Writes the changed working values to ECU RAM and verifies them.
+    ///
+    /// `pages` restricts the write; an empty list means every page with a
+    /// change. The reply is [`crate::Event::TuneWritten`] or
+    /// [`crate::Event::Failed`].
+    pub fn write_to_ram(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
+        self.send(Command::WriteToRam { pages })
+    }
+
+    /// Burns RAM to flash and verifies it.
+    ///
+    /// `pages` restricts the burn; an empty list means every burnable page.
+    /// The reply is [`crate::Event::TuneBurned`] or [`crate::Event::Failed`].
+    pub fn burn_to_flash(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
+        self.send(Command::BurnToFlash { pages })
+    }
+
+    /// Discards local edits after writing a snapshot.
+    pub fn revert_tune(&self) -> Result<OpId, CoreError> {
+        self.send(Command::RevertTune)
+    }
+
+    /// Imports a `.msq` into the working image.
+    ///
+    /// A different-signature tune needs `consented: true` (S9).
+    pub fn import_tune(
+        &self,
+        path: impl Into<PathBuf>,
+        consented: bool,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::ImportTune {
+            path: path.into(),
+            consented,
+        })
+    }
+
+    /// Restores one of the project's snapshots.
+    pub fn restore_snapshot(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::RestoreSnapshot { path: path.into() })
+    }
+
+    /// Lists the project's snapshots, oldest first.
+    pub fn list_snapshots(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ListSnapshots)
+    }
+
+    /// Turns the global write switch on or off (S8).
+    pub fn set_writes_enabled(&self, enabled: bool) -> Result<OpId, CoreError> {
+        self.send(Command::SetWritesEnabled { enabled })
+    }
+
+    /// Clears the halted write path after the user reviewed a failure.
+    pub fn acknowledge_write_failure(&self) -> Result<OpId, CoreError> {
+        self.send(Command::AcknowledgeWriteFailure)
+    }
+
+    /// Reads the project's write journal.
+    pub fn read_journal(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ReadJournal)
+    }
+
+    /// Refreshes the derived tune status.
+    pub fn refresh_tune_status(&self) -> Result<OpId, CoreError> {
+        self.send(Command::RefreshTuneStatus)
+    }
+
+    /// Starts a CSV session log in `directory`.
+    pub fn start_log(&self, directory: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::StartLog {
+            directory: directory.into(),
+        })
+    }
+
+    /// Stops the CSV session log.
+    pub fn stop_log(&self) -> Result<OpId, CoreError> {
+        self.send(Command::StopLog)
+    }
+
     /// Lists the serial ports the connect dialog can offer.
     pub fn list_ports(&self) -> Result<OpId, CoreError> {
         self.send(Command::ListPorts)

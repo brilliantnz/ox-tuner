@@ -148,6 +148,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
             events,
             latest,
             thread,
+            ..
         }) => {
             spawn_event_pump(events, cx);
             CoreService {
@@ -275,6 +276,7 @@ fn apply(event: Event, cx: &mut App) {
         }
         Event::PortsListed { .. } => (Update::Nothing, None),
         Event::Rejected { .. } | Event::Stopped => (Update::Nothing, None),
+        _ => (Update::Nothing, None),
     };
 
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
@@ -947,6 +949,7 @@ mod tests {
             verdict: oxtuner_core::SignatureVerdict::Match,
             read_only: false,
             read_only_reason: None,
+            writes_enabled: false,
             behavior: "speeduino".to_owned(),
             framing: "envelope",
             pages: 15,
