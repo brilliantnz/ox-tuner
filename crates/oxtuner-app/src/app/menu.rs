@@ -10,15 +10,16 @@
 //! absence (design guides: every action names its object, state, and result).
 
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
-use gpui_kit::component::{ActiveTheme as _, GlobalState, WindowExt as _, menu::AppMenuBar};
+use gpui_kit::component::{ActiveTheme as _, GlobalState, menu::AppMenuBar};
 use gpui_kit::{
     App, Entity, Menu, MenuItem, OsAction, ParentElement as _, Styled as _, Window, div,
 };
 use rust_i18n::t;
 
 use super::actions::{
-    About, CloseProject, ManageProjects, OpenDefinition, OpenHomepage, OpenProject, Quit, SaveTune,
-    Settings, ShowDisclaimer, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
+    About, CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenDefinition, OpenHomepage,
+    OpenProject, Quit, SaveSessionTrace, SaveTune, Settings, ShowDisclaimer, ToggleBottomPanel,
+    TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::constants::APP_NAME;
 
@@ -70,6 +71,9 @@ fn menus() -> Vec<Menu> {
             ),
             MenuItem::action(t!("app.menu.toggle_bottom_panel"), ToggleBottomPanel),
         ]),
+        // The ECU link has its own menu: connecting, testing and disconnecting
+        // are a different job from file handling.
+        Menu::new(t!("app.menu.connection")).items(connection_items()),
         Menu::new(t!("app.menu.help")).items([
             MenuItem::action(t!("app.menu.safety_disclaimer"), ShowDisclaimer),
             MenuItem::separator(),
@@ -113,6 +117,16 @@ fn file_items() -> Vec<MenuItem> {
     items
 }
 
+/// The Connection menu: the ECU link, separate from file handling.
+fn connection_items() -> Vec<MenuItem> {
+    vec![
+        MenuItem::action(t!("app.menu.connect"), ConnectEcu),
+        MenuItem::action(t!("app.menu.disconnect"), DisconnectEcu),
+        MenuItem::separator(),
+        MenuItem::action(t!("app.menu.save_session_trace"), SaveSessionTrace),
+    ]
+}
+
 /// Shows the About dialog.
 ///
 /// Runs from the app-level action handler rather than a view: a menu command
@@ -122,7 +136,7 @@ pub(crate) fn show_about(window: &mut Window, cx: &mut App) {
     // The builder is `'static` and may run again when the dialog layer is
     // rebuilt, so it captures values rather than borrowing the context.
     let muted = cx.theme().muted_foreground;
-    window.open_dialog(cx, move |dialog, _, _| {
+    super::dialog::open(window, cx, move |dialog, _, _| {
         dialog.title(APP_NAME).child(t!("app.about.line")).child(
             div()
                 .text_sm()

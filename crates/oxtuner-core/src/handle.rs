@@ -180,6 +180,59 @@ impl CoreHandle {
         })
     }
 
+    /// Connects to the simulator or a serial device.
+    ///
+    /// The reply is [`crate::Event::Connected`] or [`crate::Event::Failed`].
+    /// `framing` overrides the definition's own choice of protocol envelope.
+    pub fn connect(
+        &self,
+        port: crate::PortChoice,
+        framing: Option<crate::LinkMode>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::Connect { port, framing })
+    }
+
+    /// Reads a port's signature without opening a session.
+    ///
+    /// The reply is [`crate::Event::ConnectionTested`] or [`crate::Event::Failed`].
+    pub fn test_connection(
+        &self,
+        port: crate::PortChoice,
+        framing: Option<crate::LinkMode>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::TestConnection { port, framing })
+    }
+
+    /// Closes the connection.
+    pub fn disconnect(&self) -> Result<OpId, CoreError> {
+        self.send(Command::Disconnect)
+    }
+
+    /// Reads every declared page into the tune images.
+    pub fn read_all(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ReadAll)
+    }
+
+    /// Starts periodic realtime polling.
+    pub fn start_realtime(&self, interval_ms: u32) -> Result<OpId, CoreError> {
+        self.send(Command::StartRealtime { interval_ms })
+    }
+
+    /// Stops periodic realtime polling.
+    pub fn stop_realtime(&self) -> Result<OpId, CoreError> {
+        self.send(Command::StopRealtime)
+    }
+
+    /// Saves the session trace.
+    pub fn save_trace(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::SaveTrace { path: path.into() })
+    }
+
+    /// Lists the serial ports the connect dialog can offer.
+    pub fn list_ports(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ListPorts)
+    }
+
     /// Drops the loaded definition (and tune, if a project is open).
     pub fn unload_definition(&self) -> Result<OpId, CoreError> {
         self.send(Command::UnloadDefinition)

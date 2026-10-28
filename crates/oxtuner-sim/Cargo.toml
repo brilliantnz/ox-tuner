@@ -1,0 +1,21 @@
+[package]
+name = "oxtuner-sim"
+description = "A virtual ECU built from a real definition, for tests and daily development."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+oxtuner-ini.workspace = true
+oxtuner-protocol.workspace = true
+oxtuner-transport.workspace = true
+tracing = "0.1.44"
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+[lints]
+workspace = true

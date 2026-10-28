@@ -28,7 +28,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         .to_vec();
     let auto_reopen = AppSettings::auto_reopen(cx);
 
-    window.open_dialog(cx, move |dialog, _, cx| {
+    crate::app::dialog::open(window, cx, move |dialog, _, cx| {
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
 

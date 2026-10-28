@@ -24,8 +24,8 @@ use gpui_kit::{
 };
 
 use super::actions::{
-    CloseProject, ManageProjects, OpenProject, Quit, SaveTune, Settings, ToggleBottomPanel,
-    TogglePrimarySidebar, ToggleSecondarySidebar,
+    CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenProject, Quit, SaveTune, Settings,
+    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::i18n::t;
 
@@ -94,7 +94,7 @@ macro_rules! shortcut {
 /// The panel toggles the primary sidebar on the main modifier
 /// plus `B`, the bottom panel plus `J`, and the secondary sidebar on the
 /// neighbouring `Alt+B` so the three read as a family.
-pub static SHORTCUTS: [Shortcut; 9] = [
+pub static SHORTCUTS: [Shortcut; 11] = [
     shortcut!(
         "open-settings",
         "app.shortcut.open_settings",
@@ -139,6 +139,24 @@ pub static SHORTCUTS: [Shortcut; 9] = [
         "cmd-s",
         "ctrl-s",
         SaveTune
+    ),
+    shortcut!(
+        "connect",
+        "app.shortcut.connect",
+        General,
+        &[],
+        "cmd-k",
+        "ctrl-k",
+        ConnectEcu
+    ),
+    shortcut!(
+        "disconnect",
+        "app.shortcut.disconnect",
+        General,
+        &[],
+        "cmd-shift-k",
+        "ctrl-shift-k",
+        DisconnectEcu
     ),
     shortcut!(
         "quit",

@@ -204,9 +204,14 @@ pub enum Placeholder {
     Offset,
     /// `%2c` — byte count, two bytes. Same wire order as [`Self::Offset`].
     Count,
-    /// `%2v` — the payload bytes.
+    /// `%2v` — the payload byte array of `%2c` bytes.
     Values,
-    /// `%v` — one payload byte.
+    /// `%v` — the payload bytes of one write.
+    ///
+    /// The dialect describes it as one value; in practice the same keyword is
+    /// used for single-byte and word writes (`M%2i%2o%2c%v` writes two bytes at
+    /// a time in the MegaSquirt corpus), so the encoder emits every payload
+    /// byte and lets `%2c` state the count.
     Value,
 }
 
@@ -360,8 +365,8 @@ impl Command {
                     bytes.extend_from_slice(arguments.values);
                 }
                 Segment::Placeholder(Placeholder::Value) => match arguments.values.first() {
-                    Some(value) => bytes.push(*value),
-                    None => return Err("the command needs one payload byte".to_owned()),
+                    Some(_) => bytes.extend_from_slice(arguments.values),
+                    None => return Err("the command needs at least one payload byte".to_owned()),
                 },
                 Segment::Unparsed(text) => {
                     return Err(format!("the command contains unsupported text {text:?}"));
@@ -545,5 +550,27 @@ mod tests {
             .expect("encodes");
 
         assert_eq!(bytes, vec![0x4D, 0, 1, 2, 0, 3, 0, 9, 8, 7]);
+    }
+
+    #[test]
+    fn a_single_value_placeholder_writes_every_payload_byte() {
+        // The corpus uses `%v` for a word as well as for one byte: the count
+        // says how many bytes follow, and the firmware reads that many.
+        let command = Command::parse(r#""M%2i%2o%2c%v""#);
+
+        let bytes = command
+            .encode(
+                &CommandArguments {
+                    page: 1,
+                    offset: 0,
+                    count: 2,
+                    values: &[0xAB, 0xCD],
+                    force_big_endian: false,
+                },
+                &|_| None,
+            )
+            .expect("encodes");
+
+        assert_eq!(bytes, vec![0x4D, 0, 1, 0, 0, 2, 0, 0xAB, 0xCD]);
     }
 }

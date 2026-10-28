@@ -283,6 +283,7 @@ mod tests {
             owner: Owner::Page(crate::IniPage::FIRST),
             shape: EntryShape::Scalar,
             data_type,
+            address: None,
             units: String::new(),
             scale: Some(scale),
             translate: Some(translate),

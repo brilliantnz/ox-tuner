@@ -117,6 +117,23 @@ impl AppPaths {
     pub fn log_dir(&self) -> &Path {
         &self.logs_dir
     }
+
+    /// Session traces, next to the logs: they are diagnostics, not user data.
+    pub fn traces_dir(&self) -> PathBuf {
+        self.logs_dir.join("traces")
+    }
+
+    /// A fresh trace path for this session.
+    ///
+    /// A timestamp names the file, so two sessions never overwrite each other
+    /// and the bench run that produced a trace is identifiable later.
+    pub fn next_trace_path(&self) -> PathBuf {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        self.traces_dir().join(format!("session-{millis}.trace"))
+    }
 }
 
 #[cfg(test)]

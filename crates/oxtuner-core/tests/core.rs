@@ -475,31 +475,49 @@ fn the_invariants_hold_across_repeated_runs() {
 
 #[test]
 fn the_core_holds_no_gui_or_async_runtime() {
-    // ADR-0001/0005 as a test: the crate's own manifest is the source of truth
-    // for what it can link against, and the app crate is where GPUI lives.
-    // Only the dependency tables count — prose in the description and comments
-    // is free to name what is banned.
-    let manifest = include_str!("../Cargo.toml");
-    let dependencies: Vec<&str> = manifest
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .filter(|line| !line.is_empty())
-        .filter(|line| line.contains('=') || line.starts_with('['))
-        .filter(|line| {
-            !line.starts_with('[')
-                || line.starts_with("[dependencies]")
-                || line.starts_with("[dev-dependencies]")
-                || line.starts_with("[build-dependencies]")
-        })
-        .collect();
+    // ADR-0001/0005 as a test: the manifests are the source of truth for what
+    // the headless crates can link against, and the app crate is where GPUI
+    // lives. Only the dependency tables count — prose in a description and
+    // comments is free to name what is banned.
+    let manifests = [
+        ("oxtuner-core", include_str!("../Cargo.toml")),
+        (
+            "oxtuner-transport",
+            include_str!("../../oxtuner-transport/Cargo.toml"),
+        ),
+        (
+            "oxtuner-protocol",
+            include_str!("../../oxtuner-protocol/Cargo.toml"),
+        ),
+        ("oxtuner-sim", include_str!("../../oxtuner-sim/Cargo.toml")),
+    ];
 
-    for forbidden in ["gpui", "tokio", "async-std", "smol"] {
-        for line in &dependencies {
-            assert!(
-                !line.starts_with(forbidden),
-                "`{forbidden}` must not be a dependency of the headless core: {line}"
-            );
+    for (crate_name, manifest) in manifests {
+        let dependencies: Vec<&str> = manifest
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| !line.is_empty())
+            .filter(|line| line.contains('=') || line.starts_with('['))
+            .filter(|line| {
+                !line.starts_with('[')
+                    || line.starts_with("[dependencies]")
+                    || line.starts_with("[dev-dependencies]")
+                    || line.starts_with("[build-dependencies]")
+            })
+            .collect();
+
+        for forbidden in ["gpui", "tokio", "async-std", "smol"] {
+            for line in &dependencies {
+                assert!(
+                    !line.starts_with(forbidden),
+                    "`{forbidden}` must not be a dependency of `{crate_name}`: {line}"
+                );
+            }
         }
     }
+
+    // The channel topology is part of the decision, not an implementation
+    // detail: the core's queues are crossfire-rs (ADR-0005/0019).
+    assert!(include_str!("../Cargo.toml").contains("crossfire"));
 }
