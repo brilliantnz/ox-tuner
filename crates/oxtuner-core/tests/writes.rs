@@ -217,11 +217,27 @@ impl Harness {
         }
     }
 
+    fn status(&self) -> oxtuner_core::TuneStatus {
+        let op = self.handle.refresh_tune_status().expect("queued");
+        match self.wait(|event| event.op() == Some(op)) {
+            Event::TuneStatusRead { status, .. } => status,
+            other => panic!("expected a tune status, got {other:?}"),
+        }
+    }
+
     fn table(&self) -> oxtuner_core::TableSummary {
         let op = self.handle.read_table("veTable").expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
             Event::TableRead { table, .. } => table,
             other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    fn adopt(&self) {
+        let op = self.handle.adopt_ecu_image().expect("queued");
+        match self.wait(|event| event.op() == Some(op)) {
+            Event::EcuAdopted { .. } => {}
+            other => panic!("expected an adopt, got {other:?}"),
         }
     }
 
@@ -279,6 +295,54 @@ fn a_write_round_trips_and_reads_back_verified() {
     assert_eq!(entries[1].phase, "result");
     assert_eq!(entries[1].result, "ok");
     assert_eq!(entries[1].cells, written_cells);
+
+    core.close();
+}
+
+#[test]
+fn taking_the_ecu_image_makes_the_next_write_one_cell() {
+    let dir = TempDir::new("adopt");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+
+    // The simulator's image is the ECU's tune. Adopting it clears the
+    // differences the project file had with the controller.
+    core.adopt();
+    let adopted = core.status();
+    assert!(
+        adopted.pending_write.cells <= 2,
+        "adopting left {} unsent cells",
+        adopted.pending_write.cells
+    );
+
+    core.edit_cell(77.0);
+    let status = core.status();
+    assert_eq!(
+        status.pending_write.cells,
+        adopted.pending_write.cells + 1,
+        "one edit must add exactly one unsent cell"
+    );
+
+    let Event::TuneWritten { summary, .. } = core.write() else {
+        panic!("expected a verified write");
+    };
+    assert!(summary.verified);
+
+    core.close();
+}
+
+#[test]
+fn adopting_without_a_read_is_refused() {
+    let dir = TempDir::new("adopt-refused");
+    let core = Harness::start(true);
+    core.open(dir.path());
+
+    let op = core.handle.adopt_ecu_image().expect("queued");
+    let (code, message) = failure(&core.wait(|event| event.op() == Some(op)));
+    assert_eq!(code, FailureCode::AdoptRefused);
+    assert!(message.contains("read the ECU pages"), "{message}");
 
     core.close();
 }

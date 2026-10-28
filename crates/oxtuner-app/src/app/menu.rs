@@ -17,10 +17,10 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::actions::{
-    About, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites, ImportTune,
-    ManageProjects, OpenDefinition, OpenHomepage, OpenProject, OpenSnapshots, Quit, RevertTune,
-    SaveSessionTrace, SaveTune, Settings, ShowCharts, ShowDisclaimer, ShowTune, ToggleBottomPanel,
-    TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
+    About, AdoptEcuTune, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites,
+    ImportTune, ManageProjects, OpenDefinition, OpenHomepage, OpenProject, OpenSnapshots, Quit,
+    RevertTune, SaveSessionTrace, SaveTune, Settings, ShowCharts, ShowDisclaimer, ShowTune,
+    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
 };
 use crate::constants::APP_NAME;
 
@@ -132,6 +132,7 @@ fn connection_items() -> Vec<MenuItem> {
         MenuItem::action(t!("app.menu.enable_writes"), EnableWrites),
         MenuItem::action(t!("app.menu.write_to_ram"), WriteToRam),
         MenuItem::action(t!("app.menu.burn_to_flash"), BurnToFlash),
+        MenuItem::action(t!("app.menu.adopt_ecu_tune"), AdoptEcuTune),
         MenuItem::action(t!("app.menu.revert_tune"), RevertTune),
         MenuItem::separator(),
         MenuItem::action(t!("app.menu.import_tune"), ImportTune),

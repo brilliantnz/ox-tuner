@@ -77,6 +77,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &actions::BurnToFlash, cx| {
         with_main_window(cx, shell::write_dialogs::show_burn)
     });
+    cx.on_action(|_: &actions::AdoptEcuTune, cx| core::adopt_ecu_tune(cx));
     cx.on_action(|_: &actions::RevertTune, cx| {
         with_main_window(cx, shell::write_dialogs::show_revert)
     });

@@ -344,6 +344,7 @@ fn apply(event: Event, cx: &mut App) {
         Event::ConnectionLost { reason } => (Update::LinkLost(reason), None),
         Event::Disconnected { .. } => (Update::Disconnected, None),
         Event::PagesRead { summary, .. } => (Update::PagesRead(summary), None),
+        Event::EcuAdopted { .. } => (Update::EcuAdopted, None),
         Event::RealtimeState { running, .. } => (Update::Realtime(running), None),
         Event::TraceSaved { path, frames, .. } => (
             Update::Trace {
@@ -500,6 +501,7 @@ enum Update {
     LinkLost(String),
     Disconnected,
     PagesRead(ReadAllSummary),
+    EcuAdopted,
     Realtime(bool),
     Trace {
         saved: TraceSaved,
@@ -614,6 +616,11 @@ impl CoreStatus {
                 self.failure = None;
                 // The ECU image moved: a table kept on screen can no longer
                 // trust the write-state marks it drew from the old one.
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::EcuAdopted => {
+                self.failure = None;
+                // The working tune changed under every open table and dialog.
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Realtime(running) => self.realtime = running,
@@ -844,6 +851,21 @@ pub(crate) fn read_all(cx: &mut App) {
     if let Err(error) = handle.read_all() {
         tracing::warn!(%error, "the core refused the page read");
         report_failure(cx, FailureCode::ReadFailed, error.to_string());
+    }
+}
+
+/// Makes the tune read from the ECU the working image.
+///
+/// After a read the project file's values stay on screen, so a write would
+/// send the file rather than the controller's tune. This is the explicit way to
+/// edit what the ECU actually holds.
+pub(crate) fn adopt_ecu_tune(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::AdoptRefused) else {
+        return;
+    };
+    if let Err(error) = handle.adopt_ecu_image() {
+        tracing::warn!(%error, "the core refused to take the ECU image");
+        report_failure(cx, FailureCode::AdoptRefused, error.to_string());
     }
 }
 

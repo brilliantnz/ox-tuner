@@ -221,6 +221,12 @@ pub enum Command {
     /// Only a complete read updates the ECU image; a failure leaves it
     /// untouched and reports which page failed.
     ReadAll,
+    /// Take the ECU image the last read captured as the working tune.
+    ///
+    /// Without this a project's file values stay on screen after a read, so
+    /// writing would replace the ECU's tune with the file's. The file baseline
+    /// does not move, so the adopted values show as unsaved changes.
+    AdoptEcuImage,
     /// Start periodic realtime polling at `interval_ms`.
     StartRealtime {
         /// Milliseconds between blocks. Clamped to 10–1000 by the core.
@@ -338,6 +344,7 @@ impl Command {
             Self::TestConnection { .. } => "test-connection",
             Self::Disconnect => "disconnect",
             Self::ReadAll => "read-all",
+            Self::AdoptEcuImage => "adopt-ecu-image",
             Self::StartRealtime { .. } => "start-realtime",
             Self::StopRealtime => "stop-realtime",
             Self::SaveTrace { .. } => "save-trace",
@@ -400,6 +407,9 @@ pub enum Event {
     Disconnected { op: OpId },
     /// Every declared page was read into the tune images.
     PagesRead { op: OpId, summary: ReadAllSummary },
+    /// The ECU image became the working tune, so the editor shows what the
+    /// controller holds.
+    EcuAdopted { op: OpId },
     /// Periodic polling started or stopped.
     RealtimeState { op: OpId, running: bool },
     /// The session trace was written.
@@ -475,6 +485,7 @@ impl Event {
             | Self::Connected { op, .. }
             | Self::Disconnected { op }
             | Self::PagesRead { op, .. }
+            | Self::EcuAdopted { op }
             | Self::RealtimeState { op, .. }
             | Self::TraceSaved { op, .. }
             | Self::TuneWritten { op, .. }
@@ -556,6 +567,9 @@ pub enum FailureCode {
     NotConnected,
     /// A page read failed. The ECU image is left untouched.
     ReadFailed,
+    /// The ECU image could not become the working tune: no project, no read
+    /// yet, or the images do not share a shape.
+    AdoptRefused,
     /// The session trace could not be written.
     TraceFailed,
     /// Realtime polling was refused (no connection, or the definition has no
@@ -602,6 +616,7 @@ impl FailureCode {
             Self::TestFailed => "test-failed",
             Self::NotConnected => "not-connected",
             Self::ReadFailed => "read-failed",
+            Self::AdoptRefused => "adopt-refused",
             Self::TraceFailed => "trace-failed",
             Self::RealtimeRejected => "realtime-rejected",
             Self::WriteRefused => "write-refused",

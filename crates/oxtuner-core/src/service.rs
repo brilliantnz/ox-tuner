@@ -732,6 +732,10 @@ fn handle(
             }
             Outcome::Continue
         }
+        Command::AdoptEcuImage => {
+            adopt_ecu_image(op, session, events, report);
+            Outcome::Continue
+        }
         Command::StartRealtime { interval_ms } => {
             let Some(connection) = live.as_mut() else {
                 send(
@@ -1628,6 +1632,51 @@ fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>, usize) {
 fn unsent_edits(project: &Project) -> (usize, usize) {
     let (variables, _, cells) = unsent_changes(project);
     (cells, variables.len())
+}
+
+/// Makes the ECU image the working tune.
+///
+/// Reading pages fills the ECU image but leaves the project file's values on
+/// screen, so an unsaved edit is never lost. This is the explicit way to start
+/// from what the controller holds instead. The file baseline does not move, so
+/// the adopted values show as unsaved changes and a later write is only the
+/// delta from the ECU's own tune.
+fn adopt_ecu_image(
+    op: OpId,
+    session: &mut Session,
+    events: &EventTx,
+    report: &mut CoreReport,
+) -> Outcome {
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::AdoptRefused,
+            "open a project before taking the ECU's tune",
+        );
+    };
+    let Some(ram) = project.images().ecu_ram().cloned() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::AdoptRefused,
+            "read the ECU pages before taking its tune",
+        );
+    };
+    if let Err(error) = project.images_mut().import(ram) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::AdoptRefused,
+            &error.to_string(),
+        );
+    }
+    tracing::info!("the ECU image became the working tune");
+    send(events, Event::EcuAdopted { op });
+    Outcome::Continue
 }
 
 /// Starts a verified RAM write (S1–S3, S6–S8).

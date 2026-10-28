@@ -27,6 +27,7 @@ gpui_kit::actions!(
         ShowCharts,
         WriteToRam,
         BurnToFlash,
+        AdoptEcuTune,
         RevertTune,
         EnableWrites,
         ImportTune,

@@ -319,6 +319,15 @@ impl CoreHandle {
         self.send(Command::ReadAll)
     }
 
+    /// Takes the ECU image the last read captured as the working tune.
+    ///
+    /// The reply is [`crate::Event::EcuAdopted`] or [`crate::Event::Failed`].
+    /// Use it after a read when the tune on the controller, not the project
+    /// file, is what the next edit and write should start from.
+    pub fn adopt_ecu_image(&self) -> Result<OpId, CoreError> {
+        self.send(Command::AdoptEcuImage)
+    }
+
     /// Starts periodic realtime polling.
     pub fn start_realtime(&self, interval_ms: u32) -> Result<OpId, CoreError> {
         self.send(Command::StartRealtime { interval_ms })
