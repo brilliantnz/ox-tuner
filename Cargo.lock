@@ -4968,6 +4968,8 @@ dependencies = [
  "directories",
  "gpui-kit",
  "oxtuner-core",
+ "oxtuner-sim",
+ "oxtuner-ui",
  "rust-i18n",
  "serde",
  "serde_json",
@@ -4981,12 +4983,24 @@ name = "oxtuner-core"
 version = "0.0.0"
 dependencies = [
  "crossfire",
+ "oxtuner-datalog",
  "oxtuner-ini",
  "oxtuner-project",
  "oxtuner-protocol",
  "oxtuner-sim",
  "oxtuner-transport",
  "oxtuner-tune",
+ "serde",
+ "serde_json",
+ "time",
+ "tracing",
+]
+
+[[package]]
+name = "oxtuner-datalog"
+version = "0.0.0"
+dependencies = [
+ "crossfire",
  "tracing",
 ]
 
@@ -5042,6 +5056,14 @@ dependencies = [
  "criterion",
  "oxtuner-ini",
  "proptest",
+]
+
+[[package]]
+name = "oxtuner-ui"
+version = "0.0.0"
+dependencies = [
+ "gpui-kit",
+ "oxtuner-core",
 ]
 
 [[package]]

@@ -43,6 +43,25 @@ impl fmt::Display for EntryPage {
     }
 }
 
+/// The address a `<page>` element declares.
+///
+/// TunerStudio and LibreTune write `number="-1"` for the page that holds PC
+/// variables when they do not use an unnumbered page, so a negative number is
+/// the PC page rather than a calibration page. A number that is not an integer
+/// at all is left to the consistency check, which blocks it by name.
+fn page_address(element: &Element) -> Option<EntryPage> {
+    match element.attr("number") {
+        Some(number) => match number.trim().parse::<i64>() {
+            Ok(number) if number < 0 => Some(EntryPage::Pc),
+            Ok(number) => u16::try_from(number)
+                .ok()
+                .map(|number| EntryPage::Numbered(MsqPage::new(number))),
+            Err(_) => None,
+        },
+        None => Some(EntryPage::Pc),
+    }
+}
+
 /// Which kind of entry a value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -265,14 +284,10 @@ impl Msq {
     pub fn entries(&self) -> Vec<Entry> {
         let mut entries = Vec::new();
         for page in self.page_elements() {
-            let address = match page.attr("number") {
-                Some(number) => match number.trim().parse::<u16>() {
-                    Ok(number) => EntryPage::Numbered(MsqPage::new(number)),
-                    // A malformed number is not silently treated as page 0;
-                    // the consistency check reports it as a blocker.
-                    Err(_) => continue,
-                },
-                None => EntryPage::Pc,
+            // A malformed number is not silently treated as page 0; the
+            // consistency check reports it as a blocker.
+            let Some(address) = page_address(page) else {
+                continue;
             };
             for element in page.child_elements() {
                 let kind = match element.name.as_str() {
@@ -449,12 +464,8 @@ impl Msq {
             Node::Element(element) if element.name == "page" => Some(element),
             _ => None,
         }) {
-            let address = match page_element.attr("number") {
-                Some(number) => match number.trim().parse::<u16>() {
-                    Ok(number) => EntryPage::Numbered(MsqPage::new(number)),
-                    Err(_) => continue,
-                },
-                None => EntryPage::Pc,
+            let Some(address) = page_address(page_element) else {
+                continue;
             };
             if address != page {
                 continue;
@@ -514,14 +525,7 @@ impl Msq {
 
         let target = root.children.iter_mut().find_map(|node| match node {
             Node::Element(element) if element.name == "page" => {
-                let address = match element.attr("number") {
-                    Some(number) => number
-                        .trim()
-                        .parse::<u16>()
-                        .ok()
-                        .map(|number| EntryPage::Numbered(MsqPage::new(number))),
-                    None => Some(EntryPage::Pc),
-                };
+                let address = page_address(element);
                 (address == Some(page)).then_some(element)
             }
             _ => None,
@@ -643,6 +647,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_negative_page_number_is_the_pc_page() {
+        let source = "<msq><versionInfo signature=\"s\"/><page number=\"-1\"><pcVariable name=\"rpmhigh\">12000.0</pcVariable></page><page number=\"0\" size=\"128\"/></msq>";
+        let msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        assert_eq!(msq.pages().len(), 1, "only page 0 is a calibration page");
+        assert_eq!(
+            msq.pc_page_count(),
+            0,
+            "the numbered PC page is not counted"
+        );
+
+        let entries = msq.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page, EntryPage::Pc);
+        assert_eq!(entries[0].name, "rpmhigh");
     }
 
     #[test]

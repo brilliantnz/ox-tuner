@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, LatestFrame, OpId,
-    PortChoice, SignatureVerdict,
+    SignatureVerdict,
 };
 use oxtuner_ini::{SettingsContext, parse_str};
 use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol};
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp, SimTransport};
 use oxtuner_transport::{ReplayTransport, Trace, Transport};
+
+mod support;
 
 const FIXTURE: &str = "\
 [MegaTune]
@@ -74,7 +76,7 @@ impl Harness {
 
     fn connect(&self, config: SimConfig) -> OpId {
         self.handle
-            .connect(PortChoice::Simulator(config), None)
+            .connect(support::simulator_with(config), None)
             .expect("queued")
     }
 
@@ -121,7 +123,7 @@ fn connecting_to_the_simulator_reports_the_signature() {
     assert_eq!(summary.signature, "speeduino 202501");
     assert_eq!(summary.verdict, SignatureVerdict::Match);
     assert!(!summary.read_only);
-    assert!(summary.simulator);
+    assert!(summary.custom);
     // The fixture declares the message envelope, so that is what the session
     // picked; the legacy path is still selectable per connection.
     assert_eq!(summary.framing, "envelope");
@@ -382,7 +384,7 @@ fn a_legacy_connection_can_be_requested_explicitly() {
 
     harness
         .handle
-        .connect(PortChoice::simulator(), Some(LinkMode::Legacy))
+        .connect(support::simulator(), Some(LinkMode::Legacy))
         .expect("queued");
     let summary = harness.wait_connected();
 
@@ -440,7 +442,7 @@ fn a_test_connection_reads_the_signature_and_releases_the_port() {
 
     harness
         .handle
-        .test_connection(PortChoice::simulator(), None)
+        .test_connection(support::simulator(), None)
         .expect("queued");
     let Event::ConnectionTested { summary, .. } =
         harness.wait(|event| matches!(event, Event::ConnectionTested { .. }))
@@ -469,7 +471,7 @@ fn a_test_connection_reports_a_mismatched_signature_as_read_only() {
     harness
         .handle
         .test_connection(
-            PortChoice::Simulator(SimConfig {
+            support::simulator_with(SimConfig {
                 signature: Some("speeduino 999999".to_owned()),
                 ..SimConfig::default()
             }),
@@ -499,7 +501,7 @@ fn a_test_connection_while_connected_is_refused() {
 
     harness
         .handle
-        .test_connection(PortChoice::simulator(), None)
+        .test_connection(support::simulator(), None)
         .expect("queued");
     let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
     else {

@@ -37,6 +37,11 @@ pub struct SimConfig {
     pub faults: Vec<FaultRule>,
     /// Pages preloaded with bytes before the first read.
     pub pages: Vec<(u8, Vec<u8>)>,
+    /// How many realtime reads report `burnPending` after a burn.
+    ///
+    /// A real board answers a burn before the EEPROM write starts, so the bit
+    /// stays set for a while. Zero keeps the virtual burn instant.
+    pub burn_pending_samples: u32,
 }
 
 impl Default for SimConfig {
@@ -46,6 +51,7 @@ impl Default for SimConfig {
             seed: 0x5EED_2025,
             faults: Vec::new(),
             pages: Vec::new(),
+            burn_pending_samples: 0,
         }
     }
 }
@@ -57,6 +63,7 @@ impl From<Scenario> for SimConfig {
             seed: scenario.seed.unwrap_or(0x5EED_2025),
             faults: scenario.faults,
             pages: scenario.pages,
+            burn_pending_samples: 0,
         }
     }
 }
@@ -161,6 +168,10 @@ pub struct SimTransport {
     open: bool,
     connected: bool,
     step: u64,
+    /// How long a queued burn keeps reporting `burnPending`, in reads.
+    burn_pending_samples: u32,
+    /// Reads left before the queued burn reports complete.
+    burn_pending_left: u32,
 }
 
 impl SimTransport {
@@ -202,6 +213,8 @@ impl SimTransport {
             open: false,
             connected: false,
             step: 0,
+            burn_pending_samples: config.burn_pending_samples,
+            burn_pending_left: 0,
         })
     }
 
@@ -418,6 +431,8 @@ impl SimTransport {
                 if self.memory.burn(page).is_none() {
                     return error(0x84);
                 }
+                // A real board queues the EEPROM write and answers first.
+                self.burn_pending_left = self.burn_pending_samples;
                 if framed { vec![0x04] } else { Vec::new() }
             }
             Request::Crc {
@@ -452,12 +467,18 @@ impl SimTransport {
                 let Some(realtime) = self.ecu.realtime() else {
                     return error(0x83);
                 };
-                let Some(data) =
-                    realtime_block(realtime, &self.generator, self.step, offset, count)
-                else {
+                let Some(data) = realtime_block(
+                    realtime,
+                    &self.generator,
+                    self.step,
+                    offset,
+                    count,
+                    self.burn_pending_left > 0,
+                ) else {
                     return error(0x84);
                 };
                 self.step = self.step.wrapping_add(1);
+                self.burn_pending_left = self.burn_pending_left.saturating_sub(1);
                 if !framed {
                     return data;
                 }
@@ -497,8 +518,15 @@ fn realtime_block(
     step: u64,
     offset: u16,
     count: u16,
+    burn_pending: bool,
 ) -> Option<Vec<u8>> {
-    let block = generator.block(step);
+    let mut block = generator.block(step);
+    if burn_pending
+        && let Some((offset, low)) = realtime.burn_pending
+        && let Some(byte) = block.get_mut(offset)
+    {
+        *byte |= 1 << low;
+    }
     let start = usize::from(offset.checked_sub(realtime.start_offset)?);
     let end = start.checked_add(usize::from(count))?;
     if end > block.len() || block.len() != realtime.block_size {

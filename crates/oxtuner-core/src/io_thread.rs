@@ -24,11 +24,11 @@ use std::time::Duration;
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::Definition;
 use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol, ProtocolError};
-use oxtuner_sim::{SimConfig, SimTransport};
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
 
+use crate::link::PortChoice;
 use crate::service::CoreError;
 
 /// How many requests may wait for the wire.
@@ -37,6 +37,13 @@ use crate::service::CoreError;
 /// a time, so this is generous; it exists so a bug cannot grow the queue
 /// without bound.
 const REQUEST_CAPACITY: usize = 16;
+
+/// How many page passes a full read may take before it gives up waiting for
+/// the firmware to hold still.
+const STABLE_READ_ATTEMPTS: usize = 3;
+
+/// How long to wait between two page passes while the reboot settles.
+const STABLE_READ_DELAY: Duration = Duration::from_millis(400);
 
 /// How many replies may wait for the core.
 const REPLY_CAPACITY: usize = 48;
@@ -47,30 +54,6 @@ const REPLY_CAPACITY: usize = 48;
 /// never hangs on a crowded queue.
 const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// What a connection actually talks to.
-#[derive(Debug, Clone)]
-pub(crate) enum LinkChoice {
-    /// The built-in simulator, built from the same definition.
-    Simulator(SimConfig),
-    /// A serial device.
-    Serial(SerialSettings),
-}
-
-impl LinkChoice {
-    /// The label the UI shows for this link.
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Simulator(_) => "simulator".to_owned(),
-            Self::Serial(settings) => settings.port.clone(),
-        }
-    }
-
-    /// Whether this is the simulator.
-    pub(crate) fn is_simulator(&self) -> bool {
-        matches!(self, Self::Simulator(_))
-    }
-}
-
 /// Everything the I/O thread needs to build its side.
 pub(crate) struct IoPlan {
     /// The definition the protocol encodes with; owned by the thread.
@@ -80,7 +63,7 @@ pub(crate) struct IoPlan {
     /// The framing override (`None` uses the definition's own).
     pub(crate) link_mode: Option<LinkMode>,
     /// Where the bytes go.
-    pub(crate) link: LinkChoice,
+    pub(crate) link: PortChoice,
 }
 
 /// One request for the wire.
@@ -88,28 +71,14 @@ pub(crate) struct IoPlan {
 pub(crate) enum IoOp {
     /// Read the firmware signature.
     Signature,
-    /// Read one whole page.
-    #[expect(
-        dead_code,
-        reason = "the M7 write path and the M5 protocol suite use it; the M6 session reads all pages"
-    )]
-    ReadPage { page: u8 },
+    /// Read a list of whole pages, in order.
+    ReadPages { pages: Vec<u8> },
     /// Read every declared page.
     ReadAll,
-    /// Write a page chunk. No command creates one yet (M7 owns that path); the
-    /// protocol suite exercises it against the simulator.
-    #[expect(
-        dead_code,
-        reason = "the M7 write path is not exposed as a command yet"
-    )]
-    WritePage {
-        page: u8,
-        offset: u16,
-        data: Vec<u8>,
-    },
-    /// Burn one page. Same note as [`Self::WritePage`].
-    #[expect(dead_code, reason = "the M7 burn path is not exposed as a command yet")]
-    Burn { page: u8 },
+    /// Write one or more pages, already encoded by the core.
+    WritePages { pages: Vec<PageWrite> },
+    /// Burn a list of pages.
+    BurnPages { pages: Vec<u8> },
     /// Read one realtime block.
     ReadRealtime,
     /// Reopen the link and read the signature again.
@@ -118,6 +87,15 @@ pub(crate) enum IoOp {
     SaveTrace { path: PathBuf },
     /// Close the link and stop.
     Close,
+}
+
+/// One page write: the page number and the encoded byte image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageWrite {
+    /// INI page number.
+    pub(crate) page: u8,
+    /// Bytes to write from offset 0.
+    pub(crate) data: Vec<u8>,
 }
 
 /// One request with its identity.
@@ -183,17 +161,14 @@ pub(crate) struct IoFailure {
 pub(crate) enum IoOutcome {
     /// The ECU's signature.
     Signature { signature: String },
-    /// One page.
-    #[expect(dead_code, reason = "see IoOp::ReadPage")]
-    Page(PageRead),
+    /// A requested list of pages.
+    Pages { pages: Vec<PageRead> },
     /// Every page, in definition order. Complete: a partial read is an error.
     All { pages: Vec<PageRead> },
-    /// A write was sent.
-    #[expect(dead_code, reason = "see IoOp::WritePage")]
-    Written { page: u8, offset: u16, bytes: usize },
-    /// A burn was sent.
-    #[expect(dead_code, reason = "see IoOp::Burn")]
-    Burned { page: u8 },
+    /// Pages were written.
+    Written { pages: usize, bytes: usize },
+    /// Pages were burned.
+    Burned { pages: usize },
     /// One realtime block.
     Realtime { block: Vec<u8> },
     /// The link reopened and answered again.
@@ -289,15 +264,19 @@ pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
 }
 
 /// Builds the transport and protocol for a plan.
+///
+/// A serial device is opened here because that is the core's own capability.
+/// Any other link comes from the application through [`PortChoice::Custom`],
+/// so this module never names a simulator or a replay reader (ADR-0022).
 fn build(plan: IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
     let label = plan.link.label();
-    let mut recorder = RecordingTransport::new(match plan.link {
-        LinkChoice::Simulator(config) => Box::new(
-            SimTransport::new(&plan.definition, config)
-                .map_err(|error| CoreError::Connect(error.to_string()))?,
-        ) as Box<dyn Transport>,
-        LinkChoice::Serial(settings) => Box::new(SerialTransport::new(settings)),
-    });
+    let transport: Box<dyn Transport> = match &plan.link {
+        PortChoice::Serial { port, baud } => Box::new(SerialTransport::new(
+            SerialSettings::new(port.clone()).with_baud(*baud),
+        )),
+        PortChoice::Custom(link) => link.open(&plan.definition).map_err(CoreError::Connect)?,
+    };
+    let mut recorder = RecordingTransport::new(transport);
     recorder.note(format!("definition: {}", plan.definition.signature));
     recorder.note(format!("link: {label}"));
 
@@ -410,6 +389,49 @@ fn open_link(
     Ok(())
 }
 
+/// Reads every readable page once.
+///
+/// Returns the caller's answer on a stop request or a protocol failure, so the
+/// caller can pass it straight back.
+fn read_every_page(
+    protocol: &mut MsProtocol,
+    transport: &mut RecordingTransport,
+    stop: &AtomicBool,
+) -> Result<Vec<PageRead>, (IoOutcome, bool)> {
+    let mut pages = Vec::new();
+    for spec in protocol.pages() {
+        if stop.load(Ordering::Relaxed) {
+            return Err((
+                IoOutcome::Failed(IoFailure {
+                    kind: IoFailureKind::Stopped,
+                    message: "the page read was stopped".to_owned(),
+                }),
+                true,
+            ));
+        }
+        if !spec.readable || spec.size == 0 {
+            continue;
+        }
+        match protocol.read_page_all(transport, spec.number) {
+            Ok(bytes) => pages.push(PageRead {
+                page: spec.number,
+                bytes,
+            }),
+            Err(error) => return Err((failure(error), false)),
+        }
+    }
+    Ok(pages)
+}
+
+/// Whether two page passes carry the same bytes.
+fn same_pages(before: &[PageRead], after: &[PageRead]) -> bool {
+    before.len() == after.len()
+        && before
+            .iter()
+            .zip(after.iter())
+            .all(|(a, b)| a.page == b.page && a.bytes == b.bytes)
+}
+
 /// Performs one operation. The flag says whether the thread should stop.
 fn execute(
     transport: &mut RecordingTransport,
@@ -426,13 +448,9 @@ fn execute(
             Ok(signature) => (IoOutcome::Signature { signature }, false),
             Err(error) => (failure(error), false),
         },
-        IoOp::ReadPage { page } => match protocol.read_page_all(transport, page) {
-            Ok(bytes) => (IoOutcome::Page(PageRead { page, bytes }), false),
-            Err(error) => (failure(error), false),
-        },
-        IoOp::ReadAll => {
-            let mut pages = Vec::new();
-            for spec in protocol.pages() {
+        IoOp::ReadPages { pages } => {
+            let mut read = Vec::with_capacity(pages.len());
+            for page in pages {
                 if stop.load(Ordering::Relaxed) {
                     return (
                         IoOutcome::Failed(IoFailure {
@@ -442,37 +460,84 @@ fn execute(
                         true,
                     );
                 }
-                if !spec.readable || spec.size == 0 {
-                    continue;
-                }
-                match protocol.read_page_all(transport, spec.number) {
-                    Ok(bytes) => pages.push(PageRead {
-                        page: spec.number,
-                        bytes,
-                    }),
+                match protocol.read_page_all(transport, page) {
+                    Ok(bytes) => read.push(PageRead { page, bytes }),
                     Err(error) => return (failure(error), false),
                 }
             }
+            (IoOutcome::Pages { pages: read }, false)
+        }
+        IoOp::ReadAll => {
+            // A board reset (every port open triggers one) leaves the firmware
+            // loading its tune for a moment, and a read that races that load
+            // returns the previous session's RAM for some pages. Read twice and
+            // only answer with a pass that matches the one before it.
+            let mut previous: Option<Vec<PageRead>> = None;
+            for attempt in 0..STABLE_READ_ATTEMPTS {
+                let pages = match read_every_page(protocol, transport, stop) {
+                    Ok(pages) => pages,
+                    Err(answer) => return answer,
+                };
+                if let Some(before) = &previous
+                    && same_pages(before, &pages)
+                {
+                    return (IoOutcome::All { pages }, false);
+                }
+                previous = Some(pages);
+                if attempt + 1 < STABLE_READ_ATTEMPTS {
+                    std::thread::sleep(STABLE_READ_DELAY);
+                }
+            }
+            // Still moving after the last attempt: answer with the last pass so
+            // the caller sees values rather than an error, and let the write
+            // path's own conflict check refuse a plan built from a moving target.
+            let pages = previous.unwrap_or_default();
             (IoOutcome::All { pages }, false)
         }
-        IoOp::WritePage { page, offset, data } => {
-            let bytes = data.len();
-            match protocol.write_page(transport, page, offset, &data) {
-                Ok(()) => (
-                    IoOutcome::Written {
-                        page,
-                        offset,
-                        bytes,
-                    },
-                    false,
-                ),
-                Err(error) => (failure(error), false),
+        IoOp::WritePages { pages } => {
+            let count = pages.len();
+            let mut bytes = 0;
+            for page in pages {
+                if stop.load(Ordering::Relaxed) {
+                    return (
+                        IoOutcome::Failed(IoFailure {
+                            kind: IoFailureKind::Stopped,
+                            message: "the page write was stopped".to_owned(),
+                        }),
+                        true,
+                    );
+                }
+                bytes += page.data.len();
+                if let Err(error) = protocol.write_page(transport, page.page, 0, &page.data) {
+                    return (failure(error), false);
+                }
             }
+            (
+                IoOutcome::Written {
+                    pages: count,
+                    bytes,
+                },
+                false,
+            )
         }
-        IoOp::Burn { page } => match protocol.burn(transport, page) {
-            Ok(()) => (IoOutcome::Burned { page }, false),
-            Err(error) => (failure(error), false),
-        },
+        IoOp::BurnPages { pages } => {
+            let count = pages.len();
+            for page in pages {
+                if stop.load(Ordering::Relaxed) {
+                    return (
+                        IoOutcome::Failed(IoFailure {
+                            kind: IoFailureKind::Stopped,
+                            message: "the burn was stopped".to_owned(),
+                        }),
+                        true,
+                    );
+                }
+                if let Err(error) = protocol.burn(transport, page) {
+                    return (failure(error), false);
+                }
+            }
+            (IoOutcome::Burned { pages: count }, false)
+        }
         IoOp::ReadRealtime => match protocol.read_realtime(transport) {
             Ok(block) => (IoOutcome::Realtime { block }, false),
             Err(error) => (failure(error), false),
@@ -561,6 +626,22 @@ impl RequestId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxtuner_sim::{SimConfig, SimTransport};
+
+    /// A test link: the simulator through the same seam the application uses.
+    struct TestSim(SimConfig);
+
+    impl crate::link::CustomLink for TestSim {
+        fn label(&self) -> &str {
+            "simulator"
+        }
+
+        fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String> {
+            SimTransport::new(definition, self.0.clone())
+                .map(|sim| Box::new(sim) as Box<dyn Transport>)
+                .map_err(|error| error.to_string())
+        }
+    }
 
     fn definition() -> Definition {
         Definition::parse(
@@ -590,7 +671,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
             definition: Box::new(definition),
             behavior,
             link_mode: None,
-            link: LinkChoice::Simulator(SimConfig::default()),
+            link: PortChoice::custom(TestSim(SimConfig::default())),
         };
         let (thread, replies) = IoThread::start(plan).expect("starts");
         thread.submit(1, IoOp::Signature).expect("queued");
@@ -613,11 +694,12 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
 
     #[test]
     fn a_plan_reports_the_link_it_will_open() {
-        let link = LinkChoice::Serial(SerialSettings::new("/dev/null"));
+        let link = PortChoice::serial("/dev/null", 115_200);
         assert_eq!(link.label(), "/dev/null");
-        assert!(!link.is_simulator());
+        assert!(link.is_serial());
 
-        let link = LinkChoice::Simulator(SimConfig::default());
-        assert!(link.is_simulator());
+        let link = PortChoice::custom(TestSim(SimConfig::default()));
+        assert!(!link.is_serial());
+        assert_eq!(link.label(), "simulator");
     }
 }

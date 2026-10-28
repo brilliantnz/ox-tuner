@@ -23,23 +23,32 @@
 //! - **One owner.** The definition and the tune are moved into the core thread
 //!   and dropped there. Callers receive a [`DefinitionSummary`] or a
 //!   [`ProjectSummary`], never the data.
-//! - **Answered exactly once.** [`CoreHandle::send`] returns the [`OpId`] the
-//!   reply will carry; every accepted command produces exactly one
-//!   `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` / `DefinitionUnloaded` /
-//!   `Failed` / `Rejected` event. A refused command ([`CoreError::QueueFull`])
-//!   never enters the core and receives no event — its id is simply unused.
+//! - **Answered exactly once while the UI is reading.** [`CoreHandle::send`]
+//!   returns the [`OpId`] the reply will carry; every accepted command produces
+//!   exactly one `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` /
+//!   `DefinitionUnloaded` / `Failed` / `Rejected` event. A refused command
+//!   ([`CoreError::QueueFull`]) never enters the core and receives no event —
+//!   its id is simply unused.
 //! - **Bounded and non-blocking for the UI.** Sending never blocks; a full
 //!   command queue is reported, not waited on.
-//! - **Deterministic shutdown.** [`CoreThread::join`] (or dropping it) queues
-//!   `Shutdown`, answers whatever is still queued with `Rejected`, emits
-//!   `Stopped`, and joins.
+//! - **Realtime never enters the event queue.** The poller publishes
+//!   [`LatestFrame`] and the chart history, then sends a coalesced
+//!   [`FrameWatch`] wake, so a stalled UI cannot hold up acquisition, logging
+//!   or reconnect (ADR-0021).
+//! - **Bounded shutdown.** [`CoreThread::join`] (or dropping it) raises a stop
+//!   flag, queues `Shutdown`, answers whatever is still queued with `Rejected`,
+//!   and emits `Stopped`. Once quitting has started, an event that does not fit
+//!   the queue is dropped and counted ([`CoreReport::dropped_events`]) instead
+//!   of parking the core, so a consumer that stopped reading cannot keep the
+//!   thread alive (ADR-0023). A core that is stuck inside a command is
+//!   abandoned with an error log rather than hanging the caller.
 //!
-//! # What lands here next
+//! # Scope
 //!
-//! The write path and guardrails S2–S10 (ADR-0010/0011, M7) and the datalog
-//! ring buffer (ADR-0014, M8) belong to this crate — not to the UI. The live
-//! read-only session (connect, signature verdict, page reads, polling, trace,
-//! reconnect) is implemented; what it claims, it does.
+//! The write path and guardrails S2–S10 (ADR-0010/0011, M7), the bounded chart
+//! history (ADR-0014, M8) and the CSV logger are implemented in this crate. The
+//! M9 surface data belongs in the shared `history` module; no UI work belongs
+//! here.
 //!
 //! # Example
 //!
@@ -67,34 +76,49 @@
 //! ```
 
 mod handle;
+mod history;
 mod io_thread;
+mod journal;
+mod link;
 mod menu;
 mod message;
 mod realtime;
+mod safety;
 mod service;
+mod snapshot;
 
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
+pub use history::{
+    ChannelInfo, ChartHistory, HistoryStats, NearestSample, Sample, SeriesPoints, TimeWindow,
+    decimate, nice_ticks, padded_range,
+};
+pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
-    AxisEdit, AxisKind, AxisSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary,
-    DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure, FailureCode, OpId,
-    PortChoice, PortSummary, ProjectSummary, ReadAllSummary, RejectReason, SaveSummary,
-    SignatureVerdict, TableSummary,
+    AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary,
+    DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
+    FailureCode, ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary,
+    RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
 };
-pub use realtime::{LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame};
+pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
+pub use realtime::{
+    BlockingFrameWatch, FrameWatch, LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame,
+};
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
 /// Re-exported so callers can build [`Command::LoadDefinition`] without adding
-/// a dependency on `oxtuner-ini` themselves.
-pub use oxtuner_ini::SettingsContext;
+/// a dependency on `oxtuner-ini` themselves — and so a [`CustomLink`]
+/// implementation can name the definition it is handed.
+pub use oxtuner_ini::{Definition, SettingsContext};
 
-/// Re-exported for the table grid's per-cell write-state decoration.
-pub use oxtuner_tune::CellState;
+/// Re-exported for the table grid's per-cell write-state decoration and the
+/// write dialogs' pending counts.
+pub use oxtuner_tune::{CellState, TuneStatus};
 
 /// Re-exported so a caller can pick the connection's framing without taking a
 /// dependency on `oxtuner-protocol`.
 pub use oxtuner_protocol::LinkMode;
 
-/// Re-exported so a simulator connection can be configured — a signature
-/// override or fault rules — without a second dependency on `oxtuner-sim`.
-pub use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
+/// Re-exported so a [`CustomLink`] implementation can name the transport it
+/// returns.
+pub use oxtuner_transport::Transport;

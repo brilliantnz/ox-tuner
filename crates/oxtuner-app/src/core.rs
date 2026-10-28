@@ -21,10 +21,11 @@ use std::sync::Arc;
 
 use gpui_kit::{App, Global, PathPromptOptions};
 use oxtuner_core::{
-    AxisEdit, AxisKind, CellEdit, ConnectionSummary, CoreConfig, CoreHandle, CoreParts, CoreThread,
-    DefinitionSummary, DialogSummary, Event, EventStream, Failure, FailureCode, LatestFrame,
-    LinkMode, PortChoice, PortSummary, ProjectSummary, ReadAllSummary, RealtimeFrame, SaveSummary,
-    TableSummary,
+    AxisEdit, AxisKind, BurnSummary, CellEdit, ChartHistory, ConnectionSummary, CoreConfig,
+    CoreHandle, CoreParts, CoreThread, DefinitionSummary, DialogSummary, Event, EventStream,
+    Failure, FailureCode, FrameWatch, ImportSummary, JournalEntry, LatestFrame, LinkMode,
+    LogSnapshot, LogStatus, LogSummary, PortChoice, PortSummary, ProjectSummary, ReadAllSummary,
+    RealtimeFrame, RevertSummary, SaveSummary, TableSummary, TuneStatus, WriteSummary,
 };
 use rust_i18n::t;
 
@@ -67,6 +68,41 @@ pub(crate) struct CoreStatus {
     pub(crate) test: Option<TestResult>,
     /// The connection request that is still being answered.
     pub(crate) pending_connect: Option<PortChoice>,
+    /// Whether the global write switch is on (S8).
+    pub(crate) writes_enabled: bool,
+    /// Why the write path is halted after a failed verification, until the user
+    /// acknowledges it.
+    pub(crate) write_halted: Option<String>,
+    /// The derived write state after the last read, edit or write.
+    pub(crate) tune_status: Option<TuneStatus>,
+    /// The last verified RAM write.
+    pub(crate) last_write: Option<WriteSummary>,
+    /// The last verified burn.
+    pub(crate) last_burn: Option<BurnSummary>,
+    /// The last import or snapshot restore.
+    pub(crate) last_import: Option<ImportSummary>,
+    /// The last revert.
+    pub(crate) last_revert: Option<RevertSummary>,
+    /// The project's write journal, after `ReadJournal`.
+    pub(crate) journal: Option<JournalView>,
+    /// The project's snapshots, after `ListSnapshots`.
+    pub(crate) snapshots: Vec<PathBuf>,
+    /// A tune path waiting for the user's consent to import it (S9).
+    pub(crate) import_consent: Option<PathBuf>,
+    /// The last stopped session log, for the output panel.
+    pub(crate) last_log: Option<LogSnapshot>,
+    /// Moves when a definition or project is installed, so views can rebuild
+    /// their channel lists.
+    pub(crate) definition_revision: u64,
+}
+
+/// The journal file and its newest entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JournalView {
+    /// The file, when the session has one.
+    pub(crate) path: Option<PathBuf>,
+    /// Newest last.
+    pub(crate) entries: Vec<JournalEntry>,
 }
 
 /// The outcome of a signature test.
@@ -109,6 +145,12 @@ pub(crate) struct CoreService {
     status: CoreStatus,
     /// The freshest realtime frame (ADR-0014).
     latest: LatestFrame,
+    /// The bounded realtime history the chart reads (ADR-0014/0015).
+    history: ChartHistory,
+    /// The live session log counters.
+    log_status: LogStatus,
+    /// The tune path waiting for the user's import consent (S9).
+    pending_import: Option<PathBuf>,
     /// `--sim`: connect to the simulator as soon as a definition is loaded.
     auto_sim: bool,
 }
@@ -134,6 +176,16 @@ impl CoreService {
     pub(crate) fn latest(cx: &App) -> Option<Arc<RealtimeFrame>> {
         cx.global::<Self>().latest.get()
     }
+
+    /// The bounded realtime history the chart reads on its render tick.
+    pub(crate) fn history(cx: &App) -> ChartHistory {
+        cx.global::<Self>().history.clone()
+    }
+
+    /// The live session log counters.
+    pub(crate) fn log(cx: &App) -> LogSnapshot {
+        cx.global::<Self>().log_status.snapshot()
+    }
 }
 
 /// Starts the core and the task that carries its events to the views.
@@ -142,19 +194,37 @@ impl CoreService {
 /// core is a status to render, not a reason to panic. When the core does not
 /// start, its handle is `None` and every command reports a failure.
 pub fn start(cx: &mut App, auto_sim: bool) {
-    let service = match oxtuner_core::start(CoreConfig::default()) {
+    let writes_enabled = crate::settings::preferences::AppSettings::writes_enabled(cx);
+    let journal_dir = crate::platform::paths::AppPaths::discover()
+        .config_dir
+        .join("write-journal.log");
+    let config = CoreConfig {
+        writes_enabled,
+        journal_dir: Some(journal_dir),
+        ..CoreConfig::default()
+    };
+    let service = match oxtuner_core::start(config) {
         Ok(CoreParts {
             handle,
             events,
             latest,
+            frames,
+            history,
+            log,
             thread,
         }) => {
-            spawn_event_pump(events, cx);
+            spawn_event_pump(events, frames, cx);
             CoreService {
                 handle: Some(handle),
                 thread: Some(thread),
-                status: CoreStatus::default(),
+                status: CoreStatus {
+                    writes_enabled,
+                    ..CoreStatus::default()
+                },
                 latest,
+                history,
+                log_status: log,
+                pending_import: None,
                 auto_sim,
             }
         }
@@ -167,6 +237,9 @@ pub fn start(cx: &mut App, auto_sim: bool) {
                 thread: None,
                 status: CoreStatus::default(),
                 latest: LatestFrame::default(),
+                history: ChartHistory::default(),
+                log_status: LogStatus::new(),
+                pending_import: None,
                 auto_sim,
             }
         }
@@ -175,7 +248,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
     cx.set_global(service);
 }
 
-fn spawn_event_pump(events: EventStream, cx: &mut App) {
+fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Some(event) = events.recv().await {
             let stopped = matches!(event, Event::Stopped);
@@ -185,6 +258,17 @@ fn spawn_event_pump(events: EventStream, cx: &mut App) {
             }
         }
         tracing::debug!("the core event pump finished");
+    })
+    .detach();
+
+    // Realtime wakes are separate from the event queue and coalesced, so a
+    // frame can never queue behind a command answer or block the core
+    // (ADR-0021). Repainting reads LatestFrame and the chart history.
+    cx.spawn(async move |cx| {
+        while frames.changed().await {
+            cx.update(|cx| cx.refresh_windows());
+        }
+        tracing::debug!("the realtime wake watch finished");
     })
     .detach();
 }
@@ -260,6 +344,7 @@ fn apply(event: Event, cx: &mut App) {
         Event::ConnectionLost { reason } => (Update::LinkLost(reason), None),
         Event::Disconnected { .. } => (Update::Disconnected, None),
         Event::PagesRead { summary, .. } => (Update::PagesRead(summary), None),
+        Event::EcuAdopted { .. } => (Update::EcuAdopted, None),
         Event::RealtimeState { running, .. } => (Update::Realtime(running), None),
         Event::TraceSaved { path, frames, .. } => (
             Update::Trace {
@@ -267,7 +352,30 @@ fn apply(event: Event, cx: &mut App) {
             },
             None,
         ),
-        Event::RealtimeFrame { .. } => (Update::RealtimeFrame, None),
+        Event::TuneWritten { summary, .. } => (Update::Written(summary), None),
+        Event::TuneBurned { summary, .. } => (Update::Burned(summary), None),
+        Event::TuneImported { summary, .. } => (Update::Imported(summary), None),
+        Event::TuneReverted { summary, .. } => (Update::Reverted(summary), None),
+        Event::TuneStatusRead { status, .. } => (Update::TuneStatus(status), None),
+        Event::WriteAccessChanged {
+            writes_enabled,
+            connection,
+            ..
+        } => (
+            Update::WriteAccess {
+                enabled: writes_enabled,
+                connection,
+            },
+            None,
+        ),
+        Event::WriteFailureAcknowledged { .. } => (Update::Acknowledged, None),
+        Event::JournalRead { path, entries, .. } => {
+            (Update::Journal(JournalView { path, entries }), None)
+        }
+        Event::SnapshotsListed { paths, .. } => (Update::Snapshots(paths), None),
+        Event::LogState {
+            running, summary, ..
+        } => (Update::Log { running, summary }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => {
             tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
@@ -280,11 +388,34 @@ fn apply(event: Event, cx: &mut App) {
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
         && cx.global::<CoreService>().auto_sim
         && cx.global::<CoreService>().status.connection.is_none();
+    let import_consent = if matches!(
+        &update,
+        Update::Failed(failure) if failure.code == FailureCode::ImportNeedsConsent
+    ) {
+        cx.global::<CoreService>().pending_import.clone()
+    } else {
+        None
+    };
+    let refresh_status = match &update {
+        Update::Opened(_)
+        | Update::PagesRead(_)
+        | Update::Written(_)
+        | Update::Burned(_)
+        | Update::Imported(_)
+        | Update::Reverted(_)
+        | Update::Saved(_) => true,
+        Update::Table { edited, .. } | Update::Dialog { edited, .. } => *edited,
+        Update::Failed(failure) => matches!(
+            failure.code,
+            FailureCode::WriteFailed | FailureCode::BurnFailed | FailureCode::ImportNeedsConsent
+        ),
+        _ => false,
+    };
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
     // Remember the port that worked, so the next dialog opens on it.
     let persist_port = match &update {
-        Update::Connected(connection) if !connection.simulator => {
+        Update::Connected(connection) if !connection.custom => {
             let baud = cx
                 .global::<CoreService>()
                 .status
@@ -292,7 +423,7 @@ fn apply(event: Event, cx: &mut App) {
                 .as_ref()
                 .and_then(|pending| match pending {
                     PortChoice::Serial { baud, .. } => Some(*baud),
-                    PortChoice::Simulator(_) => None,
+                    PortChoice::Custom(_) => None,
                 });
             Some((connection.port.clone(), baud))
         }
@@ -301,6 +432,9 @@ fn apply(event: Event, cx: &mut App) {
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
+        if let Some(path) = import_consent.clone() {
+            cx.global_mut::<CoreService>().status.import_consent = Some(path);
+        }
         if let Some(root) = remember {
             crate::project::remember(&root, cx);
         }
@@ -330,8 +464,22 @@ fn apply(event: Event, cx: &mut App) {
             .settings()
             .connection
             .poll_rate_hz
-            .clamp(1, 50);
+            .clamp(1, 100);
         start_realtime(1000 / hz, cx);
+    }
+    if refresh_status {
+        refresh_tune_status(cx);
+    }
+    if import_consent.is_some() {
+        cx.defer(|cx| {
+            if let Some(window) = crate::app::window::main(cx) {
+                window
+                    .update(cx, |_, window, cx| {
+                        crate::shell::write_dialogs::show_import_consent(window, cx);
+                    })
+                    .ok();
+            }
+        });
     }
 }
 
@@ -340,16 +488,40 @@ enum Update {
     Tested(ConnectionSummary),
     Opened(ProjectSummary),
     Saved(SaveSummary),
-    Table { table: TableSummary, edited: bool },
-    Dialog { dialog: DialogSummary, edited: bool },
+    Table {
+        table: TableSummary,
+        edited: bool,
+    },
+    Dialog {
+        dialog: DialogSummary,
+        edited: bool,
+    },
     Connected(ConnectionSummary),
     Reconnected(ConnectionSummary),
     LinkLost(String),
     Disconnected,
     PagesRead(ReadAllSummary),
+    EcuAdopted,
     Realtime(bool),
-    Trace { saved: TraceSaved },
-    RealtimeFrame,
+    Trace {
+        saved: TraceSaved,
+    },
+    Written(WriteSummary),
+    Burned(BurnSummary),
+    Imported(ImportSummary),
+    Reverted(RevertSummary),
+    TuneStatus(TuneStatus),
+    WriteAccess {
+        enabled: bool,
+        connection: Option<ConnectionSummary>,
+    },
+    Acknowledged,
+    Journal(JournalView),
+    Snapshots(Vec<PathBuf>),
+    Log {
+        running: bool,
+        summary: Option<LogSummary>,
+    },
     Unloaded,
     Failed(Failure),
     Nothing,
@@ -365,6 +537,8 @@ impl CoreStatus {
                 self.table = None;
                 self.dialog = None;
                 self.failure = None;
+                self.tune_status = None;
+                self.definition_revision = self.definition_revision.wrapping_add(1);
             }
             Update::Opened(project) => {
                 self.project = Some(project);
@@ -373,6 +547,10 @@ impl CoreStatus {
                 self.table = None;
                 self.dialog = None;
                 self.failure = None;
+                self.tune_status = None;
+                self.journal = None;
+                self.snapshots.clear();
+                self.definition_revision = self.definition_revision.wrapping_add(1);
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
@@ -440,13 +618,80 @@ impl CoreStatus {
                 // trust the write-state marks it drew from the old one.
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
+            Update::EcuAdopted => {
+                self.failure = None;
+                // The working tune changed under every open table and dialog.
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
             Update::Realtime(running) => self.realtime = running,
             Update::Trace { saved } => {
                 self.last_trace = Some(saved);
                 self.failure = None;
             }
-            Update::RealtimeFrame => {}
-            Update::Unloaded => *self = Self::default(),
+            Update::Written(summary) => {
+                self.last_write = Some(summary);
+                self.write_halted = None;
+                self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::Burned(summary) => {
+                self.last_burn = Some(summary);
+                self.write_halted = None;
+                self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::Imported(summary) => {
+                self.last_import = Some(summary);
+                self.import_consent = None;
+                self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::Reverted(summary) => {
+                self.last_revert = Some(summary);
+                self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::TuneStatus(status) => self.tune_status = Some(status),
+            Update::WriteAccess {
+                enabled,
+                connection,
+            } => {
+                self.writes_enabled = enabled;
+                if let Some(connection) = connection {
+                    self.connection = Some(connection);
+                }
+                self.failure = None;
+            }
+            Update::Acknowledged => self.write_halted = None,
+            Update::Journal(view) => self.journal = Some(view),
+            Update::Snapshots(paths) => self.snapshots = paths,
+            Update::Log { running, summary } => {
+                if let Some(summary) = summary {
+                    self.last_log = Some(LogSnapshot::new(
+                        running,
+                        Some(summary.path),
+                        summary.frames,
+                        summary.dropped,
+                        summary.bytes,
+                    ));
+                }
+                if running {
+                    self.last_log = Some(LogSnapshot::new(
+                        true,
+                        self.last_log.as_ref().and_then(|log| log.path.clone()),
+                        0,
+                        0,
+                        0,
+                    ));
+                }
+            }
+            Update::Unloaded => {
+                let writes_enabled = self.writes_enabled;
+                *self = Self {
+                    writes_enabled,
+                    ..Self::default()
+                };
+            }
             Update::Failed(failure) => {
                 // A table or dialog that could not be read must not stay on
                 // screen as if it were still the selection; an edit failure
@@ -471,6 +716,16 @@ impl CoreStatus {
                 }
                 if failure.code == FailureCode::ConnectFailed {
                     self.pending_connect = None;
+                }
+                if matches!(
+                    failure.code,
+                    FailureCode::WriteFailed | FailureCode::BurnFailed
+                ) {
+                    self.write_halted = Some(failure.message.clone());
+                    // The core reloaded the ECU image from the read-back and
+                    // marked the changed cells; a table on screen must refetch
+                    // its states instead of showing the pre-write snapshot.
+                    self.tune_revision = self.tune_revision.wrapping_add(1);
                 }
                 self.failure = Some(failure);
             }
@@ -507,7 +762,7 @@ pub(crate) fn save_tune(cx: &mut App) {
 
 /// Starts a connection to the simulator with the default configuration.
 pub(crate) fn connect_to_simulator(cx: &mut App) {
-    connect(PortChoice::simulator(), None, cx);
+    connect(crate::link::simulator(), None, cx);
 }
 
 /// Asks for the port list, then opens the connect dialog when it arrives.
@@ -599,6 +854,21 @@ pub(crate) fn read_all(cx: &mut App) {
     }
 }
 
+/// Makes the tune read from the ECU the working image.
+///
+/// After a read the project file's values stay on screen, so a write would
+/// send the file rather than the controller's tune. This is the explicit way to
+/// edit what the ECU actually holds.
+pub(crate) fn adopt_ecu_tune(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::AdoptRefused) else {
+        return;
+    };
+    if let Err(error) = handle.adopt_ecu_image() {
+        tracing::warn!(%error, "the core refused to take the ECU image");
+        report_failure(cx, FailureCode::AdoptRefused, error.to_string());
+    }
+}
+
 /// Saves the session trace to the app's trace directory.
 pub(crate) fn save_trace(cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::TraceFailed) else {
@@ -609,6 +879,168 @@ pub(crate) fn save_trace(cx: &mut App) {
         tracing::warn!(%error, "the core refused the trace save");
         report_failure(cx, FailureCode::TraceFailed, error.to_string());
     }
+}
+
+/// Asks the core to sync the tune values that differ from ECU RAM.
+pub(crate) fn write_to_ram(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
+        return;
+    };
+    if let Err(error) = handle.write_to_ram(Vec::new()) {
+        tracing::warn!(%error, "the core refused the write");
+        report_failure(cx, FailureCode::WriteRefused, error.to_string());
+    }
+}
+
+/// Asks the core to burn RAM to flash.
+pub(crate) fn burn_to_flash(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::BurnRefused) else {
+        return;
+    };
+    if let Err(error) = handle.burn_to_flash(Vec::new()) {
+        tracing::warn!(%error, "the core refused the burn");
+        report_failure(cx, FailureCode::BurnRefused, error.to_string());
+    }
+}
+
+/// Discards local edits after the core snapshots the working image.
+pub(crate) fn revert_tune(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
+        return;
+    };
+    if let Err(error) = handle.revert_tune() {
+        tracing::warn!(%error, "the core refused the revert");
+        report_failure(cx, FailureCode::WriteRefused, error.to_string());
+    }
+}
+
+/// Turns the global write switch on or off and persists the choice.
+pub(crate) fn set_writes_enabled(enabled: bool, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
+        return;
+    };
+    if let Err(error) = handle.set_writes_enabled(enabled) {
+        tracing::warn!(%error, "the core refused the write switch");
+        report_failure(cx, FailureCode::WriteRefused, error.to_string());
+        return;
+    }
+    crate::settings::preferences::AppSettings::set_writes_enabled(cx, enabled);
+}
+
+/// Clears a halted write path after the user reviewed the failure.
+pub(crate) fn acknowledge_write_failure(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::WriteFailed) else {
+        return;
+    };
+    if let Err(error) = handle.acknowledge_write_failure() {
+        tracing::warn!(%error, "the core refused the acknowledgement");
+        report_failure(cx, FailureCode::WriteFailed, error.to_string());
+    }
+}
+
+/// Asks the core to import a `.msq` into the working image.
+pub(crate) fn import_tune(path: &Path, consented: bool, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ImportRejected) else {
+        return;
+    };
+    cx.global_mut::<CoreService>().pending_import = Some(path.to_owned());
+    if let Err(error) = handle.import_tune(path, consented) {
+        tracing::warn!(%error, path = %path.display(), "the core refused the import");
+        cx.global_mut::<CoreService>().pending_import = None;
+        report_failure(cx, FailureCode::ImportRejected, error.to_string());
+    }
+}
+
+/// Restores one of the project's snapshots.
+pub(crate) fn restore_snapshot(path: &Path, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ImportRejected) else {
+        return;
+    };
+    if let Err(error) = handle.restore_snapshot(path) {
+        tracing::warn!(%error, path = %path.display(), "the core refused the snapshot restore");
+        report_failure(cx, FailureCode::ImportRejected, error.to_string());
+    }
+}
+
+/// Lists the open project's snapshots.
+pub(crate) fn list_snapshots(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::SnapshotFailed) else {
+        return;
+    };
+    if let Err(error) = handle.list_snapshots() {
+        tracing::warn!(%error, "the core refused the snapshot list");
+        report_failure(cx, FailureCode::SnapshotFailed, error.to_string());
+    }
+}
+
+/// Reads the open project's write journal.
+pub(crate) fn read_journal(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::JournalFailed) else {
+        return;
+    };
+    if let Err(error) = handle.read_journal() {
+        tracing::warn!(%error, "the core refused the journal read");
+        report_failure(cx, FailureCode::JournalFailed, error.to_string());
+    }
+}
+
+/// Refreshes the derived tune status (unsaved, not sent, not burned).
+pub(crate) fn refresh_tune_status(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::NothingToSave) else {
+        return;
+    };
+    if let Err(error) = handle.refresh_tune_status() {
+        tracing::debug!(%error, "the core refused the status refresh");
+    }
+}
+
+/// Starts a session log beside the project, or in the app's log folder.
+pub(crate) fn start_log(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::LogFailed) else {
+        return;
+    };
+    let directory = CoreService::status(cx)
+        .project
+        .as_ref()
+        .map(|project| project.root.join(".ox-tuner").join("logs"))
+        .unwrap_or_else(|| crate::platform::paths::AppPaths::discover().logs_dir);
+    if let Err(error) = handle.start_log(directory) {
+        tracing::warn!(%error, "the core refused the session log");
+        report_failure(cx, FailureCode::LogFailed, error.to_string());
+    }
+}
+
+/// Stops the session log, flushing it.
+pub(crate) fn stop_log(cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::LogFailed) else {
+        return;
+    };
+    if let Err(error) = handle.stop_log() {
+        tracing::warn!(%error, "the core refused to stop the session log");
+        report_failure(cx, FailureCode::LogFailed, error.to_string());
+    }
+}
+
+/// Asks the OS for a `.msq` and imports it.
+pub(crate) fn choose_import(cx: &mut App) {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some(t!("app.import.title").to_string().into()),
+    });
+
+    cx.spawn(async move |cx| match receiver.await {
+        Ok(Ok(Some(paths))) => {
+            if let Some(path) = paths.into_iter().next() {
+                cx.update(|cx| import_tune(&path, false, cx));
+            }
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "the import picker failed"),
+        Err(error) => tracing::warn!(%error, "the import picker channel closed"),
+    })
+    .detach();
 }
 
 /// Asks the core for one table snapshot.
@@ -941,12 +1373,13 @@ mod tests {
     fn connection() -> ConnectionSummary {
         ConnectionSummary {
             port: "/dev/cu.usbmodem21201".to_owned(),
-            simulator: false,
+            custom: false,
             signature: "speeduino 202501".to_owned(),
             definition_signature: "speeduino 202501".to_owned(),
             verdict: oxtuner_core::SignatureVerdict::Match,
             read_only: false,
             read_only_reason: None,
+            writes_enabled: true,
             behavior: "speeduino".to_owned(),
             framing: "envelope",
             pages: 15,
@@ -999,6 +1432,55 @@ mod tests {
         status.apply(Update::Disconnected);
         assert!(status.connection.is_none());
         assert!(status.pages_read.is_some(), "the read still happened");
+    }
+
+    #[test]
+    fn a_failed_write_halts_the_path_until_it_is_acknowledged() {
+        let mut status = CoreStatus::default();
+
+        status.apply(Update::Failed(failure(FailureCode::WriteFailed)));
+        assert!(status.write_halted.is_some());
+
+        status.apply(Update::Acknowledged);
+        assert!(status.write_halted.is_none());
+    }
+
+    #[test]
+    fn the_write_switch_is_tracked_independently_of_the_connection() {
+        let mut status = CoreStatus::default();
+        assert!(!status.writes_enabled);
+
+        status.apply(Update::WriteAccess {
+            enabled: true,
+            connection: None,
+        });
+
+        assert!(status.writes_enabled);
+    }
+
+    #[test]
+    fn unloading_keeps_the_write_switch() {
+        let mut status = CoreStatus::default();
+        status.apply(Update::WriteAccess {
+            enabled: true,
+            connection: None,
+        });
+
+        status.apply(Update::Unloaded);
+
+        assert!(
+            status.writes_enabled,
+            "the global switch is not project state"
+        );
+    }
+
+    #[test]
+    fn a_bad_import_is_not_halted() {
+        let mut status = CoreStatus::default();
+
+        status.apply(Update::Failed(failure(FailureCode::ImportRejected)));
+
+        assert!(status.write_halted.is_none());
     }
 
     #[test]

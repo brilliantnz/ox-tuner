@@ -22,6 +22,16 @@ gpui_kit::actions!(
         ToggleBottomPanel,
         ConnectEcu,
         DisconnectEcu,
-        SaveSessionTrace
+        SaveSessionTrace,
+        ShowTune,
+        ShowCharts,
+        WriteToRam,
+        BurnToFlash,
+        AdoptEcuTune,
+        RevertTune,
+        EnableWrites,
+        ImportTune,
+        WriteJournal,
+        OpenSnapshots
     ]
 );

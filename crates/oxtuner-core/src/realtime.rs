@@ -6,15 +6,15 @@
 //! than a definition scan.
 //!
 //! The latest frame lives outside the event queue (ADR-0014): the poller writes
-//! it, the UI reads it on its render tick, and an [`Event::RealtimeFrame`]
-//! carries only the sequence number that wakes the view. A slow frame therefore
-//! never backs up rendering, and a dropped repaint shows the newer value, not
-//! an older one.
-//!
-//! [`Event::RealtimeFrame`]: crate::Event::RealtimeFrame
+//! it, the UI reads it on its render tick, and a [`FrameWatch`] token says a
+//! newer frame exists. The token is coalesced, so a stalled UI cannot back up
+//! acquisition and a dropped wake shows the newer value, not an older one
+//! (ADR-0021).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+use crossfire::{AsyncRx, Rx, Tx, spsc};
 
 use oxtuner_ini::{BitRange, ChannelKind, DataType, Definition, Endianness, Number};
 
@@ -84,6 +84,75 @@ impl LatestFrame {
             .unwrap_or_else(|poison| poison.into_inner());
         *slot = None;
     }
+}
+
+/// One pending wake is enough: a token already waiting means the UI has not
+/// looked yet, and the next frame will set the same signal again.
+const WAKE_CAPACITY: usize = 1;
+
+/// The core's end of the realtime wake signal.
+///
+/// Held by the core thread only, which is why it is not `Clone`: one producer,
+/// one consumer (ADR-0019).
+pub(crate) struct FrameNotify {
+    wake: Tx<spsc::Array<()>>,
+}
+
+impl FrameNotify {
+    /// Says a newer frame is readable. Never blocks and never fails: a full
+    /// slot already means the same thing.
+    pub(crate) fn wake(&self) {
+        let _ = self.wake.try_send(());
+    }
+}
+
+/// The UI's end of the realtime wake signal.
+///
+/// The token is not the frame: readers take the newest one from [`LatestFrame`]
+/// and the chart history from [`crate::ChartHistory`], so several frames may
+/// collapse into one wake without losing values.
+pub struct FrameWatch {
+    wake: AsyncRx<spsc::Array<()>>,
+}
+
+impl FrameWatch {
+    /// Waits for the next frame to be announced.
+    ///
+    /// `false` means the core dropped its end, so no further wake will come and
+    /// a loop should stop.
+    pub async fn changed(&self) -> bool {
+        self.wake.recv().await.is_ok()
+    }
+
+    /// Takes a pending wake without waiting.
+    pub fn try_changed(&self) -> bool {
+        self.wake.try_recv().is_ok()
+    }
+
+    /// Switches to the blocking end, for headless callers and tests.
+    pub fn into_blocking(self) -> BlockingFrameWatch {
+        BlockingFrameWatch {
+            wake: self.wake.into_blocking(),
+        }
+    }
+}
+
+/// The blocking counterpart of [`FrameWatch`].
+pub struct BlockingFrameWatch {
+    wake: Rx<spsc::Array<()>>,
+}
+
+impl BlockingFrameWatch {
+    /// Waits up to `timeout` for the next frame to be announced.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        self.wake.recv_timeout(timeout).is_ok()
+    }
+}
+
+/// Creates the wake pair: the core keeps the notifier, the UI takes the watch.
+pub(crate) fn frame_wake() -> (FrameNotify, FrameWatch) {
+    let (wake, watch) = spsc::bounded_blocking_async(WAKE_CAPACITY);
+    (FrameNotify { wake }, FrameWatch { wake: watch })
 }
 
 /// One decoded channel definition.
@@ -178,6 +247,78 @@ impl RealtimeDecoder {
     /// The block size the definition declares.
     pub fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    /// The visible channels, in definition order, with their units.
+    ///
+    /// These are the columns a session log writes and the channels a chart can
+    /// offer. Hidden channels stay out, matching [`RealtimeFrame::values`].
+    pub fn columns(&self) -> Vec<(String, String)> {
+        self.sources
+            .iter()
+            .filter_map(|source| match source {
+                Source::Measured {
+                    name,
+                    units,
+                    hidden,
+                    ..
+                }
+                | Source::Computed {
+                    name,
+                    units,
+                    hidden,
+                    ..
+                } => (!hidden).then(|| (name.clone(), units.clone())),
+            })
+            .collect()
+    }
+
+    /// Whether the definition declares a measured channel with this name.
+    ///
+    /// The protocol reads a few status bits that no chart plots, so a caller
+    /// can tell "this definition has no such channel" from "the block did not
+    /// carry it".
+    pub fn has_channel(&self, name: &str) -> bool {
+        self.measured(name).is_some()
+    }
+
+    /// One measured channel's stored value, hidden or not.
+    ///
+    /// The value is taken after bit extraction and before scale and translate,
+    /// which is what a status bit such as `burnPending` wants. A block of the
+    /// wrong size returns `None`, like [`Self::decode`].
+    pub fn channel_raw(&self, block: &[u8], name: &str) -> Option<f64> {
+        if block.len() != self.block_size {
+            return None;
+        }
+        let Some(Source::Measured {
+            offset,
+            data_type,
+            storage,
+            bits,
+            ..
+        }) = self.measured(name)
+        else {
+            return None;
+        };
+        let raw = read_raw(
+            block,
+            *offset,
+            if bits.is_some() { *storage } else { *data_type },
+            self.endianness,
+        )?;
+        match bits {
+            Some(range) => extract_bits(raw, *range),
+            None => Some(raw),
+        }
+    }
+
+    /// The measured source for a channel name, case-insensitively.
+    fn measured(&self, name: &str) -> Option<&Source> {
+        self.sources.iter().find(|source| match source {
+            Source::Measured { name: channel, .. } => channel.eq_ignore_ascii_case(name),
+            Source::Computed { .. } => false,
+        })
     }
 
     /// Decodes one block.
@@ -359,9 +500,37 @@ fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use oxtuner_ini::{SettingsContext, parse_str};
 
     use super::*;
+
+    #[test]
+    fn frame_wakes_coalesce_into_one_pending_token() {
+        let (notify, watch) = frame_wake();
+        let watch = watch.into_blocking();
+
+        notify.wake();
+        notify.wake();
+        notify.wake();
+
+        assert!(watch.wait(Duration::from_millis(50)), "a wake is pending");
+        assert!(
+            !watch.wait(Duration::from_millis(50)),
+            "the extra wakes must not queue up behind the first"
+        );
+    }
+
+    #[test]
+    fn a_wake_never_waits_for_a_reader() {
+        let (notify, _watch) = frame_wake();
+        // The capacity is one; the fourth call still returns immediately
+        // because a full slot already means "there is something to read".
+        for _ in 0..100 {
+            notify.wake();
+        }
+    }
 
     fn definition() -> Definition {
         parse_str(
@@ -382,6 +551,7 @@ ochBlockSize = 8
 rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
 status = scalar, U08, 2, \"bits\", 1.0, 0.0
 running = bits, U08, 2, [0:0]
+burnPending = bits, U08, 2, [4:4]
 tps = scalar, U08, 3, \"%\", 0.5, 0.0
 halfRpm = { rpm / 2 }, \"rpm\"
 ",
@@ -414,6 +584,25 @@ halfRpm = { rpm / 2 }, \"rpm\"
         let frame = decoder.decode(&block, 1);
 
         assert_eq!(frame.value("halfRpm").unwrap().value, 1750.0);
+    }
+
+    #[test]
+    fn a_status_bit_reads_raw_without_decoding_the_frame() {
+        let decoder = RealtimeDecoder::new(&definition());
+        let mut block = vec![0u8; 8];
+
+        block[2] = 0b0001_0000;
+        assert_eq!(decoder.channel_raw(&block, "burnPending"), Some(1.0));
+        assert_eq!(decoder.channel_raw(&block, "burnpending"), Some(1.0));
+        assert!(decoder.has_channel("burnPending"));
+        assert!(!decoder.has_channel("nothing"));
+
+        block[2] = 0;
+        assert_eq!(decoder.channel_raw(&block, "burnPending"), Some(0.0));
+
+        // A short block says nothing, and so does a name that is not measured.
+        assert_eq!(decoder.channel_raw(&[0u8; 4], "burnPending"), None);
+        assert_eq!(decoder.channel_raw(&block, "halfRpm"), None);
     }
 
     #[test]

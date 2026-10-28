@@ -117,9 +117,9 @@ fn tree_row(
     let node = nodes.get(entry.item().id.as_ref());
     let icon = if entry.is_folder() {
         if entry.is_expanded() {
-            IconName::FolderOpen
+            IconName::ChevronDown
         } else {
-            IconName::Folder
+            IconName::ChevronRight
         }
     } else {
         node.map_or(IconName::File, |node| explorer::icon(node.kind))

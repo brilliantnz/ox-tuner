@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use oxtuner_ini::{Command, Definition};
+use oxtuner_ini::{ChannelKind, Command, Definition};
 use oxtuner_protocol::{CommandPattern, page_identifier};
 
 use crate::SimError;
@@ -33,6 +33,9 @@ pub(crate) struct RealtimeEcu {
     pub(crate) pattern: CommandPattern,
     pub(crate) block_size: usize,
     pub(crate) start_offset: u16,
+    /// Where a `burnPending` status bit lives, when the definition declares
+    /// one. A queued burn sets it so a client can wait for its flash write.
+    pub(crate) burn_pending: Option<(usize, u8)>,
 }
 
 /// A request the bytes turned out to be.
@@ -103,6 +106,21 @@ impl SimEcu {
                     block_size,
                     start_offset: u16::try_from(definition.protocol.output_channel_start_offset)
                         .unwrap_or(0),
+                    burn_pending: definition.channels.iter().find_map(|(name, channel)| {
+                        if !name.eq_ignore_ascii_case("burnPending") {
+                            return None;
+                        }
+                        let ChannelKind::Measured {
+                            offset,
+                            bits: Some(bits),
+                            ..
+                        } = &channel.kind
+                        else {
+                            return None;
+                        };
+                        let offset = usize::try_from(*offset).ok()?;
+                        (offset < block_size).then_some((offset, bits.low))
+                    }),
                 })
             });
 

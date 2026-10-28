@@ -16,6 +16,8 @@ path = "src/main.rs"
 directories = "6.0.0"
 gpui-kit.workspace = true
 oxtuner-core.workspace = true
+oxtuner-sim.workspace = true
+oxtuner-ui.workspace = true
 rust-i18n = "4.2.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

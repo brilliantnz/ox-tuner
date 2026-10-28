@@ -93,4 +93,4 @@ pub use layout::{
 pub use page::{IniPage, MsqPage};
 pub use tune::{EditOutcome, Tune, TuneError};
 pub use value::{AttributeError, RawConversion, Values, is_integer, storage_range};
-pub use wire::{DecodeReport, decode_page, encode_page};
+pub use wire::{DecodeReport, decode_page, encode_page, patch_page};

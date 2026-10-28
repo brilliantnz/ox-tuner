@@ -1,25 +1,130 @@
 //! The UI-side handles: commands in, events out.
 //!
-//! Two endpoints, chosen for who is on each end (ADR-0005 rule 5):
+//! Two endpoints, chosen for who is on each end (ADR-0005 rule 5, ADR-0019):
 //!
-//! - **Commands** use the *blocking* sender but only ever `try_send`: the UI
-//!   thread must never block on the core. A full queue is reported as
+//! - **Commands** are a bounded **MPSC** queue: many `CoreHandle` clones, one
+//!   core thread. The sender is the blocking flavor but only ever `try_send`s:
+//!   the UI thread must never block on the core. A full queue is reported as
 //!   [`CoreError::QueueFull`] and the caller decides what to tell the user.
-//! - **Events** use the *async* receiver, so the UI can await them on GPUI's
-//!   foreground executor without a polling loop or a second runtime.
+//! - **Events** are a bounded **SPSC** queue: the core thread produces, one
+//!   event pump consumes. The receiver is the async flavor, so the UI can await
+//!   it on GPUI's foreground executor without a polling loop or a second
+//!   runtime. The single-consumer type makes a second pump that would silently
+//!   steal events a compile error instead of a design review note.
 
 use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
-use crossfire::{MAsyncRx, MTx, TrySendError, mpmc};
+use crossfire::{AsyncRx, MTx, Rx, SendTimeoutError, TrySendError, Tx, mpsc, spsc};
 
 use crate::message::{CellEdit, Command, Envelope, Event, OpId};
 use crate::service::CoreError;
+
+/// How long one attempt to hand an event to the UI may wait before the core
+/// looks at the shutdown flag again.
+///
+/// Short enough that a quit is never held up by a stalled consumer, long enough
+/// that a healthy UI costs at most a few wakeups per second while busy.
+const EVENT_SLICE: Duration = Duration::from_millis(25);
+
+/// Set when shutdown has been asked for and accepted.
+///
+/// Shared by the handle, the thread guard and the event sender. Its only job is
+/// to turn a potentially endless wait for event-queue room into a bounded one:
+/// once quitting has started, a consumer that never reads must not be able to
+/// keep the core thread alive.
+#[derive(Debug, Default)]
+pub(crate) struct StopFlag {
+    requested: AtomicBool,
+}
+
+impl StopFlag {
+    /// Records that shutdown has been accepted.
+    pub(crate) fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether shutdown has been accepted.
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+}
+
+/// Why an event was not handed to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendFailure {
+    /// The UI dropped its receiver, so no event can ever arrive again.
+    Closed,
+    /// Shutdown was requested while the queue stayed full, so the event was
+    /// dropped instead of keeping the core thread alive. Counted in
+    /// [`crate::CoreReport::dropped_events`].
+    Dropped,
+}
+
+/// The core's event producer. One instance, on the core thread (ADR-0019).
+///
+/// Delivery is lossless while the UI is reading: a full queue is waited on, so
+/// every accepted command really is answered. The wait is taken in
+/// [`EVENT_SLICE`] steps, and once [`StopFlag`] says shutdown has been accepted
+/// an event that still does not fit is dropped and counted rather than blocking
+/// the thread — otherwise a consumer that stopped reading could keep the core
+/// alive forever and hang quitting (ADR-0023).
+pub(crate) struct EventTx {
+    events: Tx<spsc::Array<Event>>,
+    stop: Arc<StopFlag>,
+    dropped: AtomicU64,
+}
+
+impl EventTx {
+    /// Wraps the channel's producer with the shutdown flag it observes.
+    pub(crate) fn new(events: Tx<spsc::Array<Event>>, stop: Arc<StopFlag>) -> Self {
+        Self {
+            events,
+            stop,
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// Hands one event to the UI.
+    pub(crate) fn send(&self, mut event: Event) -> Result<(), SendFailure> {
+        loop {
+            match self.events.send_timeout(event, EVENT_SLICE) {
+                Ok(()) => return Ok(()),
+                Err(SendTimeoutError::Disconnected(_)) => return Err(SendFailure::Closed),
+                Err(SendTimeoutError::Timeout(returned)) => {
+                    event = returned;
+                    if self.stop.is_requested() {
+                        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed);
+                        if dropped == 0 {
+                            tracing::warn!(
+                                op = ?event.op(),
+                                "the UI stopped reading; events are dropped so shutdown can finish"
+                            );
+                        } else {
+                            tracing::debug!(
+                                op = ?event.op(),
+                                dropped = dropped + 1,
+                                "event dropped during shutdown"
+                            );
+                        }
+                        return Err(SendFailure::Dropped);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Events that could not be delivered because shutdown was in progress.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
 
 /// The door commands pass through, so "shutdown" has one exact meaning.
 ///
@@ -67,9 +172,10 @@ impl Gate {
 /// even with several UI-side producers.
 #[derive(Clone)]
 pub struct CoreHandle {
-    pub(crate) commands: MTx<mpmc::Array<Envelope>>,
+    pub(crate) commands: MTx<mpsc::Array<Envelope>>,
     pub(crate) next_op: Arc<AtomicU64>,
     pub(crate) gate: Arc<Gate>,
+    pub(crate) stop: Arc<StopFlag>,
 }
 
 impl CoreHandle {
@@ -180,7 +286,7 @@ impl CoreHandle {
         })
     }
 
-    /// Connects to the simulator or a serial device.
+    /// Connects over a serial device or a link the application supplies.
     ///
     /// The reply is [`crate::Event::Connected`] or [`crate::Event::Failed`].
     /// `framing` overrides the definition's own choice of protocol envelope.
@@ -213,6 +319,15 @@ impl CoreHandle {
         self.send(Command::ReadAll)
     }
 
+    /// Takes the ECU image the last read captured as the working tune.
+    ///
+    /// The reply is [`crate::Event::EcuAdopted`] or [`crate::Event::Failed`].
+    /// Use it after a read when the tune on the controller, not the project
+    /// file, is what the next edit and write should start from.
+    pub fn adopt_ecu_image(&self) -> Result<OpId, CoreError> {
+        self.send(Command::AdoptEcuImage)
+    }
+
     /// Starts periodic realtime polling.
     pub fn start_realtime(&self, interval_ms: u32) -> Result<OpId, CoreError> {
         self.send(Command::StartRealtime { interval_ms })
@@ -228,6 +343,84 @@ impl CoreHandle {
         self.send(Command::SaveTrace { path: path.into() })
     }
 
+    /// Writes the changed working values to ECU RAM and verifies them.
+    ///
+    /// `pages` restricts the write; an empty list means every page with a
+    /// change. The reply is [`crate::Event::TuneWritten`] or
+    /// [`crate::Event::Failed`].
+    pub fn write_to_ram(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
+        self.send(Command::WriteToRam { pages })
+    }
+
+    /// Burns RAM to flash and verifies it.
+    ///
+    /// `pages` restricts the burn; an empty list means every burnable page.
+    /// The reply is [`crate::Event::TuneBurned`] or [`crate::Event::Failed`].
+    pub fn burn_to_flash(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
+        self.send(Command::BurnToFlash { pages })
+    }
+
+    /// Discards local edits after writing a snapshot.
+    pub fn revert_tune(&self) -> Result<OpId, CoreError> {
+        self.send(Command::RevertTune)
+    }
+
+    /// Imports a `.msq` into the working image.
+    ///
+    /// A different-signature tune needs `consented: true` (S9).
+    pub fn import_tune(
+        &self,
+        path: impl Into<PathBuf>,
+        consented: bool,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::ImportTune {
+            path: path.into(),
+            consented,
+        })
+    }
+
+    /// Restores one of the project's snapshots.
+    pub fn restore_snapshot(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::RestoreSnapshot { path: path.into() })
+    }
+
+    /// Lists the project's snapshots, oldest first.
+    pub fn list_snapshots(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ListSnapshots)
+    }
+
+    /// Turns the global write switch on or off (S8).
+    pub fn set_writes_enabled(&self, enabled: bool) -> Result<OpId, CoreError> {
+        self.send(Command::SetWritesEnabled { enabled })
+    }
+
+    /// Clears the halted write path after the user reviewed a failure.
+    pub fn acknowledge_write_failure(&self) -> Result<OpId, CoreError> {
+        self.send(Command::AcknowledgeWriteFailure)
+    }
+
+    /// Reads the project's write journal.
+    pub fn read_journal(&self) -> Result<OpId, CoreError> {
+        self.send(Command::ReadJournal)
+    }
+
+    /// Refreshes the derived tune status.
+    pub fn refresh_tune_status(&self) -> Result<OpId, CoreError> {
+        self.send(Command::RefreshTuneStatus)
+    }
+
+    /// Starts a CSV session log in `directory`.
+    pub fn start_log(&self, directory: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send(Command::StartLog {
+            directory: directory.into(),
+        })
+    }
+
+    /// Stops the CSV session log.
+    pub fn stop_log(&self) -> Result<OpId, CoreError> {
+        self.send(Command::StopLog)
+    }
+
     /// Lists the serial ports the connect dialog can offer.
     pub fn list_ports(&self) -> Result<OpId, CoreError> {
         self.send(Command::ListPorts)
@@ -241,9 +434,14 @@ impl CoreHandle {
     /// Asks the core to stop. The events stream reports [`Event::Stopped`].
     ///
     /// Unlike the other commands this one may block briefly: quitting must not
-    /// be lost to a full queue, and the caller is on its way out anyway.
+    /// be lost to a full queue, and the caller is on its way out anyway. The
+    /// stop flag is raised first, so a core blocked handing an answer to a UI
+    /// that stopped reading can still reach this command; from that point on
+    /// delivery is best effort and undelivered events are counted instead of
+    /// blocking the thread (ADR-0023).
     pub fn shutdown(&self) -> Result<OpId, CoreError> {
         let op = self.next_op();
+        self.stop.request();
         self.gate.while_open(|| {
             crate::service::send_shutdown(&self.commands, op)?;
             Ok(op)
@@ -258,7 +456,7 @@ impl CoreHandle {
 
 /// Receives core events on an async executor (the UI's foreground task).
 pub struct EventStream {
-    pub(crate) events: MAsyncRx<mpmc::Array<Event>>,
+    pub(crate) events: AsyncRx<spsc::Array<Event>>,
 }
 
 impl EventStream {
@@ -294,7 +492,7 @@ impl EventStream {
 
 /// The blocking counterpart of [`EventStream`], for tests and CLI tools.
 pub struct BlockingEventStream {
-    events: crossfire::MRx<mpmc::Array<Event>>,
+    events: Rx<spsc::Array<Event>>,
 }
 
 impl BlockingEventStream {

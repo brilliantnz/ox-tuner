@@ -180,6 +180,33 @@ impl Tune {
         Arc::ptr_eq(&self.layout, &other.layout)
     }
 
+    /// Copies every value from `other` into this tune, keeping this tune's
+    /// layout.
+    ///
+    /// An imported `.msq` is parsed with the same definition but builds its own
+    /// layout allocation, so a pointer comparison cannot accept it. This is the
+    /// checked adoption: every variable must exist with the same element count;
+    /// only then are the values replaced. Edit timestamps do not survive, which
+    /// is right for a tune that arrived from a file.
+    pub fn adopt_values(&mut self, other: &Self) -> Result<(), TuneError> {
+        if self.layout.variables().len() != other.layout.variables().len() {
+            return Err(TuneError::LayoutMismatch);
+        }
+        let mut values = Vec::with_capacity(self.values.len());
+        for spec in self.layout.variables() {
+            let Some(other_values) = other.value(&spec.name) else {
+                return Err(TuneError::UnknownVariable(spec.name.clone()));
+            };
+            if other_values.len() != spec.element_count() {
+                return Err(TuneError::LayoutMismatch);
+            }
+            values.push(other_values.clone());
+        }
+        self.values = values;
+        self.edits.clear();
+        Ok(())
+    }
+
     /// A copy of this tune's values without edit timestamps.
     ///
     /// This is what becomes the baseline image: "as persisted" is about values,
