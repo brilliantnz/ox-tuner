@@ -400,16 +400,6 @@ pub enum Event {
     PagesRead { op: OpId, summary: ReadAllSummary },
     /// Periodic polling started or stopped.
     RealtimeState { op: OpId, running: bool },
-    /// A new realtime frame is available through [`LatestFrame`].
-    ///
-    /// Carries no data: rendering reads the shared frame, so a slow UI can
-    /// never queue up a backlog of stale values (ADR-0014).
-    ///
-    /// [`LatestFrame`]: crate::LatestFrame
-    RealtimeFrame {
-        /// Sequence number of the frame that is now the latest.
-        sequence: u64,
-    },
     /// The session trace was written.
     TraceSaved {
         op: OpId,
@@ -498,9 +488,7 @@ impl Event {
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
-            Self::RealtimeFrame { .. } | Self::ConnectionLost { .. } | Self::Reconnected { .. } => {
-                None
-            }
+            Self::ConnectionLost { .. } | Self::Reconnected { .. } => None,
             Self::Stopped => None,
         }
     }

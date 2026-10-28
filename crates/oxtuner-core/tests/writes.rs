@@ -14,7 +14,7 @@ use std::{
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, JournalEntry,
-    OpId, ProjectSummary, start,
+    LatestFrame, OpId, ProjectSummary, start,
 };
 use oxtuner_project::TUNE_FILE;
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
@@ -119,6 +119,7 @@ struct Harness {
     handle: CoreHandle,
     thread: CoreThread,
     events: BlockingEventStream,
+    latest: LatestFrame,
 }
 
 impl Harness {
@@ -132,6 +133,7 @@ impl Harness {
             handle: parts.handle,
             thread: parts.thread,
             events: parts.events.into_blocking(),
+            latest: parts.latest,
         }
     }
 
@@ -585,8 +587,11 @@ fn the_poller_is_held_while_a_write_runs() {
     while core.events.try_recv().is_some() {}
 
     let write = core.handle.write_to_ram(Vec::new()).expect("queued");
+    // A frame published before the write is expected; a newer one would mean a
+    // poll ran inside the write conversation.
+    let baseline = core.latest.get().map(|frame| frame.sequence).unwrap_or(0);
     // The poll schedule starts while the write transaction is already active.
-    // If the scheduler let a poll through, a frame would arrive before the
+    // If the scheduler let a poll through, a newer frame would arrive before the
     // write's answer.
     let realtime = core.handle.start_realtime(10).expect("queued");
     let deadline = Instant::now() + WAIT;
@@ -610,8 +615,9 @@ fn the_poller_is_held_while_a_write_runs() {
             core.close();
             return;
         }
-        assert!(
-            !matches!(event, Event::RealtimeFrame { .. }),
+        assert_eq!(
+            core.latest.get().map(|frame| frame.sequence).unwrap_or(0),
+            baseline,
             "a realtime poll interleaved with the write conversation"
         );
     }

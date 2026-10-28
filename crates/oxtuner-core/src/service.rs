@@ -41,7 +41,7 @@ use crate::message::{
     PortSummary, ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SignatureVerdict,
     TableSummary, WriteSummary,
 };
-use crate::realtime::{LatestFrame, RealtimeDecoder, RealtimeFrame};
+use crate::realtime::{FrameNotify, FrameWatch, LatestFrame, RealtimeDecoder, RealtimeFrame};
 use crate::safety::{Safety, clamp_user};
 use crate::snapshot;
 
@@ -215,6 +215,9 @@ pub struct CoreParts {
     pub events: EventStream,
     /// The newest realtime frame, read without an event round trip (ADR-0014).
     pub latest: LatestFrame,
+    /// Wakes the UI when a newer frame is readable. Coalesced, never blocking
+    /// (ADR-0021).
+    pub frames: FrameWatch,
     /// The bounded realtime history the charts read (ADR-0014/0015).
     pub history: ChartHistory,
     /// The session log's live counters, when one is running.
@@ -294,6 +297,7 @@ impl Drop for CoreThread {
 pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
     let (commands, command_rx) = mpmc::bounded_blocking(config.command_capacity.max(1));
     let (event_tx, events) = mpmc::bounded_blocking_async(config.event_capacity.max(1));
+    let (frame_notify, frame_watch) = crate::realtime::frame_wake();
     let next_op = Arc::new(AtomicU64::new(OpId::FIRST));
     let gate = Arc::new(Gate::default());
     let core_gate = Arc::clone(&gate);
@@ -316,6 +320,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
                 core_latest,
                 core_history,
                 core_log,
+                frame_notify,
                 safety,
                 journal_dir,
             )
@@ -332,6 +337,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
         },
         events: EventStream { events },
         latest,
+        frames: frame_watch,
         history,
         log,
         thread: CoreThread {
@@ -353,6 +359,7 @@ fn run(
     latest: LatestFrame,
     history: ChartHistory,
     log: LogStatus,
+    frames: FrameNotify,
     mut safety: Safety,
     journal_dir: Option<PathBuf>,
 ) -> CoreReport {
@@ -410,6 +417,7 @@ fn run(
             journal_dir.as_deref(),
             &events,
             &latest,
+            &frames,
             &history,
             &log,
             &mut report,
@@ -3206,6 +3214,7 @@ fn service_live(
     journal_dir: Option<&std::path::Path>,
     events: &MTx<mpmc::Array<Event>>,
     latest: &LatestFrame,
+    frames: &FrameNotify,
     history: &ChartHistory,
     log: &LogStatus,
     report: &mut CoreReport,
@@ -3216,7 +3225,7 @@ fn service_live(
 
     while let Ok(reply) = connection.replies.try_recv() {
         let keep = on_reply(
-            connection, reply, session, safety, events, latest, history, log, report,
+            connection, reply, session, safety, events, latest, frames, history, log, report,
         );
         if !keep {
             teardown(
@@ -4001,6 +4010,7 @@ fn on_reply(
     safety: &mut Safety,
     events: &MTx<mpmc::Array<Event>>,
     latest: &LatestFrame,
+    frames: &FrameNotify,
     history: &ChartHistory,
     log: &LogStatus,
     report: &mut CoreReport,
@@ -4152,8 +4162,11 @@ fn on_reply(
                 }
             }
             latest.set(frame);
+            // A wake, not an event: acquisition must never wait for the UI
+            // (ADR-0021). One pending token covers every frame that arrived
+            // since the last repaint.
+            frames.wake();
             report.realtime_frames += 1;
-            send(events, Event::RealtimeFrame { sequence });
             true
         }
         (PendingKind::Write, outcome) => {

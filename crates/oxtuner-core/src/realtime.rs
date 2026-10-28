@@ -6,15 +6,15 @@
 //! than a definition scan.
 //!
 //! The latest frame lives outside the event queue (ADR-0014): the poller writes
-//! it, the UI reads it on its render tick, and an [`Event::RealtimeFrame`]
-//! carries only the sequence number that wakes the view. A slow frame therefore
-//! never backs up rendering, and a dropped repaint shows the newer value, not
-//! an older one.
-//!
-//! [`Event::RealtimeFrame`]: crate::Event::RealtimeFrame
+//! it, the UI reads it on its render tick, and a [`FrameWatch`] token says a
+//! newer frame exists. The token is coalesced, so a stalled UI cannot back up
+//! acquisition and a dropped wake shows the newer value, not an older one
+//! (ADR-0021).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+use crossfire::{AsyncRx, Rx, Tx, spsc};
 
 use oxtuner_ini::{BitRange, ChannelKind, DataType, Definition, Endianness, Number};
 
@@ -84,6 +84,75 @@ impl LatestFrame {
             .unwrap_or_else(|poison| poison.into_inner());
         *slot = None;
     }
+}
+
+/// One pending wake is enough: a token already waiting means the UI has not
+/// looked yet, and the next frame will set the same signal again.
+const WAKE_CAPACITY: usize = 1;
+
+/// The core's end of the realtime wake signal.
+///
+/// Held by the core thread only, which is why it is not `Clone`: one producer,
+/// one consumer (ADR-0019).
+pub(crate) struct FrameNotify {
+    wake: Tx<spsc::Array<()>>,
+}
+
+impl FrameNotify {
+    /// Says a newer frame is readable. Never blocks and never fails: a full
+    /// slot already means the same thing.
+    pub(crate) fn wake(&self) {
+        let _ = self.wake.try_send(());
+    }
+}
+
+/// The UI's end of the realtime wake signal.
+///
+/// The token is not the frame: readers take the newest one from [`LatestFrame`]
+/// and the chart history from [`crate::ChartHistory`], so several frames may
+/// collapse into one wake without losing values.
+pub struct FrameWatch {
+    wake: AsyncRx<spsc::Array<()>>,
+}
+
+impl FrameWatch {
+    /// Waits for the next frame to be announced.
+    ///
+    /// `false` means the core dropped its end, so no further wake will come and
+    /// a loop should stop.
+    pub async fn changed(&self) -> bool {
+        self.wake.recv().await.is_ok()
+    }
+
+    /// Takes a pending wake without waiting.
+    pub fn try_changed(&self) -> bool {
+        self.wake.try_recv().is_ok()
+    }
+
+    /// Switches to the blocking end, for headless callers and tests.
+    pub fn into_blocking(self) -> BlockingFrameWatch {
+        BlockingFrameWatch {
+            wake: self.wake.into_blocking(),
+        }
+    }
+}
+
+/// The blocking counterpart of [`FrameWatch`].
+pub struct BlockingFrameWatch {
+    wake: Rx<spsc::Array<()>>,
+}
+
+impl BlockingFrameWatch {
+    /// Waits up to `timeout` for the next frame to be announced.
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        self.wake.recv_timeout(timeout).is_ok()
+    }
+}
+
+/// Creates the wake pair: the core keeps the notifier, the UI takes the watch.
+pub(crate) fn frame_wake() -> (FrameNotify, FrameWatch) {
+    let (wake, watch) = spsc::bounded_blocking_async(WAKE_CAPACITY);
+    (FrameNotify { wake }, FrameWatch { wake: watch })
 }
 
 /// One decoded channel definition.
@@ -383,9 +452,37 @@ fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use oxtuner_ini::{SettingsContext, parse_str};
 
     use super::*;
+
+    #[test]
+    fn frame_wakes_coalesce_into_one_pending_token() {
+        let (notify, watch) = frame_wake();
+        let watch = watch.into_blocking();
+
+        notify.wake();
+        notify.wake();
+        notify.wake();
+
+        assert!(watch.wait(Duration::from_millis(50)), "a wake is pending");
+        assert!(
+            !watch.wait(Duration::from_millis(50)),
+            "the extra wakes must not queue up behind the first"
+        );
+    }
+
+    #[test]
+    fn a_wake_never_waits_for_a_reader() {
+        let (notify, _watch) = frame_wake();
+        // The capacity is one; the fourth call still returns immediately
+        // because a full slot already means "there is something to read".
+        for _ in 0..100 {
+            notify.wake();
+        }
+    }
 
     fn definition() -> Definition {
         parse_str(

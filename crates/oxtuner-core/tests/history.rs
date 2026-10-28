@@ -105,6 +105,7 @@ impl Harness {
             handle,
             events,
             latest: _,
+            frames: _,
             history,
             log,
             thread,

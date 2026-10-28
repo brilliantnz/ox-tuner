@@ -30,6 +30,10 @@
 //!   never enters the core and receives no event — its id is simply unused.
 //! - **Bounded and non-blocking for the UI.** Sending never blocks; a full
 //!   command queue is reported, not waited on.
+//! - **Realtime never enters the event queue.** The poller publishes
+//!   [`LatestFrame`] and the chart history, then sends a coalesced
+//!   [`FrameWatch`] wake, so a stalled UI cannot hold up acquisition, logging
+//!   or reconnect (ADR-0021).
 //! - **Deterministic shutdown.** [`CoreThread::join`] (or dropping it) queues
 //!   `Shutdown`, answers whatever is still queued with `Rejected`, emits
 //!   `Stopped`, and joins.
@@ -92,7 +96,9 @@ pub use message::{
     RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
 };
 pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
-pub use realtime::{LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame};
+pub use realtime::{
+    BlockingFrameWatch, FrameWatch, LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame,
+};
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
 /// Re-exported so callers can build [`Command::LoadDefinition`] without adding

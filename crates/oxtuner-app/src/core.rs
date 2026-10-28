@@ -23,9 +23,9 @@ use gpui_kit::{App, Global, PathPromptOptions};
 use oxtuner_core::{
     AxisEdit, AxisKind, BurnSummary, CellEdit, ChartHistory, ConnectionSummary, CoreConfig,
     CoreHandle, CoreParts, CoreThread, DefinitionSummary, DialogSummary, Event, EventStream,
-    Failure, FailureCode, ImportSummary, JournalEntry, LatestFrame, LinkMode, LogSnapshot,
-    LogStatus, LogSummary, PortChoice, PortSummary, ProjectSummary, ReadAllSummary, RealtimeFrame,
-    RevertSummary, SaveSummary, TableSummary, TuneStatus, WriteSummary,
+    Failure, FailureCode, FrameWatch, ImportSummary, JournalEntry, LatestFrame, LinkMode,
+    LogSnapshot, LogStatus, LogSummary, PortChoice, PortSummary, ProjectSummary, ReadAllSummary,
+    RealtimeFrame, RevertSummary, SaveSummary, TableSummary, TuneStatus, WriteSummary,
 };
 use rust_i18n::t;
 
@@ -208,11 +208,12 @@ pub fn start(cx: &mut App, auto_sim: bool) {
             handle,
             events,
             latest,
+            frames,
             history,
             log,
             thread,
         }) => {
-            spawn_event_pump(events, cx);
+            spawn_event_pump(events, frames, cx);
             CoreService {
                 handle: Some(handle),
                 thread: Some(thread),
@@ -247,7 +248,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
     cx.set_global(service);
 }
 
-fn spawn_event_pump(events: EventStream, cx: &mut App) {
+fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Some(event) = events.recv().await {
             let stopped = matches!(event, Event::Stopped);
@@ -257,6 +258,17 @@ fn spawn_event_pump(events: EventStream, cx: &mut App) {
             }
         }
         tracing::debug!("the core event pump finished");
+    })
+    .detach();
+
+    // Realtime wakes are separate from the event queue and coalesced, so a
+    // frame can never queue behind a command answer or block the core
+    // (ADR-0021). Repainting reads LatestFrame and the chart history.
+    cx.spawn(async move |cx| {
+        while frames.changed().await {
+            cx.update(|cx| cx.refresh_windows());
+        }
+        tracing::debug!("the realtime wake watch finished");
     })
     .detach();
 }
@@ -339,7 +351,6 @@ fn apply(event: Event, cx: &mut App) {
             },
             None,
         ),
-        Event::RealtimeFrame { .. } => (Update::RealtimeFrame, None),
         Event::TuneWritten { summary, .. } => (Update::Written(summary), None),
         Event::TuneBurned { summary, .. } => (Update::Burned(summary), None),
         Event::TuneImported { summary, .. } => (Update::Imported(summary), None),
@@ -493,7 +504,6 @@ enum Update {
     Trace {
         saved: TraceSaved,
     },
-    RealtimeFrame,
     Written(WriteSummary),
     Burned(BurnSummary),
     Imported(ImportSummary),
@@ -611,7 +621,6 @@ impl CoreStatus {
                 self.last_trace = Some(saved);
                 self.failure = None;
             }
-            Update::RealtimeFrame => {}
             Update::Written(summary) => {
                 self.last_write = Some(summary);
                 self.write_halted = None;
