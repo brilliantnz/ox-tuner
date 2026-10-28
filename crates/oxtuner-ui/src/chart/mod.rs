@@ -364,7 +364,12 @@ pub struct ChartState {
     locked_ranges: HashMap<String, (f64, f64)>,
     hover: Option<Point<Pixels>>,
     dragging: Option<(f32, f64)>,
+    /// The whole chart body, which is also the tooltip's positioning frame.
     body_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The plot rect inside the body. The lanes and the overlay inset it for the
+    /// card padding and the tick-label column, so the cursor and the trace only
+    /// agree when the hover fraction is measured against this rect.
+    plot_bounds: Rc<Cell<Bounds<Pixels>>>,
     focus: FocusHandle,
 }
 
@@ -391,6 +396,10 @@ impl ChartState {
             hover: None,
             dragging: None,
             body_bounds: Rc::new(Cell::new(Bounds::new(
+                point(px(0.), px(0.)),
+                size(px(0.), px(0.)),
+            ))),
+            plot_bounds: Rc::new(Cell::new(Bounds::new(
                 point(px(0.), px(0.)),
                 size(px(0.), px(0.)),
             ))),
@@ -748,17 +757,18 @@ impl ChartState {
         range_of(points)
     }
 
+    /// Where the cursor is across the plot, 0 at the left edge and 1 at the
+    /// right, or `None` when it is outside the plot.
+    ///
+    /// This is measured against the plot rect rather than the body, because the
+    /// time axis and the crosshair both span the plot: the body also holds the
+    /// card padding and the tick-label column, so a body fraction would put the
+    /// crosshair right of the cursor and pick the wrong sample.
     fn hover_fraction(&self) -> Option<f64> {
-        let hover = self.hover?;
-        let bounds = self.body_bounds.get();
-        let width = f32::from(bounds.size.width);
-        if width <= 0.0 {
-            return None;
-        }
-        let x = f32::from(hover.x - bounds.origin.x);
-        (x >= 0.0 && x <= width).then(|| f64::from(x / width))
+        fraction_in(self.plot_bounds.get(), self.hover?)
     }
 
+    /// The cursor inside the body, which is the frame the tooltip is placed in.
     fn hover_point(&self) -> Option<Point<Pixels>> {
         let hover = self.hover?;
         let bounds = self.body_bounds.get();
@@ -1154,34 +1164,36 @@ impl ChartState {
                             .pr_1()
                             .children(tick_labels),
                     )
-                    .child(
-                        div().relative().flex_1().min_w_0().h_full().child(
-                            canvas(
-                                move |bounds, _, _| CanvasMetrics {
+                    .child(div().relative().flex_1().min_w_0().h_full().child({
+                        let slot = self.plot_bounds.clone();
+                        canvas(
+                            move |bounds, _, _| {
+                                slot.set(bounds);
+                                CanvasMetrics {
                                     origin: bounds.origin,
                                     width: f32::from(bounds.size.width),
                                     height: f32::from(bounds.size.height),
-                                },
-                                move |_bounds, metrics, window, _| {
-                                    paint_lane(
-                                        window,
-                                        metrics,
-                                        &samples,
-                                        range,
-                                        &ticks,
-                                        time_window,
-                                        color,
-                                        grid,
-                                        border,
-                                        surface,
-                                        hover_sample,
-                                        hover_fraction,
-                                    );
-                                },
-                            )
-                            .size_full(),
-                        ),
-                    ),
+                                }
+                            },
+                            move |_bounds, metrics, window, _| {
+                                paint_lane(
+                                    window,
+                                    metrics,
+                                    &samples,
+                                    range,
+                                    &ticks,
+                                    time_window,
+                                    color,
+                                    grid,
+                                    border,
+                                    surface,
+                                    hover_sample,
+                                    hover_fraction,
+                                );
+                            },
+                        )
+                        .size_full()
+                    })),
             )
             .when(show_time_labels, |this| {
                 this.child(
@@ -1338,55 +1350,54 @@ impl ChartState {
                             .pr_1()
                             .children(tick_labels),
                     )
-                    .child(
-                        div().relative().flex_1().min_w_0().h_full().child(
-                            canvas(
-                                move |bounds, _, _| CanvasMetrics {
+                    .child(div().relative().flex_1().min_w_0().h_full().child({
+                        let slot = self.plot_bounds.clone();
+                        canvas(
+                            move |bounds, _, _| {
+                                slot.set(bounds);
+                                CanvasMetrics {
                                     origin: bounds.origin,
                                     width: f32::from(bounds.size.width),
                                     height: f32::from(bounds.size.height),
-                                },
-                                move |_bounds, metrics, window, _| {
-                                    paint_grid(window, metrics, &ticks, axis_range, grid);
-                                    for (color, points, range) in &plotted {
-                                        paint_series(
-                                            window,
-                                            metrics,
-                                            points,
-                                            *range,
-                                            window_copy,
-                                            *color,
-                                        );
-                                    }
-                                    if let Some(fraction) = hover_fraction {
+                                }
+                            },
+                            move |_bounds, metrics, window, _| {
+                                paint_grid(window, metrics, &ticks, axis_range, grid);
+                                for (color, points, range) in &plotted {
+                                    paint_series(
+                                        window,
+                                        metrics,
+                                        points,
+                                        *range,
+                                        window_copy,
+                                        *color,
+                                    );
+                                }
+                                if let Some(fraction) = hover_fraction {
+                                    let x = metrics.origin.x + px(fraction as f32 * metrics.width);
+                                    paint_crosshair(
+                                        window,
+                                        metrics.origin,
+                                        x,
+                                        metrics.height,
+                                        border,
+                                    );
+                                }
+                                for (index, sample) in hover_samples.iter().enumerate() {
+                                    if let Some(sample) = sample {
+                                        let (color, _, range) = &plotted[index];
                                         let x =
-                                            metrics.origin.x + px(fraction as f32 * metrics.width);
-                                        paint_crosshair(
-                                            window,
-                                            metrics.origin,
-                                            x,
-                                            metrics.height,
-                                            border,
-                                        );
+                                            fraction_to_px(sample.t, window_copy, metrics.width)
+                                                + metrics.origin.x;
+                                        let y = value_to_px(sample.v, *range, metrics.height)
+                                            + metrics.origin.y;
+                                        paint_dot(window, point(x, y), 3.5, *color);
                                     }
-                                    for (index, sample) in hover_samples.iter().enumerate() {
-                                        if let Some(sample) = sample {
-                                            let (color, _, range) = &plotted[index];
-                                            let x = fraction_to_px(
-                                                sample.t,
-                                                window_copy,
-                                                metrics.width,
-                                            ) + metrics.origin.x;
-                                            let y = value_to_px(sample.v, *range, metrics.height)
-                                                + metrics.origin.y;
-                                            paint_dot(window, point(x, y), 3.5, *color);
-                                        }
-                                    }
-                                },
-                            )
-                            .size_full(),
-                        ),
-                    ),
+                                }
+                            },
+                        )
+                        .size_full()
+                    })),
             )
             .child(
                 h_flex()
@@ -1571,7 +1582,13 @@ impl Render for ChartState {
                         if let Some((start, start_value)) = this.dragging
                             && event.pressed_button == Some(MouseButton::Left)
                         {
-                            let width = f32::from(this.body_bounds.get().size.width).max(1.0);
+                            // The drag spans the plot, not the body, otherwise the
+                            // data lags the cursor by the label column's share.
+                            let mut width = f32::from(this.plot_bounds.get().size.width);
+                            if width <= 0.0 {
+                                width = f32::from(this.body_bounds.get().size.width);
+                            }
+                            let width = width.max(1.0);
                             let delta = (start - f32::from(event.position.x)) / width
                                 * this.window().span() as f32;
                             if this.paused {
@@ -1685,6 +1702,19 @@ fn nearest(points: &[Sample], time: f64) -> Option<Sample> {
 
 fn fraction_to_px(time: f64, window: TimeWindow, width: f32) -> Pixels {
     px((window.fraction(time) as f32 * width).clamp(0.0, width))
+}
+
+/// Where `cursor` sits across `bounds`, 0 at the left edge and 1 at the right.
+///
+/// Returns `None` when the point is outside the rect or the rect has no width,
+/// which also covers the frame before the plots have been measured.
+fn fraction_in(bounds: Bounds<Pixels>, cursor: Point<Pixels>) -> Option<f64> {
+    let width = f32::from(bounds.size.width);
+    if width <= 0.0 {
+        return None;
+    }
+    let x = f32::from(cursor.x - bounds.origin.x);
+    (x >= 0.0 && x <= width).then(|| f64::from(x / width))
 }
 
 fn value_to_px(value: f64, range: (f64, f64), height: f32) -> Pixels {

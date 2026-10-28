@@ -10,7 +10,8 @@ use std::{cell::RefCell, rc::Rc};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, TestAppContext, Window, WindowBounds, WindowOptions, div, px, size,
+    Styled as _, Subscription, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
+    size,
 };
 use oxtuner_core::{ChannelInfo, ChartHistory};
 
@@ -345,4 +346,50 @@ fn axis_labels_have_no_negative_zero_and_read_as_offsets() {
     assert_eq!(format_offset(-30.0), "-30s");
     assert_eq!(format_offset(0.0), "0s");
     assert_eq!(format_offset(-90.0), "-1:30");
+}
+
+#[gpui_kit::test]
+fn the_hover_fraction_is_measured_across_the_plot_not_the_body(cx: &mut TestAppContext) {
+    let (handle, chart, _events) = open(cx, history());
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    cx.update(|cx| {
+        chart.update(cx, |chart, _| {
+            let body = chart.body_bounds.get();
+            let plot = chart.plot_bounds.get();
+            assert!(
+                plot.size.width > px(0.),
+                "a rendered frame records the plot rect"
+            );
+            assert!(
+                plot.origin.x > body.origin.x,
+                "the plot sits right of the body origin"
+            );
+            assert!(
+                plot.size.width < body.size.width,
+                "the plot is narrower than the body"
+            );
+
+            // Over the tick labels there is no crosshair: that x is outside the plot.
+            chart.hover = Some(point(plot.origin.x - px(4.), plot.origin.y + px(10.)));
+            assert_eq!(chart.hover_fraction(), None);
+
+            // The middle of the plot is the middle of the window. Measured
+            // against the body this would read well under 0.5.
+            chart.hover = Some(point(plot.origin.x + plot.size.width / 2., plot.origin.y));
+            let fraction = chart.hover_fraction().expect("inside the plot");
+            assert!((fraction - 0.5).abs() < 0.001, "fraction {fraction}");
+
+            // The body's right padding is outside the plot too.
+            chart.hover = Some(point(
+                plot.origin.x + plot.size.width + px(4.),
+                plot.origin.y,
+            ));
+            assert_eq!(chart.hover_fraction(), None);
+        });
+    });
 }
