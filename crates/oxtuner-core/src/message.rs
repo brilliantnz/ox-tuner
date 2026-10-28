@@ -185,7 +185,8 @@ pub enum Command {
         /// Bins to write, in user units.
         edits: Vec<AxisEdit>,
     },
-    /// Connect to a simulator or a serial device, using the loaded definition.
+    /// Connect over a serial device or a link the application supplies, using
+    /// the loaded definition.
     ///
     /// The core builds the transport and protocol, owns them on the I/O thread
     /// and answers with [`Event::Connected`] (or [`Event::Failed`] with
@@ -1539,46 +1540,11 @@ pub(crate) struct Envelope {
     pub(crate) command: Command,
 }
 
-/// Where a connection's bytes go.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PortChoice {
-    /// The built-in simulator, built from the loaded definition.
-    ///
-    /// The config is the same one the simulator's own tests use: a signature
-    /// override for the S1 path, a seed, and fault rules for the link-loss and
-    /// recovery scenarios. The app passes the default.
-    Simulator(oxtuner_sim::SimConfig),
-    /// A serial device at a baud rate.
-    Serial {
-        /// Device path (`/dev/cu.usbmodem21201`, `COM3`).
-        port: String,
-        /// Bits per second.
-        baud: u32,
-    },
-}
-
-impl PortChoice {
-    /// The simulator with its default configuration.
-    pub fn simulator() -> Self {
-        Self::Simulator(Default::default())
-    }
-
-    /// A serial port at a baud rate.
-    pub fn serial(port: impl Into<String>, baud: u32) -> Self {
-        Self::Serial {
-            port: port.into(),
-            baud,
-        }
-    }
-
-    /// The label the UI shows for this choice.
-    pub fn label(&self) -> String {
-        match self {
-            Self::Simulator(_) => "simulator".to_owned(),
-            Self::Serial { port, .. } => port.clone(),
-        }
-    }
-}
+/// Re-exported here because [`Command`] carries it.
+///
+/// The type lives in [`crate::link`], next to the [`crate::CustomLink`] seam
+/// that lets the application supply a transport the core does not build.
+pub use crate::link::PortChoice;
 
 /// One serial port the connect dialog can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1612,10 +1578,10 @@ impl SignatureVerdict {
 /// What the core is connected to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionSummary {
-    /// Device path, or `simulator`.
+    /// Device path, or the custom link's label.
     pub port: String,
-    /// Whether this is the simulator.
-    pub simulator: bool,
+    /// Whether the link came from the application rather than a serial port.
+    pub custom: bool,
     /// The signature the ECU reported.
     pub signature: String,
     /// The signature the definition expects.

@@ -14,8 +14,10 @@ use std::{
 
 use oxtuner_core::{
     BlockingEventStream, ChartHistory, CoreConfig, CoreHandle, CoreParts, CoreThread, Event,
-    LogStatus, OpId, PortChoice, SimConfig, start,
+    LogStatus, OpId, start,
 };
+
+mod support;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -143,7 +145,7 @@ impl Harness {
     fn connect(&self) {
         let op = self
             .handle
-            .connect(PortChoice::Simulator(SimConfig::default()), None)
+            .connect(support::simulator(), None)
             .expect("queued");
         let Event::Connected { .. } = self.wait_for_op(op) else {
             panic!("did not connect");

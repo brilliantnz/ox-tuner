@@ -24,11 +24,11 @@ use std::time::Duration;
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::Definition;
 use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol, ProtocolError};
-use oxtuner_sim::{SimConfig, SimTransport};
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
 
+use crate::link::PortChoice;
 use crate::service::CoreError;
 
 /// How many requests may wait for the wire.
@@ -47,30 +47,6 @@ const REPLY_CAPACITY: usize = 48;
 /// never hangs on a crowded queue.
 const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// What a connection actually talks to.
-#[derive(Debug, Clone)]
-pub(crate) enum LinkChoice {
-    /// The built-in simulator, built from the same definition.
-    Simulator(SimConfig),
-    /// A serial device.
-    Serial(SerialSettings),
-}
-
-impl LinkChoice {
-    /// The label the UI shows for this link.
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Simulator(_) => "simulator".to_owned(),
-            Self::Serial(settings) => settings.port.clone(),
-        }
-    }
-
-    /// Whether this is the simulator.
-    pub(crate) fn is_simulator(&self) -> bool {
-        matches!(self, Self::Simulator(_))
-    }
-}
-
 /// Everything the I/O thread needs to build its side.
 pub(crate) struct IoPlan {
     /// The definition the protocol encodes with; owned by the thread.
@@ -80,7 +56,7 @@ pub(crate) struct IoPlan {
     /// The framing override (`None` uses the definition's own).
     pub(crate) link_mode: Option<LinkMode>,
     /// Where the bytes go.
-    pub(crate) link: LinkChoice,
+    pub(crate) link: PortChoice,
 }
 
 /// One request for the wire.
@@ -281,15 +257,19 @@ pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
 }
 
 /// Builds the transport and protocol for a plan.
+///
+/// A serial device is opened here because that is the core's own capability.
+/// Any other link comes from the application through [`PortChoice::Custom`],
+/// so this module never names a simulator or a replay reader (ADR-0022).
 fn build(plan: IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
     let label = plan.link.label();
-    let mut recorder = RecordingTransport::new(match plan.link {
-        LinkChoice::Simulator(config) => Box::new(
-            SimTransport::new(&plan.definition, config)
-                .map_err(|error| CoreError::Connect(error.to_string()))?,
-        ) as Box<dyn Transport>,
-        LinkChoice::Serial(settings) => Box::new(SerialTransport::new(settings)),
-    });
+    let transport: Box<dyn Transport> = match &plan.link {
+        PortChoice::Serial { port, baud } => Box::new(SerialTransport::new(
+            SerialSettings::new(port.clone()).with_baud(*baud),
+        )),
+        PortChoice::Custom(link) => link.open(&plan.definition).map_err(CoreError::Connect)?,
+    };
+    let mut recorder = RecordingTransport::new(transport);
     recorder.note(format!("definition: {}", plan.definition.signature));
     recorder.note(format!("link: {label}"));
 
@@ -594,6 +574,22 @@ impl RequestId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxtuner_sim::{SimConfig, SimTransport};
+
+    /// A test link: the simulator through the same seam the application uses.
+    struct TestSim(SimConfig);
+
+    impl crate::link::CustomLink for TestSim {
+        fn label(&self) -> &str {
+            "simulator"
+        }
+
+        fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String> {
+            SimTransport::new(definition, self.0.clone())
+                .map(|sim| Box::new(sim) as Box<dyn Transport>)
+                .map_err(|error| error.to_string())
+        }
+    }
 
     fn definition() -> Definition {
         Definition::parse(
@@ -623,7 +619,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
             definition: Box::new(definition),
             behavior,
             link_mode: None,
-            link: LinkChoice::Simulator(SimConfig::default()),
+            link: PortChoice::custom(TestSim(SimConfig::default())),
         };
         let (thread, replies) = IoThread::start(plan).expect("starts");
         thread.submit(1, IoOp::Signature).expect("queued");
@@ -646,11 +642,12 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
 
     #[test]
     fn a_plan_reports_the_link_it_will_open() {
-        let link = LinkChoice::Serial(SerialSettings::new("/dev/null"));
+        let link = PortChoice::serial("/dev/null", 115_200);
         assert_eq!(link.label(), "/dev/null");
-        assert!(!link.is_simulator());
+        assert!(link.is_serial());
 
-        let link = LinkChoice::Simulator(SimConfig::default());
-        assert!(link.is_simulator());
+        let link = PortChoice::custom(TestSim(SimConfig::default()));
+        assert!(!link.is_serial());
+        assert_eq!(link.label(), "simulator");
     }
 }

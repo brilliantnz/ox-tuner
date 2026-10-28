@@ -403,7 +403,7 @@ fn apply(event: Event, cx: &mut App) {
     let poll = matches!(&update, Update::PagesRead(_));
     // Remember the port that worked, so the next dialog opens on it.
     let persist_port = match &update {
-        Update::Connected(connection) if !connection.simulator => {
+        Update::Connected(connection) if !connection.custom => {
             let baud = cx
                 .global::<CoreService>()
                 .status
@@ -411,7 +411,7 @@ fn apply(event: Event, cx: &mut App) {
                 .as_ref()
                 .and_then(|pending| match pending {
                     PortChoice::Serial { baud, .. } => Some(*baud),
-                    PortChoice::Simulator(_) => None,
+                    PortChoice::Custom(_) => None,
                 });
             Some((connection.port.clone(), baud))
         }
@@ -746,7 +746,7 @@ pub(crate) fn save_tune(cx: &mut App) {
 
 /// Starts a connection to the simulator with the default configuration.
 pub(crate) fn connect_to_simulator(cx: &mut App) {
-    connect(PortChoice::simulator(), None, cx);
+    connect(crate::link::simulator(), None, cx);
 }
 
 /// Asks for the port list, then opens the connect dialog when it arrives.
@@ -1342,7 +1342,7 @@ mod tests {
     fn connection() -> ConnectionSummary {
         ConnectionSummary {
             port: "/dev/cu.usbmodem21201".to_owned(),
-            simulator: false,
+            custom: false,
             signature: "speeduino 202501".to_owned(),
             definition_signature: "speeduino 202501".to_owned(),
             verdict: oxtuner_core::SignatureVerdict::Match,

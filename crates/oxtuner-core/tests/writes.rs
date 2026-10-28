@@ -14,10 +14,12 @@ use std::{
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, JournalEntry,
-    OpId, PortChoice, ProjectSummary, SimConfig, SimOp, start,
+    OpId, ProjectSummary, start,
 };
 use oxtuner_project::TUNE_FILE;
-use oxtuner_sim::Fault;
+use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
+
+mod support;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -161,7 +163,7 @@ impl Harness {
     fn connect(&self, config: SimConfig) -> oxtuner_core::ConnectionSummary {
         let op = self
             .handle
-            .connect(PortChoice::Simulator(config), None)
+            .connect(support::simulator_with(config), None)
             .expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
             Event::Connected { summary, .. } => summary,
@@ -398,7 +400,7 @@ fn a_partial_write_fails_verification_and_halts_the_path() {
     let core = Harness::start(true);
     core.open(dir.path());
     core.connect(SimConfig {
-        faults: vec![oxtuner_core::FaultRule::once(
+        faults: vec![FaultRule::once(
             SimOp::WritePage,
             Fault::PartialWrite { bytes: 0 },
         )],
@@ -564,7 +566,7 @@ fn the_poller_is_held_while_a_write_runs() {
     let core = Harness::start(true);
     core.open(dir.path());
     core.connect(SimConfig {
-        faults: vec![oxtuner_core::FaultRule::once(
+        faults: vec![FaultRule::once(
             SimOp::WritePage,
             Fault::Delay {
                 delay: Duration::from_millis(150),
@@ -622,10 +624,7 @@ fn a_link_loss_during_a_write_is_reported_and_halts() {
     let core = Harness::start(true);
     core.open(dir.path());
     core.connect(SimConfig {
-        faults: vec![oxtuner_core::FaultRule::once(
-            SimOp::WritePage,
-            Fault::Disconnect,
-        )],
+        faults: vec![FaultRule::once(SimOp::WritePage, Fault::Disconnect)],
         ..SimConfig::default()
     });
     core.read_all();

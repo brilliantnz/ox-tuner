@@ -70,6 +70,7 @@ mod handle;
 mod history;
 mod io_thread;
 mod journal;
+mod link;
 mod menu;
 mod message;
 mod realtime;
@@ -82,21 +83,22 @@ pub use history::{
     ChannelInfo, ChartHistory, HistoryStats, NearestSample, Sample, SeriesPoints, TimeWindow,
     decimate, nice_ticks, padded_range,
 };
+pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
     AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary,
     DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
-    FailureCode, ImportSummary, JournalEntry, OpId, PortChoice, PortSummary, ProjectSummary,
-    ReadAllSummary, RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
-    WriteSummary,
+    FailureCode, ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary,
+    RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
 };
 pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
 pub use realtime::{LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame};
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
 /// Re-exported so callers can build [`Command::LoadDefinition`] without adding
-/// a dependency on `oxtuner-ini` themselves.
-pub use oxtuner_ini::SettingsContext;
+/// a dependency on `oxtuner-ini` themselves — and so a [`CustomLink`]
+/// implementation can name the definition it is handed.
+pub use oxtuner_ini::{Definition, SettingsContext};
 
 /// Re-exported for the table grid's per-cell write-state decoration and the
 /// write dialogs' pending counts.
@@ -106,6 +108,6 @@ pub use oxtuner_tune::{CellState, TuneStatus};
 /// dependency on `oxtuner-protocol`.
 pub use oxtuner_protocol::LinkMode;
 
-/// Re-exported so a simulator connection can be configured — a signature
-/// override or fault rules — without a second dependency on `oxtuner-sim`.
-pub use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
+/// Re-exported so a [`CustomLink`] implementation can name the transport it
+/// returns.
+pub use oxtuner_transport::Transport;

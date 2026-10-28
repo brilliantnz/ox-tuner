@@ -88,7 +88,7 @@ impl DialogModel {
     /// The chosen port, if the current mode has one.
     fn port_choice(&self, ports: &[PortSummary], baud: u32) -> Option<PortChoice> {
         match self.mode {
-            Mode::Simulator => Some(PortChoice::simulator()),
+            Mode::Simulator => Some(crate::link::simulator()),
             Mode::Serial => {
                 let port = self
                     .selected_port

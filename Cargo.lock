@@ -4968,6 +4968,7 @@ dependencies = [
  "directories",
  "gpui-kit",
  "oxtuner-core",
+ "oxtuner-sim",
  "oxtuner-ui",
  "rust-i18n",
  "serde",

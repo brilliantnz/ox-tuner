@@ -28,6 +28,7 @@ pub mod disclaimer;
 mod editor;
 pub mod i18n;
 pub mod icons;
+pub mod link;
 pub mod platform;
 pub mod project;
 pub mod realtime;

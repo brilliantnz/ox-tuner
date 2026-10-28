@@ -14,13 +14,17 @@ oxtuner-datalog.workspace = true
 oxtuner-ini.workspace = true
 oxtuner-project.workspace = true
 oxtuner-protocol.workspace = true
-oxtuner-sim.workspace = true
 oxtuner-transport.workspace = true
 oxtuner-tune.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 time = { version = "0.3.55", features = ["formatting"] }
 tracing = "0.1.44"
+
+# The simulator is one link the application supplies (ADR-0022), so it is only
+# needed by this crate's tests.
+[dev-dependencies]
+oxtuner-sim.workspace = true
 
 [lints]
 workspace = true

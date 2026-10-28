@@ -32,8 +32,7 @@ use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page}
 use crate::handle::{CoreHandle, EventStream, Gate};
 use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
-    self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, LinkChoice, PageRead,
-    PageWrite, RequestId,
+    self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
 };
 use crate::journal::{self, Journal};
 use crate::message::{
@@ -2723,7 +2722,7 @@ struct Live {
     thread: IoThread,
     replies: Rx<spsc::Array<IoReply>>,
     link_label: String,
-    simulator: bool,
+    custom_link: bool,
     definition_signature: String,
     behavior: String,
     framing: &'static str,
@@ -2767,7 +2766,7 @@ impl Live {
     fn new(
         thread: IoThread,
         replies: Rx<spsc::Array<IoReply>>,
-        link: &LinkChoice,
+        link: &PortChoice,
         definition: &Definition,
         behavior: Behavior,
         framing: LinkMode,
@@ -2782,7 +2781,7 @@ impl Live {
             thread,
             replies,
             link_label: link.label(),
-            simulator: link.is_simulator(),
+            custom_link: !link.is_serial(),
             definition_signature: definition.signature.clone(),
             behavior: behavior.as_dyn().name().to_owned(),
             framing: match framing {
@@ -2899,7 +2898,7 @@ impl Live {
         let read_only = self.verdict == SignatureVerdict::Mismatch;
         ConnectionSummary {
             port: self.link_label.clone(),
-            simulator: self.simulator,
+            custom: self.custom_link,
             signature: self.signature.clone(),
             definition_signature: self.definition_signature.clone(),
             verdict: self.verdict,
@@ -3130,12 +3129,7 @@ fn connect(
         Session::Project(_) | Session::Empty => None,
     };
 
-    let link = match &port {
-        PortChoice::Simulator(config) => LinkChoice::Simulator(config.clone()),
-        PortChoice::Serial { port, baud } => LinkChoice::Serial(
-            oxtuner_transport::SerialSettings::new(port.clone()).with_baud(*baud),
-        ),
-    };
+    let link = port.clone();
     let effective_framing = framing.unwrap_or_else(|| default_framing(definition));
     let plan = IoPlan {
         definition: Box::new(definition.clone()),
