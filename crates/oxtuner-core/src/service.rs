@@ -1519,25 +1519,41 @@ fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
     (cells, variables)
 }
 
-/// Clamps every non-controller tune value to its definition range (S2).
+/// Clamps every non-controller tune value that is about to be written (S2).
 ///
 /// Edits are already clamped when they enter the core. An imported tune or a
 /// file written by another tool can still carry an out-of-range value, and the
-/// write path must not send those blindly. Controller-owned values are not part
-/// of the write plan. Returns how many cells changed.
+/// write path must not send those blindly. A value the controller already
+/// holds is left alone: it is not part of the write plan, so clamping it would
+/// turn "leave the ECU's tune alone" into a write of a different number — a
+/// definition's range is not the firmware's limit. Controller-owned values are
+/// not part of the write plan either. Returns how many cells changed.
 fn clamp_working_changes(project: &mut Project) -> usize {
     let mut clamped: Vec<(String, usize, f64)> = Vec::new();
-    for spec in project.layout().variables() {
-        if spec.is_controller_owned() {
-            continue;
-        }
-        for index in 0..spec.element_count() {
-            let Ok(value) = project.images().working().user_at(&spec.name, index) else {
+    {
+        let images = project.images();
+        let Some(ram) = images.ecu_ram() else {
+            return 0;
+        };
+        for spec in project.layout().variables() {
+            if spec.is_controller_owned() {
                 continue;
-            };
-            let (wanted, changed) = clamp_user(spec, value);
-            if changed {
-                clamped.push((spec.name.clone(), index, wanted));
+            }
+            for index in 0..spec.element_count() {
+                let Ok(value) = images.working().user_at(&spec.name, index) else {
+                    continue;
+                };
+                if ram
+                    .user_at(&spec.name, index)
+                    .is_ok_and(|sent| sent == value)
+                {
+                    // The ECU holds this value; there is nothing to send.
+                    continue;
+                }
+                let (wanted, changed) = clamp_user(spec, value);
+                if changed {
+                    clamped.push((spec.name.clone(), index, wanted));
+                }
             }
         }
     }

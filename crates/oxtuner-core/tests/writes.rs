@@ -300,6 +300,39 @@ fn a_write_round_trips_and_reads_back_verified() {
 }
 
 #[test]
+fn an_ecu_value_outside_the_declared_range_is_left_alone() {
+    let dir = TempDir::new("range");
+    // The controller holds a bin past the definition's declared maximum: 65535
+    // rpm against 10000. Adopting its tune must not clamp that value, because
+    // the definition's range is an editing limit, not the firmware's. The write
+    // plan is the edit and nothing else.
+    let mut page = [0u8; 16];
+    page[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
+    let config = SimConfig {
+        pages: vec![(1, page.to_vec())],
+        ..SimConfig::default()
+    };
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(config);
+    core.read_all();
+    core.adopt();
+    assert_eq!(core.status().pending_write.cells, 0);
+
+    core.edit_cell(77.0);
+    let Event::TuneWritten { summary, .. } = core.write() else {
+        panic!("expected a verified write");
+    };
+    assert!(summary.verified);
+    assert_eq!(
+        summary.cells, 1,
+        "the ECU's out-of-range bin must not be clamped into the write"
+    );
+
+    core.close();
+}
+
+#[test]
 fn taking_the_ecu_image_makes_the_next_write_one_cell() {
     let dir = TempDir::new("adopt");
     let core = Harness::start(true);
