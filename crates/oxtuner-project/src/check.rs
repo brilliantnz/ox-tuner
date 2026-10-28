@@ -220,7 +220,19 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             let Some(number) = page.attr("number") else {
                 continue;
             };
-            let Ok(number) = number.trim().parse::<u16>() else {
+            let Ok(number) = number.trim().parse::<i64>() else {
+                report.block(
+                    IssueKind::InvalidPageNumber,
+                    format!("`number=\"{number}\"` is not a valid page number"),
+                );
+                continue;
+            };
+            if number < 0 {
+                // `-1` is the page that holds PC variables, not calibration
+                // data, so it has no INI counterpart to compare against.
+                continue;
+            }
+            let Ok(number) = u16::try_from(number) else {
                 report.block(
                     IssueKind::InvalidPageNumber,
                     format!("`number=\"{number}\"` is not a valid page number"),

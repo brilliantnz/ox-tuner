@@ -337,6 +337,33 @@ fn collect_paths(root: &Path, current: &Path, into: &mut Vec<String>) {
 type ReadOnlyCase = (&'static str, fn(&str) -> String, IssueKind);
 
 #[test]
+fn a_negative_page_number_holds_pc_variables_and_does_not_gate_the_project() {
+    // LibreTune writes the PC-variable page as `number="-1"` rather than as an
+    // unnumbered page. Those variables are not calibration data, so the page
+    // must neither block the open nor count as a tune page.
+    let dir = TempDir::new("pc-page-negative");
+    dir.write("projectCfg/mainController.ini", MAIN_DEFINITION);
+    dir.write("projectCfg/page2.ini", PAGE_TWO);
+    let tune = TUNE.replace(
+        r#"    <page>
+        <pcVariable digits="0" name="rpmhigh" units="rpm">12000.0</pcVariable>
+    </page>"#,
+        r#"    <page number="-1">
+        <pcVariable digits="0" name="rpmhigh" units="rpm">12000.0</pcVariable>
+        <pcVariable digits="0" name="AUXin00Alias">"Aux0"</pcVariable>
+    </page>"#,
+    );
+    dir.write(TUNE_FILE, &tune);
+
+    let project = Project::open(dir.path()).expect("the tune opens");
+    assert!(
+        !project.is_read_only(),
+        "a PC-variable page must not gate the project: {:?}",
+        project.report().blockers
+    );
+}
+
+#[test]
 fn structural_mismatches_open_read_only_and_refuse_to_save() {
     let cases: Vec<ReadOnlyCase> = vec![
         (
