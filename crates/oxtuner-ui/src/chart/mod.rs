@@ -697,9 +697,14 @@ impl ChartState {
 
     /// The channel ids this chart will draw, after defaults and filtering.
     fn selected_ids(&self) -> Vec<String> {
-        let channels = self.history.channels();
+        self.selected_ids_in(&self.history.channels())
+    }
+
+    /// [`Self::selected_ids`] against an already fetched channel list, so one
+    /// render can resolve the selection and the series from one read.
+    fn selected_ids_in(&self, channels: &[oxtuner_core::ChannelInfo]) -> Vec<String> {
         let mut ids: Vec<String> = if self.selected.is_empty() {
-            default_ids(&channels)
+            default_ids(channels)
         } else {
             self.selected.clone()
         };
@@ -709,14 +714,14 @@ impl ChartState {
                 .any(|channel| channel.name.eq_ignore_ascii_case(id))
         });
         if ids.is_empty() {
-            ids = default_ids(&channels);
+            ids = default_ids(channels);
         }
         ids
     }
 
     fn resolve_series(&self, _cx: &App) -> Vec<ChartSeries> {
         let channels = self.history.channels();
-        self.selected_ids()
+        self.selected_ids_in(&channels)
             .into_iter()
             .enumerate()
             .map(|(index, id)| {
@@ -984,9 +989,12 @@ impl ChartState {
                         .next()
                         .unwrap_or_default();
                     let range = self.range_for(&series.id, &points);
+                    // The extracted points are handed to the paint closure rather
+                    // than cloned, so a frame allocates one sample vector per
+                    // lane instead of two.
                     lanes = lanes.child(self.render_lane(
                         series,
-                        &points,
+                        points.points,
                         range,
                         window,
                         hover_fraction,
@@ -996,11 +1004,10 @@ impl ChartState {
                 lanes.into_any_element()
             }
             ChartMode::Overlay => {
-                let extracted: Vec<(ChartSeries, SeriesPoints)> = visible
+                let extracted: Vec<SeriesPoints> = visible
                     .iter()
                     .map(|series| {
-                        let points = self
-                            .history
+                        self.history
                             .extract(
                                 std::slice::from_ref(&series.id),
                                 window,
@@ -1008,11 +1015,10 @@ impl ChartState {
                             )
                             .into_iter()
                             .next()
-                            .unwrap_or_default();
-                        ((*series).clone(), points)
+                            .unwrap_or_default()
                     })
                     .collect();
-                self.render_overlay(&extracted, window, hover_fraction)
+                self.render_overlay(&visible, extracted, window, hover_fraction)
             }
         };
 
@@ -1045,7 +1051,7 @@ impl ChartState {
     fn render_lane(
         &self,
         series: &ChartSeries,
-        points: &SeriesPoints,
+        samples: Vec<Sample>,
         range: (f64, f64),
         window: TimeWindow,
         hover_fraction: Option<f64>,
@@ -1057,7 +1063,6 @@ impl ChartState {
         let border = style.border;
         let surface = style.surface;
         let color = series.color;
-        let samples = points.points.clone();
         let time_window = window;
         let hover_sample =
             hover_fraction.and_then(|fraction| nearest(&samples, time_window.time_at(fraction)));
@@ -1216,7 +1221,8 @@ impl ChartState {
 
     fn render_overlay(
         &self,
-        series: &[(ChartSeries, SeriesPoints)],
+        series: &[&ChartSeries],
+        points: Vec<SeriesPoints>,
         window: TimeWindow,
         hover_fraction: Option<f64>,
     ) -> AnyElement {
@@ -1226,7 +1232,7 @@ impl ChartState {
         let foreground = style.foreground;
         let shared_range = {
             let mut values = Vec::new();
-            for (_, points) in series {
+            for points in &points {
                 values.extend(points.points.iter().map(|sample| sample.v));
             }
             let range = padded_range(values);
@@ -1237,15 +1243,18 @@ impl ChartState {
             }
         };
         let normalized = self.normalize_overlay;
-        let plotted: Vec<(Hsla, Vec<Sample>, (f64, f64))> = series
-            .iter()
-            .map(|(series, points)| {
+        // The extracted points move into the paint closure; nothing is cloned
+        // for a frame that is about to be dropped at the end of this render.
+        let plotted: Vec<(Hsla, Vec<Sample>, (f64, f64))> = points
+            .into_iter()
+            .zip(series)
+            .map(|(points, series)| {
                 let range = if normalized {
-                    range_of(points)
+                    range_of(&points)
                 } else {
                     shared_range
                 };
-                (series.color, points.points.clone(), range)
+                (series.color, points.points, range)
             })
             .collect();
         let window_copy = window;
