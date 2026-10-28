@@ -38,6 +38,13 @@ use crate::service::CoreError;
 /// without bound.
 const REQUEST_CAPACITY: usize = 16;
 
+/// How many page passes a full read may take before it gives up waiting for
+/// the firmware to hold still.
+const STABLE_READ_ATTEMPTS: usize = 3;
+
+/// How long to wait between two page passes while the reboot settles.
+const STABLE_READ_DELAY: Duration = Duration::from_millis(400);
+
 /// How many replies may wait for the core.
 const REPLY_CAPACITY: usize = 48;
 
@@ -382,6 +389,49 @@ fn open_link(
     Ok(())
 }
 
+/// Reads every readable page once.
+///
+/// Returns the caller's answer on a stop request or a protocol failure, so the
+/// caller can pass it straight back.
+fn read_every_page(
+    protocol: &mut MsProtocol,
+    transport: &mut RecordingTransport,
+    stop: &AtomicBool,
+) -> Result<Vec<PageRead>, (IoOutcome, bool)> {
+    let mut pages = Vec::new();
+    for spec in protocol.pages() {
+        if stop.load(Ordering::Relaxed) {
+            return Err((
+                IoOutcome::Failed(IoFailure {
+                    kind: IoFailureKind::Stopped,
+                    message: "the page read was stopped".to_owned(),
+                }),
+                true,
+            ));
+        }
+        if !spec.readable || spec.size == 0 {
+            continue;
+        }
+        match protocol.read_page_all(transport, spec.number) {
+            Ok(bytes) => pages.push(PageRead {
+                page: spec.number,
+                bytes,
+            }),
+            Err(error) => return Err((failure(error), false)),
+        }
+    }
+    Ok(pages)
+}
+
+/// Whether two page passes carry the same bytes.
+fn same_pages(before: &[PageRead], after: &[PageRead]) -> bool {
+    before.len() == after.len()
+        && before
+            .iter()
+            .zip(after.iter())
+            .all(|(a, b)| a.page == b.page && a.bytes == b.bytes)
+}
+
 /// Performs one operation. The flag says whether the thread should stop.
 fn execute(
     transport: &mut RecordingTransport,
@@ -418,28 +468,30 @@ fn execute(
             (IoOutcome::Pages { pages: read }, false)
         }
         IoOp::ReadAll => {
-            let mut pages = Vec::new();
-            for spec in protocol.pages() {
-                if stop.load(Ordering::Relaxed) {
-                    return (
-                        IoOutcome::Failed(IoFailure {
-                            kind: IoFailureKind::Stopped,
-                            message: "the page read was stopped".to_owned(),
-                        }),
-                        true,
-                    );
+            // A board reset (every port open triggers one) leaves the firmware
+            // loading its tune for a moment, and a read that races that load
+            // returns the previous session's RAM for some pages. Read twice and
+            // only answer with a pass that matches the one before it.
+            let mut previous: Option<Vec<PageRead>> = None;
+            for attempt in 0..STABLE_READ_ATTEMPTS {
+                let pages = match read_every_page(protocol, transport, stop) {
+                    Ok(pages) => pages,
+                    Err(answer) => return answer,
+                };
+                if let Some(before) = &previous
+                    && same_pages(before, &pages)
+                {
+                    return (IoOutcome::All { pages }, false);
                 }
-                if !spec.readable || spec.size == 0 {
-                    continue;
-                }
-                match protocol.read_page_all(transport, spec.number) {
-                    Ok(bytes) => pages.push(PageRead {
-                        page: spec.number,
-                        bytes,
-                    }),
-                    Err(error) => return (failure(error), false),
+                previous = Some(pages);
+                if attempt + 1 < STABLE_READ_ATTEMPTS {
+                    std::thread::sleep(STABLE_READ_DELAY);
                 }
             }
+            // Still moving after the last attempt: answer with the last pass so
+            // the caller sees values rather than an error, and let the write
+            // path's own conflict check refuse a plan built from a moving target.
+            let pages = previous.unwrap_or_default();
             (IoOutcome::All { pages }, false)
         }
         IoOp::WritePages { pages } => {
