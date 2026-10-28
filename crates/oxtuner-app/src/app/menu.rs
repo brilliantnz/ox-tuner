@@ -17,9 +17,10 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::actions::{
-    About, CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenDefinition, OpenHomepage,
-    OpenProject, Quit, SaveSessionTrace, SaveTune, Settings, ShowDisclaimer, ToggleBottomPanel,
-    TogglePrimarySidebar, ToggleSecondarySidebar,
+    About, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites, ImportTune,
+    ManageProjects, OpenDefinition, OpenHomepage, OpenProject, OpenSnapshots, Quit, RevertTune,
+    SaveSessionTrace, SaveTune, Settings, ShowCharts, ShowDisclaimer, ShowTune, ToggleBottomPanel,
+    TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
 };
 use crate::constants::APP_NAME;
 
@@ -64,6 +65,9 @@ fn menus() -> Vec<Menu> {
         // The panel commands, so a panel closed by mistake can be found again
         // without knowing the shortcut. Each carries its key from the keymap.
         Menu::new(t!("app.menu.view")).items([
+            MenuItem::action(t!("app.menu.show_tune"), ShowTune),
+            MenuItem::action(t!("app.menu.show_charts"), ShowCharts),
+            MenuItem::separator(),
             MenuItem::action(t!("app.menu.toggle_primary_sidebar"), TogglePrimarySidebar),
             MenuItem::action(
                 t!("app.menu.toggle_secondary_sidebar"),
@@ -124,6 +128,15 @@ fn connection_items() -> Vec<MenuItem> {
         MenuItem::action(t!("app.menu.disconnect"), DisconnectEcu),
         MenuItem::separator(),
         MenuItem::action(t!("app.menu.save_session_trace"), SaveSessionTrace),
+        MenuItem::separator(),
+        MenuItem::action(t!("app.menu.enable_writes"), EnableWrites),
+        MenuItem::action(t!("app.menu.write_to_ram"), WriteToRam),
+        MenuItem::action(t!("app.menu.burn_to_flash"), BurnToFlash),
+        MenuItem::action(t!("app.menu.revert_tune"), RevertTune),
+        MenuItem::separator(),
+        MenuItem::action(t!("app.menu.import_tune"), ImportTune),
+        MenuItem::action(t!("app.menu.write_journal"), WriteJournal),
+        MenuItem::action(t!("app.menu.snapshots"), OpenSnapshots),
     ]
 }
 

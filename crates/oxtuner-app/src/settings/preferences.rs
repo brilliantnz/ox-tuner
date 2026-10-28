@@ -218,20 +218,16 @@ impl Default for ConnectionSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SafetySettings {
     pub(crate) disclaimer_accepted: bool,
-    pub(crate) read_only_default: bool,
-}
-
-impl Default for SafetySettings {
-    fn default() -> Self {
-        Self {
-            disclaimer_accepted: false,
-            read_only_default: true,
-        }
-    }
+    /// Whether the global write switch starts on (S8).
+    ///
+    /// Off by default: an installation that has never been told the ECU is at
+    /// the bench must not write to it. The app passes this into the core at
+    /// start-up and persists every explicit change.
+    pub(crate) writes_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -389,6 +385,16 @@ impl AppSettings {
         });
     }
 
+    /// Whether writes start enabled for the next launch.
+    pub(crate) fn writes_enabled(cx: &App) -> bool {
+        cx.global::<Self>().settings.safety.writes_enabled
+    }
+
+    /// Persists the global write switch.
+    pub(crate) fn set_writes_enabled(cx: &mut App, enabled: bool) {
+        Self::update(cx, |settings| settings.safety.writes_enabled = enabled);
+    }
+
     /// Adds a project to the recent list and saves.
     pub(crate) fn remember_project(cx: &mut App, path: &Path) {
         Self::update(cx, |settings| settings.recent.remember(path));
@@ -471,7 +477,7 @@ mod tests {
             },
             safety: SafetySettings {
                 disclaimer_accepted: true,
-                read_only_default: false,
+                writes_enabled: true,
             },
             project: ProjectSettings { auto_reopen: true },
             recent: RecentSettings {

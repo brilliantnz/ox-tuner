@@ -68,6 +68,24 @@ app:
       en: Disconnect
     save_session_trace:
       en: Save Session Trace…
+    show_tune:
+      en: Tune
+    show_charts:
+      en: Live Charts
+    enable_writes:
+      en: Write Access…
+    write_to_ram:
+      en: Write to ECU RAM…
+    burn_to_flash:
+      en: Burn to Flash…
+    revert_tune:
+      en: Discard Local Edits…
+    import_tune:
+      en: Import Tune…
+    write_journal:
+      en: Write Journal…
+    snapshots:
+      en: Snapshots…
     safety_disclaimer:
       en: Safety Disclaimer
     github:
@@ -238,6 +256,20 @@ app:
       en: 'Trace saved (%{frames} frames) to %{path}'
     no_live_values:
       en: Waiting for realtime values…
+    writes_on:
+      en: Writes are enabled. Every operation is verified and journaled.
+    writes_off:
+      en: Writes are off. Enable them from Connection ▸ Write Access….
+    write_halted:
+      en: 'Write path halted: %{reason}'
+    write_done:
+      en: 'Verified write · %{pages} pages · %{cells} cells'
+    burn_done:
+      en: 'Verified burn · %{pages} pages'
+    import_done:
+      en: 'Imported %{cells} values from %{path}'
+    log_saved:
+      en: 'Session log · %{frames} frames · %{dropped} dropped · %{path}'
   table:
     copy:
       en: Copy
@@ -392,6 +424,12 @@ app:
       en: Read-only session
     live:
       en: Live
+    writes_on:
+      en: Writes on
+    writes_off:
+      en: Writes off…
+    write_halted:
+      en: Write halted
   panels:
     toggle_primary_sidebar:
       en: Toggle primary sidebar
@@ -422,6 +460,10 @@ app:
       en: Toggle secondary sidebar
     toggle_bottom_panel:
       en: Toggle output panel
+    show_tune:
+      en: Show the tune editor
+    show_charts:
+      en: Show the live charts
   disclaimer:
     title:
       en: Before you tune
@@ -502,6 +544,141 @@ app:
       en: The last project reopens at startup (Settings › Project).
     auto_reopen_off:
       en: Startup stays clean; reopen from here or Settings › Project.
+  view:
+    tune:
+      en: Tune
+    tune_tooltip:
+      en: Show the table editor
+    charts:
+      en: Charts
+    charts_tooltip:
+      en: Show the realtime charts
+  realtime:
+    title:
+      en: Live charts
+    connected:
+      en: Live session
+    not_connected:
+      en: Connect to an ECU to see live data
+    start_log:
+      en: Record CSV
+    stop_log:
+      en: Stop recording
+    channels:
+      en: Channels…
+    channel_filter:
+      en: Filter channels
+    channels_title:
+      en: Chart channels
+    channels_hint:
+      en: Click a channel to add or remove it. %{count} series are selected.
+    no_channels:
+      en: No channel matches the filter.
+    channels_count:
+      en: '%{count} selected'
+    default_channels:
+      en: Default five
+    close:
+      en: Close
+    dropped:
+      en: '%{count} log frames dropped'
+  write:
+    title:
+      en: Write to ECU RAM?
+    body:
+      en: Send %{cells} values that differ from ECU RAM to the ECU. The engine must be off.
+    snapshot:
+      en: A snapshot of the working tune is written first. The values are read back and verified before the write is reported.
+    writes_off:
+      en: Writes are disabled. Enable them from Connection ▸ Write Access….
+    not_connected:
+      en: No ECU is connected.
+    halted:
+      en: 'The write path is halted: %{reason}'
+    acknowledge:
+      en: Acknowledge the failed write
+    verify:
+      en: Only the values that differ from ECU RAM are patched into a fresh page read; controller-owned values are left untouched.
+    cancel:
+      en: Cancel
+    confirm:
+      en: Write to RAM
+  burn:
+    title:
+      en: Burn RAM to flash?
+    warning:
+      en: A burn persists the ECU's RAM across power cycles. A wrong calibration can damage the engine.
+    body:
+      en: Burn %{pages} pages holding %{cells} RAM changes to flash.
+    unsent:
+      en: '%{cells} tune values are not in ECU RAM yet. Write them first; burning now would persist the older values.'
+    snapshot:
+      en: A snapshot of the working tune is written before the burn. The pages are read back afterwards.
+    cancel:
+      en: Cancel
+    confirm:
+      en: Burn to flash
+  revert:
+    title:
+      en: Discard local edits?
+    body:
+      en: Revert %{cells} edited values to the file baseline.
+    snapshot:
+      en: A snapshot of the current working tune is written first.
+    cancel:
+      en: Cancel
+    confirm:
+      en: Discard edits
+  writes:
+    enable_title:
+      en: Enable writing to the ECU?
+    disable_title:
+      en: Disable writing to the ECU?
+    warning:
+      en: Writing is for a bench ECU with the engine off. Never tune while driving.
+    rules:
+      en: With writes on, an explicit Write or Burn command may change the ECU. Nothing is written automatically, and every operation is verified and journaled.
+    confirm_check:
+      en: The ECU is at the bench and the engine is off
+    cancel:
+      en: Cancel
+    enable:
+      en: Enable writes
+    disable:
+      en: Disable writes
+  journal:
+    title:
+      en: Write journal
+    no_file:
+      en: No journal file exists yet.
+    empty:
+      en: The journal is empty.
+    close:
+      en: Close
+  snapshots:
+    title:
+      en: Snapshots
+    hint:
+      en: Every write, burn, import and revert writes one. Restoring takes a new snapshot first.
+    restore:
+      en: Restore
+    empty:
+      en: No snapshots yet.
+    close:
+      en: Close
+  import:
+    title:
+      en: Import tune
+    consent_title:
+      en: Import a tune for a different firmware?
+    consent_warning:
+      en: This tune was written for a different ECU signature.
+    consent_body:
+      en: Importing it replaces the working values. A snapshot is written first and nothing is sent to the ECU until you write explicitly.
+    cancel:
+      en: Cancel
+    consent_confirm:
+      en: Import anyway
   language:
     en:
       en: English

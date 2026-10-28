@@ -199,6 +199,59 @@ fn core_status(cx: &App) -> AnyElement {
 
     let live = live_values(cx, muted);
 
+    let writes = v_flex()
+        .gap_1()
+        .child(if let Some(reason) = &status.write_halted {
+            div()
+                .text_xs()
+                .text_color(danger)
+                .child(t!("app.bottom_panel.write_halted", reason = reason.clone()))
+        } else if status.writes_enabled {
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(t!("app.bottom_panel.writes_on"))
+        } else {
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(t!("app.bottom_panel.writes_off"))
+        })
+        .when_some(status.last_write.as_ref(), |this, write| {
+            this.child(div().text_xs().text_color(muted).child(t!(
+                "app.bottom_panel.write_done",
+                pages = write.pages.to_string(),
+                cells = write.cells.to_string(),
+            )))
+        })
+        .when_some(status.last_burn.as_ref(), |this, burn| {
+            this.child(div().text_xs().text_color(muted).child(t!(
+                "app.bottom_panel.burn_done",
+                pages = burn.pages.to_string(),
+            )))
+        })
+        .when_some(status.last_import.as_ref(), |this, import| {
+            this.child(div().text_xs().text_color(muted).child(t!(
+                "app.bottom_panel.import_done",
+                cells = import.cells.to_string(),
+                path = import.path.display().to_string(),
+            )))
+        })
+        .when_some(
+            status.last_log.as_ref().filter(|log| !log.running),
+            |this, log| {
+                this.child(div().text_xs().text_color(muted).child(t!(
+                        "app.bottom_panel.log_saved",
+                        frames = log.frames.to_string(),
+                        dropped = log.dropped.to_string(),
+                        path = log
+                            .path
+                            .as_ref()
+                            .map_or_else(String::new, |path| path.display().to_string()),
+                    )))
+            },
+        );
+
     let failure = status.failure.as_ref().map(|failure| {
         let heading = match failure.code {
             FailureCode::DefinitionRejected => t!("app.bottom_panel.definition_failed"),
@@ -241,6 +294,7 @@ fn core_status(cx: &App) -> AnyElement {
         .when_some(lost, |this, lost| this.child(lost))
         .when_some(pages, |this, pages| this.child(pages))
         .when_some(live, |this, live| this.child(live))
+        .child(writes)
         .when_some(trace, |this, trace| this.child(trace))
         .when_some(saved, |this, saved| this.child(saved))
         .when_some(failure, |this, failure| this.child(failure))

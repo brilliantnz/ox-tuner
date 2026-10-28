@@ -30,6 +30,7 @@ pub mod i18n;
 pub mod icons;
 pub mod platform;
 pub mod project;
+pub mod realtime;
 pub mod settings;
 pub mod shell;
 pub mod state;

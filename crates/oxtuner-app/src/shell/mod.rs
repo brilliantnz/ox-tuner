@@ -44,6 +44,7 @@ pub mod primary_sidebar;
 pub mod project_dialog;
 pub mod secondary_sidebar;
 pub mod titlebar;
+pub mod write_dialogs;
 
 use oxtuner_core::MenuNodeKind;
 
@@ -56,10 +57,11 @@ use crate::{
     editor::{dialog::DialogEditor, table::TableEditor},
     i18n::t,
     project,
+    realtime::RealtimeView,
     settings::preferences::AppSettings,
     state::session::{
-        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, capture_window,
-        schedule_save,
+        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, WorkView,
+        capture_window, schedule_save,
     },
 };
 
@@ -81,6 +83,9 @@ pub(crate) struct Shell {
     /// The dialog editor; one instance so the edit-in-progress survives a
     /// core echo.
     dialog_editor: Entity<DialogEditor>,
+    /// The live charts workspace, kept alive so its view state survives a
+    /// switch back to the tune.
+    realtime: Entity<RealtimeView>,
     /// Which view a dialog-backed node shows: its grid or its constants.
     tab: EditorTab,
     /// The node the tab belongs to, so a new selection starts on the grid.
@@ -141,6 +146,7 @@ impl Shell {
         let explorer = cx.new(Explorer::new);
         let table_editor = cx.new(TableEditor::new);
         let dialog_editor = cx.new(DialogEditor::new);
+        let realtime = cx.new(RealtimeView::new);
         let _explorer = cx.observe(&explorer, |this, _, cx| {
             this.sync_editors(cx);
             cx.notify();
@@ -153,6 +159,7 @@ impl Shell {
             explorer,
             table_editor,
             dialog_editor,
+            realtime,
             tab: EditorTab::Table,
             tab_node: None,
             _explorer,
@@ -169,6 +176,9 @@ impl Shell {
         if node_id != self.tab_node {
             self.tab_node = node_id;
             self.tab = EditorTab::Table;
+            if cx.global::<AppState>().data().layout.work_view == WorkView::Charts {
+                set_work_view(WorkView::Tune, cx);
+            }
         }
 
         let (table_target, dialog_target, label) = match selected {
@@ -213,7 +223,14 @@ impl Shell {
     /// Project identity lives in the title bar and the Projects dialog; the
     /// editor shows only the selected node, plus a read-only banner when the
     /// workspace itself is read-only.
-    fn render_editor_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_editor_column(&self, cx: &mut Context<Self>) -> AnyElement {
+        if cx.global::<AppState>().data().layout.work_view == WorkView::Charts {
+            return div()
+                .size_full()
+                .min_h_0()
+                .child(self.realtime.clone())
+                .into_any_element();
+        }
         // The editor names what the core owns. `AppState::last_project` only
         // remembers the path between launches.
         let status = crate::core::CoreService::status(cx);
@@ -347,6 +364,7 @@ impl Shell {
                             })
                     }),
             )
+            .into_any_element()
     }
 
     /// The grid/constants switch above a dialog that wraps a table.
@@ -397,8 +415,36 @@ impl Shell {
             layout.secondary_visible,
             layout.bottom_visible,
         );
+        let work_view = layout.work_view;
 
         vec![
+            Button::new("show-tune")
+                .label(t!("app.view.tune"))
+                .small()
+                .ghost()
+                .selected(work_view == WorkView::Tune)
+                .tooltip(tooltip("show-tune", t!("app.view.tune_tooltip")))
+                .on_click(|_, _, cx| {
+                    cx.stop_propagation();
+                    show_tune(cx);
+                })
+                .into_any_element(),
+            Button::new("show-charts")
+                .label(t!("app.view.charts"))
+                .small()
+                .ghost()
+                .selected(work_view == WorkView::Charts)
+                .tooltip(tooltip("show-charts", t!("app.view.charts_tooltip")))
+                .on_click(|_, _, cx| {
+                    cx.stop_propagation();
+                    show_charts(cx);
+                })
+                .into_any_element(),
+            div()
+                .w(px(1.))
+                .h_4()
+                .bg(cx.theme().border)
+                .into_any_element(),
             Button::new("toggle-primary-sidebar")
                 .icon(if primary {
                     IconName::PanelLeftClose
@@ -469,6 +515,8 @@ impl Shell {
         let lost = status.link_lost.clone();
         let read_only = connection.as_ref().is_some_and(|state| state.read_only);
         let live = status.realtime;
+        let writes_enabled = status.writes_enabled;
+        let write_halted = status.write_halted.clone();
         let danger = cx.theme().danger;
 
         let link = match connection {
@@ -502,6 +550,32 @@ impl Shell {
                         this.child(div().text_color(danger).child(t!("app.status.read_only")))
                     })
                     .when(live, |this| this.child(t!("app.status.live")))
+                    .child(
+                        Button::new("status-writes")
+                            .label(if writes_enabled {
+                                t!("app.status.writes_on")
+                            } else {
+                                t!("app.status.writes_off")
+                            })
+                            .small()
+                            .ghost()
+                            .on_click(|_, window, cx| {
+                                write_dialogs::show_enable_writes(window, cx);
+                            }),
+                    )
+                    .when_some(write_halted, |this, reason| {
+                        this.child(
+                            Button::new("status-write-halted")
+                                .label(t!("app.status.write_halted"))
+                                .small()
+                                .ghost()
+                                .text_color(danger)
+                                .tooltip(gpui_kit::SharedString::from(reason))
+                                .on_click(|_, window, cx| {
+                                    write_dialogs::show_write(window, cx);
+                                }),
+                        )
+                    })
                     .child(concat!("v", env!("CARGO_PKG_VERSION"))),
             )
     }
@@ -682,6 +756,26 @@ pub fn toggle_bottom_panel(cx: &mut App) {
     toggle_panel(cx, |layout| {
         layout.bottom_visible = !layout.bottom_visible;
     });
+}
+
+/// Switches the editor column to the tune.
+pub fn show_tune(cx: &mut App) {
+    set_work_view(WorkView::Tune, cx);
+}
+
+/// Switches the editor column to the live charts.
+pub fn show_charts(cx: &mut App) {
+    set_work_view(WorkView::Charts, cx);
+}
+
+fn set_work_view(view: WorkView, cx: &mut App) {
+    let current = cx.global::<AppState>().data().layout.work_view;
+    if current == view {
+        return;
+    }
+    AppState::update_global(cx, |data| data.layout.work_view = view);
+    schedule_save(cx);
+    app::window::notify_main(cx);
 }
 
 /// Flips one panel's visibility, saves, and repaints.
