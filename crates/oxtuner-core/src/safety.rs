@@ -108,7 +108,11 @@ pub(crate) fn clamp_user(spec: &VariableSpec, value: f64) -> (f64, bool) {
         return (value, false);
     }
     let clamped = value.clamp(minimum, maximum);
-    (clamped, clamped.to_bits() != value.to_bits())
+    // The wire has no signed zero, so `-0.0` and `0.0` are the same value.
+    // Store the positive zero and compare numerically, otherwise a value that
+    // moved to `-0.0` looks modified without having changed.
+    let clamped = if clamped == 0.0 { 0.0 } else { clamped };
+    (clamped, clamped != value)
 }
 
 #[cfg(test)]
@@ -146,6 +150,15 @@ fuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
         assert_eq!(clamp_user(&fuel, 12.0), (12.0, false));
         assert_eq!(clamp_user(&fuel, 100.0), (25.5, true));
         assert_eq!(clamp_user(&fuel, -4.0), (0.0, true));
+    }
+
+    #[test]
+    fn a_negative_zero_is_not_a_change() {
+        let fuel = spec("fuel");
+
+        let (value, changed) = clamp_user(&fuel, -0.0);
+        assert!(!changed, "the sign of zero is not a new value");
+        assert_eq!(value.to_bits(), 0.0_f64.to_bits());
     }
 
     #[test]
