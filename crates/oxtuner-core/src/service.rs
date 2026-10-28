@@ -3268,6 +3268,17 @@ fn configure_history(history: &ChartHistory, definition: &Definition) {
 /// block, and a computed channel may not resolve. The log keeps its full header
 /// and writes an empty cell for those, rather than shifting every later column.
 fn align_log_values(columns: &[String], frame: &RealtimeFrame) -> Vec<f64> {
+    // A frame normally carries every column in definition order, so the common
+    // case is a plain copy with no lookup table to build and throw away.
+    if frame.values.len() == columns.len()
+        && frame
+            .values
+            .iter()
+            .zip(columns)
+            .all(|(value, name)| value.name.as_str() == name.as_str())
+    {
+        return frame.values.iter().map(|value| value.value).collect();
+    }
     let lookup: std::collections::HashMap<&str, f64> = frame
         .values
         .iter()
@@ -4511,12 +4522,13 @@ fn on_reply(
             let first = *live.first_frame.get_or_insert_with(Instant::now);
             let time = first.elapsed().as_secs_f64();
             live.last_frame_time = time;
-            let named: Vec<(&str, f64)> = frame
-                .values
-                .iter()
-                .map(|value| (value.name.as_str(), value.value))
-                .collect();
-            history.push_frame(time, &named);
+            history.push_frame_iter(
+                time,
+                frame
+                    .values
+                    .iter()
+                    .map(|value| (value.name.as_str(), value.value)),
+            );
             if let Some(logger) = &live.logger {
                 let values = align_log_values(&live.log_columns, &frame);
                 if !logger.try_log(time, &values) {
@@ -4746,6 +4758,7 @@ fn commit_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LiveValue;
 
     #[test]
     fn the_default_queues_are_bounded() {
@@ -4775,5 +4788,40 @@ mod tests {
         };
 
         assert_eq!(report.mean_op_latency(), Duration::from_micros(2500));
+    }
+
+    fn live(name: &str, value: f64) -> LiveValue {
+        LiveValue {
+            name: name.to_owned(),
+            value,
+            text: String::new(),
+            units: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_log_row_keeps_column_order_when_a_channel_is_missing() {
+        let columns: Vec<String> = ["rpm", "map", "tps"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+
+        // A complete frame is in definition order and copies straight across.
+        let full = RealtimeFrame {
+            sequence: 0,
+            values: vec![live("rpm", 900.0), live("map", 45.0), live("tps", 3.0)],
+        };
+        assert_eq!(align_log_values(&columns, &full), [900.0, 45.0, 3.0]);
+
+        // A channel the decoder could not read becomes a gap, not a shift.
+        let short = RealtimeFrame {
+            sequence: 1,
+            values: vec![live("rpm", 900.0), live("tps", 3.0)],
+        };
+        let row = align_log_values(&columns, &short);
+        assert_eq!(row.len(), columns.len());
+        assert_eq!(row[0], 900.0);
+        assert!(row[1].is_nan(), "a missing channel is a gap");
+        assert_eq!(row[2], 3.0);
     }
 }

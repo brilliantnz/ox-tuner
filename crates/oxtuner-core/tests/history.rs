@@ -187,8 +187,8 @@ fn realtime_frames_fill_the_shared_history() {
     let names: Vec<String> = core
         .history
         .channels()
-        .into_iter()
-        .map(|channel| channel.name)
+        .iter()
+        .map(|channel| channel.name.clone())
         .collect();
     assert_eq!(names, ["rpm", "map"]);
     let ids = vec!["rpm".to_owned(), "map".to_owned()];

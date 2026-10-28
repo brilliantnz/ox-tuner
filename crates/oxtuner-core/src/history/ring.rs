@@ -100,7 +100,8 @@ struct Frame {
 /// The mutable inside of the ring.
 #[derive(Debug)]
 struct Inner {
-    channels: Vec<ChannelInfo>,
+    /// Shared so a reader can hand the list out without copying every channel.
+    channels: Arc<[ChannelInfo]>,
     index: HashMap<String, usize>,
     frames: VecDeque<Arc<Frame>>,
     capacity: usize,
@@ -218,7 +219,7 @@ impl ChartHistory {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner {
-                channels: Vec::new(),
+                channels: Vec::new().into(),
                 index: HashMap::new(),
                 frames: VecDeque::new(),
                 capacity: capacity.max(2),
@@ -239,7 +240,7 @@ impl ChartHistory {
         for (position, channel) in channels.iter().enumerate() {
             inner.index.insert(channel.name.clone(), position);
         }
-        inner.channels = channels;
+        inner.channels = channels.into();
         inner.frames.clear();
         inner.pushed = 0;
         inner.overruns = 0;
@@ -254,8 +255,11 @@ impl ChartHistory {
     }
 
     /// The channels this history carries, in definition order.
-    pub fn channels(&self) -> Vec<ChannelInfo> {
-        self.read().channels.clone()
+    ///
+    /// The list is shared: cloning the returned handle is one refcount bump, not
+    /// a copy of every name and unit, so a render tick can call this freely.
+    pub fn channels(&self) -> Arc<[ChannelInfo]> {
+        Arc::clone(&self.read().channels)
     }
 
     /// Pushes one decoded frame, naming each value.
@@ -265,14 +269,20 @@ impl ChartHistory {
     /// instead of inventing a value. The same-named channel and value must
     /// match in case, because both sides come from one definition.
     pub fn push_frame(&self, time: f64, values: &[(&str, f64)]) {
+        self.push_frame_iter(time, values.iter().copied());
+    }
+
+    /// [`Self::push_frame`] from an iterator, so a live poller can name the
+    /// values it already has instead of collecting a slice every frame.
+    pub fn push_frame_iter<'a>(&self, time: f64, values: impl IntoIterator<Item = (&'a str, f64)>) {
         if !time.is_finite() {
             return;
         }
         let mut inner = self.write();
         let mut row = vec![f64::NAN; inner.channels.len()];
         for (name, value) in values {
-            if let Some(index) = inner.index.get(*name) {
-                row[*index] = *value;
+            if let Some(index) = inner.index.get(name) {
+                row[*index] = value;
             }
         }
         let time = inner.newest().map_or(time, |newest| time.max(newest));
