@@ -273,6 +273,54 @@ impl RealtimeDecoder {
             .collect()
     }
 
+    /// Whether the definition declares a measured channel with this name.
+    ///
+    /// The protocol reads a few status bits that no chart plots, so a caller
+    /// can tell "this definition has no such channel" from "the block did not
+    /// carry it".
+    pub fn has_channel(&self, name: &str) -> bool {
+        self.measured(name).is_some()
+    }
+
+    /// One measured channel's stored value, hidden or not.
+    ///
+    /// The value is taken after bit extraction and before scale and translate,
+    /// which is what a status bit such as `burnPending` wants. A block of the
+    /// wrong size returns `None`, like [`Self::decode`].
+    pub fn channel_raw(&self, block: &[u8], name: &str) -> Option<f64> {
+        if block.len() != self.block_size {
+            return None;
+        }
+        let Some(Source::Measured {
+            offset,
+            data_type,
+            storage,
+            bits,
+            ..
+        }) = self.measured(name)
+        else {
+            return None;
+        };
+        let raw = read_raw(
+            block,
+            *offset,
+            if bits.is_some() { *storage } else { *data_type },
+            self.endianness,
+        )?;
+        match bits {
+            Some(range) => extract_bits(raw, *range),
+            None => Some(raw),
+        }
+    }
+
+    /// The measured source for a channel name, case-insensitively.
+    fn measured(&self, name: &str) -> Option<&Source> {
+        self.sources.iter().find(|source| match source {
+            Source::Measured { name: channel, .. } => channel.eq_ignore_ascii_case(name),
+            Source::Computed { .. } => false,
+        })
+    }
+
     /// Decodes one block.
     ///
     /// A block whose length is not the declared one produces no values: a
@@ -503,6 +551,7 @@ ochBlockSize = 8
 rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
 status = scalar, U08, 2, \"bits\", 1.0, 0.0
 running = bits, U08, 2, [0:0]
+burnPending = bits, U08, 2, [4:4]
 tps = scalar, U08, 3, \"%\", 0.5, 0.0
 halfRpm = { rpm / 2 }, \"rpm\"
 ",
@@ -535,6 +584,25 @@ halfRpm = { rpm / 2 }, \"rpm\"
         let frame = decoder.decode(&block, 1);
 
         assert_eq!(frame.value("halfRpm").unwrap().value, 1750.0);
+    }
+
+    #[test]
+    fn a_status_bit_reads_raw_without_decoding_the_frame() {
+        let decoder = RealtimeDecoder::new(&definition());
+        let mut block = vec![0u8; 8];
+
+        block[2] = 0b0001_0000;
+        assert_eq!(decoder.channel_raw(&block, "burnPending"), Some(1.0));
+        assert_eq!(decoder.channel_raw(&block, "burnpending"), Some(1.0));
+        assert!(decoder.has_channel("burnPending"));
+        assert!(!decoder.has_channel("nothing"));
+
+        block[2] = 0;
+        assert_eq!(decoder.channel_raw(&block, "burnPending"), Some(0.0));
+
+        // A short block says nothing, and so does a name that is not measured.
+        assert_eq!(decoder.channel_raw(&[0u8; 4], "burnPending"), None);
+        assert_eq!(decoder.channel_raw(&block, "halfRpm"), None);
     }
 
     #[test]

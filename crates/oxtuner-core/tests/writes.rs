@@ -56,6 +56,8 @@ ochGetCommand = "r%2o%2c"
 ochBlockSize = 4
 rpm = scalar, U16, 0, "rpm", 1.0, 0.0
 map = scalar, U08, 2, "kPa", 1.0, 0.0
+status = scalar, U08, 3, "bits", 1.0, 0.0
+burnPending = bits, U08, 3, [4:4]
 
 [UserDefined]
 dialog = engineDialog, "Engine"
@@ -472,19 +474,31 @@ fn a_write_is_clamped_to_the_definition_range() {
 #[test]
 fn a_burn_follows_a_verified_write_and_is_journaled() {
     let dir = TempDir::new("burn");
+    // The virtual board keeps reporting a queued EEPROM write for two reads,
+    // the way a real one answers a burn before it touches flash. The burn may
+    // only be reported verified once that bit clears.
+    let config = SimConfig {
+        burn_pending_samples: 2,
+        ..SimConfig::default()
+    };
     let core = Harness::start(true);
     core.open(dir.path());
-    core.connect(SimConfig::default());
+    core.connect(config);
     core.read_all();
     core.edit_cell(66.0);
 
     let event = core.write();
     assert!(matches!(event, Event::TuneWritten { .. }), "{event:?}");
 
+    let started = Instant::now();
     let event = core.burn();
     let Event::TuneBurned { summary, .. } = event else {
         panic!("expected a verified burn, got {event:?}");
     };
+    assert!(
+        started.elapsed() >= Duration::from_millis(500),
+        "the burn waited for the queued EEPROM write, not just for the reply"
+    );
     assert!(summary.verified);
     assert!(summary.snapshot.as_ref().is_some_and(|path| path.exists()));
 

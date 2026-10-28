@@ -598,6 +598,9 @@ pub enum FailureCode {
     JournalFailed,
     /// The session log could not be started or stopped.
     LogFailed,
+    /// The request was refused because an operation that must finish owns the
+    /// link (a write or burn, including its EEPROM wait).
+    Busy,
 }
 
 impl FailureCode {
@@ -628,6 +631,7 @@ impl FailureCode {
             Self::SnapshotFailed => "snapshot-failed",
             Self::JournalFailed => "journal-failed",
             Self::LogFailed => "log-failed",
+            Self::Busy => "busy",
         }
     }
 }

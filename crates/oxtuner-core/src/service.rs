@@ -648,6 +648,22 @@ fn handle(
                 );
                 return Outcome::Continue;
             };
+            if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::Busy,
+                            message: "a write or burn is still running; closing now resets the \
+                                      board and could drop it"
+                                .to_owned(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
+            }
             if let Err(error) = connection.request(op, PendingKind::Disconnect, IoOp::Close) {
                 report.failures += 1;
                 send(
@@ -1906,6 +1922,7 @@ fn write_to_ram(
         kind: TxnKind::Write,
         phase: TxnPhase::ReadBase,
         pages: targets.clone(),
+        burned: 0,
         base: BTreeMap::new(),
         expected: BTreeMap::new(),
         readback: BTreeMap::new(),
@@ -2106,6 +2123,7 @@ fn burn_to_flash(
         kind: TxnKind::Burn,
         phase: TxnPhase::ReadBase,
         pages: targets.clone(),
+        burned: 0,
         base: BTreeMap::new(),
         expected: BTreeMap::new(),
         readback: BTreeMap::new(),
@@ -2706,6 +2724,25 @@ const MAX_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// How long an idle core waits while an I/O reply is outstanding.
 const PENDING_WAIT: Duration = Duration::from_millis(5);
 
+/// The realtime bit that says the firmware still has EEPROM writes queued.
+const BURN_PENDING_CHANNEL: &str = "burnPending";
+
+/// How often the burn wait samples that bit.
+///
+/// The gap leaves the link idle long enough for the firmware's main loop to
+/// run another EEPROM pass, and each sample is one short realtime block.
+const BURN_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a burn may stay queued before it is reported as not saved.
+///
+/// A 2560 writes up to 144 bytes per pass at idle, at roughly 4 ms a byte, so
+/// a full 3.4 KiB image is about 13 s. The margin covers the definition's
+/// defer delay too.
+const BURN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to settle when the definition has no `burnPending` bit.
+const BURN_SETTLE: Duration = Duration::from_millis(1500);
+
 /// The first reconnect delay; doubled per attempt, capped.
 const RECONNECT_BASE: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(5);
@@ -2750,6 +2787,26 @@ struct Reconnect {
     next_at: Instant,
 }
 
+/// A burn whose pages the firmware accepted but has not written to flash yet.
+///
+/// Speeduino answers `b`/`B` before the EEPROM write happens: `burnSinglePage`
+/// only queues the page, and the flush runs from the main loop once the link
+/// has been idle for a second. Closing the port inside that window resets the
+/// board and drops the pending save, so the transaction waits here until the
+/// firmware reports the queue empty.
+#[derive(Debug, Clone, Copy)]
+struct BurnWait {
+    /// When the next `burnPending` sample is due.
+    next_at: Instant,
+    /// When the wait stops trusting the firmware.
+    deadline: Instant,
+    /// Whether the definition has a `burnPending` bit to read.
+    ///
+    /// Without one the wait is a fixed settle: the ECU's answer alone cannot
+    /// say when its own flash write finished.
+    observed: bool,
+}
+
 /// What a transaction will do with the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxnKind {
@@ -2791,6 +2848,8 @@ enum TxnPhase {
     Write,
     /// Sending burn commands.
     Burn,
+    /// Waiting for the firmware to flush its queued EEPROM writes.
+    BurnWait,
     /// Reading pages back for verification.
     Verify,
 }
@@ -2806,6 +2865,9 @@ struct WriteTxn {
     phase: TxnPhase,
     /// Pages the transaction covers, sorted.
     pages: Vec<u8>,
+    /// Pages already burned; a burn waits for each one's flash write before the
+    /// next, because the firmware's queue bit covers the whole batch.
+    burned: usize,
     /// Fresh page bytes read before patching or burning.
     base: BTreeMap<u8, Vec<u8>>,
     /// Bytes expected after a write, or before a burn; used for verification.
@@ -2837,6 +2899,8 @@ struct Live {
     next_id: RequestId,
     poll: Option<Poll>,
     reconnect: Option<Reconnect>,
+    /// A burn that is queued in the firmware, waiting for its flash write.
+    burn_wait: Option<BurnWait>,
     sequence: u64,
     /// The ECU RAM image when no project owns one (a definition on its own).
     standalone: Option<Box<Tune>>,
@@ -2899,6 +2963,7 @@ impl Live {
             next_id: RequestId::FIRST,
             poll: None,
             reconnect: None,
+            burn_wait: None,
             sequence: 0,
             standalone,
             connected: false,
@@ -2988,6 +3053,50 @@ impl Live {
         if let Some(poll) = &mut self.poll {
             poll.next_at = Instant::now() + poll.interval;
         }
+    }
+
+    /// Whether this definition can say when a burn reaches flash.
+    ///
+    /// Speeduino exposes `burnPending`, and it has to be read one page at a
+    /// time: its queue bit is a single flag, so a batch that mixes a deferred
+    /// page with an inline one loses the deferred pages when the last inline
+    /// save clears the flag. One page per burn keeps every page accounted for.
+    fn can_observe_burn(&self) -> bool {
+        self.realtime_block.is_some() && self.decoder.has_channel(BURN_PENDING_CHANNEL)
+    }
+
+    /// Starts waiting for the firmware to write an accepted burn to flash.
+    fn begin_burn_wait(&mut self) {
+        let now = Instant::now();
+        if self.realtime_block.is_none() {
+            // Nothing to sample: the read-back runs at once, as a burn without
+            // a status bit always did.
+            self.burn_wait = None;
+            return;
+        }
+        let observed = self.can_observe_burn();
+        if !observed {
+            tracing::debug!(
+                "the definition has no {BURN_PENDING_CHANNEL} bit; settling for {} ms",
+                BURN_SETTLE.as_millis()
+            );
+        }
+        self.burn_wait = Some(BurnWait {
+            next_at: now
+                + if observed {
+                    BURN_POLL_INTERVAL
+                } else {
+                    BURN_SETTLE
+                },
+            deadline: now + BURN_TIMEOUT,
+            observed,
+        });
+    }
+
+    /// Whether the next burn check is due.
+    fn burn_due(&self) -> bool {
+        self.burn_wait
+            .is_some_and(|wait| wait.next_at <= Instant::now())
     }
 
     /// Whether a reconnect attempt is due.
@@ -3131,11 +3240,15 @@ fn next_wait(live: &Option<Live>) -> Option<Duration> {
         .reconnect
         .as_ref()
         .map(|reconnect| reconnect.next_at.saturating_duration_since(now));
-    match (poll, reconnect) {
-        (Some(poll), Some(reconnect)) => Some(poll.min(reconnect).max(Duration::from_millis(1))),
-        (Some(wait), None) | (None, Some(wait)) => Some(wait.max(Duration::from_millis(1))),
-        (None, None) => None,
-    }
+    let burn = live
+        .burn_wait
+        .as_ref()
+        .map(|wait| wait.next_at.saturating_duration_since(now));
+    [poll, reconnect, burn]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|wait| wait.max(Duration::from_millis(1)))
 }
 
 /// Rebuilds the chart history's channel list from a definition, clearing old
@@ -3349,6 +3462,40 @@ fn service_live(
     {
         tracing::debug!(%error, "the reconnect could not be queued");
         schedule_reconnect(connection);
+    }
+
+    // A burn that the firmware queued needs its own samples; the realtime
+    // poll stays off while a transaction owns the link.
+    if connection.burn_due() {
+        let op = connection
+            .write_tx
+            .as_ref()
+            .map(|transaction| transaction.op);
+        match op {
+            Some(op) if !connection.pending_kind(PendingKind::Write) => {
+                if let Some(wait) = connection.burn_wait.as_mut() {
+                    wait.next_at = Instant::now() + BURN_POLL_INTERVAL;
+                }
+                if let Err(error) = connection.request(op, PendingKind::Write, IoOp::ReadRealtime) {
+                    let Some(transaction) = connection.write_tx.take() else {
+                        return;
+                    };
+                    connection.burn_wait = None;
+                    fail_transaction(
+                        connection,
+                        transaction,
+                        session,
+                        safety,
+                        events,
+                        report,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            }
+            Some(_) => {}
+            None => connection.burn_wait = None,
+        }
     }
 
     if connection.poll_due()
@@ -3704,8 +3851,14 @@ fn advance_write(
                             return;
                         }
                         transaction.expected = transaction.base.clone();
+                        let pages = if live.can_observe_burn() {
+                            // One page per burn, each followed by a check that
+                            // the firmware saved it before the next command.
+                            transaction.pages.first().copied().into_iter().collect()
+                        } else {
+                            transaction.pages.clone()
+                        };
                         transaction.phase = TxnPhase::Burn;
-                        let pages = transaction.pages.clone();
                         live.write_tx = Some(transaction);
                         if let Err(error) =
                             live.request(op, PendingKind::Write, IoOp::BurnPages { pages })
@@ -3744,53 +3897,103 @@ fn advance_write(
                 }
                 succeed_transaction(live, transaction, session, safety, events, report);
             }
-            TxnPhase::Write | TxnPhase::Burn => {
+            TxnPhase::Write | TxnPhase::Burn | TxnPhase::BurnWait => {
                 tracing::warn!(%op, "an unexpected page read arrived during a transaction");
                 live.write_tx = Some(transaction);
             }
         },
         IoOutcome::Written { pages, bytes } => {
             tracing::debug!(%op, pages, bytes, "pages written; reading them back");
-            transaction.phase = TxnPhase::Verify;
-            let pages = transaction.pages.clone();
-            live.write_tx = Some(transaction);
-            if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
-                let Some(transaction) = live.write_tx.take() else {
-                    return;
-                };
-                fail_transaction(
-                    live,
-                    transaction,
-                    session,
-                    safety,
-                    events,
-                    report,
-                    error.to_string(),
-                    false,
-                );
-            }
+            start_verify(live, op, transaction, session, safety, events, report);
         }
         IoOutcome::Burned { pages } => {
-            tracing::debug!(%op, pages, "pages burned; reading them back");
-            transaction.phase = TxnPhase::Verify;
-            let pages = transaction.pages.clone();
+            tracing::debug!(%op, pages, "pages burned; waiting for the flash write");
+            // The firmware answers a burn before it writes EEPROM, so reading
+            // the pages back here would only prove RAM. Wait for its queue to
+            // empty first, or the link may close over an unfinished save.
+            transaction.burned = transaction.burned.saturating_add(pages);
+            transaction.phase = TxnPhase::BurnWait;
             live.write_tx = Some(transaction);
-            if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
+            live.begin_burn_wait();
+            if live.burn_wait.is_none() {
+                // No realtime block to sample: nothing to wait on.
                 let Some(transaction) = live.write_tx.take() else {
                     return;
                 };
-                fail_transaction(
-                    live,
-                    transaction,
-                    session,
-                    safety,
-                    events,
-                    report,
-                    error.to_string(),
-                    false,
-                );
+                start_verify(live, op, transaction, session, safety, events, report);
             }
         }
+        IoOutcome::Realtime { block } => match transaction.phase {
+            TxnPhase::BurnWait => {
+                let Some(wait) = live.burn_wait else {
+                    tracing::warn!(%op, "a burn check arrived without a wait");
+                    live.write_tx = Some(transaction);
+                    return;
+                };
+                let queued = wait.observed
+                    && live.decoder.channel_raw(&block, BURN_PENDING_CHANNEL) != Some(0.0);
+                if queued {
+                    if Instant::now() >= wait.deadline {
+                        live.burn_wait = None;
+                        fail_transaction(
+                            live,
+                            transaction,
+                            session,
+                            safety,
+                            events,
+                            report,
+                            format!(
+                                "the ECU still reports a pending EEPROM write after {} s. \
+                                 Do not close the link: closing resets the board and drops an \
+                                 unfinished save",
+                                BURN_TIMEOUT.as_secs()
+                            ),
+                            false,
+                        );
+                        return;
+                    }
+                    let mut wait = wait;
+                    wait.next_at = Instant::now() + BURN_POLL_INTERVAL;
+                    live.burn_wait = Some(wait);
+                    live.write_tx = Some(transaction);
+                    return;
+                }
+                live.burn_wait = None;
+                if transaction.burned < transaction.pages.len() {
+                    // The next page goes out only after this one's save is
+                    // accounted for.
+                    let page = transaction.pages[transaction.burned];
+                    transaction.phase = TxnPhase::Burn;
+                    live.write_tx = Some(transaction);
+                    if let Err(error) = live.request(
+                        op,
+                        PendingKind::Write,
+                        IoOp::BurnPages { pages: vec![page] },
+                    ) {
+                        let Some(transaction) = live.write_tx.take() else {
+                            return;
+                        };
+                        fail_transaction(
+                            live,
+                            transaction,
+                            session,
+                            safety,
+                            events,
+                            report,
+                            error.to_string(),
+                            false,
+                        );
+                    }
+                    return;
+                }
+                tracing::debug!(%op, "the burn reached flash; reading it back");
+                start_verify(live, op, transaction, session, safety, events, report);
+            }
+            _ => {
+                tracing::warn!(%op, "an unexpected realtime block arrived during a transaction");
+                live.write_tx = Some(transaction);
+            }
+        },
         IoOutcome::Failed(failure) => {
             let link_lost = matches!(
                 failure.kind,
@@ -3816,6 +4019,37 @@ fn advance_write(
             tracing::warn!(%op, ?other, "an unexpected reply arrived during a transaction");
             live.write_tx = Some(transaction);
         }
+    }
+}
+
+/// Queues the read-back that ends a write or burn transaction.
+#[allow(clippy::too_many_arguments)]
+fn start_verify(
+    live: &mut Live,
+    op: OpId,
+    mut transaction: WriteTxn,
+    session: &mut Session,
+    safety: &mut Safety,
+    events: &EventTx,
+    report: &mut CoreReport,
+) {
+    transaction.phase = TxnPhase::Verify;
+    let pages = transaction.pages.clone();
+    live.write_tx = Some(transaction);
+    if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
+        let Some(transaction) = live.write_tx.take() else {
+            return;
+        };
+        fail_transaction(
+            live,
+            transaction,
+            session,
+            safety,
+            events,
+            report,
+            error.to_string(),
+            false,
+        );
     }
 }
 
