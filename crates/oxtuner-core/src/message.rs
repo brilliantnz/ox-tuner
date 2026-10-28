@@ -5,12 +5,14 @@
 //!
 //! - **Commands carry what the core needs, never a borrowed view of UI state.**
 //!   A definition load moves bytes and a settings snapshot in; nothing is shared.
-//! - **Every accepted command is answered exactly once.** [`OpId`] is assigned by
+//! - **Every accepted command is answered exactly once while the UI is reading.**
+//!   [`OpId`] is assigned by
 //!   the sender, so the UI can correlate a reply without trusting arrival order;
 //!   the core answers with [`Event::DefinitionLoaded`], [`Event::ProjectOpened`],
 //!   [`Event::TuneSaved`], [`Event::TableRead`], [`Event::TableEdited`],
 //!   [`Event::DefinitionUnloaded`], [`Event::Failed`] or [`Event::Rejected`] —
-//!   never twice, never silently.
+//!   never twice. After shutdown is accepted an event that does not fit may be
+//!   dropped and counted instead of blocking the quit (ADR-0023).
 
 use std::{collections::HashSet, fmt, path::PathBuf};
 
@@ -1520,8 +1522,9 @@ fn field_row(project: &Project, row: &DialogRow, section: &str) -> Option<Dialog
 /// One command plus the id it will be answered under.
 ///
 /// Internal to the crate: senders wrap a [`Command`], receivers unwrap it. A
-/// command never reaches the core without an id, so "answered exactly once"
-/// is a property of the type rather than a convention.
+/// command never reaches the core without an id, so "answered exactly once
+/// while reading" is a property of the type rather than a convention; after
+/// shutdown starts a missing answer is counted as dropped.
 #[derive(Debug)]
 pub(crate) struct Envelope {
     pub(crate) op: OpId,

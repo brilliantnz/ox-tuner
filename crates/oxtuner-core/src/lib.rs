@@ -23,20 +23,25 @@
 //! - **One owner.** The definition and the tune are moved into the core thread
 //!   and dropped there. Callers receive a [`DefinitionSummary`] or a
 //!   [`ProjectSummary`], never the data.
-//! - **Answered exactly once.** [`CoreHandle::send`] returns the [`OpId`] the
-//!   reply will carry; every accepted command produces exactly one
-//!   `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` / `DefinitionUnloaded` /
-//!   `Failed` / `Rejected` event. A refused command ([`CoreError::QueueFull`])
-//!   never enters the core and receives no event — its id is simply unused.
+//! - **Answered exactly once while the UI is reading.** [`CoreHandle::send`]
+//!   returns the [`OpId`] the reply will carry; every accepted command produces
+//!   exactly one `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` /
+//!   `DefinitionUnloaded` / `Failed` / `Rejected` event. A refused command
+//!   ([`CoreError::QueueFull`]) never enters the core and receives no event —
+//!   its id is simply unused.
 //! - **Bounded and non-blocking for the UI.** Sending never blocks; a full
 //!   command queue is reported, not waited on.
 //! - **Realtime never enters the event queue.** The poller publishes
 //!   [`LatestFrame`] and the chart history, then sends a coalesced
 //!   [`FrameWatch`] wake, so a stalled UI cannot hold up acquisition, logging
 //!   or reconnect (ADR-0021).
-//! - **Deterministic shutdown.** [`CoreThread::join`] (or dropping it) queues
-//!   `Shutdown`, answers whatever is still queued with `Rejected`, emits
-//!   `Stopped`, and joins.
+//! - **Bounded shutdown.** [`CoreThread::join`] (or dropping it) raises a stop
+//!   flag, queues `Shutdown`, answers whatever is still queued with `Rejected`,
+//!   and emits `Stopped`. Once quitting has started, an event that does not fit
+//!   the queue is dropped and counted ([`CoreReport::dropped_events`]) instead
+//!   of parking the core, so a consumer that stopped reading cannot keep the
+//!   thread alive (ADR-0023). A core that is stuck inside a command is
+//!   abandoned with an error log rather than hanging the caller.
 //!
 //! # Scope
 //!

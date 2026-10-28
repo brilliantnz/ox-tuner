@@ -22,14 +22,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossfire::{MRx, MTx, RecvTimeoutError, Rx, mpmc, spsc};
+use crossfire::{MTx, RecvTimeoutError, Rx, mpsc, spsc};
 use oxtuner_datalog::{LogColumn, LogStatus, Logger};
 use oxtuner_ini::Definition;
 use oxtuner_project::Project;
 use oxtuner_protocol::{Behavior, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
-use crate::handle::{CoreHandle, EventStream, Gate};
+use crate::handle::{CoreHandle, EventStream, EventTx, Gate, SendFailure, StopFlag};
 use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
     self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
@@ -52,11 +52,17 @@ pub struct CoreConfig {
     /// only hides a stalled core, and every queued command has to be answered
     /// at shutdown.
     pub command_capacity: usize,
-    /// Events that may wait for the UI. Generous: dropping an event would break
-    /// the "answered exactly once" guarantee. Keep at least
-    /// `command_capacity + 2`, so one answer (or one [`Event::Rejected`]) per
-    /// accepted command plus [`Event::Stopped`] fits without the UI consuming —
-    /// otherwise the shutdown drain could block on the queue.
+    /// Events that may wait for the UI. Dropping an event outside shutdown would
+    /// break the "answered exactly once while reading" guarantee, so this is
+    /// generous by default.
+    ///
+    /// The value is raised to at least `command_capacity + 2` at start-up, so
+    /// one answer (or one [`Event::Rejected`]) per accepted command plus
+    /// [`Event::Stopped`] fits even when nothing reads. That keeps the common
+    /// quit path lossless, but it is not what bounds a stalled consumer: a
+    /// long session keeps producing answers, so the queue can still fill. The
+    /// stop flag is the guarantee — once shutdown is accepted, an event that
+    /// does not fit is dropped and counted instead of blocking (ADR-0023).
     pub event_capacity: usize,
     /// Whether the global write switch starts on (S8). Off unless the user
     /// enabled it in the settings and the app passed that choice in.
@@ -148,6 +154,9 @@ pub struct CoreReport {
     pub verification_failures: u64,
     /// Log frames dropped because the writer queue was full.
     pub log_drops: u64,
+    /// Events the UI never received because shutdown was already in progress
+    /// and it had stopped reading (ADR-0023).
+    pub dropped_events: u64,
     /// Slowest command, measured from dequeue to reply.
     pub max_op_latency: Duration,
     /// Sum of command durations, for the mean.
@@ -187,7 +196,7 @@ const JOIN_POLL: Duration = Duration::from_millis(10);
 ///
 /// Returns whether the core will see the command (or is already gone).
 pub(crate) fn send_shutdown(
-    commands: &MTx<mpmc::Array<Envelope>>,
+    commands: &MTx<mpsc::Array<Envelope>>,
     op: OpId,
 ) -> Result<(), CoreError> {
     match commands.send_timeout(
@@ -228,15 +237,17 @@ pub struct CoreParts {
 
 /// Owns the core thread and joins it on drop.
 ///
-/// Dropping is a safe shutdown: it queues [`Command::Shutdown`] and joins the
-/// thread, so a forgotten core is stopped and reaped, and [`CoreThread::join`]
-/// returns its report. One policy is explicit rather than pretty: a core that
-/// refuses shutdown is wedged, and a wedged thread is abandoned — loudly, after
-/// [`SHUTDOWN_WAIT`] + [`JOIN_WAIT`] — instead of hanging the caller forever.
-/// Nothing is ever detached silently.
+/// Dropping is a safe shutdown: it queues [`Command::Shutdown`], raises the stop
+/// flag so a full event queue cannot hold the thread, and joins, so a forgotten
+/// core is stopped and reaped and [`CoreThread::join`] returns its report. One
+/// policy is explicit rather than pretty: a core that refuses shutdown is
+/// wedged, and a wedged thread is abandoned — loudly, after [`SHUTDOWN_WAIT`] +
+/// [`JOIN_WAIT`] — instead of hanging the caller forever. Nothing is ever
+/// detached silently.
 pub struct CoreThread {
     join: Option<JoinHandle<CoreReport>>,
-    commands: MTx<mpmc::Array<Envelope>>,
+    commands: MTx<mpsc::Array<Envelope>>,
+    stop: Arc<StopFlag>,
 }
 
 impl CoreThread {
@@ -254,17 +265,19 @@ impl CoreThread {
         let Some(join) = self.join.take() else {
             return CoreReport::default();
         };
+        // Raise the flag first, and only then wait for room in the command
+        // queue (ADR-0023). The core thread may be blocked handing an answer to
+        // a UI that stopped reading; raising the flag makes that wait bounded,
+        // so the core returns to its loop and drains the command queue this
+        // `Shutdown` is waiting on. Raising it afterwards would deadlock the two
+        // waits against each other until both time out.
+        self.stop.request();
         match send_shutdown(&self.commands, OpId::new(0)) {
-            // The core will stop; the join below is safe to wait on, because
-            // the loop is guaranteed to end once `Shutdown` is handled. Its one
-            // dependency is a live consumer for the final events (`Stopped`
-            // among them) — oxtuner-app's event pump drains until then.
             Ok(()) | Err(CoreError::Stopped) => {}
-            // The queue stayed full, so `Shutdown` never reached the core and
-            // nothing else can be queued either. The thread is wedged or slower
-            // than the wait to finish its current command: give it a bounded
-            // moment, then abandon it — loudly and explicitly. Quitting must
-            // not hang, and nothing here detaches silently.
+            // The queue stayed full even with delivery unblocked, so the thread
+            // is wedged inside a command (a slow ECU conversation). Give it a
+            // bounded moment, then abandon it — loudly and explicitly. Quitting
+            // must not hang, and nothing here detaches silently.
             Err(error) => {
                 tracing::warn!(%error, "the core did not accept a shutdown command");
                 let deadline = Instant::now() + JOIN_WAIT;
@@ -295,8 +308,19 @@ impl Drop for CoreThread {
 
 /// Starts the core thread.
 pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
-    let (commands, command_rx) = mpmc::bounded_blocking(config.command_capacity.max(1));
-    let (event_tx, events) = mpmc::bounded_blocking_async(config.event_capacity.max(1));
+    let command_capacity = config.command_capacity.max(1);
+    // The floor is enforced rather than only documented: every accepted command
+    // owes exactly one answer, so `command_capacity` answers plus `Stopped`
+    // must always fit. Without it, a small configured capacity would let a
+    // shutdown drain block on the event queue, and the caller would abandon a
+    // perfectly healthy core.
+    let event_capacity = config
+        .event_capacity
+        .max(command_capacity.saturating_add(2));
+    let (commands, command_rx) = mpsc::bounded_blocking(command_capacity);
+    let (event_tx, events) = spsc::bounded_blocking_async(event_capacity);
+    let stop = Arc::new(StopFlag::default());
+    let event_tx = EventTx::new(event_tx, Arc::clone(&stop));
     let (frame_notify, frame_watch) = crate::realtime::frame_wake();
     let next_op = Arc::new(AtomicU64::new(OpId::FIRST));
     let gate = Arc::new(Gate::default());
@@ -334,6 +358,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
             commands: commands.clone(),
             next_op,
             gate,
+            stop: Arc::clone(&stop),
         },
         events: EventStream { events },
         latest,
@@ -343,6 +368,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
         thread: CoreThread {
             join: Some(join),
             commands,
+            stop,
         },
     })
 }
@@ -353,8 +379,8 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
 /// and a timed wait would only wake the thread for nothing.
 #[allow(clippy::too_many_arguments)]
 fn run(
-    commands: MRx<mpmc::Array<Envelope>>,
-    events: MTx<mpmc::Array<Event>>,
+    commands: Rx<mpsc::Array<Envelope>>,
+    events: EventTx,
     gate: Arc<Gate>,
     latest: LatestFrame,
     history: ChartHistory,
@@ -460,10 +486,12 @@ fn run(
     // which is the second half of the same guarantee.
     drop(commands);
     send(&events, Event::Stopped);
+    report.dropped_events = events.dropped();
     report.uptime = started.elapsed();
     tracing::debug!(
         handled = report.handled,
         rejected = report.rejected,
+        dropped_events = report.dropped_events,
         uptime_ms = report.uptime.as_millis(),
         "core thread stopped"
     );
@@ -554,7 +582,7 @@ fn handle(
     live: &mut Option<Live>,
     safety: &mut Safety,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     latest: &LatestFrame,
     history: &ChartHistory,
     log: &LogStatus,
@@ -1610,7 +1638,7 @@ fn write_to_ram(
     live: &mut Option<Live>,
     safety: &Safety,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     requested: Vec<u8>,
 ) -> Outcome {
@@ -1849,7 +1877,7 @@ fn burn_to_flash(
     live: &mut Option<Live>,
     safety: &Safety,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     requested: Vec<u8>,
 ) -> Outcome {
@@ -2046,7 +2074,7 @@ fn revert_tune(
     op: OpId,
     session: &mut Session,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
 ) -> Outcome {
     let Some(project) = session.project_mut() else {
@@ -2104,7 +2132,7 @@ fn import_tune(
     op: OpId,
     session: &mut Session,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     path: &std::path::Path,
     consented: bool,
@@ -2233,7 +2261,7 @@ fn import_tune(
 fn start_log(
     op: OpId,
     live: &mut Option<Live>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     directory: &std::path::Path,
     log: &LogStatus,
@@ -2322,7 +2350,7 @@ fn start_log(
 fn stop_log(
     op: OpId,
     live: &mut Option<Live>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
 ) -> Outcome {
     let Some(connection) = live.as_mut() else {
@@ -2380,7 +2408,7 @@ fn stop_log(
 
 /// Sends a refusal as [`Event::Failed`].
 fn refuse(
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     op: OpId,
     code: FailureCode,
@@ -2402,7 +2430,7 @@ fn refuse(
 }
 
 /// Sends the derived tune status after a change.
-fn send_status(events: &MTx<mpmc::Array<Event>>, op: OpId, project: &Project) {
+fn send_status(events: &EventTx, op: OpId, project: &Project) {
     send(
         events,
         Event::TuneStatusRead {
@@ -2576,13 +2604,16 @@ fn validate_scalar_edit(project: &Project, name: &str, value: f64) -> Result<(),
     Ok(())
 }
 
-/// Sends an event, ignoring a closed channel.
+/// Sends an event, logging why it did not arrive.
 ///
-/// A closed events channel means the UI is gone, which also ends the command
-/// loop on its own; there is nothing useful to do with the error here.
-fn send(events: &MTx<mpmc::Array<Event>>, event: Event) {
-    if events.send(event).is_err() {
-        tracing::debug!("the events channel is closed");
+/// A closed channel means the UI is gone, which also ends the command loop on
+/// its own. A drop means shutdown was in progress and the consumer had stopped
+/// reading; it is counted in the report so a lost answer is never silent.
+fn send(events: &EventTx, event: Event) {
+    match events.send(event) {
+        Ok(()) => {}
+        Err(SendFailure::Closed) => tracing::debug!("the events channel is closed"),
+        Err(SendFailure::Dropped) => {}
     }
 }
 
@@ -2958,7 +2989,7 @@ fn teardown(
     safety: &mut Safety,
     _journal_dir: Option<&std::path::Path>,
     latest: &LatestFrame,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     history: &ChartHistory,
     log: &LogStatus,
 ) {
@@ -3076,7 +3107,7 @@ fn connect(
     op: OpId,
     session: &mut Session,
     live: &mut Option<Live>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     port: PortChoice,
     framing: Option<LinkMode>,
@@ -3212,7 +3243,7 @@ fn service_live(
     session: &mut Session,
     safety: &mut Safety,
     journal_dir: Option<&std::path::Path>,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     latest: &LatestFrame,
     frames: &FrameNotify,
     history: &ChartHistory,
@@ -3282,7 +3313,7 @@ fn advance_write(
     outcome: IoOutcome,
     session: &mut Session,
     safety: &mut Safety,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     latest: &LatestFrame,
     history: &ChartHistory,
     log: &LogStatus,
@@ -3727,7 +3758,7 @@ fn succeed_transaction(
     transaction: WriteTxn,
     session: &mut Session,
     safety: &mut Safety,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
 ) {
     if session.project().is_none() {
@@ -3881,7 +3912,7 @@ fn fail_transaction(
     transaction: WriteTxn,
     session: &mut Session,
     safety: &mut Safety,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     reason: String,
     link_lost: bool,
@@ -3982,7 +4013,7 @@ fn record_result(transaction: &WriteTxn, live: &Live, result: &str, detail: &str
 fn finish_refused(
     live: &mut Live,
     transaction: WriteTxn,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     report: &mut CoreReport,
     reason: &str,
 ) {
@@ -4008,7 +4039,7 @@ fn on_reply(
     reply: IoReply,
     session: &mut Session,
     safety: &mut Safety,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     latest: &LatestFrame,
     frames: &FrameNotify,
     history: &ChartHistory,
@@ -4265,7 +4296,7 @@ fn failure_code(kind: PendingKind) -> FailureCode {
 fn connection_lost(
     live: &mut Live,
     session: &mut Session,
-    events: &MTx<mpmc::Array<Event>>,
+    events: &EventTx,
     latest: &LatestFrame,
     reason: String,
 ) {
