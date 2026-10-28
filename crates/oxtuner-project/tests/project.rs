@@ -201,6 +201,55 @@ fn a_snapshot_renders_the_working_image_without_touching_the_tune() {
 }
 
 #[test]
+fn a_snapshot_keeps_the_file_text_of_a_value_it_cannot_render() {
+    let dir = TempDir::new("unresolved-scale");
+    dir.write(
+        "projectCfg/mainController.ini",
+        r#"[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 128
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+iacMin = scalar, U08, 1, "%", {idleRes}, 0.0, 0.0, 100, 0
+"#,
+    );
+    dir.write(
+        TUNE_FILE,
+        r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="128">
+        <constant digits="1" name="reqFuel" units="ms">15.4</constant>
+        <constant name="iacMin" units="%">12.0</constant>
+    </page>
+</msq>
+"#,
+    );
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_user("reqFuel", 9.9)
+        .expect("a resolved value is editable");
+
+    let bytes = project
+        .snapshot_msq()
+        .expect("one unresolved expression must not block the snapshot");
+    let text = String::from_utf8(bytes).expect("the snapshot is UTF-8");
+    assert!(
+        text.contains(r#"<constant name="iacMin" units="%">12.0</constant>"#),
+        "the file text of the unresolved value was lost: {text}"
+    );
+    assert!(
+        text.contains(">9.9<"),
+        "the edited value is missing: {text}"
+    );
+}
+
+#[test]
 fn saving_without_edits_leaves_the_tune_byte_identical() {
     let dir = project_dir("no-op");
     let before = read_tune(&dir);

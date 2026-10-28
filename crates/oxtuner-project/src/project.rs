@@ -484,10 +484,12 @@ impl Project {
     /// Unlike [`Self::save`], which touches only changed values in the file it
     /// owns, this writes every representable variable into a copy of the
     /// document. It is the snapshot used before a risky operation (ADR-0011 S4)
-    /// and is never written over the project's tune. Values the file cannot
-    /// represent (a variable with no label, a broken text constant) are skipped
-    /// by [`load::format_values`] and reported by the error, exactly as a save
-    /// would.
+    /// and is never written over the project's tune. A value the file cannot
+    /// represent keeps the text the document already had: a variable with no
+    /// label, a broken text constant, or a `scale` expression this build could
+    /// not evaluate (Speeduino's `{idleRes}`). The last case is safe because
+    /// such a value is never loaded from the file nor edited, so the tune holds
+    /// no change worth snapshotting.
     pub fn snapshot_msq(&self) -> Result<Vec<u8>, ProjectError> {
         let mut document = self.msq.clone();
         for spec in self.layout().variables() {
@@ -500,12 +502,9 @@ impl Project {
             if values.is_empty() {
                 continue;
             }
-            let text = load::format_values(spec, &self.definition, values).map_err(|source| {
-                ProjectError::Unrepresentable {
-                    name: spec.name.clone(),
-                    source,
-                }
-            })?;
+            let Ok(text) = load::format_values(spec, &self.definition, values) else {
+                continue;
+            };
             let (page, kind) = match spec.ini_page() {
                 Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
                 None => (EntryPage::Pc, EntryKind::PcVariable),
