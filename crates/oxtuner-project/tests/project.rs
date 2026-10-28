@@ -178,6 +178,29 @@ fn open_edit_save_reopen_round_trips_every_value_shape() {
 }
 
 #[test]
+fn a_snapshot_renders_the_working_image_without_touching_the_tune() {
+    let dir = project_dir("snapshot");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    let before = read_tune(&dir);
+    project.tune_mut().set_user("reqFuel", 9.9).expect("known");
+    project
+        .tune_mut()
+        .set_cell_user("table", 1, 1, 42.0)
+        .expect("known");
+
+    let bytes = project.snapshot_msq().expect("the snapshot renders");
+    assert_eq!(read_tune(&dir), before, "the project file is untouched");
+
+    let snapshot = dir.path().join("snapshot.msq");
+    fs::write(&snapshot, &bytes).expect("snapshot written");
+    let reopened =
+        Project::open_standalone(&snapshot, dir.path().join("projectCfg/mainController.ini"))
+            .expect("the snapshot opens as a tune");
+    assert_close(reopened.tune().scalar_user("reqFuel").unwrap(), 9.9);
+    assert_close(reopened.tune().cell_user("table", 1, 1).unwrap(), 42.0);
+}
+
+#[test]
 fn saving_without_edits_leaves_the_tune_byte_identical() {
     let dir = project_dir("no-op");
     let before = read_tune(&dir);

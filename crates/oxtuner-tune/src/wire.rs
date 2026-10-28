@@ -168,6 +168,7 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
                 let source = text.as_bytes();
                 let end = start.saturating_add(len).min(bytes.len());
                 let take = source.len().min(end - start);
+                bytes[start..end].fill(0);
                 bytes[start..start + take].copy_from_slice(&source[..take]);
             }
             EntryShape::Scalar => {
@@ -196,6 +197,112 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
                 let merged = (existing as i64 & !i64::from(mask))
                     | ((value as i64) << low & i64::from(mask));
                 let _ = width;
+                write_value(
+                    &mut bytes,
+                    start,
+                    variable.data_type,
+                    layout.endianness(),
+                    merged as f64,
+                );
+            }
+            EntryShape::Array { cols, rows } => {
+                let count = cols.saturating_mul(rows);
+                let width = variable.data_type.size() as usize;
+                for element in 0..count {
+                    let Ok(raw) = tune.raw_at(&variable.name, element) else {
+                        break;
+                    };
+                    let at = start.saturating_add(element.saturating_mul(width));
+                    write_value(&mut bytes, at, variable.data_type, layout.endianness(), raw);
+                }
+            }
+        }
+    }
+
+    Ok(bytes)
+}
+
+/// Writes the named variables' values into an existing page image.
+///
+/// This is the delta write path: a page read from the ECU is the base, and only
+/// variables whose working value changed are repainted into it. Every other
+/// byte — controller-owned values, fields this build does not model, and the
+/// untouched bits of a shared word — stays exactly as the ECU sent it. Writing
+/// a full [`encode_page`] image would overwrite those with defaults.
+///
+/// Names are matched case-insensitively, as the layout is. A name that is not on
+/// this page contributes nothing.
+pub fn patch_page(
+    layout: &Layout,
+    page: IniPage,
+    base: &[u8],
+    tune: &Tune,
+    variables: &[String],
+) -> Result<Vec<u8>, TuneError> {
+    let Some(page_layout) = layout.page(page) else {
+        return Err(TuneError::UnknownPage { page });
+    };
+    let size = usize::try_from(page_layout.size).unwrap_or(0);
+    if base.len() < size {
+        return Err(TuneError::ShortPage {
+            page,
+            got: base.len(),
+            expected: size,
+        });
+    }
+
+    let mut bytes = base[..size].to_vec();
+    let changed: std::collections::HashSet<String> = variables
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+
+    for index in &page_layout.variables {
+        let variable = &layout.variables()[*index];
+        if !changed.contains(&variable.name.to_ascii_lowercase()) {
+            continue;
+        }
+        let Some(start) = offset_of(variable, page_layout.start_offset) else {
+            continue;
+        };
+        match variable.shape {
+            EntryShape::Text { len } => {
+                if start >= bytes.len() {
+                    continue;
+                }
+                let Ok(text) = tune.text(&variable.name) else {
+                    continue;
+                };
+                let source = text.as_bytes();
+                let end = start.saturating_add(len).min(bytes.len());
+                let take = source.len().min(end - start);
+                bytes[start..end].fill(0);
+                bytes[start..start + take].copy_from_slice(&source[..take]);
+            }
+            EntryShape::Scalar => {
+                let Ok(raw) = tune.raw_at(&variable.name, 0) else {
+                    continue;
+                };
+                write_value(
+                    &mut bytes,
+                    start,
+                    variable.data_type,
+                    layout.endianness(),
+                    raw,
+                );
+            }
+            EntryShape::Bits { low, high, .. } => {
+                let Ok(value) = tune.raw_at(&variable.name, 0) else {
+                    continue;
+                };
+                let Some(existing) =
+                    read_value(&bytes, start, variable.data_type, layout.endianness())
+                else {
+                    continue;
+                };
+                let mask = bit_mask(low, high);
+                let merged = (existing as i64 & !i64::from(mask))
+                    | ((value as i64) << low & i64::from(mask));
                 write_value(
                     &mut bytes,
                     start,
@@ -489,5 +596,75 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
             decode_page(&layout, IniPage::FIRST, &[0u8; 4], &mut tune).expect_err("too short");
 
         assert!(matches!(error, TuneError::ShortPage { .. }));
+    }
+
+    #[test]
+    fn a_patch_writes_only_the_named_variable() {
+        let definition = definition();
+        let layout = Layout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_user("rpm", 4200.0).expect("known");
+        let base = [0x10, 0x27, 0xFB, 0x14, b'o', b'x', b' ', b' ', 0, 0];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["rpm".to_owned()])
+            .expect("patches");
+
+        // 4200 raw = 0x1068.
+        assert_eq!(&patched[..2], &[0x68, 0x10]);
+        assert_eq!(&patched[2..], &base[2..]);
+    }
+
+    #[test]
+    fn a_patch_clears_the_rest_of_a_short_text_field() {
+        let definition = definition();
+        let layout = Layout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_text("name", "ox").expect("known");
+
+        let patched = patch_page(
+            &layout,
+            IniPage::FIRST,
+            &[0, 0, 0, 0, b'A', b'B', b'C', b'D', 0, 0],
+            &tune,
+            &["name".to_owned()],
+        )
+        .expect("patches");
+
+        assert_eq!(&patched[4..8], &[b'o', b'x', 0, 0]);
+    }
+
+    #[test]
+    fn a_patch_keeps_the_other_bits_of_a_shared_word() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+status = scalar, U08, 0, \"bits\", 1.0, 0.0
+running = bits, U08, 0, [0:0]
+fan = bits, U08, 0, [1:1]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Layout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_user("fan", 1.0).expect("known");
+
+        let patched = patch_page(
+            &layout,
+            IniPage::FIRST,
+            &[0b0000_0001, 0, 0, 0],
+            &tune,
+            &["fan".to_owned()],
+        )
+        .expect("patches");
+
+        assert_eq!(patched[0], 0b0000_0011, "running keeps its bit");
     }
 }

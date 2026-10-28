@@ -413,9 +413,12 @@ impl TuneImages {
 
     /// Replaces the working image (an import). The caller owns consent policy
     /// ([`crate::WriteIntent::needs_consent`]).
+    ///
+    /// The imported tune keeps its own layout allocation, so values are adopted
+    /// into this project's layout after a name-and-shape check; the session's
+    /// `Arc<Layout>` is never replaced under the views holding it.
     pub fn import(&mut self, tune: Tune) -> Result<(), TuneError> {
-        self.check_layout(&tune)?;
-        self.working = tune;
+        self.working.adopt_values(&tune)?;
         self.overlays
             .retain(|_, overlay| *overlay != Overlay::Conflict);
         Ok(())
@@ -455,11 +458,13 @@ impl TuneImages {
     pub fn status(&self) -> TuneStatus {
         let unsaved = diff_values(&self.layout, self.baseline.values(), self.working.values());
         let pending_write = match &self.ecu_ram {
-            Some(ram) => diff_values(&self.layout, ram.values(), self.working.values()),
+            Some(ram) => diff_writable_values(&self.layout, ram.values(), self.working.values()),
             None => unsaved.clone(),
         };
         let pending_burn = match (&self.ecu_ram, &self.ecu_flash) {
-            (Some(ram), Some(flash)) => diff_values(&self.layout, ram.values(), flash.values()),
+            (Some(ram), Some(flash)) => {
+                diff_writable_values(&self.layout, ram.values(), flash.values())
+            }
             _ => TuneDiff::default(),
         };
         let conflicts = self
@@ -700,6 +705,28 @@ pub fn conflict_names(images: &TuneImages) -> BTreeSet<String> {
         .into_iter()
         .map(|conflict| conflict.name)
         .collect()
+}
+
+fn diff_writable_values(layout: &Layout, left: &[Values], right: &[Values]) -> TuneDiff {
+    let mut diff = TuneDiff::default();
+    for (index, variable) in layout.variables().iter().enumerate() {
+        if variable.is_controller_owned() || variable.address.is_none() {
+            continue;
+        }
+        let (Some(left), Some(right)) = (left.get(index), right.get(index)) else {
+            continue;
+        };
+        let changed = left.changed_cells(right);
+        if changed == 0 {
+            continue;
+        }
+        diff.changed_variables.push(variable.name.clone());
+        diff.cells += changed;
+        if let Some(page) = variable.ini_page() {
+            *diff.pages.entry(page).or_default() += changed;
+        }
+    }
+    diff
 }
 
 #[cfg(test)]

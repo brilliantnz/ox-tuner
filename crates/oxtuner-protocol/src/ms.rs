@@ -495,7 +495,7 @@ impl MsProtocol {
     ///
     /// `ReadBeforeUse` sends a one-byte read of the target page: the legacy
     /// protocol uses that read to select the page. `BurnBeforeSwitch` refuses
-    /// the switch here; only the core's burn path may perform it (M7).
+    /// the switch here; only the core's burn path may perform it.
     fn activate(&mut self, io: &mut dyn Transport, page: u8) -> Result<(), ProtocolError> {
         if self.last_page == Some(page) {
             return Ok(());
