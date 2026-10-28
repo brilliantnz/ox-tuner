@@ -29,10 +29,6 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
         .tune_status
         .as_ref()
         .map_or(0, |status| status.pending_write.cells);
-    let changed = status
-        .tune_status
-        .as_ref()
-        .map_or(0, |status| status.unsaved.cells);
     let halted = status.write_halted.clone();
     let connected = status.connection.is_some();
 
@@ -55,7 +51,7 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(t!("app.write.snapshot", changed = changed.to_string())),
+                            .child(t!("app.write.snapshot")),
                     )
                     .when(!writes_enabled, |this| {
                         this.child(
