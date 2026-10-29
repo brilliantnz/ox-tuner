@@ -35,7 +35,6 @@ pub mod project;
 pub mod realtime;
 pub mod settings;
 pub mod state;
-mod table;
 pub mod theme;
 
 /// Initialize GPUI Kit, the interface language, the keymap and the app-level

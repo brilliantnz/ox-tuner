@@ -12,14 +12,15 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, TestAppContext, Window,
     WindowBounds, WindowOptions, div, px, size,
 };
-use oxtuner_core::{AxisSummary, CellState, TableSummary};
+use oxtuner_core::{AxisKind, AxisSummary, CellState, TableSummary};
 
-use super::grid::RealtimePoint;
-use super::model::CellPos;
-use super::{TableGrid, TableGridEvent};
+use super::RealtimePoint;
+use super::geometry::{CELL_GAP, CELL_WIDTH};
+use super::model::{AxisTarget, CellPos};
+use super::{Table, TableEvent};
 
 struct Host {
-    grid: Entity<TableGrid>,
+    grid: Entity<Table>,
     _events: Subscription,
 }
 
@@ -66,17 +67,13 @@ fn open(
     cx: &mut TestAppContext,
     rows: usize,
     columns: usize,
-) -> (
-    AnyWindowHandle,
-    Entity<TableGrid>,
-    Rc<RefCell<Vec<TableGridEvent>>>,
-) {
+) -> (AnyWindowHandle, Entity<Table>, Rc<RefCell<Vec<TableEvent>>>) {
     cx.update(gpui_kit::init);
     let events = Rc::new(RefCell::new(Vec::new()));
     let (handle, grid) = cx.update(|cx| {
-        let grid = cx.new(TableGrid::new);
+        let grid = cx.new(Table::new);
         let sink = events.clone();
-        let subscription = cx.subscribe(&grid, move |_, event: &TableGridEvent, _| {
+        let subscription = cx.subscribe(&grid, move |_, event: &TableEvent, _| {
             sink.borrow_mut().push(event.clone());
         });
         let host = cx.new(|_| Host {
@@ -119,7 +116,7 @@ fn column_header(column: usize) -> ElementId {
     ElementId::from(("column-header", column))
 }
 
-fn selected(grid: &Entity<TableGrid>, cx: &mut TestAppContext) -> CellPos {
+fn selected(grid: &Entity<Table>, cx: &mut TestAppContext) -> CellPos {
     cx.update(|cx| grid.read(cx).model().selection().cursor)
 }
 
@@ -133,6 +130,41 @@ fn clicking_a_cell_selects_it(cx: &mut TestAppContext) {
     .unwrap();
 
     assert_eq!(selected(&grid, cx), CellPos { row: 3, column: 4 });
+}
+
+#[gpui_kit::test]
+fn a_header_bin_edit_starts_on_a_double_click(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(column_header(2), cx);
+    })
+    .unwrap();
+    assert!(
+        cx.update(|cx| grid.read(cx).model().axis_editing().is_none()),
+        "a single press must not open a bin editor"
+    );
+
+    cx.update_window(handle, |_, window, cx| {
+        window.double_click(column_header(2), cx);
+    })
+    .unwrap();
+
+    let target = cx.update(|cx| {
+        grid.read(cx)
+            .model()
+            .axis_editing()
+            .map(|editing| editing.target)
+    });
+    assert_eq!(
+        target,
+        Some(AxisTarget {
+            axis: AxisKind::X,
+            index: 2,
+        }),
+        "a double press opens the bin editor for that column"
+    );
 }
 
 #[gpui_kit::test]
@@ -234,7 +266,7 @@ fn typing_an_edit_requests_it_and_shows_it_immediately(cx: &mut TestAppContext) 
     let requested = events.borrow().iter().any(|event| {
         matches!(
             event,
-            TableGridEvent::EditRequested { name, edits }
+            TableEvent::EditRequested { name, edits }
                 if name == "veTable"
                     && edits.len() == 1
                     && edits[0].row == 2
@@ -243,6 +275,70 @@ fn typing_an_edit_requests_it_and_shows_it_immediately(cx: &mut TestAppContext) 
         )
     });
     assert!(requested, "the grid asked the owner to send the edit");
+}
+
+#[gpui_kit::test]
+fn shift_navigation_widens_the_selection_outline(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(cell(2, 2, 8), cx);
+        window.press("shift-right", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // Two selected columns: two cell widths plus the gap between them.
+    let expected = 2.0 * CELL_WIDTH + CELL_GAP;
+    let width = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find(ElementId::from("selection-frame"))
+        })
+        .unwrap()
+        .map(|frame| f32::from(frame.bounds().size.width));
+    let selection = cx.update(|cx| grid.read(cx).model().selection().bounds());
+    assert_eq!(
+        width,
+        Some(expected),
+        "the outline follows shift-navigation like a spreadsheet selection"
+    );
+    assert_eq!(selection, (2, 2, 2, 3), "shift-right extended one column");
+}
+
+#[gpui_kit::test]
+fn the_selection_draws_one_outline_over_the_range(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.drag_to(cell(1, 1, 8), cell(3, 4, 8), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // The outline must match the selection rectangle exactly, whatever the
+    // drag produced — one frame over the range, not a border per cell.
+    let (columns, expected) = cx.update(|cx| {
+        let model = grid.read(cx).model();
+        let (_, left, _, right) = model.selection().bounds();
+        let columns = right - left + 1;
+        let span = columns as f32;
+        (columns, span * CELL_WIDTH + (span - 1.) * CELL_GAP)
+    });
+    assert!(columns > 1, "the drag must select several columns");
+
+    let width = cx
+        .update_window(handle, |_, window, _| {
+            window.try_find(ElementId::from("selection-frame"))
+        })
+        .unwrap()
+        .map(|frame| f32::from(frame.bounds().size.width));
+    assert_eq!(
+        width,
+        Some(expected),
+        "the outline spans the whole selection as one rectangle"
+    );
 }
 
 #[gpui_kit::test]
@@ -446,7 +542,7 @@ fn undo_and_redo_keys_write_the_old_and_new_values(cx: &mut TestAppContext) {
         "undo restores the value the edit replaced"
     );
     let undone = events.borrow().iter().rev().find_map(|event| match event {
-        TableGridEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
+        TableEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
         _ => None,
     });
     assert_eq!(undone, Some(19.0), "undo is sent to the core as an edit");
@@ -461,7 +557,7 @@ fn undo_and_redo_keys_write_the_old_and_new_values(cx: &mut TestAppContext) {
         "redo writes the edit again"
     );
     let redone = events.borrow().iter().rev().find_map(|event| match event {
-        TableGridEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
+        TableEvent::EditRequested { edits, .. } => edits.first().map(|edit| edit.value),
         _ => None,
     });
     assert_eq!(redone, Some(5.0));

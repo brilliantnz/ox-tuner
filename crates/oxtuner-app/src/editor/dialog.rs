@@ -23,7 +23,7 @@ use oxtuner_core::{DialogFieldKind, DialogSummary, Failure, FailureCode, SaveSum
 
 use crate::core::CoreService;
 use crate::i18n::t;
-use crate::table::{EditOp, parse_edit};
+use oxtuner_ui::table::{EditOp, parse_edit};
 
 /// An in-progress row edit.
 struct RowEditing {

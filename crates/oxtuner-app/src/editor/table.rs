@@ -1,9 +1,9 @@
-//! The table editor: toolbar, grid, and the line under them.
+//! The table editor: toolbar, the table widget, and the line under them.
 //!
-//! This view owns the relationship between the grid and the core. The grid asks
-//! for edits; this sends them as commands and feeds the echoed snapshot back.
-//! The Y-axis flip is a workspace view preference, persisted with the panel
-//! layout so it survives a restart.
+//! This view owns the relationship between the table and the core. The table
+//! asks for edits; this sends them as commands and feeds the echoed snapshot
+//! back. The Y-axis flip is a workspace view preference, persisted with the
+//! panel layout so it survives a restart.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -20,15 +20,15 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
 use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
+use oxtuner_ui::table::{BulkOp, GridAction, Table, TableEvent, TableStyle};
 
 use crate::core::{CoreService, edit_table, read_table};
 use crate::i18n::t;
 use crate::state::session::{AppState, schedule_save};
-use crate::table::{BulkOp, GridAction, TableGrid, TableGridEvent};
 
 /// The table editor for the node selected in the navigation tree.
 pub(crate) struct TableEditor {
-    grid: Entity<TableGrid>,
+    table: Entity<Table>,
     /// The menu label, shown until the snapshot arrives and if it never does.
     label: SharedString,
     /// The table id the selection asked for.
@@ -47,21 +47,42 @@ pub(crate) struct TableEditor {
     cache_revision: u64,
     flip_y: bool,
     _core: Subscription,
-    _grid: Subscription,
+    _table: Subscription,
+}
+
+/// The table tokens from the application theme, matching `chart_style` in the
+/// realtime view.
+fn table_style(theme: &gpui_kit::component::Theme) -> TableStyle {
+    TableStyle {
+        background: theme.background,
+        foreground: theme.foreground,
+        surface: theme.group_box,
+        muted: theme.muted_foreground,
+        border: theme.border,
+        danger: theme.danger,
+        warning: theme.warning,
+        info: theme.info,
+        accent: theme.primary,
+        radius: theme.radius_lg,
+    }
 }
 
 impl TableEditor {
     /// An editor with no table loaded yet.
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let grid = cx.new(TableGrid::new);
-        let _grid = cx.subscribe(&grid, |this, _, event, cx| this.on_grid(event, cx));
+        let table = cx.new(|cx| {
+            let mut table = Table::new(cx);
+            table.set_style(table_style(cx.theme()), cx);
+            table
+        });
+        let _table = cx.subscribe(&table, |this, _, event, cx| this.on_table(event, cx));
         let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
         let flip_y = cx
             .try_global::<AppState>()
             .is_some_and(|state| state.data().layout.table_low_at_top);
 
         let editor = Self {
-            grid,
+            table,
             label: SharedString::default(),
             requested: None,
             last_save: None,
@@ -71,11 +92,11 @@ impl TableEditor {
             cache_revision: 0,
             flip_y,
             _core,
-            _grid,
+            _table,
         };
         editor
-            .grid
-            .update(cx, |grid, cx| grid.set_flip_y(flip_y, cx));
+            .table
+            .update(cx, |table, cx| table.set_flip_y(flip_y, cx));
         editor
     }
 
@@ -99,7 +120,7 @@ impl TableEditor {
 
         let already_shown = self.requested.as_deref() == Some(name)
             && self
-                .grid
+                .table
                 .read(cx)
                 .model()
                 .table()
@@ -117,11 +138,11 @@ impl TableEditor {
             .filter(|table| table.id == name)
             .cloned();
         if let Some(table) = existing.or_else(|| self.cache.get(name).cloned()) {
-            self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
+            self.table.update(cx, |grid, cx| grid.set_table(table, cx));
         } else {
             // Do not show the previous table's values while the next snapshot
             // travels through the core; an empty grid plus "Loading" is honest.
-            self.grid.update(cx, TableGrid::clear_table);
+            self.table.update(cx, Table::clear_table);
             read_table(name, cx);
         }
         cx.notify();
@@ -156,7 +177,7 @@ impl TableEditor {
                 match status.table.as_ref().filter(|table| &table.id == requested) {
                     Some(table) => {
                         table_matches = true;
-                        let seen = self.grid.read(cx).model().table() == Some(table);
+                        let seen = self.table.read(cx).model().table() == Some(table);
                         if !seen {
                             snapshot = Some(table.clone());
                         }
@@ -193,7 +214,7 @@ impl TableEditor {
         if let Some(table) = snapshot {
             self.failure = None;
             self.cache.insert(table.id.clone(), table.clone());
-            self.grid.update(cx, |grid, cx| grid.set_table(table, cx));
+            self.table.update(cx, |grid, cx| grid.set_table(table, cx));
         }
         if table_matches {
             // The next successful core state proves the previous table failure
@@ -204,13 +225,13 @@ impl TableEditor {
             if let Some(name) = &self.requested {
                 self.cache.remove(name);
             }
-            self.grid.update(cx, TableGrid::clear_table);
+            self.table.update(cx, Table::clear_table);
         }
         if failure.is_some() {
             self.failure = failure;
         }
         if edit_failed {
-            self.grid.update(cx, TableGrid::reject_pending);
+            self.table.update(cx, Table::reject_pending);
         }
         if saved && let Some(name) = reload {
             read_table(&name, cx);
@@ -218,21 +239,21 @@ impl TableEditor {
         cx.notify();
     }
 
-    fn on_grid(&mut self, event: &TableGridEvent, cx: &mut Context<Self>) {
+    fn on_table(&mut self, event: &TableEvent, cx: &mut Context<Self>) {
         match event {
-            TableGridEvent::EditRequested { name, edits } => {
+            TableEvent::EditRequested { name, edits } => {
                 edit_table(name, edits.clone(), cx);
             }
-            TableGridEvent::AxisEditRequested { table, axis, edits } => {
+            TableEvent::AxisEditRequested { table, axis, edits } => {
                 crate::core::edit_axis(table, *axis, edits.clone(), cx);
             }
-            TableGridEvent::SelectionChanged => cx.notify(),
+            TableEvent::SelectionChanged => cx.notify(),
         }
     }
 
     fn toggle_flip_y(&mut self, cx: &mut Context<Self>) {
         self.flip_y = !self.flip_y;
-        self.grid
+        self.table
             .update(cx, |grid, cx| grid.set_flip_y(self.flip_y, cx));
         AppState::update_global(cx, |data| {
             data.layout.table_low_at_top = self.flip_y;
@@ -262,16 +283,16 @@ impl TableEditor {
         let read_only = table.is_some_and(|table| !table.writable);
         let has_table = table.is_some();
 
-        let copy = self.grid.clone();
-        let paste = self.grid.clone();
-        let undo = self.grid.clone();
-        let redo = self.grid.clone();
-        let operations = self.grid.clone();
+        let copy = self.table.clone();
+        let paste = self.table.clone();
+        let undo = self.table.clone();
+        let redo = self.table.clone();
+        let operations = self.table.clone();
 
         // A menu entry that cannot run is shown disabled: the selection's shape
         // decides, and the operation explains itself in its label.
         let (can_undo, can_redo, bulk, rebin) = {
-            let model = self.grid.read(cx).model();
+            let model = self.table.read(cx).model();
             (
                 model.can_undo(),
                 model.can_redo(),
@@ -422,7 +443,7 @@ impl TableEditor {
                     .disabled(!has_table)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_flip_y(cx);
-                        let focus = this.grid.read(cx).focus_handle(cx);
+                        let focus = this.table.read(cx).focus_handle(cx);
                         window.focus(&focus, cx);
                     })),
             );
@@ -488,7 +509,7 @@ impl TableEditor {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .child(self.grid.clone())
+                .child(self.table.clone())
                 .into_any_element();
         }
 
@@ -530,7 +551,7 @@ impl TableEditor {
 
     fn render_status(&self, table: &TableSummary, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let model = self.grid.read(cx).model();
+        let model = self.table.read(cx).model();
         let cursor = model.selection().cursor;
         // Bins come from the model so an optimistic header edit shows in the
         // same frame the key was pressed, before the core echoes it.
@@ -651,14 +672,23 @@ impl TableEditor {
 impl Render for TableEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        // One small snapshot clone per frame keeps the borrow of the grid out
+        // The table paints from a token snapshot, not the live theme, so a
+        // theme change reached from settings only lands after it is pushed
+        // here. The comparison keeps an unchanged theme from re-rendering the
+        // grid every frame.
+        let style = table_style(&theme);
+        if self.table.read(cx).style() != &style {
+            self.table
+                .update(cx, |table, cx| table.set_style(style, cx));
+        }
+        // One small snapshot clone per frame keeps the borrow of the table out
         // of the render helpers, which need `cx` mutably for their buttons.
-        let table = self.grid.read(cx).model().table().cloned();
-        let has_table = table.is_some();
+        let snapshot = self.table.read(cx).model().table().cloned();
+        let has_table = snapshot.is_some();
         let failure = self.failure.as_ref();
-        let header = self.render_header(table.as_ref(), cx);
+        let header = self.render_header(snapshot.as_ref(), cx);
         let content = self.render_content(has_table, failure, cx);
-        let status = table.as_ref().map(|table| self.render_status(table, cx));
+        let status = snapshot.as_ref().map(|table| self.render_status(table, cx));
 
         v_flex()
             .size_full()
@@ -672,7 +702,7 @@ impl Render for TableEditor {
 }
 
 fn bulk_item(
-    grid: Entity<TableGrid>,
+    grid: Entity<Table>,
     label: SharedString,
     op: BulkOp,
     disabled: bool,
@@ -687,7 +717,7 @@ fn bulk_item(
 }
 
 fn rebin_item(
-    grid: Entity<TableGrid>,
+    grid: Entity<Table>,
     label: SharedString,
     axis: oxtuner_core::AxisKind,
     disabled: bool,

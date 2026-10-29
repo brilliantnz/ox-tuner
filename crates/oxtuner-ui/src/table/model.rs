@@ -1,7 +1,7 @@
-//! The grid's state, free of GPUI types.
+//! The table's state, free of GPUI types.
 //!
 //! Selection, edit parsing, copy/paste and the display flip are plain Rust so
-//! they can be tested without a window (ADR-0013). The view in [`super::view`]
+//! they can be tested without a window (ADR-0013). The view in [`super::Table`]
 //! renders this state and turns its requested edits into events; the core stays
 //! the only owner of tune values.
 //!
