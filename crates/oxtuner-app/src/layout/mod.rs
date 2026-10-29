@@ -1,4 +1,4 @@
-//! The main window's shell view.
+//! The main window's layout view.
 //!
 //! Three resizable panels under one title bar, named by role:
 //!
@@ -66,7 +66,7 @@ use crate::{
 };
 
 /// The application's main view.
-pub(crate) struct Shell {
+pub(crate) struct AppLayout {
     /// Keeps the OS-appearance observer alive; dropping it stops following the
     /// system theme.
     _appearance: Subscription,
@@ -107,7 +107,7 @@ enum EditorTab {
     Constants,
 }
 
-impl Shell {
+impl AppLayout {
     fn new(window: &mut Window, menu_bar: Entity<AppMenuBar>, cx: &mut Context<Self>) -> Self {
         // Start-up applies the stored preference once; this follows live OS
         // changes only while the user chose `System`. A Light or Dark preference
@@ -141,7 +141,7 @@ impl Shell {
         });
 
         // The tree is its own entity: it observes the core, owns the gpui-kit
-        // tree state and keeps the selection. The shell watches it only to
+        // tree state and keeps the selection. The layout watches it only to
         // repaint the editor column when the selection changes.
         let explorer = cx.new(Explorer::new);
         let table_editor = cx.new(TableEditor::new);
@@ -581,7 +581,7 @@ impl Shell {
     }
 }
 
-impl Render for Shell {
+impl Render for AppLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
         let (primary, secondary, bottom) = (layout.primary(), layout.secondary(), layout.bottom());
@@ -600,7 +600,7 @@ impl Render for Shell {
             .child(MainBar::new(self.menu_bar.clone()).actions(self.render_panel_buttons(cx)))
             .child(
                 div().flex_1().min_h_0().child(
-                    h_resizable("shell-primary")
+                    h_resizable("layout-primary")
                         .on_resize(move |state, _, cx| {
                             // Only a visible sidebar has a handle, and a hidden
                             // one would report the editor's width instead.
@@ -629,7 +629,7 @@ impl Render for Shell {
                         })
                         .child(
                             resizable_panel().child(
-                                h_resizable("shell-panels")
+                                h_resizable("layout-panels")
                                     .on_resize(move |state, _, cx| {
                                         if !secondary_visible {
                                             return;
@@ -642,7 +642,7 @@ impl Render for Shell {
                                     })
                                     .child(
                                         resizable_panel().child(
-                                            v_resizable("shell-editor")
+                                            v_resizable("layout-editor")
                                                 .on_resize(move |state, _, cx| {
                                                     if !bottom_visible {
                                                         return;
@@ -701,24 +701,24 @@ impl Render for Shell {
 /// Opens the main window and remembers its handle for window-dependent commands.
 ///
 /// Called by `main` after the settings and session documents are installed;
-/// everything the shell needs from them is read here or during its first render.
+/// everything the layout needs from them is read here or during its first render.
 pub fn open_main_window(cx: &mut App) {
     // The menu must be installed after the keymap, so item shortcuts come from
     // the bindings `init` applied.
     let menu_bar = menu::init(cx);
 
-    let (handle, shell) = gpui_kit::open_window(app::window::options(cx), cx, |window, cx| {
+    let (handle, view) = gpui_kit::open_window(app::window::options(cx), cx, |window, cx| {
         // Before the view exists: closing the window must hide the app on macOS
         // rather than leave it running with no window and no way back.
         app::window::install_close_behavior(window, cx);
         // The window opens windowed; the platform state the last session left is
         // applied here, where the window exists.
         app::window::restore(window, cx);
-        cx.new(|cx| Shell::new(window, menu_bar.clone(), cx))
+        cx.new(|cx| AppLayout::new(window, menu_bar.clone(), cx))
     })
     .expect("failed to open the main window");
 
-    app::window::set(cx, handle, &shell);
+    app::window::set(cx, handle, &view);
     app::window::save_on_quit(cx);
 
     // The first launch shows the disclaimer until acceptance is recorded. The
@@ -785,7 +785,7 @@ fn set_work_view(view: WorkView, cx: &mut App) {
 fn toggle_panel(cx: &mut App, mutate: impl FnOnce(&mut crate::state::session::LayoutState)) {
     AppState::update_global(cx, |data| mutate(&mut data.layout));
     schedule_save(cx);
-    // Only the shell draws panels; the Settings window has nothing to update.
+    // Only the main layout draws panels; the Settings window has nothing to update.
     app::window::notify_main(cx);
 }
 

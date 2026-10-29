@@ -438,7 +438,7 @@ fn apply(event: Event, cx: &mut App) {
         if let Some(root) = remember {
             crate::project::remember(&root, cx);
         }
-        // Only the shell shows the core status; the Settings window does not.
+        // Only the main layout shows the core status; the Settings window does not.
         cx.refresh_windows();
     }
 
@@ -475,7 +475,7 @@ fn apply(event: Event, cx: &mut App) {
             if let Some(window) = crate::app::window::main(cx) {
                 window
                     .update(cx, |_, window, cx| {
-                        crate::shell::write_dialogs::show_import_consent(window, cx);
+                        crate::layout::write_dialogs::show_import_consent(window, cx);
                     })
                     .ok();
             }
@@ -773,7 +773,7 @@ pub(crate) fn request_connect(cx: &mut App) {
         if let Some(window) = crate::app::window::main(cx) {
             window
                 .update(cx, |_, window, cx| {
-                    crate::shell::connect_dialog::show(window, cx);
+                    crate::layout::connect_dialog::show(window, cx);
                 })
                 .ok();
         }

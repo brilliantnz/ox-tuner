@@ -18,7 +18,7 @@ pub mod window;
 
 use gpui_kit::{App, Window};
 
-use crate::{core, disclaimer, project, settings, shell};
+use crate::{core, disclaimer, layout, project, settings};
 
 pub fn app_identity() -> &'static str {
     "com.oxtuner.OxTuner"
@@ -56,7 +56,7 @@ pub fn init(cx: &mut App) {
             if let Some(window) = window::main(cx) {
                 window
                     .update(cx, |_, window, cx| {
-                        shell::project_dialog::show(window, cx);
+                        layout::project_dialog::show(window, cx);
                     })
                     .ok();
             }
@@ -69,29 +69,29 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &actions::ConnectEcu, cx| core::request_connect(cx));
     cx.on_action(|_: &actions::DisconnectEcu, cx| core::disconnect(cx));
     cx.on_action(|_: &actions::SaveSessionTrace, cx| core::save_trace(cx));
-    cx.on_action(|_: &actions::ShowTune, cx| shell::show_tune(cx));
-    cx.on_action(|_: &actions::ShowCharts, cx| shell::show_charts(cx));
+    cx.on_action(|_: &actions::ShowTune, cx| layout::show_tune(cx));
+    cx.on_action(|_: &actions::ShowCharts, cx| layout::show_charts(cx));
     cx.on_action(|_: &actions::WriteToRam, cx| {
-        with_main_window(cx, shell::write_dialogs::show_write)
+        with_main_window(cx, layout::write_dialogs::show_write)
     });
     cx.on_action(|_: &actions::BurnToFlash, cx| {
-        with_main_window(cx, shell::write_dialogs::show_burn)
+        with_main_window(cx, layout::write_dialogs::show_burn)
     });
     cx.on_action(|_: &actions::AdoptEcuTune, cx| core::adopt_ecu_tune(cx));
     cx.on_action(|_: &actions::RevertTune, cx| {
-        with_main_window(cx, shell::write_dialogs::show_revert)
+        with_main_window(cx, layout::write_dialogs::show_revert)
     });
     cx.on_action(|_: &actions::EnableWrites, cx| {
-        with_main_window(cx, shell::write_dialogs::show_enable_writes)
+        with_main_window(cx, layout::write_dialogs::show_enable_writes)
     });
     cx.on_action(|_: &actions::ImportTune, cx| core::choose_import(cx));
     cx.on_action(|_: &actions::WriteJournal, cx| {
         core::read_journal(cx);
-        with_main_window(cx, shell::write_dialogs::show_journal)
+        with_main_window(cx, layout::write_dialogs::show_journal)
     });
     cx.on_action(|_: &actions::OpenSnapshots, cx| {
         core::list_snapshots(cx);
-        with_main_window(cx, shell::write_dialogs::show_snapshots)
+        with_main_window(cx, layout::write_dialogs::show_snapshots)
     });
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");
@@ -100,13 +100,13 @@ pub fn init(cx: &mut App) {
     // Panel visibility is session state, not view state, so the toggles only
     // need the app context.
     cx.on_action(|_: &actions::TogglePrimarySidebar, cx| {
-        shell::toggle_primary_sidebar(cx);
+        layout::toggle_primary_sidebar(cx);
     });
     cx.on_action(|_: &actions::ToggleSecondarySidebar, cx| {
-        shell::toggle_secondary_sidebar(cx);
+        layout::toggle_secondary_sidebar(cx);
     });
     cx.on_action(|_: &actions::ToggleBottomPanel, cx| {
-        shell::toggle_bottom_panel(cx);
+        layout::toggle_bottom_panel(cx);
     });
 
     // Dialogs need a window; `defer` avoids touching the dispatching window

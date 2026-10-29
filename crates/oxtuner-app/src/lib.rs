@@ -6,8 +6,8 @@
 //!
 //! - [`app`] — app-level wiring: actions, the static shortcut table, the menu,
 //!   the main window's identity and geometry
-//! - [`shell`] — the main window: primary sidebar, secondary sidebar, bottom
-//!   panel, editable column, title bar
+//! - [`layout`] — the main window's layout view: primary sidebar, secondary
+//!   sidebar, bottom panel, editable column, title bar
 //! - [`settings`] — the settings window and the persisted preferences
 //! - [`state`] — the persisted session document and the JSON store
 //! - [`platform`] — infrastructure: filesystem paths, logging
@@ -28,12 +28,12 @@ pub mod disclaimer;
 mod editor;
 pub mod i18n;
 pub mod icons;
+pub mod layout;
 pub mod link;
 pub mod platform;
 pub mod project;
 pub mod realtime;
 pub mod settings;
-pub mod shell;
 pub mod state;
 mod table;
 pub mod theme;

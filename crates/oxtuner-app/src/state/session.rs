@@ -260,7 +260,7 @@ impl WindowRect {
     }
 }
 
-/// Sizes and visibility of the three shell panels, in pixels.
+/// Sizes and visibility of the three main layout panels, in pixels.
 ///
 /// The panels are independent: any of them can be hidden, and the editor
 /// absorbs whatever space is left.
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(layout.bottom(), px(BOTTOM_HEIGHT_RANGE.start));
     }
 
-    /// Dragging a shell handle is the one path that panicked in the field, so
+    /// Dragging a layout handle is the one path that panicked in the field, so
     /// the mapping from reported sizes to state is covered directly.
     #[test]
     fn dragging_the_primary_handle_records_the_navigation_width() {

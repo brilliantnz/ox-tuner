@@ -13,11 +13,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use oxtuner_app::{
-    app, core, init,
+    app, core, init, layout,
     platform::{logging, paths::AppPaths},
     project,
     settings::preferences::AppSettings,
-    shell,
     state::session::AppState,
     theme,
 };
@@ -61,8 +60,8 @@ fn main() {
     app.run(move |cx| {
         init(cx);
 
-        // Globals must exist before the first render: the shell and the settings
-        // window both read them.
+        // Globals must exist before the first render: the main layout and the
+        // settings window both read them.
         cx.set_global(settings);
         cx.set_global(session);
 
@@ -82,7 +81,7 @@ fn main() {
         // reopened. It reads on the core thread; the window opens meanwhile.
         project::reopen_last(cx);
 
-        shell::open_main_window(cx);
+        layout::open_main_window(cx);
 
         cx.activate(true);
     });

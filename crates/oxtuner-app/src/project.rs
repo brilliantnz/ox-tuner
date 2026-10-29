@@ -89,7 +89,7 @@ pub(crate) fn remember(path: &Path, cx: &mut App) {
     AppState::update_global(cx, |state| state.last_project = Some(path.to_path_buf()));
     AppSettings::remember_project(cx, path);
     AppState::save(cx);
-    // Only the shell draws the active project; the Settings window does not.
+    // Only the main layout draws the active project; the Settings window does not.
     crate::app::window::notify_main(cx);
 }
 

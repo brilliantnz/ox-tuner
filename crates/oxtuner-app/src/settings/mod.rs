@@ -5,7 +5,7 @@
 //! [`Settings`] component — its sidebar, search and grouped pages are the
 //! standard macOS-like settings layout.
 //!
-//! The window's title bar is our own [`crate::shell::titlebar::UtilityBar`], the
+//! The window's title bar is our own [`crate::layout::titlebar::UtilityBar`], the
 //! same geometry and drag behaviour as the main window. The gpui-kit `TitleBar`
 //! component would draw its own gradient strip and lead padding, and this app
 //! already owns its window chrome.

@@ -2,7 +2,7 @@
 //!
 //! One definition, two presentations: macOS draws it in the global menu bar
 //! (`cx.set_menus`), while Windows and Linux have no native menu bar in GPUI, so
-//! the same items are also handed to [`AppMenuBar`], which `Shell` renders inside
+//! the same items are also handed to [`AppMenuBar`], which `AppLayout` renders inside
 //! the window.
 //!
 //! Keep this to commands that exist today. Menu entries appear before their

@@ -12,15 +12,15 @@ use gpui_kit::{
 
 use crate::{
     constants::APP_NAME,
+    layout::{AppLayout, titlebar::titlebar_options},
     settings::preferences::AppSettings,
-    shell::{Shell, titlebar::titlebar_options},
     state::session::{self, AppState},
 };
 
 /// The main window and the view inside it, once it exists.
 struct MainWindow {
     handle: AnyWindowHandle,
-    view: WeakEntity<Shell>,
+    view: WeakEntity<AppLayout>,
 }
 
 impl Global for MainWindow {}
@@ -31,19 +31,19 @@ pub fn main(cx: &App) -> Option<AnyWindowHandle> {
 }
 
 /// Records the window the app just opened.
-pub(crate) fn set(cx: &mut App, handle: AnyWindowHandle, view: &gpui_kit::Entity<Shell>) {
+pub(crate) fn set(cx: &mut App, handle: AnyWindowHandle, view: &gpui_kit::Entity<AppLayout>) {
     cx.set_global(MainWindow {
         handle,
         view: view.downgrade(),
     });
 }
 
-/// Repaints the shell, not every window.
+/// Repaints the main layout, not every window.
 ///
-/// Panel toggles and project changes are the shell's own state; repainting the
+/// Panel toggles and project changes are the layout's own state; repainting the
 /// Settings window for them would be wasted work.
 ///
-/// Deferred on purpose: the toggle buttons run inside the shell's own update, so
+/// Deferred on purpose: the toggle buttons run inside the layout's own update, so
 /// updating that entity again from there would panic on the double borrow.
 pub(crate) fn notify_main(cx: &mut App) {
     cx.defer(|cx| {
@@ -55,7 +55,7 @@ pub(crate) fn notify_main(cx: &mut App) {
             Some(view) => {
                 view.update(cx, |_, cx| cx.notify());
             }
-            // No shell to notify (a stale weak handle): fall back to every
+            // No layout to notify (a stale weak handle): fall back to every
             // window so a missed repaint cannot leave the app looking frozen.
             None => cx.refresh_windows(),
         }
