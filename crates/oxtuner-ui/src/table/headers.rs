@@ -5,7 +5,7 @@
 //! bin edit when the table is writable; the table owns that rule and forwards
 //! only the raw event here.
 
-use gpui_kit::base::StyledExt as _;
+use gpui_kit::base::{StyledExt as _, h_flex};
 use gpui_kit::{
     App, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -31,7 +31,9 @@ pub(crate) struct ColumnHeader {
     pub(crate) label: SharedString,
     pub(crate) aria: SharedString,
     pub(crate) background: Hsla,
-    pub(crate) muted: Hsla,
+    /// The neutral foreground, for the bin editor frame and caret.
+    pub(crate) foreground: Hsla,
+    /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,
@@ -44,7 +46,7 @@ impl RenderOnce for ColumnHeader {
             label,
             aria,
             background,
-            muted,
+            foreground,
             danger,
             editing,
             on_press,
@@ -70,17 +72,24 @@ impl RenderOnce for ColumnHeader {
                 (on_press)(event, window, cx)
             });
 
+        // The bin editor reads like the cell editor: the same frame around
+        // the typed text, but a neutral foreground instead of the heatmap's
+        // contrasting colour.
         if let Some(text) = editing_text {
-            element = element.gap(px(CELL_GAP)).child(text).child(caret(muted));
+            element = element
+                .border_2()
+                .border_color(if editing_invalid { danger } else { foreground })
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(CELL_GAP))
+                        .child(text)
+                        .child(caret(foreground)),
+                );
         } else {
             element = element.child(label);
         }
 
-        if editing_invalid {
-            element = element.border_1().border_color(danger);
-        } else if editing.is_some() {
-            element = element.border_1().border_color(muted);
-        }
         element
     }
 }
@@ -92,7 +101,9 @@ pub(crate) struct RowHeader {
     pub(crate) label: SharedString,
     pub(crate) aria: SharedString,
     pub(crate) background: Hsla,
-    pub(crate) muted: Hsla,
+    /// The neutral foreground, for the bin editor frame and caret.
+    pub(crate) foreground: Hsla,
+    /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,
@@ -105,7 +116,7 @@ impl RenderOnce for RowHeader {
             label,
             aria,
             background,
-            muted,
+            foreground,
             danger,
             editing,
             on_press,
@@ -132,17 +143,22 @@ impl RenderOnce for RowHeader {
                 (on_press)(event, window, cx)
             });
 
+        // Same frame as the cell editor, in the neutral foreground.
         if let Some(text) = editing_text {
-            element = element.gap(px(CELL_GAP)).child(text).child(caret(muted));
+            element = element
+                .border_2()
+                .border_color(if editing_invalid { danger } else { foreground })
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(CELL_GAP))
+                        .child(text)
+                        .child(caret(foreground)),
+                );
         } else {
             element = element.child(label);
         }
 
-        if editing_invalid {
-            element = element.border_1().border_color(danger);
-        } else if editing.is_some() {
-            element = element.border_1().border_color(muted);
-        }
         element
     }
 }

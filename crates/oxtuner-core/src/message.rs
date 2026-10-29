@@ -980,6 +980,10 @@ pub struct TableSummary {
 }
 
 /// One table axis, as the grid draws it.
+///
+/// Labels and units come from the table in use: the definition's `xyLabels`
+/// override, otherwise the bins array's own label and units. Nothing in the
+/// grid hardcodes them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisSummary {
     /// Variable name the values come from.
@@ -988,10 +992,35 @@ pub struct AxisSummary {
     pub label: String,
     /// Units.
     pub units: String,
+    /// Live output channel tracking this axis, from the INI axis `channel`.
+    /// The realtime follower resolves it to a value and then to a bin; `None`
+    /// when the definition declares no channel.
+    pub channel: Option<String>,
     /// Decimal digits to display.
     pub digits: u8,
     /// Axis values, in definition order.
     pub values: Vec<f64>,
+}
+
+impl AxisSummary {
+    /// `label (units)`, or the bare label when unitless. Every caption of this
+    /// axis renders through here, so the text always matches the table.
+    pub fn caption(&self) -> String {
+        if self.units.is_empty() {
+            self.label.clone()
+        } else {
+            format!("{} ({})", self.label, self.units)
+        }
+    }
+
+    /// ` units`, or nothing when unitless, for bin value labels.
+    pub fn units_suffix(&self) -> String {
+        if self.units.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.units)
+        }
+    }
 }
 
 impl TableSummary {
@@ -1230,6 +1259,7 @@ impl TableSummary {
             name: cells_name.to_owned(),
             label: y_label.map_or_else(|| cells_name.to_owned(), str::to_owned),
             units: spec.units.clone(),
+            channel: None,
             digits: spec.digits,
             values: vec![minimum],
         };
@@ -1285,6 +1315,7 @@ fn axis_summary(
             name: fallback.to_owned(),
             label: fallback.to_owned(),
             units: String::new(),
+            channel: None,
             digits: 0,
             values: (0..length).map(|index| index as f64).collect(),
         };
@@ -1313,6 +1344,7 @@ fn axis_summary(
             str::to_owned,
         ),
         units: spec.map_or_else(String::new, |spec| spec.units.clone()),
+        channel: axis.channel.clone(),
         digits: spec.map_or(0, |spec| spec.digits),
         values,
     }

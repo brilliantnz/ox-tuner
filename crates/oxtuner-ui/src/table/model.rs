@@ -543,6 +543,38 @@ impl TableModel {
             .unwrap_or(0.0)
     }
 
+    /// The live output channel tracking one axis, from the table in use.
+    ///
+    /// A realtime follower resolves each channel to a value and then to a bin
+    /// with [`TableModel::realtime_cell`]; the grid itself never names a
+    /// channel.
+    pub fn axis_channel(&self, axis: AxisKind) -> Option<&str> {
+        self.table.as_ref().and_then(|table| match axis {
+            AxisKind::X => table.x_axis.channel.as_deref(),
+            AxisKind::Y => table.y_axis.channel.as_deref(),
+        })
+    }
+
+    /// The column whose bin sits closest to a live X value, ties going down.
+    pub fn nearest_column(&self, x_value: f64) -> Option<usize> {
+        let table = self.table.as_ref()?;
+        nearest_bin(&table.x_axis.values, x_value)
+    }
+
+    /// The definition row whose bin sits closest to a live Y value.
+    pub fn nearest_row(&self, y_value: f64) -> Option<usize> {
+        let table = self.table.as_ref()?;
+        nearest_bin(&table.y_axis.values, y_value)
+    }
+
+    /// The cell a live `(x, y)` point sits on, for the realtime follower.
+    pub fn realtime_cell(&self, x_value: f64, y_value: f64) -> Option<CellPos> {
+        Some(CellPos {
+            row: self.nearest_row(y_value)?,
+            column: self.nearest_column(x_value)?,
+        })
+    }
+
     /// Whether an axis bin can be edited.
     pub fn is_axis_writable(&self, axis: AxisKind, index: usize) -> bool {
         if !self.is_writable() {
@@ -1586,6 +1618,20 @@ fn clamp_signed(current: usize, delta: isize, last: usize) -> usize {
     next.clamp(0, last as isize) as usize
 }
 
+/// The bin closest to a live value, ties going to the lower index. A follower
+/// outside the table still lands on the nearest edge bin.
+fn nearest_bin(bins: &[f64], value: f64) -> Option<usize> {
+    bins.iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (**a - value)
+                .abs()
+                .partial_cmp(&(**b - value).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _)| index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1607,6 +1653,7 @@ mod tests {
                 name: "rpmBins".to_owned(),
                 label: "RPM".to_owned(),
                 units: "rpm".to_owned(),
+                channel: Some("rpm".to_owned()),
                 digits: 0,
                 values: (0..columns).map(|value| value as f64 * 500.0).collect(),
             },
@@ -1614,6 +1661,7 @@ mod tests {
                 name: "mapBins".to_owned(),
                 label: "MAP".to_owned(),
                 units: "kPa".to_owned(),
+                channel: Some("map".to_owned()),
                 digits: 0,
                 values: (0..rows).map(|value| value as f64 * 10.0).collect(),
             },
@@ -1632,6 +1680,34 @@ mod tests {
         assert_eq!(selection.bounds(), (1, 2, 3, 4));
         assert_eq!(selection.cell_count(), 9);
         assert!(selection.contains(CellPos { row: 2, column: 3 }));
+    }
+
+    #[test]
+    fn the_axes_name_their_live_channels() {
+        let mut model = TableModel::new();
+        assert_eq!(model.axis_channel(AxisKind::X), None);
+        model.set_table(table(4, 2));
+        assert_eq!(model.axis_channel(AxisKind::X), Some("rpm"));
+        assert_eq!(model.axis_channel(AxisKind::Y), Some("map"));
+    }
+
+    #[test]
+    fn a_live_point_lands_on_its_nearest_cell() {
+        let mut model = TableModel::new();
+        // Columns step 500 (0, 500, 1000, ...), rows step 10 (0, 10, 20, 30).
+        model.set_table(table(4, 8));
+        assert_eq!(
+            model.realtime_cell(750.0, 22.0),
+            Some(CellPos { row: 2, column: 1 }),
+            "750 ties 500 and 1000, so it lands on the lower bin; 22 rounds to 20"
+        );
+        assert_eq!(
+            model.realtime_cell(9_999.0, -5.0),
+            Some(CellPos { row: 0, column: 7 }),
+            "a point outside the table holds the nearest edge bins"
+        );
+        model.clear_table();
+        assert_eq!(model.realtime_cell(750.0, 22.0), None);
     }
 
     #[test]

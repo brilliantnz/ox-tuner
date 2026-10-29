@@ -15,7 +15,7 @@ use gpui_kit::{
 use oxtuner_core::{AxisKind, AxisSummary, CellState, TableSummary};
 
 use super::RealtimePoint;
-use super::geometry::{CELL_GAP, CELL_WIDTH};
+use super::geometry::{AXIS_LABEL_GAP, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
 use super::model::{AxisTarget, CellPos};
 use super::{Table, TableEvent};
 
@@ -47,6 +47,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             name: "rpmBins".to_owned(),
             label: "RPM".to_owned(),
             units: "rpm".to_owned(),
+            channel: Some("rpm".to_owned()),
             digits: 0,
             values: (0..columns).map(|value| value as f64 * 500.0).collect(),
         },
@@ -54,6 +55,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             name: "mapBins".to_owned(),
             label: "MAP".to_owned(),
             units: "kPa".to_owned(),
+            channel: Some("map".to_owned()),
             digits: 0,
             values: (0..rows).map(|value| value as f64 * 10.0).collect(),
         },
@@ -289,8 +291,9 @@ fn shift_navigation_widens_the_selection_outline(cx: &mut TestAppContext) {
     })
     .unwrap();
 
-    // Two selected columns: two cell widths plus the gap between them.
-    let expected = 2.0 * CELL_WIDTH + CELL_GAP;
+    // Two selected columns: two cell widths, the gap between them, and the
+    // gap the outline bleeds past the range on either side.
+    let expected = 2.0 * CELL_WIDTH + 3.0 * CELL_GAP;
     let width = cx
         .update_window(handle, |_, window, _| {
             window.try_find(ElementId::from("selection-frame"))
@@ -317,14 +320,19 @@ fn the_selection_draws_one_outline_over_the_range(cx: &mut TestAppContext) {
     })
     .unwrap();
 
-    // The outline must match the selection rectangle exactly, whatever the
-    // drag produced — one frame over the range, not a border per cell.
+    // The outline must wrap the selection rectangle exactly, whatever the drag
+    // produced — one frame over the range, not a border per cell — and it
+    // bleeds one gap past it on each side so it covers the grid line instead
+    // of eating into the edge cells.
     let (columns, expected) = cx.update(|cx| {
         let model = grid.read(cx).model();
         let (_, left, _, right) = model.selection().bounds();
         let columns = right - left + 1;
         let span = columns as f32;
-        (columns, span * CELL_WIDTH + (span - 1.) * CELL_GAP)
+        (
+            columns,
+            span * CELL_WIDTH + (span - 1.) * CELL_GAP + 2. * CELL_GAP,
+        )
     });
     assert!(columns > 1, "the drag must select several columns");
 
@@ -339,6 +347,169 @@ fn the_selection_draws_one_outline_over_the_range(cx: &mut TestAppContext) {
         Some(expected),
         "the outline spans the whole selection as one rectangle"
     );
+}
+
+#[gpui_kit::test]
+fn a_multi_cell_selection_tints_the_whole_range(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.drag_to(cell(1, 1, 8), cell(3, 4, 8), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    let (top, left, bottom, right) = cx.update(|cx| grid.read(cx).model().selection().bounds());
+    assert!(bottom > top && right > left, "the drag must select a range");
+
+    let cursor = cx.update(|cx| grid.read(cx).model().selection().cursor);
+
+    let (fill, frame, cursor_cell) = cx
+        .update_window(handle, |_, window, _| {
+            (
+                window.find(ElementId::from("selection-fill")).bounds(),
+                window.find(ElementId::from("selection-frame")).bounds(),
+                window.find(cell(cursor.row, cursor.column, 8)).bounds(),
+            )
+        })
+        .unwrap();
+
+    let columns = (right - left + 1) as f32;
+    let rows = (bottom - top + 1) as f32;
+    let tint_width = columns * CELL_WIDTH + (columns - 1.) * CELL_GAP;
+    let tint_height = rows * CELL_HEIGHT + (rows - 1.) * CELL_GAP;
+
+    assert_eq!(f32::from(fill.size.width), tint_width);
+    assert_eq!(f32::from(fill.size.height), tint_height);
+
+    // The cursor cell is part of the range, so the tint covers it too.
+    let fill_right = fill.origin.x + fill.size.width;
+    let fill_bottom = fill.origin.y + fill.size.height;
+    assert!(cursor_cell.origin.x >= fill.origin.x && cursor_cell.origin.x < fill_right);
+    assert!(cursor_cell.origin.y >= fill.origin.y && cursor_cell.origin.y < fill_bottom);
+
+    // The outline wraps the tint and bleeds one gap past it on each side, so it
+    // covers the grid line instead of eating into the edge cells.
+    assert_eq!(
+        f32::from(frame.size.width),
+        tint_width + 2. * CELL_GAP,
+        "the outline wraps the tint"
+    );
+    assert_eq!(f32::from(frame.size.height), tint_height + 2. * CELL_GAP);
+    assert_eq!(
+        f32::from(frame.origin.x),
+        f32::from(fill.origin.x) - CELL_GAP
+    );
+    assert_eq!(
+        f32::from(frame.origin.y),
+        f32::from(fill.origin.y) - CELL_GAP
+    );
+}
+
+#[gpui_kit::test]
+fn a_single_cell_selection_outlines_the_cell_without_an_inset(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(cell(2, 3, 8), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    let (fill, frame, value) = cx
+        .update_window(handle, |_, window, _| {
+            (
+                window.try_find(ElementId::from("selection-fill")).is_some(),
+                window.find(ElementId::from("selection-frame")).bounds(),
+                window.find(cell(2, 3, 8)).bounds(),
+            )
+        })
+        .unwrap();
+
+    assert!(
+        !fill,
+        "a single cell reads as an outline, not a filled range"
+    );
+    assert_eq!(
+        f32::from(value.origin.x) - f32::from(frame.origin.x),
+        CELL_GAP,
+        "the outline straddles the grid line outside the cell"
+    );
+    assert_eq!(
+        f32::from(value.origin.y) - f32::from(frame.origin.y),
+        CELL_GAP
+    );
+    assert_eq!(
+        f32::from(frame.size.width),
+        f32::from(value.size.width) + 2. * CELL_GAP,
+        "the outline never eats into the cell it outlines"
+    );
+    assert_eq!(
+        f32::from(frame.size.height),
+        f32::from(value.size.height) + 2. * CELL_GAP
+    );
+}
+
+#[gpui_kit::test]
+fn the_corner_is_empty_and_each_axis_names_itself_beside_its_headers(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update(|cx| {
+        let model = grid.read(cx).model();
+        assert_eq!(
+            model.axis_channel(AxisKind::X),
+            Some("rpm"),
+            "the follower reads the X channel from the table, never a constant"
+        );
+        assert_eq!(model.axis_channel(AxisKind::Y), Some("map"));
+        assert_eq!(
+            model.realtime_cell(1_250.0, 25.0),
+            Some(CellPos { row: 2, column: 2 }),
+            "1250 ties 1000 and 1500, so it lands on the lower bin; 25 rounds to 20"
+        );
+    });
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        let corner = window.find(ElementId::from("table-corner"));
+        assert_eq!(corner.label(), None, "the corner must not carry a caption");
+
+        let x_label = window.find(ElementId::from("x-axis-label"));
+        assert_eq!(x_label.label(), Some("RPM (rpm)"));
+        let y_label = window.find(ElementId::from("y-axis-label"));
+        assert_eq!(y_label.label(), Some("MAP (kPa)"));
+
+        let y_bounds = y_label.bounds();
+        let header = window.find(row_header(0)).bounds();
+        assert!(
+            f32::from(header.origin.x)
+                - (f32::from(y_bounds.origin.x) + f32::from(y_bounds.size.width))
+                >= AXIS_LABEL_GAP,
+            "the Y caption sits outside the grid box, left of the row headers"
+        );
+        assert!(
+            f32::from(y_bounds.size.width) < f32::from(header.size.width),
+            "the Y caption is a narrow vertical band"
+        );
+
+        let column = window.find(column_header(0)).bounds();
+        let grid_box = window.find(ElementId::from("table-box")).bounds();
+        let gap = f32::from(x_label.bounds().origin.y)
+            - (f32::from(grid_box.origin.y) + f32::from(grid_box.size.height));
+        assert!(
+            (gap - AXIS_LABEL_GAP).abs() < 0.5,
+            "the X caption sits outside the grid box, {gap} pt below it"
+        );
+        assert!(
+            f32::from(column.origin.y) + f32::from(column.size.height)
+                <= f32::from(grid_box.origin.y) + f32::from(grid_box.size.height),
+            "the column band stays inside the grid box"
+        );
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -364,7 +535,7 @@ fn the_row_headers_stay_aligned_with_their_rows(cx: &mut TestAppContext) {
     let (handle, _, _) = open(cx, 8, 8);
 
     cx.update_window(handle, |_, window, cx| {
-        // A selected cell adds a heavier border; the header must not move.
+        // The selection paints over the cells; the header must not move.
         window.click(cell(3, 2, 8), cx);
         window.render_frame(cx);
 
@@ -506,6 +677,218 @@ fn the_column_band_sits_next_to_the_body(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn headers_stay_aligned_when_scrolled_past_the_end(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point, px};
+
+    let (handle, _, _) = open(cx, 32, 32);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // Wheel past the bottom end: the body clamps there, so the row
+        // headers must clamp too instead of sliding past the cells. Scroll
+        // one axis at a time: a diagonal gesture only moves its dominant
+        // axis.
+        window.scroll(
+            cell(20, 5, 32),
+            ScrollDelta::Pixels(point(px(0.0), px(-5000.0))),
+            cx,
+        );
+        // No extra frame: the scroll helper already rendered once, and that
+        // frame must be consistent on its own.
+
+        // The clamped body shows the end, so the last row and its header
+        // must both be rendered, exactly aligned.
+        let rows: Vec<usize> = (0..32)
+            .filter(|display| window.try_find(row_header(*display)).is_some())
+            .collect();
+        assert!(
+            window.try_find(row_header(31)).is_some(),
+            "last row header missing after scrolling past the end; rendered rows={rows:?}"
+        );
+        assert!(
+            window.try_find(cell(0, 0, 32)).is_some(),
+            "last-row first cell missing after scrolling past the end; rendered rows={rows:?}"
+        );
+        let header = window.find(row_header(31));
+        let value = window.find(cell(0, 0, 32));
+        let dy = f32::from(header.bounds().origin.y) - f32::from(value.bounds().origin.y);
+        assert!(
+            dy.abs() < 1.5,
+            "last row header off by {dy} after scrolling past the end"
+        );
+
+        // Every other rendered row pair must agree too.
+        for display_row in 0..32 {
+            if let (Some(header), Some(value)) = (
+                window.try_find(row_header(display_row)),
+                window.try_find(cell(31 - display_row, 0, 32)),
+            ) {
+                let dy = f32::from(header.bounds().origin.y) - f32::from(value.bounds().origin.y);
+                assert!(dy.abs() < 1.5, "row header {display_row} off by {dy}");
+            }
+        }
+
+        // Same for the right end: the last column and its header line up.
+        window.scroll(
+            cell(0, 5, 32),
+            ScrollDelta::Pixels(point(px(-5000.0), px(0.0))),
+            cx,
+        );
+
+        let header = window.find(column_header(31));
+        let value = window.find(cell(0, 31, 32));
+        let dx = f32::from(header.bounds().origin.x) - f32::from(value.bounds().origin.x);
+        assert!(
+            dx.abs() < 1.5,
+            "last column header off by {dx} after scrolling past the end"
+        );
+
+        for column in 0..32 {
+            if let (Some(header), Some(value)) = (
+                window.try_find(column_header(column)),
+                window.try_find(cell(0, column, 32)),
+            ) {
+                let dx = f32::from(header.bounds().origin.x) - f32::from(value.bounds().origin.x);
+                assert!(dx.abs() < 1.5, "column header {column} off by {dx}");
+            }
+        }
+
+        // And back past the start: the body clamps at zero, so the first
+        // row and column must line up again.
+        window.scroll(
+            cell(0, 26, 32),
+            ScrollDelta::Pixels(point(px(5000.0), px(0.0))),
+            cx,
+        );
+        window.scroll(
+            cell(0, 5, 32),
+            ScrollDelta::Pixels(point(px(0.0), px(5000.0))),
+            cx,
+        );
+
+        let header = window.find(row_header(0));
+        let value = window.find(cell(31, 0, 32));
+        let dy = f32::from(header.bounds().origin.y) - f32::from(value.bounds().origin.y);
+        assert!(
+            dy.abs() < 1.5,
+            "first row header off by {dy} after scrolling back"
+        );
+
+        let header = window.find(column_header(0));
+        let value = window.find(cell(31, 0, 32));
+        let dx = f32::from(header.bounds().origin.x) - f32::from(value.bounds().origin.x);
+        assert!(
+            dx.abs() < 1.5,
+            "first column header off by {dx} after scrolling back"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn double_clicking_a_bin_hides_the_cell_selection(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(cell(3, 2, 8), cx);
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(ElementId::from("selection-frame"))
+                .is_some(),
+            "a selected cell draws its outline"
+        );
+        window.double_click(column_header(2), cx);
+    })
+    .unwrap();
+    assert!(
+        cx.update(|cx| grid.read(cx).model().axis_editing().is_some()),
+        "double-clicking a bin opens the bin editor"
+    );
+
+    cx.update_window(handle, |_, window, cx| {
+        assert!(
+            window
+                .try_find(ElementId::from("selection-frame"))
+                .is_none(),
+            "the cell range hides while a bin owns the focus"
+        );
+        window.press("escape", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, _| {
+        assert!(
+            window
+                .try_find(ElementId::from("selection-frame"))
+                .is_some(),
+            "cancelling the bin edit returns the focus to the cells"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn clicking_the_corner_dismisses_the_range(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(cell(3, 2, 8), cx);
+        window.press(&shortcut("a"), cx);
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| grid.read(cx).model().selection().cell_count()),
+        64,
+        "select-all covers the whole 8x8 grid"
+    );
+
+    cx.update_window(handle, |_, window, cx| {
+        window.click(ElementId::from("table-corner"), cx);
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| grid.read(cx).model().selection().cell_count()),
+        1,
+        "a chrome click collapses the range back to the cursor"
+    );
+}
+
+#[gpui_kit::test]
+fn single_click_on_another_header_dismisses_the_bin_edit(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.double_click(column_header(2), cx);
+    })
+    .unwrap();
+    assert!(
+        cx.update(|cx| grid.read(cx).model().axis_editing().is_some()),
+        "double-clicking a bin opens the bin editor"
+    );
+
+    // Clicking the same bin keeps typing where it is.
+    cx.update_window(handle, |_, window, cx| {
+        window.click(column_header(2), cx);
+    })
+    .unwrap();
+    assert!(
+        cx.update(|cx| grid.read(cx).model().axis_editing().is_some()),
+        "clicking the open bin does not drop its text"
+    );
+
+    // Clicking anywhere else dismisses it.
+    cx.update_window(handle, |_, window, cx| {
+        window.click(column_header(4), cx);
+    })
+    .unwrap();
+    assert!(
+        cx.update(|cx| grid.read(cx).model().axis_editing().is_none()),
+        "a click outside the open bin dismisses it"
+    );
 }
 
 /// A keystroke with the platform's command modifier: Cmd on macOS, Ctrl

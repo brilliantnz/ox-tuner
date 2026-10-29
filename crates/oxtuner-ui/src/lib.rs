@@ -1,9 +1,10 @@
 //! Reusable GPUI widgets for ox-tuner.
 //!
-//! This crate is the project's own widget layer over GPUI and GPUI Base. It
-//! does not depend on `gpui-component`: widgets take a [`chart::ChartStyle`] or
-//! a [`table::TableStyle`] token set from the host, draw with base primitives,
-//! and expose retained state + events rather than reaching for a global theme.
+//! This crate is the project's own widget layer over GPUI and GPUI Base. The
+//! chart takes a [`chart::ChartStyle`] token set from the host; the table reads
+//! its chrome from the application theme and keeps only data colours of its
+//! own. Both draw with base primitives and expose retained state + events
+//! rather than reaching further into globals.
 //!
 //! The widgets are the live chart and the tune table. Each is built as a
 //! retained entity with a small public API — data in, events out — so every
@@ -19,4 +20,4 @@ pub mod table;
 pub use chart::{
     ChartConfig, ChartEvent, ChartMode, ChartSeries, ChartState, ChartStyle, PREFERRED_CHANNELS,
 };
-pub use table::{RealtimePoint, Table, TableEvent, TableModel, TableStyle};
+pub use table::{RealtimePoint, Table, TableEvent, TableModel};

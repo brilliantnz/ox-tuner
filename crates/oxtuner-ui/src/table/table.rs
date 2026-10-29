@@ -15,6 +15,9 @@
 //! Headers are frozen: the body scrolls under fixed header bands shifted by
 //! the body's scroll offset. The column band follows the low end of the Y
 //! axis: at the bottom by default and at the top when the axis is flipped.
+//! Each axis names itself in a caption band beside its headers, and the
+//! selection is painted over the cells as a spreadsheet range: one tint and
+//! one outline, never a border that moves the values.
 //! There is no scrollbar; the body scrolls with the wheel, drag-select and
 //! the keyboard.
 
@@ -22,23 +25,27 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TestSupportExt as _, UTF16Selection, Window, canvas, div, px,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, UTF16Selection, Window,
+    canvas, div, point, px,
 };
 
 use oxtuner_core::{CellEdit, TableSummary};
 
 use super::cell::{CellEditing, TableCell};
-use super::geometry::{AXIS_HEIGHT, AXIS_WIDTH, CELL_GAP, CELL_HEIGHT, CELL_WIDTH, visible_range};
+use super::geometry::{
+    AXIS_HEIGHT, AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, AXIS_LABEL_LINE_HEIGHT, AXIS_LABEL_WIDTH,
+    AXIS_WIDTH, CELL_GAP, CELL_HEIGHT, CELL_WIDTH, visible_range,
+};
 use super::headers::{ColumnHeader, HeaderEditing, RowHeader};
 use super::heatmap::{contrast_text, decoration, heat_color};
-use super::model::{BulkOp, CellPos, Editing, HistoryStep, Selection, TableModel};
-use super::style::TableStyle;
+use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,9 +83,11 @@ pub struct RealtimePoint {
 }
 
 /// The tune table.
+///
+/// Chrome follows the application theme through `cx.theme()`; only the heatmap
+/// cells keep their own data colours (see [`super::heatmap`]).
 pub struct Table {
     model: TableModel,
-    style: TableStyle,
     focus: FocusHandle,
     body_scroll: ScrollHandle,
     dragging: bool,
@@ -204,11 +213,10 @@ impl EntityInputHandler for Table {
 }
 
 impl Table {
-    /// An empty table with the default style.
+    /// An empty table.
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             model: TableModel::new(),
-            style: TableStyle::default(),
             focus: cx.focus_handle(),
             body_scroll: ScrollHandle::new(),
             dragging: false,
@@ -219,17 +227,6 @@ impl Table {
     /// The model, for status lines and tests.
     pub fn model(&self) -> &TableModel {
         &self.model
-    }
-
-    /// Replaces the visual tokens.
-    pub fn set_style(&mut self, style: TableStyle, cx: &mut Context<Self>) {
-        self.style = style;
-        cx.notify();
-    }
-
-    /// The current tokens, so a host can compare before pushing a new set.
-    pub fn style(&self) -> &TableStyle {
-        &self.style
     }
 
     /// Replaces the snapshot and repaints.
@@ -255,6 +252,19 @@ impl Table {
     /// Drops the table, keeping the Y-axis preference.
     pub fn clear_table(&mut self, cx: &mut Context<Self>) {
         self.model.clear_table();
+        cx.notify();
+    }
+
+    /// Drops any open editor and collapses the selection to the cursor.
+    ///
+    /// Clicks that land on table chrome or outside the grid call this: one
+    /// focus owner at a time, and a click that selects nothing still leaves
+    /// the grid in a clean state for the next gesture.
+    pub fn dismiss_focus(&mut self, cx: &mut Context<Self>) {
+        self.model.cancel_edit();
+        self.model.cancel_axis_edit();
+        self.model.collapse_selection();
+        cx.emit(TableEvent::SelectionChanged);
         cx.notify();
     }
 
@@ -534,7 +544,6 @@ impl Table {
         &self,
         data_row: usize,
         column: usize,
-        selection: Selection,
         editing: Option<&Editing>,
         minimum: f64,
         maximum: f64,
@@ -545,13 +554,13 @@ impl Table {
             column,
         };
         let value = self.model.value(cell);
-        let is_cursor = selection.cursor == cell;
         let editing = editing.filter(|editing| editing.cell == cell);
 
         let fill = heat_color(minimum, maximum, value);
         let text_color = contrast_text(fill);
         let display = self.model.display(cell).unwrap_or_else(|| Arc::from(""));
         let aria = self.model.aria(cell).unwrap_or_else(|| Arc::from(""));
+        let theme = cx.theme();
 
         let id = ElementId::from(("table-cell", data_row * self.model.columns() + column));
         let on_press = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -584,9 +593,8 @@ impl Table {
             aria: SharedString::from(aria),
             fill,
             text_color,
-            danger: self.style.danger,
-            info: self.style.info,
-            cursor: is_cursor,
+            danger: theme.danger,
+            info: theme.info,
             editing: editing.map(|editing| CellEditing {
                 text: SharedString::from(editing.text.clone()),
                 invalid: editing.invalid,
@@ -594,7 +602,9 @@ impl Table {
             mark: decoration(
                 self.model.state(cell),
                 self.model.changed(cell),
-                &self.style,
+                theme.danger,
+                theme.warning,
+                theme.info,
             ),
             realtime: self
                 .realtime
@@ -614,15 +624,16 @@ impl Table {
             return Vec::new();
         };
         let can_edit = snapshot.writable;
-        let background = self.style.surface;
-        let muted = self.style.muted;
-        let danger = self.style.danger;
+        let theme = cx.theme();
+        let background = theme.secondary;
+        let foreground = theme.foreground;
+        let danger = theme.danger;
 
         columns
             .map(|column| {
                 let value = self.model.axis_value(oxtuner_core::AxisKind::X, column);
                 let label = format_value(value, usize::from(snapshot.x_axis.digits));
-                let units = axis_units(&snapshot.x_axis);
+                let units = snapshot.x_axis.units_suffix();
                 let aria = format!("{label}{units} {}", snapshot.x_axis.label);
                 let editing = self.model.axis_editing().filter(|editing| {
                     editing.target.axis == oxtuner_core::AxisKind::X
@@ -634,9 +645,10 @@ impl Table {
                 });
                 let on_press = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
-                    // One press selects nothing: a double press is the edit
-                    // gesture, matching the cells, so a click on the way to
-                    // another table cannot leave a bin editor behind.
+                    // A double press is the edit gesture, matching the cells.
+                    // Any other press dismisses: a bin edit owns the focus,
+                    // so a click that opens nothing must not leave the old
+                    // owners behind.
                     if can_edit && event.click_count >= 2 {
                         this.model.clear_action();
                         if this
@@ -645,6 +657,11 @@ impl Table {
                         {
                             cx.notify();
                         }
+                    } else if !this.model.axis_editing().is_some_and(|editing| {
+                        editing.target.axis == oxtuner_core::AxisKind::X
+                            && editing.target.index == column
+                    }) {
+                        this.dismiss_focus(cx);
                     }
                     cx.stop_propagation();
                     cx.emit(TableEvent::SelectionChanged);
@@ -655,7 +672,7 @@ impl Table {
                     label: SharedString::from(label),
                     aria: SharedString::from(aria),
                     background,
-                    muted,
+                    foreground,
                     danger,
                     editing: header_editing,
                     on_press: Box::new(on_press),
@@ -674,15 +691,16 @@ impl Table {
             return Vec::new();
         };
         let can_edit = snapshot.writable;
-        let background = self.style.surface;
-        let muted = self.style.muted;
-        let danger = self.style.danger;
+        let theme = cx.theme();
+        let background = theme.secondary;
+        let foreground = theme.foreground;
+        let danger = theme.danger;
 
         rows.map(|display_row| {
             let data_row = self.model.data_row(display_row);
             let value = self.model.axis_value(oxtuner_core::AxisKind::Y, data_row);
             let label = format_value(value, usize::from(snapshot.y_axis.digits));
-            let units = axis_units(&snapshot.y_axis);
+            let units = snapshot.y_axis.units_suffix();
             let aria = format!("{label}{units} {}", snapshot.y_axis.label);
             let editing = self.model.axis_editing().filter(|editing| {
                 editing.target.axis == oxtuner_core::AxisKind::Y && editing.target.index == data_row
@@ -694,8 +712,10 @@ impl Table {
             let on_press = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus, cx);
                 // A double press edits, matching the column headers and the
-                // cells. The bin index is the data row: on a flipped axis the
-                // top displayed row is the highest bin.
+                // cells. Any other press dismisses, so a bin edit never
+                // shares the focus with the cell range. The bin index is the
+                // data row: on a flipped axis the top displayed row is the
+                // highest bin.
                 if can_edit && event.click_count >= 2 {
                     this.model.clear_action();
                     if this
@@ -704,6 +724,11 @@ impl Table {
                     {
                         cx.notify();
                     }
+                } else if !this.model.axis_editing().is_some_and(|editing| {
+                    editing.target.axis == oxtuner_core::AxisKind::Y
+                        && editing.target.index == data_row
+                }) {
+                    this.dismiss_focus(cx);
                 }
                 cx.stop_propagation();
                 cx.emit(TableEvent::SelectionChanged);
@@ -714,7 +739,7 @@ impl Table {
                 label: SharedString::from(label),
                 aria: SharedString::from(aria),
                 background,
-                muted,
+                foreground,
                 danger,
                 editing: header_editing,
                 on_press: Box::new(on_press),
@@ -735,10 +760,22 @@ impl Render for Table {
         let columns = table.cols;
         let minimum = table.minimum;
         let maximum = table.maximum;
-        let corner_label = corner_caption(&table.x_axis, &table.y_axis);
+        let x_caption = table.x_axis.caption();
+        let y_caption = table.y_axis.caption();
         let selection = self.model.selection();
         let editing = self.model.editing().cloned();
-        let offset = self.body_scroll.offset();
+        // Wheel events add their delta to the scroll handle before layout
+        // runs, and layout clamps it to the content without repainting. The
+        // body therefore paints the clamped offset while a raw read here can
+        // still hold the overshoot, which pushed the frozen headers past the
+        // cells after scrolling into a limit. Clamping here keeps both sides
+        // on the same value in every frame.
+        let raw_offset = self.body_scroll.offset();
+        let max_offset = self.body_scroll.max_offset();
+        let offset = point(
+            raw_offset.x.clamp(-max_offset.x, px(0.)),
+            raw_offset.y.clamp(-max_offset.y, px(0.)),
+        );
         let body_width =
             px(columns as f32 * CELL_WIDTH + columns.saturating_sub(1) as f32 * CELL_GAP);
         let body_height = px(rows as f32 * CELL_HEIGHT + rows.saturating_sub(1) as f32 * CELL_GAP);
@@ -754,7 +791,8 @@ impl Render for Table {
         let (first_column, last_column) = visible_range(offset.x, viewport.width, step_x, columns);
         let (first_row, last_row) = visible_range(offset.y, viewport.height, step_y, rows);
 
-        let style = self.style;
+        let theme = cx.theme().clone();
+        let cell_border_color = theme.border;
         let flipped = self.model.flip_y();
 
         let column_headers = self.render_column_headers(first_column..last_column, cx);
@@ -765,15 +803,7 @@ impl Render for Table {
                 let data_row = self.model.data_row(display_row);
                 let cells = (first_column..last_column)
                     .map(|column| {
-                        self.render_cell(
-                            data_row,
-                            column,
-                            selection,
-                            editing.as_ref(),
-                            minimum,
-                            maximum,
-                            cx,
-                        )
+                        self.render_cell(data_row, column, editing.as_ref(), minimum, maximum, cx)
                     })
                     .collect::<Vec<_>>();
                 h_flex()
@@ -783,75 +813,162 @@ impl Render for Table {
             })
             .collect::<Vec<_>>();
 
+        // The corner is empty: each axis names itself beside its own band, so
+        // the caption cannot be mistaken for a row or column label.
         let corner = div()
+            .id("table-corner")
+            .test_support()
             .w(px(AXIS_WIDTH))
             .h(px(AXIS_HEIGHT))
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .bg(style.surface)
-            .text_xs()
-            .text_color(style.muted)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_center()
-                    .child(corner_label),
-            );
+            .flex_shrink_0()
+            .bg(theme.secondary);
 
         let header_band = h_flex()
             .h(px(AXIS_HEIGHT))
             .flex_shrink_0()
             .gap(px(CELL_GAP))
-            .bg(style.border)
+            // Contrast between theme
+            .bg(cell_border_color)
             .child(corner)
+            // One clipped viewport: the headers ride the scroll offset inside
+            // it, and the band's trailing space keeps the plain background.
             .child(
                 div()
+                    .relative()
                     .flex_1()
+                    .h_full()
                     .min_w_0()
                     .overflow_hidden()
-                    .bg(style.background)
                     .child(
-                        div()
-                            .relative()
-                            .left(offset.x)
+                        h_flex()
+                            .absolute()
+                            .left(offset.x + px(first_column as f32 * step_x))
+                            .top(px(0.))
                             .w(body_width)
-                            .h(px(AXIS_HEIGHT))
-                            .bg(style.border)
-                            .child(
-                                h_flex()
-                                    .absolute()
-                                    .left(px(first_column as f32 * step_x))
-                                    .top(px(0.))
-                                    .gap(px(CELL_GAP))
-                                    .children(column_headers),
-                            ),
+                            .h_full()
+                            // Contrast between theme
+                            .bg(cell_border_color)
+                            .gap(px(CELL_GAP))
+                            .children(column_headers),
                     ),
             );
 
-        // The selection reads as one spreadsheet-style outline around the
-        // whole range rather than a border on every cell, and being a plain
-        // frame it leaves the cells underneath fully clickable.
+        // The selection is painted over the cells, the way a spreadsheet does
+        // it: one soft tint across a multi-cell range and one outline around
+        // the whole range. Drawing it over the grid instead of bordering each
+        // cell keeps every value on the same pixel grid whether or not it is
+        // selected, and the tint is thin enough to read the values through.
         let (top, left, bottom, right) = selection.bounds();
         let top_display = self.model.display_row(top);
         let bottom_display = self.model.display_row(bottom);
         let first_display = top_display.min(bottom_display);
         let rows_span = (top_display.max(bottom_display) - first_display + 1) as f32;
-        let selection_frame = div()
-            .id("selection-frame")
-            .test_support()
+
+        let selection_width =
+            (right - left + 1) as f32 * CELL_WIDTH + (right - left) as f32 * CELL_GAP;
+        let selection_height = rows_span * CELL_HEIGHT + (rows_span - 1.) * CELL_GAP;
+        // The heat colours span the whole hue circle, so a tinted accent
+        // disappears on cells of the same hue. Foreground contrasts with every
+        // fill in both themes.
+        let selection_fill = theme.foreground.opacity(0.22);
+
+        let mut selection_layer = div()
             .absolute()
             .left(px(left as f32 * step_x))
             .top(px(first_display as f32 * step_y))
-            .w(px(
-                (right - left + 1) as f32 * CELL_WIDTH + (right - left) as f32 * CELL_GAP
-            ))
-            .h(px(rows_span * CELL_HEIGHT + (rows_span - 1.) * CELL_GAP))
-            .border_1()
-            .border_color(style.foreground);
+            .w(px(selection_width))
+            .h(px(selection_height));
+
+        // The tint is translucent and covers the whole range, the cursor cell
+        // included: every selected value stays readable under it, and no cell
+        // in a filled range looks left out.
+        if selection.cell_count() > 1 {
+            selection_layer = selection_layer.child(
+                div()
+                    .id("selection-fill")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .bg(selection_fill),
+            );
+        }
+
+        // The outline straddles the grid line instead of sitting inside the
+        // range. Drawn on the bounds it would eat two pixels off the edge
+        // cells, which makes a single selected cell read as inset.
+        //
+        // Every ramp stop sits at mid lightness, so the frame goes dark to
+        // separate from all of them, yellow and red included. Purple keeps
+        // the hue outside the red-to-blue span at the same time.
+        selection_layer = selection_layer.child(
+            div()
+                .id("selection-frame")
+                .test_support()
+                .absolute()
+                .left(px(-CELL_GAP))
+                .top(px(-CELL_GAP))
+                .w(px(selection_width + 2. * CELL_GAP))
+                .h(px(selection_height + 2. * CELL_GAP))
+                .border_2()
+                .border_color(Hsla {
+                    h: 288.0 / 360.0,
+                    s: 0.90,
+                    l: 0.26,
+                    a: 1.0,
+                }),
+        );
+
+        // The captions sit outside the grid box, the way a chart labels its
+        // axes: the Y caption in its own column to the left, the X caption on
+        // the side the column band takes.
+        //
+        // The Y caption runs vertically. Glyphs cannot be rotated through the
+        // styling API (the SVG element draws with its own font stack, so it
+        // does not match application text), so it is one character per line.
+        // A space becomes a short gap instead of an empty line, which would
+        // pull a two-word caption apart.
+        let y_caption_rows = y_caption
+            .chars()
+            .map(|character| {
+                if character.is_whitespace() {
+                    div().h(px(AXIS_LABEL_LINE_HEIGHT / 2.))
+                } else {
+                    div()
+                        .h(px(AXIS_LABEL_LINE_HEIGHT))
+                        .child(character.to_string())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let y_label = div()
+            .id("y-axis-label")
+            .test_support()
+            .aria_label(y_caption)
+            .w(px(AXIS_LABEL_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .children(y_caption_rows);
+
+        // The X caption sits outside the grid box, centred over it.
+        let x_label = div()
+            .id("x-axis-label")
+            .test_support()
+            .aria_label(x_caption.clone())
+            .h(px(AXIS_LABEL_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(div().min_w_0().truncate().text_center().child(x_caption));
 
         let body_band = h_flex()
             // The band takes exactly the table's height and shrinks only when
@@ -861,30 +978,31 @@ impl Render for Table {
             .flex_shrink_1()
             .min_h_0()
             .gap(px(CELL_GAP))
-            .bg(style.border)
+            // Contrast between theme
+            .bg(cell_border_color)
             .child(
+                // One clipped viewport for the frozen row band: the headers
+                // ride the body's scroll offset inside it.
                 div()
+                    .relative()
                     .w(px(AXIS_WIDTH))
                     .h_full()
                     .flex_shrink_0()
                     .overflow_hidden()
-                    .bg(style.background)
+                    .border_b_1()
+                    // Contrast between theme
+                    .border_color(cell_border_color)
                     .child(
-                        div()
-                            .relative()
-                            .top(offset.y)
+                        v_flex()
+                            .absolute()
+                            .left(px(0.))
+                            .top(offset.y + px(first_row as f32 * step_y))
                             .w(px(AXIS_WIDTH))
                             .h(body_height)
-                            .bg(style.border)
-                            .child(
-                                v_flex()
-                                    .absolute()
-                                    .left(px(0.))
-                                    .top(px(first_row as f32 * step_y))
-                                    .w(px(AXIS_WIDTH))
-                                    .gap(px(CELL_GAP))
-                                    .children(row_headers),
-                            ),
+                            // Contrast between theme
+                            .bg(cell_border_color)
+                            .gap(px(CELL_GAP))
+                            .children(row_headers),
                     ),
             )
             .child(
@@ -892,16 +1010,18 @@ impl Render for Table {
                     .id("table-body")
                     .size_full()
                     .min_w_0()
-                    .bg(style.background)
                     .overflow_scroll()
                     .track_scroll(&self.body_scroll)
                     .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
+                        // The content is exactly the grid's size: it carries
+                        // the grid-line colour, and the cells sit on top.
                         div()
                             .relative()
                             .w(body_width)
                             .h(body_height)
-                            .bg(style.border)
+                            // Contrast between theme
+                            .bg(cell_border_color)
                             .child(
                                 v_flex()
                                     .absolute()
@@ -910,10 +1030,14 @@ impl Render for Table {
                                     .gap(px(CELL_GAP))
                                     .children(body_rows),
                             )
-                            // Painted after the cells so the outline sits on
-                            // top of them; being a plain frame it leaves the
-                            // cells underneath fully clickable.
-                            .child(selection_frame),
+                            // Painted after the cells so the tint and the
+                            // outline sit on top; being plain frames they leave
+                            // the cells underneath fully clickable. A bin edit
+                            // owns the focus instead: the cell range stays in
+                            // the model but is not drawn until the edit lands.
+                            .when(self.model.axis_editing().is_none(), |this| {
+                                this.child(selection_layer)
+                            }),
                     ),
             );
 
@@ -939,42 +1063,85 @@ impl Render for Table {
             .size_full()
         };
         let aria = format!("{}: {} rows by {} columns", table.title, rows, columns);
-        let focused = self.focus.is_focused(window);
 
         // The column band follows the low end of the Y axis, which is the
-        // bottom by default (chart orientation) and the top when flipped.
-        let mut bands = v_flex().relative().size_full().min_h_0().child(input);
+        // bottom by default (chart orientation) and the top when flipped. One
+        // column holds the bands and the X caption, so the caption is centred
+        // over the table it names.
+        //
+        // The box draws the table's hairline around the two bands only, so
+        // both axis captions stay outside it.
+        let mut table_box = v_flex()
+            .id("table-box")
+            .test_support()
+            .flex_shrink_1()
+            .min_h_0()
+            .border_1()
+            .border_color(theme.border);
+
         if flipped {
-            bands = bands.child(header_band).child(body_band);
+            table_box = table_box.child(header_band).child(body_band);
         } else {
-            bands = bands.child(body_band).child(header_band);
+            table_box = table_box.child(body_band).child(header_band);
         }
 
+        let mut grid = v_flex()
+            .relative()
+            .flex_grow_0()
+            .flex_shrink_1()
+            .min_w_0()
+            .min_h_0()
+            .child(input);
+
+        if flipped {
+            grid = grid.child(x_label.mb(px(AXIS_LABEL_GAP))).child(table_box);
+        } else {
+            grid = grid.child(table_box).child(x_label.mt(px(AXIS_LABEL_GAP)));
+        }
+
+        // The grid is transparent: it fills the box its owner gives it and
+        // paints nothing around it, so the panel colour and the bounds stay
+        // the application's business.
         div()
             .id("table")
-            .size_full()
+            .flex()
+            .flex_col()
+            .h_full()
             .min_h_0()
-            .p_3()
-            .bg(style.background)
-            .text_color(style.foreground)
+            .text_color(theme.foreground)
             .role(Role::Grid)
             .aria_label(aria)
             .track_focus(&self.focus)
-            // The focused border is the keyboard focus indicator for the whole
-            // grid; the cursor cell carries the finer highlight.
-            .when(focused, |this| {
-                this.rounded(style.radius)
-                    .border_1()
-                    .border_color(style.accent)
-            })
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
+            )
+            // Cells and headers stop their own presses, so a press that
+            // reaches here landed on chrome or padding and selects nothing.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.dismiss_focus(cx);
+                    cx.stop_propagation();
+                }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false),
             )
-            .child(bands)
+            .child(
+                // The Y caption sits beside the grid, so it is centred on the
+                // table rather than on the empty space below it.
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_stretch()
+                    .flex_grow_0()
+                    .flex_shrink_1()
+                    .min_h_0()
+                    .gap(px(AXIS_LABEL_GAP))
+                    .child(y_label)
+                    .child(grid),
+            )
             .into_any_element()
     }
 }
@@ -982,32 +1149,6 @@ impl Render for Table {
 /// Formats a table value with the definition's digits.
 fn format_value(value: f64, digits: usize) -> String {
     format!("{value:.digits$}")
-}
-
-/// The corner label names both axes with their units: `MAP (kPa) / RPM (rpm)`.
-fn corner_caption(
-    x_axis: &oxtuner_core::AxisSummary,
-    y_axis: &oxtuner_core::AxisSummary,
-) -> String {
-    format!("{} / {}", axis_caption(y_axis), axis_caption(x_axis))
-}
-
-/// An axis name with its units, for the corner and the editor header.
-fn axis_caption(axis: &oxtuner_core::AxisSummary) -> String {
-    if axis.units.is_empty() {
-        axis.label.clone()
-    } else {
-        format!("{} ({})", axis.label, axis.units)
-    }
-}
-
-/// The units suffix for an axis value label: ` kPa`, or nothing when unitless.
-fn axis_units(axis: &oxtuner_core::AxisSummary) -> String {
-    if axis.units.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", axis.units)
-    }
 }
 
 fn is_edit_start(character: char) -> bool {

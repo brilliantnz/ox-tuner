@@ -31,7 +31,7 @@ pub(crate) type DragHandler = Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App)
 /// step.
 pub(crate) fn caret(color: Hsla) -> impl IntoElement {
     div()
-        .w(px(1.5))
+        .w(px(1.))
         .h(px(12.))
         .flex_shrink_0()
         .bg(color)
@@ -65,8 +65,6 @@ pub(crate) struct TableCell {
     pub(crate) danger: Hsla,
     /// The theme's info colour, for the realtime dot.
     pub(crate) info: Hsla,
-    /// Whether the cell is the cursor, the keyboard's position.
-    pub(crate) cursor: bool,
     pub(crate) editing: Option<CellEditing>,
     /// The write-state dot's colour, or `None` for no mark.
     pub(crate) mark: Option<Hsla>,
@@ -86,7 +84,6 @@ impl RenderOnce for TableCell {
             text_color,
             danger,
             info,
-            cursor,
             editing,
             mark,
             realtime,
@@ -128,10 +125,6 @@ impl RenderOnce for TableCell {
                 );
         } else {
             element = element.child(display);
-        }
-
-        if cursor {
-            element = element.border_2().border_color(text_color);
         }
 
         if let Some(color) = mark {

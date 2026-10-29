@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-gpui-kit = { workspace = true, default-features = false }
+gpui-kit = { workspace = true, default-features = false, features = ["component"] }
 oxtuner-core.workspace = true
 
 [lints]

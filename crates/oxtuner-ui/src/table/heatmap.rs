@@ -2,13 +2,13 @@
 //!
 //! These are data colours, not interface chrome: the value is the datum and its
 //! colour is the encoding, so the ramp stays stable across light and dark
-//! themes while everything around it follows [`crate::table::TableStyle`].
+//! themes while everything around it follows the application theme. The marks
+//! take their colours as arguments for the same reason: the caller reads the
+//! theme, this module only decides which colour a state means.
 
 use gpui_kit::{Hsla, Rgba, rgb};
 
 use oxtuner_core::CellState;
-
-use super::style::TableStyle;
 
 /// The heatmap's data palette: a saturated blue → cyan → green → yellow →
 /// orange → red ramp.
@@ -55,13 +55,19 @@ pub(crate) fn contrast_text(fill: Hsla) -> Hsla {
 }
 
 /// The write-state dot for one cell, or `None` when the cell needs no mark.
-pub(crate) fn decoration(state: CellState, changed: bool, style: &TableStyle) -> Option<Hsla> {
+pub(crate) fn decoration(
+    state: CellState,
+    changed: bool,
+    danger: Hsla,
+    warning: Hsla,
+    info: Hsla,
+) -> Option<Hsla> {
     match state {
-        CellState::WriteFailed | CellState::Conflict => Some(style.danger),
-        CellState::InRam => Some(style.info),
-        CellState::LocalDirty => Some(style.warning),
+        CellState::WriteFailed | CellState::Conflict => Some(danger),
+        CellState::InRam => Some(info),
+        CellState::LocalDirty => Some(warning),
         CellState::Synced | CellState::Unknown | CellState::NotApplicable => {
-            changed.then_some(style.warning)
+            changed.then_some(warning)
         }
     }
 }

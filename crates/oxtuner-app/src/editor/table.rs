@@ -16,11 +16,12 @@ use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Selectable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, Focusable as _, FontWeight, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div, px,
 };
 use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
-use oxtuner_ui::table::{BulkOp, GridAction, Table, TableEvent, TableStyle};
+use oxtuner_ui::table::{BulkOp, GridAction, Table, TableEvent};
 
 use crate::core::{CoreService, edit_table, read_table};
 use crate::i18n::t;
@@ -50,31 +51,10 @@ pub(crate) struct TableEditor {
     _table: Subscription,
 }
 
-/// The table tokens from the application theme, matching `chart_style` in the
-/// realtime view.
-fn table_style(theme: &gpui_kit::component::Theme) -> TableStyle {
-    TableStyle {
-        background: theme.background,
-        foreground: theme.foreground,
-        surface: theme.group_box,
-        muted: theme.muted_foreground,
-        border: theme.border,
-        danger: theme.danger,
-        warning: theme.warning,
-        info: theme.info,
-        accent: theme.primary,
-        radius: theme.radius_lg,
-    }
-}
-
 impl TableEditor {
     /// An editor with no table loaded yet.
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let table = cx.new(|cx| {
-            let mut table = Table::new(cx);
-            table.set_style(table_style(cx.theme()), cx);
-            table
-        });
+        let table = cx.new(Table::new);
         let _table = cx.subscribe(&table, |this, _, event, cx| this.on_table(event, cx));
         let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
         let flip_y = cx
@@ -273,13 +253,8 @@ impl TableEditor {
         let theme = cx.theme().clone();
         let title: SharedString =
             table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
-        let axes = table.map(|table| {
-            format!(
-                "{} · {}",
-                axis_caption(&table.x_axis),
-                axis_caption(&table.y_axis)
-            )
-        });
+        let axes =
+            table.map(|table| format!("{} · {}", table.x_axis.caption(), table.y_axis.caption()));
         let read_only = table.is_some_and(|table| !table.writable);
         let has_table = table.is_some();
 
@@ -505,11 +480,35 @@ impl TableEditor {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if has_table {
-            return div()
+            // The editor owns the surface around the grid: the grid reports
+            // its own size, so the surface fits it instead of filling the
+            // editor.
+            return v_flex()
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .child(self.table.clone())
+                .items_start()
+                .p_2()
+                // Clicks that land on the padding around the grid dismiss
+                // the table's focus. Presses on cells and headers stop at
+                // the table, so the toolbar and the selection it acts on
+                // are unaffected.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.table.update(cx, |table, cx| table.dismiss_focus(cx));
+                    }),
+                )
+                .child(
+                    // The surface fits the table: it is as wide as the grid
+                    // and as tall as the grid, up to the editor's height; the
+                    // grid scrolls inside once it does not fit.
+                    div()
+                        .max_w_full()
+                        .max_h_full()
+                        .overflow_hidden()
+                        .child(self.table.clone()),
+                )
                 .into_any_element();
         }
 
@@ -672,15 +671,6 @@ impl TableEditor {
 impl Render for TableEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        // The table paints from a token snapshot, not the live theme, so a
-        // theme change reached from settings only lands after it is pushed
-        // here. The comparison keeps an unchanged theme from re-rendering the
-        // grid every frame.
-        let style = table_style(&theme);
-        if self.table.read(cx).style() != &style {
-            self.table
-                .update(cx, |table, cx| table.set_style(style, cx));
-        }
         // One small snapshot clone per frame keeps the borrow of the table out
         // of the render helpers, which need `cx` mutably for their buttons.
         let snapshot = self.table.read(cx).model().table().cloned();
@@ -729,14 +719,6 @@ fn rebin_item(
             grid.update(cx, |grid, cx| grid.rebin(axis, cx));
             window.focus(&focus, cx);
         })
-}
-
-fn axis_caption(axis: &oxtuner_core::AxisSummary) -> String {
-    if axis.units.is_empty() {
-        axis.label.clone()
-    } else {
-        format!("{} ({})", axis.label, axis.units)
-    }
 }
 
 fn format_value(value: f64, digits: u8) -> String {
