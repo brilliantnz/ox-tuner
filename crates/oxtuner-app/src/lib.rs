@@ -27,7 +27,6 @@ pub mod core;
 pub mod disclaimer;
 mod editor;
 pub mod i18n;
-pub mod icons;
 pub mod layout;
 pub mod link;
 pub mod platform;
