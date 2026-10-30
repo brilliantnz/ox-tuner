@@ -483,6 +483,8 @@ app:
     page:
       appearance:
         en: Appearance
+      editor:
+        en: Editor
       project:
         en: Project
       shortcuts:
@@ -498,9 +500,13 @@ app:
         en: Startup
       guardrails:
         en: Guardrails
+      table:
+        en: Table
     item:
       mode:
         en: Mode
+      header_wash_for_ranges:
+        en: Highlight row and column headers for a range selection
       auto_reopen:
         en: Reopen the last project at startup
       language:
@@ -517,6 +523,8 @@ app:
       en: Follow the system appearance, or pin the app to light or dark.
     auto_reopen_description:
       en: Off keeps launching clean; the Projects dialog reopens it in one click.
+    header_wash_for_ranges_description:
+      en: Off tints only the bins of a single selected cell. On tints every row and column bin the range covers.
     disclaimer_accepted:
       en: Accepted on this installation.
     disclaimer_not_accepted:

@@ -24,7 +24,7 @@ pub(crate) struct HeaderEditing {
     pub(crate) invalid: bool,
 }
 
-/// The wash that ties a bin to the cells selected along its axis.
+/// The wash that ties a bin to a selected cell.
 ///
 /// It is an overlay inside the bin, not a border or an inset: the bin keeps
 /// its exact size and its label stays where it was, and the tint reads the
@@ -48,7 +48,8 @@ pub(crate) struct ColumnHeader {
     pub(crate) foreground: Hsla,
     /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
-    /// The selection wash, when the cursor or range covers this bin.
+    /// The selection wash, when a single selected cell sits in this bin's
+    /// column, or a range covers it and the owner asked for the wider wash.
     pub(crate) highlight: Option<BinHighlight>,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,
@@ -136,7 +137,8 @@ pub(crate) struct RowHeader {
     pub(crate) foreground: Hsla,
     /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
-    /// The selection wash, when the cursor or range covers this bin.
+    /// The selection wash, when a single selected cell sits in this bin's row,
+    /// or a range covers it and the owner asked for the wider wash.
     pub(crate) highlight: Option<BinHighlight>,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,

@@ -191,8 +191,41 @@ fn a_selected_cell_washes_its_column_and_row_bins(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_range_washes_every_bin_it_spans(cx: &mut TestAppContext) {
+fn a_range_leaves_the_bins_plain(cx: &mut TestAppContext) {
     let (handle, _, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.drag_to(cell(1, 1, 8), cell(5, 6, 8), cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        for column in 0..8 {
+            assert!(
+                window.try_find(column_highlight(column)).is_none(),
+                "a range must not wash the column bins"
+            );
+        }
+
+        for display_row in 0..8 {
+            assert!(
+                window.try_find(row_highlight(display_row)).is_none(),
+                "a range must not wash the row bins"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_range_washes_every_bin_it_spans_when_asked(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+    cx.update(|cx| {
+        grid.update(cx, |grid, cx| grid.set_header_wash_for_ranges(true, cx));
+    });
 
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);

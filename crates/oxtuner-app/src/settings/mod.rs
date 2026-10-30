@@ -14,6 +14,7 @@
 //! written to `settings.json`, so the choice survives a restart, further
 //! sections arrive with the features they configure.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::group_box::GroupBoxVariant;
@@ -21,7 +22,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Global, IntoElement, Keystroke,
     ParentElement as _, Pixels, Render, SharedString, Styled as _, WeakEntity, Window,
@@ -143,6 +144,7 @@ impl Render for SettingsWindow {
 fn pages() -> Vec<SettingPage> {
     vec![
         appearance_page(),
+        editor_page(),
         project_page(),
         shortcuts_page(),
         safety_page(),
@@ -217,6 +219,41 @@ fn theme_options() -> Vec<(SharedString, SharedString)> {
 /// key rather than the active locale.
 fn language_options() -> Vec<(SharedString, SharedString)> {
     vec![(preferences::DEFAULT_LANGUAGE.into(), t!("app.language.en"))]
+}
+
+/// The table editor's display preferences.
+fn editor_page() -> SettingPage {
+    SettingPage::new(t!("app.settings.page.editor"))
+        .icon(IconName::Columns3Cog)
+        .group(
+            SettingGroup::new()
+                .title(t!("app.settings.group.table"))
+                .item(
+                    SettingItem::new(
+                        t!("app.settings.item.header_wash_for_ranges"),
+                        SettingField::switch(
+                            |cx| {
+                                cx.global::<AppSettings>()
+                                    .settings()
+                                    .ui
+                                    .table_header_wash_for_ranges
+                            },
+                            |value, cx| {
+                                AppSettings::set_table_header_wash_for_ranges(cx, value);
+                            },
+                        ),
+                    )
+                    .description(t!("app.settings.header_wash_for_ranges_description").to_string())
+                    .keywords([
+                        "table",
+                        "header",
+                        "bin",
+                        "range",
+                        "selection",
+                        "highlight",
+                    ]),
+                ),
+        )
 }
 
 fn project_page() -> SettingPage {

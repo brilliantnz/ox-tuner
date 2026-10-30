@@ -111,6 +111,10 @@ pub(crate) struct UiSettings {
     /// persisted so a new locale is a file plus a dropdown option, not a
     /// schema change.
     pub(crate) language: String,
+    /// Whether a range selection also tints the row and column bins of the
+    /// table editor. Off by default: a range is read on the cells, and a
+    /// single selected cell marks its two bins either way.
+    pub(crate) table_header_wash_for_ranges: bool,
 }
 
 impl Default for UiSettings {
@@ -118,6 +122,7 @@ impl Default for UiSettings {
         Self {
             theme: ThemePreference::System,
             language: DEFAULT_LANGUAGE.to_string(),
+            table_header_wash_for_ranges: false,
         }
     }
 }
@@ -378,6 +383,19 @@ impl AppSettings {
         apply_language(code, cx);
     }
 
+    /// Whether a range selection also tints the table's row and column bins.
+    pub(crate) fn table_header_wash_for_ranges(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|settings| settings.settings.ui.table_header_wash_for_ranges)
+    }
+
+    /// Changes the header wash preference and persists it.
+    pub(crate) fn set_table_header_wash_for_ranges(cx: &mut App, wash: bool) {
+        Self::update(cx, |settings| {
+            settings.ui.table_header_wash_for_ranges = wash;
+        });
+    }
+
     /// Records that the safety disclaimer was accepted.
     pub(crate) fn set_disclaimer_accepted(cx: &mut App) {
         Self::update(cx, |settings| {
@@ -469,6 +487,7 @@ mod tests {
             ui: UiSettings {
                 theme: ThemePreference::Dark,
                 language: DEFAULT_LANGUAGE.to_string(),
+                table_header_wash_for_ranges: true,
             },
             connection: ConnectionSettings {
                 last_port: Some("/dev/tty.usbmodem1101".into()),
@@ -556,6 +575,18 @@ mod tests {
         ] {
             assert_eq!(ThemePreference::from_key(preference.key()), preference);
         }
+    }
+
+    /// A fresh installation must not add tint to the table's headers; only a
+    /// single selected cell marks its bins until the user asks for more.
+    #[test]
+    fn the_range_header_wash_is_off_by_default() {
+        assert!(!Settings::default().ui.table_header_wash_for_ranges);
+
+        let document = json!({ "ui": { "theme": "dark" } });
+        let migrated = Settings::from_json_value(document).expect("migrate");
+
+        assert!(!migrated.ui.table_header_wash_for_ranges);
     }
 
     #[test]

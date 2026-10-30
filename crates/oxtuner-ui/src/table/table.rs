@@ -17,7 +17,10 @@
 //! axis: at the bottom by default and at the top when the axis is flipped.
 //! Each axis names itself in a caption band beside its headers, and the
 //! selection is painted over the cells as a spreadsheet range: one tint and
-//! one outline, never a border that moves the values.
+//! one outline, never a border that moves the values. A single selected cell
+//! also tints the two bins it sits between, so the value can be read against
+//! both axes; a range leaves the bins plain unless the owner asks for the
+//! wider wash with [`Table::set_header_wash_for_ranges`].
 //! There is no scrollbar; the body scrolls with the wheel, drag-select and
 //! the keyboard.
 
@@ -93,6 +96,9 @@ pub struct Table {
     body_scroll: ScrollHandle,
     dragging: bool,
     realtime: Option<RealtimePoint>,
+    /// Whether a selection of several cells also tints the bins of the headers
+    /// it spans. One cell always tints its two bins.
+    header_wash_for_ranges: bool,
 }
 
 impl EventEmitter<TableEvent> for Table {}
@@ -222,6 +228,7 @@ impl Table {
             body_scroll: ScrollHandle::new(),
             dragging: false,
             realtime: None,
+            header_wash_for_ranges: false,
         }
     }
 
@@ -241,6 +248,16 @@ impl Table {
     pub fn set_flip_y(&mut self, flip: bool, cx: &mut Context<Self>) {
         self.model.set_flip_y(flip);
         self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Sets whether a multi-cell selection also tints the row and column bins.
+    ///
+    /// Off by default: a range is read on the cells themselves, and washing
+    /// every bin it spans only adds noise to the headers. A single selected
+    /// cell tints its two bins either way.
+    pub fn set_header_wash_for_ranges(&mut self, wash: bool, cx: &mut Context<Self>) {
+        self.header_wash_for_ranges = wash;
         cx.notify();
     }
 
@@ -629,9 +646,13 @@ impl Table {
         let background = theme.secondary;
         let foreground = theme.foreground;
         let danger = theme.danger;
-        // The bins of the selected columns carry the same emphasis as the
-        // selection itself, so a value can be read against both axes at once.
-        let (_, left, _, right) = self.model.selection().bounds();
+        // A single cell names the bins it sits between, the way a spreadsheet
+        // does, so a value can be read against both axes at once. A range is
+        // read on the cells themselves and leaves the bins plain unless the
+        // owner asked for the wider wash.
+        let selection = self.model.selection();
+        let washes_bins = self.header_wash_for_ranges || selection.cell_count() == 1;
+        let (_, left, _, right) = selection.bounds();
         let wash = theme.primary.opacity(0.28);
 
         columns
@@ -679,9 +700,11 @@ impl Table {
                     background,
                     foreground,
                     danger,
-                    highlight: (left..=right).contains(&column).then(|| BinHighlight {
-                        id: ("column-header-highlight", column).into(),
-                        color: wash,
+                    highlight: (washes_bins && (left..=right).contains(&column)).then(|| {
+                        BinHighlight {
+                            id: ("column-header-highlight", column).into(),
+                            color: wash,
+                        }
                     }),
                     editing: header_editing,
                     on_press: Box::new(on_press),
@@ -706,7 +729,10 @@ impl Table {
         let danger = theme.danger;
         // Rows are matched in definition order: the band may run downhill
         // when the axis is flipped, while the selection never changes shape.
-        let (top, _, bottom, _) = self.model.selection().bounds();
+        // The same rule as the columns: only one selected cell names its bin.
+        let selection = self.model.selection();
+        let washes_bins = self.header_wash_for_ranges || selection.cell_count() == 1;
+        let (top, _, bottom, _) = selection.bounds();
         let wash = theme.primary.opacity(0.28);
 
         rows.map(|display_row| {
@@ -754,9 +780,11 @@ impl Table {
                 background,
                 foreground,
                 danger,
-                highlight: (top..=bottom).contains(&data_row).then(|| BinHighlight {
-                    id: ("row-header-highlight", display_row).into(),
-                    color: wash,
+                highlight: (washes_bins && (top..=bottom).contains(&data_row)).then(|| {
+                    BinHighlight {
+                        id: ("row-header-highlight", display_row).into(),
+                        color: wash,
+                    }
                 }),
                 editing: header_editing,
                 on_press: Box::new(on_press),

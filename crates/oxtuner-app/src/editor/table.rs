@@ -25,6 +25,7 @@ use oxtuner_ui::table::{BulkOp, GridAction, Table, TableEvent};
 
 use crate::core::{CoreService, edit_table, read_table};
 use crate::i18n::t;
+use crate::settings::preferences::AppSettings;
 use crate::state::session::{AppState, schedule_save};
 
 /// The table editor for the node selected in the navigation tree.
@@ -49,6 +50,7 @@ pub(crate) struct TableEditor {
     flip_y: bool,
     _core: Subscription,
     _table: Subscription,
+    _settings: Subscription,
 }
 
 impl TableEditor {
@@ -57,9 +59,13 @@ impl TableEditor {
         let table = cx.new(Table::new);
         let _table = cx.subscribe(&table, |this, _, event, cx| this.on_table(event, cx));
         let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
+        // The Settings page edits a global, so a table that is already open
+        // picks a new header preference up without being reopened.
+        let _settings = cx.observe_global::<AppSettings>(|this, cx| this.sync_header_wash(cx));
         let flip_y = cx
             .try_global::<AppState>()
             .is_some_and(|state| state.data().layout.table_low_at_top);
+        let header_wash = AppSettings::table_header_wash_for_ranges(cx);
 
         let editor = Self {
             table,
@@ -73,10 +79,12 @@ impl TableEditor {
             flip_y,
             _core,
             _table,
+            _settings,
         };
-        editor
-            .table
-            .update(cx, |table, cx| table.set_flip_y(flip_y, cx));
+        editor.table.update(cx, |table, cx| {
+            table.set_flip_y(flip_y, cx);
+            table.set_header_wash_for_ranges(header_wash, cx);
+        });
         editor
     }
 
@@ -240,6 +248,14 @@ impl TableEditor {
         });
         schedule_save(cx);
         cx.notify();
+    }
+
+    /// Follows Settings › Editor: the header wash reaches an open table at once.
+    fn sync_header_wash(&mut self, cx: &mut Context<Self>) {
+        let wash = AppSettings::table_header_wash_for_ranges(cx);
+
+        self.table
+            .update(cx, |table, cx| table.set_header_wash_for_ranges(wash, cx));
     }
 
     fn retry(&mut self, cx: &mut Context<Self>) {
