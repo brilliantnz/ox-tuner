@@ -296,19 +296,9 @@ impl TableModel {
     pub fn set_table(&mut self, table: TableSummary) {
         let same_table = self.table.as_ref().map(|current| &current.id) == Some(&table.id);
         if !same_table {
-            // Start on the cell the user sees first: the top-left of the
-            // displayed grid, which is the highest bin unless the axis is
-            // flipped. Selecting data row 0 here would open the table scrolled
-            // to its far end.
-            let top = if self.flip_y {
-                0
-            } else {
-                table.rows.saturating_sub(1)
-            };
-            self.selection = Selection::single(CellPos {
-                row: top,
-                column: 0,
-            });
+            // Start at the first definition bin on both axes. Display
+            // orientation changes which side owns that bin, not its index.
+            self.selection = Selection::single(CellPos { row: 0, column: 0 });
             self.editing = None;
             self.axis_editing = None;
             self.pending.clear();
@@ -1689,6 +1679,20 @@ mod tests {
         model.set_table(table(4, 2));
         assert_eq!(model.axis_channel(AxisKind::X), Some("rpm"));
         assert_eq!(model.axis_channel(AxisKind::Y), Some("map"));
+    }
+
+    #[test]
+    fn a_new_table_starts_at_the_first_bin_on_both_axes() {
+        let mut model = TableModel::new();
+        model.set_table(table(4, 2));
+
+        assert_eq!(model.selection().cursor, CellPos { row: 0, column: 0 });
+
+        model.set_flip_y(true);
+        model.clear_table();
+        model.set_table(table(4, 8));
+
+        assert_eq!(model.selection().cursor, CellPos { row: 0, column: 0 });
     }
 
     #[test]
