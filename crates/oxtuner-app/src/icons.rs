@@ -7,6 +7,33 @@
 //! icon variant it uses and loads each one from the bundle, so a wrong icon
 //! fails `cargo test` instead of a user's session.
 
+use std::borrow::Cow;
+
+use gpui_kit::AssetSource;
+
+gpui_kit::assets::icon_assets!(pub ExtraIcons, [Move3d]);
+
+/// Application assets layered over GPUI Kit's default bundle.
+pub struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<gpui_kit::SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

@@ -42,7 +42,7 @@ fn main() {
     // new language is a locale file plus a dropdown option.
     oxtuner_app::i18n::set_locale(settings.language());
 
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(oxtuner_app::icons::AppAssets);
 
     // macOS: closing the window hides the app (see
     // `app::window::install_close_behavior`), so the Dock icon has to be able to
