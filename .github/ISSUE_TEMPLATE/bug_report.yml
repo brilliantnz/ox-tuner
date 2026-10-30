@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible problem in Ox Tuner.
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove personal or sensitive data from logs and configuration files before sharing them. Do not attach ECU data you are not comfortable making public.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ox Tuner version or commit
+      placeholder: Version number or commit hash
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: OS and version
+  - type: textarea
+    id: ecu
+    attributes:
+      label: ECU and connection details
+      description: ECU model, firmware, interface, and relevant connection setup.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Include relevant error messages. Remove secrets and personal data first.

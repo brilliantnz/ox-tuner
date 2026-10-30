@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a capability or improvement for Ox Tuner.
+title: '[Feature]: '
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem or workflow and the outcome you would like. For ECU write operations, include relevant safety considerations.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what is difficult or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you expect Ox Tuner to support this?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any existing workflow or alternative you have considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: ECU and setup context
+      description: ECU, firmware, operating system, hardware, or relevant configuration.

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or start a discussion
+    url: https://github.com/brilliantnz/ox-tuner/discussions
+    about: Get help, discuss ideas, or ask general questions about Ox Tuner.
