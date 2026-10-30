@@ -12,14 +12,22 @@
 //! and the directory is watched so later edits reload. The System / Light /
 //! Dark preference in settings keeps working — it now resolves to the OxTuner
 //! pair instead of the kit defaults.
+//!
+//! The seeded file is user-owned, so it is not replaced on upgrade. It carries
+//! a schema version, and a version older than the bundle is migrated by adding
+//! the keys it is missing. Existing values and unknown keys are kept. An
+//! unreadable file is moved aside, the same way the settings and state stores
+//! handle one.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::{Theme, ThemeRegistry};
 use gpui_kit::{App, SharedString};
+use serde_json::Value;
 
 use crate::platform::paths::AppPaths;
 use crate::settings::preferences::{AppSettings, apply_theme};
+use crate::state::store;
 
 /// The light theme's name in the registry and in the theme file.
 pub const LIGHT_NAME: &str = "OxTuner Light";
@@ -29,30 +37,134 @@ pub const DARK_NAME: &str = "OxTuner Dark";
 const BUNDLED_FILE_NAME: &str = "oxtuner.json";
 /// The theme set shipped with the app, also written to disk on first launch.
 const BUNDLED: &str = include_str!("../themes/oxtuner.json");
+/// Bump when the bundled set gains a token or changes a theme name.
+///
+/// The seeded file records the version it came from. A lower version is
+/// migrated by adding the keys it is missing; a higher one is left alone,
+/// because this build cannot know what a newer file means.
+const THEME_SCHEMA_VERSION: u32 = 1;
+/// The key that carries [`THEME_SCHEMA_VERSION`] in the theme set.
+const SCHEMA_VERSION_KEY: &str = "schema_version";
 
 /// The seeded file: `<config>/themes/oxtuner.json`.
 fn bundled_path(paths: &AppPaths) -> PathBuf {
     paths.themes_dir().join(BUNDLED_FILE_NAME)
 }
 
-/// Writes the bundled theme set into the config directory on first launch.
+/// Writes the bundled theme set into the config directory, then keeps it in
+/// step across upgrades.
 ///
-/// An existing file is never overwritten: once seeded, the file belongs to
-/// the user. A failure is logged, not fatal — the in-memory bundled set is
-/// still installed by [`register`], so the app keeps its colors.
+/// A missing file is written from the bundle. An existing file is user-owned:
+/// a current version is left untouched, an older one gains the keys the bundle
+/// defines and keeps every value the user set, and a newer one is left alone.
+/// An unreadable file is moved aside so the user can recover it. A failure is
+/// logged, not fatal — the in-memory bundled set is still installed by
+/// [`register`], so the app keeps its colors.
 pub fn seed(paths: &AppPaths) {
     let path = bundled_path(paths);
-    if path.exists() {
+
+    let user = match store::read_json::<Value>(&path) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            write_bundled(&path);
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "could not read theme file");
+            match store::quarantine(&path) {
+                Ok(backup) => {
+                    tracing::warn!(path = %backup.display(), "moved unreadable theme aside");
+                }
+                Err(move_error) => {
+                    tracing::warn!(
+                        %move_error,
+                        path = %path.display(),
+                        "could not move unreadable theme aside"
+                    );
+                    return;
+                }
+            }
+            write_bundled(&path);
+            return;
+        }
+    };
+
+    let user_version = schema_version(&user);
+    if user_version > THEME_SCHEMA_VERSION {
+        tracing::warn!(
+            path = %path.display(),
+            user_version,
+            built_version = THEME_SCHEMA_VERSION,
+            "theme file is newer than this build; leaving it alone"
+        );
         return;
     }
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(%error, path = %path.display(), "could not create themes directory");
+    if user_version == THEME_SCHEMA_VERSION {
         return;
     }
-    if let Err(error) = std::fs::write(&path, BUNDLED) {
+
+    let mut migrated = user;
+    merge_missing(&mut migrated, &bundled_value());
+    migrated[SCHEMA_VERSION_KEY] = Value::from(THEME_SCHEMA_VERSION);
+
+    if let Err(error) = store::write_json(&path, &migrated) {
+        tracing::warn!(%error, path = %path.display(), "could not migrate theme file");
+    }
+}
+
+/// Parses the embedded set. The file is compiled in, so a parse failure is a
+/// build-time bug and not something to recover from at runtime.
+fn bundled_value() -> Value {
+    serde_json::from_str(BUNDLED).expect("the bundled theme set is valid JSON")
+}
+
+fn write_bundled(path: &Path) {
+    if let Err(error) = store::write_json(path, &bundled_value()) {
         tracing::warn!(%error, path = %path.display(), "could not write bundled theme");
+    }
+}
+
+fn schema_version(value: &Value) -> u32 {
+    value
+        .get(SCHEMA_VERSION_KEY)
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(0)
+}
+
+/// Adds every key the bundle defines and the user's copy does not.
+///
+/// Existing values win, and keys the bundle does not know stay. The `themes`
+/// array is matched by `name`, so a user theme keeps its values and position,
+/// and a bundled theme that is absent is appended.
+fn merge_missing(user: &mut Value, bundled: &Value) {
+    match (user, bundled) {
+        (Value::Object(user), Value::Object(bundled)) => {
+            for (key, bundled_value) in bundled {
+                match user.get_mut(key) {
+                    Some(user_value) => merge_missing(user_value, bundled_value),
+                    None => {
+                        user.insert(key.clone(), bundled_value.clone());
+                    }
+                }
+            }
+        }
+        (Value::Array(user), Value::Array(bundled)) => {
+            for bundled_item in bundled {
+                let name = bundled_item.get("name").and_then(Value::as_str);
+                let position = name.and_then(|name| {
+                    user.iter()
+                        .position(|item| item.get("name").and_then(Value::as_str) == Some(name))
+                });
+
+                match position {
+                    Some(index) => merge_missing(&mut user[index], bundled_item),
+                    None => user.push(bundled_item.clone()),
+                }
+            }
+        }
+        // A scalar or an unnamed array the user set: keep it.
+        _ => {}
     }
 }
 
@@ -159,6 +271,35 @@ mod tests {
     }
 
     #[test]
+    fn every_bundled_color_key_is_a_theme_token() {
+        let set = bundled_set();
+        let known =
+            serde_json::to_value(&set.themes[0].colors).expect("theme colors must serialize");
+        let known = known.as_object().expect("theme colors must be an object");
+
+        let raw: serde_json::Value =
+            serde_json::from_str(BUNDLED).expect("bundled theme set must parse");
+        let themes = raw["themes"].as_array().expect("themes must be an array");
+
+        for theme in themes {
+            let name = theme["name"].as_str().expect("theme name");
+            let colors = theme["colors"]
+                .as_object()
+                .expect("theme colors must be an object");
+
+            let unknown: Vec<_> = colors
+                .keys()
+                .filter(|key| !known.contains_key(*key))
+                .collect();
+
+            assert!(
+                unknown.is_empty(),
+                "{name} has color keys gpui-kit does not know: {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_bundled_highlight_sections_define_an_editor_style() {
         let set = bundled_set();
 
@@ -196,24 +337,112 @@ mod tests {
     }
 
     #[test]
-    fn seed_writes_the_bundled_file_once_and_keeps_user_edits() {
+    fn seed_writes_the_bundled_file_and_keeps_a_current_user_edit() {
         let paths = temp_paths("seed");
         let directory = paths.config_dir.clone();
 
         seed(&paths);
         let path = bundled_path(&paths);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read seeded theme"),
-            BUNDLED
-        );
+        let seeded: Value = store::read_json(&path)
+            .expect("read seeded theme")
+            .expect("seeded file");
+        assert_eq!(seeded, bundled_value());
 
-        std::fs::write(&path, r#"{"name": "user edit"}"#).expect("write user edit");
+        // A file at the current version is user-owned and must not be rewritten.
+        let mut edited = seeded;
+        edited["themes"][0]["colors"]["background"] = Value::from("#010203");
+        store::write_json(&path, &edited).expect("write user edit");
         seed(&paths);
+
+        let kept: Value = store::read_json(&path)
+            .expect("read user theme")
+            .expect("user file");
+        assert_eq!(kept, edited, "a current theme file must not be clobbered");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_bundled_set_declares_its_version() {
+        assert_eq!(schema_version(&bundled_value()), THEME_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn an_old_theme_file_gains_new_tokens_and_keeps_edits() {
+        let paths = temp_paths("migrate");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        let bundled = bundled_value();
+        let mut old = bundled.clone();
+        old.as_object_mut()
+            .expect("theme set object")
+            .remove(SCHEMA_VERSION_KEY);
+        old["themes"][0]["colors"]
+            .as_object_mut()
+            .expect("colors object")
+            .remove("secondary.background");
+        old["themes"][0]["colors"]["background"] = Value::from("#010203");
+
+        store::write_json(&path, &old).expect("write old theme");
+        seed(&paths);
+
+        let migrated: Value = store::read_json(&path)
+            .expect("read migrated theme")
+            .expect("migrated file");
+        assert_eq!(schema_version(&migrated), THEME_SCHEMA_VERSION);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read user theme"),
-            r#"{"name": "user edit"}"#,
-            "reseeding must not clobber user edits"
+            migrated["themes"][0]["colors"]["secondary.background"],
+            bundled["themes"][0]["colors"]["secondary.background"]
         );
+        assert_eq!(migrated["themes"][0]["colors"]["background"], "#010203");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_newer_theme_file_is_left_alone() {
+        let paths = temp_paths("newer");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        let newer = serde_json::json!({
+            "name": "future",
+            "schema_version": THEME_SCHEMA_VERSION + 1,
+            "themes": []
+        });
+        store::write_json(&path, &newer).expect("write newer theme");
+        seed(&paths);
+
+        let kept: Value = store::read_json(&path)
+            .expect("read newer theme")
+            .expect("newer file");
+        assert_eq!(kept, newer);
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_unreadable_theme_file_is_quarantined_and_reseeded() {
+        let paths = temp_paths("broken");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        std::fs::create_dir_all(path.parent().expect("themes directory"))
+            .expect("create themes directory");
+        std::fs::write(&path, b"{ not json").expect("write broken theme");
+        seed(&paths);
+
+        let seeded: Value = store::read_json(&path)
+            .expect("read seeded theme")
+            .expect("reseeded file");
+        assert_eq!(seeded, bundled_value());
+
+        let quarantined = std::fs::read_dir(directory.join("themes"))
+            .expect("read themes directory")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains("invalid-"));
+        assert!(quarantined, "the unreadable file should be moved aside");
 
         let _ = std::fs::remove_dir_all(&directory);
     }

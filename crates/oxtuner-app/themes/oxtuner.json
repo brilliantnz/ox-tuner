@@ -1,5 +1,6 @@
 {
-  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/heads/main/.theme-schema.json",
+  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/tags/v0.8.1/.theme-schema.json",
+  "schema_version": 1,
   "name": "OxTuner",
   "author": "OxTuner",
   "_note": "Editor keys are written twice (dotted and underscored) because gpui-kit reads dotted names with the tree-sitter highlighter and underscored names with the stub highlighter; unknown keys are ignored, so both stay.",
