@@ -15,7 +15,7 @@ use gpui_kit::{
 use oxtuner_core::{AxisKind, AxisSummary, CellState, TableSummary};
 
 use super::RealtimePoint;
-use super::geometry::{AXIS_LABEL_GAP, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
+use super::geometry::{AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
 use super::model::{AxisTarget, CellPos};
 use super::{Table, TableEvent};
 
@@ -680,6 +680,45 @@ fn the_column_band_sits_next_to_the_body(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_short_table_grows_its_row_for_the_stacked_caption(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 2, 6);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let label = window.find(ElementId::from("y-axis-label")).bounds();
+        let grid_box = window.find(ElementId::from("table-box")).bounds();
+        let viewport = window.viewport_size();
+        assert!(
+            f32::from(grid_box.size.height) < f32::from(viewport.height) * 0.5,
+            "the border stays around the bands instead of stretching over the free area"
+        );
+        assert!(
+            f32::from(label.size.height) > f32::from(grid_box.size.height),
+            "the caption column takes the height the stacked text needs"
+        );
+        assert!(
+            f32::from(label.origin.y) >= 0.0
+                && f32::from(label.origin.y) + f32::from(label.size.height)
+                    <= f32::from(viewport.height),
+            "the caption stays whole and inside the window"
+        );
+    })
+    .unwrap();
+
+    cx.update(|cx| grid.update(cx, |grid, cx| grid.set_flip_y(true, cx)));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let label = window.find(ElementId::from("y-axis-label")).bounds();
+        let grid_box = window.find(ElementId::from("table-box")).bounds();
+        assert!(
+            f32::from(label.size.height) > f32::from(grid_box.size.height),
+            "the caption keeps its height when the band moves above the body"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn headers_stay_aligned_when_scrolled_past_the_end(cx: &mut TestAppContext) {
     use gpui_kit::{ScrollDelta, point, px};
 
@@ -783,6 +822,70 @@ fn headers_stay_aligned_when_scrolled_past_the_end(cx: &mut TestAppContext) {
         assert!(
             dx.abs() < 1.5,
             "first column header off by {dx} after scrolling back"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_one_row_table_draws_no_row_band_and_lifts_the_caption(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 1, 6);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(row_header(0)).is_none(),
+            "a key/value curve has no row band"
+        );
+        assert!(
+            window.try_find(ElementId::from("table-corner")).is_none(),
+            "without a row band there is no corner cell"
+        );
+
+        let label = window.find(ElementId::from("y-axis-label")).bounds();
+        let grid_box = window.find(ElementId::from("table-box")).bounds();
+        assert!(
+            (f32::from(label.size.height) - AXIS_LABEL_HEIGHT).abs() < 0.5,
+            "the curve caption is one ordinary line, not a stacked column"
+        );
+        assert!(
+            f32::from(label.origin.y) + f32::from(label.size.height)
+                <= f32::from(grid_box.origin.y),
+            "the curve caption sits above its values"
+        );
+
+        let value = window.find(cell(0, 0, 6)).bounds();
+        let bins = window.find(column_header(0)).bounds();
+        assert!(
+            f32::from(value.origin.y) + f32::from(value.size.height) <= f32::from(bins.origin.y),
+            "the values sit above their X bins"
+        );
+    })
+    .unwrap();
+
+    cx.update(|cx| grid.update(cx, |grid, cx| grid.set_flip_y(true, cx)));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let label = window.find(ElementId::from("y-axis-label")).bounds();
+        let x_label = window.find(ElementId::from("x-axis-label")).bounds();
+        let grid_box = window.find(ElementId::from("table-box")).bounds();
+
+        assert!(
+            f32::from(x_label.origin.y) + f32::from(x_label.size.height)
+                <= f32::from(grid_box.origin.y),
+            "flipping moves the X caption above the values"
+        );
+        assert!(
+            f32::from(grid_box.origin.y) + f32::from(grid_box.size.height)
+                <= f32::from(label.origin.y),
+            "flipping moves the Y caption below the values"
+        );
+
+        let value = window.find(cell(0, 0, 6)).bounds();
+        let bins = window.find(column_header(0)).bounds();
+        assert!(
+            f32::from(bins.origin.y) + f32::from(bins.size.height) <= f32::from(value.origin.y),
+            "flipping puts the X bins above their values"
         );
     })
     .unwrap();

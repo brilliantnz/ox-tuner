@@ -24,8 +24,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button, button::ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler,
@@ -796,7 +797,14 @@ impl Render for Table {
         let flipped = self.model.flip_y();
 
         let column_headers = self.render_column_headers(first_column..last_column, cx);
-        let row_headers = self.render_row_headers(first_row..last_row, cx);
+        // A one-row table is a key/value curve: there is no Y axis, so it
+        // draws no row band at all and its caption sits above the values.
+        let single_row = rows <= 1;
+        let row_headers = if single_row {
+            Vec::new()
+        } else {
+            self.render_row_headers(first_row..last_row, cx)
+        };
 
         let body_rows = (first_row..last_row)
             .map(|display_row| {
@@ -821,7 +829,19 @@ impl Render for Table {
             .w(px(AXIS_WIDTH))
             .h(px(AXIS_HEIGHT))
             .flex_shrink_0()
-            .bg(theme.secondary);
+            .bg(theme.secondary)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Button::new("re-bins")
+                    .icon(IconName::Move3d)
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .h_full()
+                    .rounded_none(),
+            );
 
         let header_band = h_flex()
             .h(px(AXIS_HEIGHT))
@@ -829,7 +849,7 @@ impl Render for Table {
             .gap(px(CELL_GAP))
             // Contrast between theme
             .bg(cell_border_color)
-            .child(corner)
+            .when(!single_row, |this| this.child(corner))
             // One clipped viewport: the headers ride the scroll offset inside
             // it, and the band's trailing space keeps the plain background.
             .child(
@@ -919,41 +939,73 @@ impl Render for Table {
         );
 
         // The captions sit outside the grid box, the way a chart labels its
-        // axes: the Y caption in its own column to the left, the X caption on
-        // the side the column band takes.
+        // axes: the X caption on the side the column band takes.
         //
-        // The Y caption runs vertically. Glyphs cannot be rotated through the
+        // A table with rows stacks the Y caption one character per line in its
+        // own column to the left, because glyphs cannot be rotated through the
         // styling API (the SVG element draws with its own font stack, so it
-        // does not match application text), so it is one character per line.
-        // A space becomes a short gap instead of an empty line, which would
-        // pull a two-word caption apart.
-        let y_caption_rows = y_caption
-            .chars()
-            .map(|character| {
-                if character.is_whitespace() {
-                    div().h(px(AXIS_LABEL_LINE_HEIGHT / 2.))
-                } else {
-                    div()
-                        .h(px(AXIS_LABEL_LINE_HEIGHT))
-                        .child(character.to_string())
-                }
-            })
-            .collect::<Vec<_>>();
+        // does not match application text). A space becomes a short gap
+        // instead of an empty line, which would pull a two-word caption apart.
+        // A one-row table has no bins to run beside, so its name is ordinary
+        // text on the values' side instead: above them by default, below them
+        // when the axis is flipped.
+        let y_label = |stacked: bool, below: bool| -> AnyElement {
+            if !stacked {
+                return div()
+                    .id("y-axis-label")
+                    .test_support()
+                    .aria_label(y_caption.clone())
+                    .h(px(AXIS_LABEL_HEIGHT))
+                    .w(body_width)
+                    .when(below, |this| this.mt(px(AXIS_LABEL_GAP)))
+                    .when(!below, |this| this.mb(px(AXIS_LABEL_GAP)))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_center()
+                            .child(y_caption.clone()),
+                    )
+                    .into_any_element();
+            }
 
-        let y_label = div()
-            .id("y-axis-label")
-            .test_support()
-            .aria_label(y_caption)
-            .w(px(AXIS_LABEL_WIDTH))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .children(y_caption_rows);
+            let rows = y_caption
+                .chars()
+                .map(|character| {
+                    if character.is_whitespace() {
+                        div().h(px(AXIS_LABEL_LINE_HEIGHT / 2.))
+                    } else {
+                        div()
+                            .h(px(AXIS_LABEL_LINE_HEIGHT))
+                            .child(character.to_string())
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            // The column is as tall as the caption, never shorter: the row
+            // takes its height from the stacked text and the grid sits at the
+            // foot, so a long name beside a short table is not clipped.
+            div()
+                .id("y-axis-label")
+                .test_support()
+                .aria_label(y_caption.clone())
+                .w(px(AXIS_LABEL_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .children(rows)
+                .into_any_element()
+        };
 
         // The X caption sits outside the grid box, centred over it.
         let x_label = div()
@@ -970,7 +1022,7 @@ impl Render for Table {
             .text_color(theme.muted_foreground)
             .child(div().min_w_0().truncate().text_center().child(x_caption));
 
-        let body_band = h_flex()
+        let mut body_band = h_flex()
             // The band takes exactly the table's height and shrinks only when
             // the editor cannot show it all. Growing to fill the viewport is
             // what pulled the column band away from the last row.
@@ -979,8 +1031,10 @@ impl Render for Table {
             .min_h_0()
             .gap(px(CELL_GAP))
             // Contrast between theme
-            .bg(cell_border_color)
-            .child(
+            .bg(cell_border_color);
+
+        if !single_row {
+            body_band = body_band.child(
                 // One clipped viewport for the frozen row band: the headers
                 // ride the body's scroll offset inside it.
                 div()
@@ -1004,42 +1058,44 @@ impl Render for Table {
                             .gap(px(CELL_GAP))
                             .children(row_headers),
                     ),
-            )
-            .child(
-                div()
-                    .id("table-body")
-                    .size_full()
-                    .min_w_0()
-                    .overflow_scroll()
-                    .track_scroll(&self.body_scroll)
-                    .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
-                    .child(
-                        // The content is exactly the grid's size: it carries
-                        // the grid-line colour, and the cells sit on top.
-                        div()
-                            .relative()
-                            .w(body_width)
-                            .h(body_height)
-                            // Contrast between theme
-                            .bg(cell_border_color)
-                            .child(
-                                v_flex()
-                                    .absolute()
-                                    .left(px(first_column as f32 * step_x))
-                                    .top(px(first_row as f32 * step_y))
-                                    .gap(px(CELL_GAP))
-                                    .children(body_rows),
-                            )
-                            // Painted after the cells so the tint and the
-                            // outline sit on top; being plain frames they leave
-                            // the cells underneath fully clickable. A bin edit
-                            // owns the focus instead: the cell range stays in
-                            // the model but is not drawn until the edit lands.
-                            .when(self.model.axis_editing().is_none(), |this| {
-                                this.child(selection_layer)
-                            }),
-                    ),
             );
+        }
+
+        body_band = body_band.child(
+            div()
+                .id("table-body")
+                .size_full()
+                .min_w_0()
+                .overflow_scroll()
+                .track_scroll(&self.body_scroll)
+                .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+                .child(
+                    // The content is exactly the grid's size: it carries
+                    // the grid-line colour, and the cells sit on top.
+                    div()
+                        .relative()
+                        .w(body_width)
+                        .h(body_height)
+                        // Contrast between theme
+                        .bg(cell_border_color)
+                        .child(
+                            v_flex()
+                                .absolute()
+                                .left(px(first_column as f32 * step_x))
+                                .top(px(first_row as f32 * step_y))
+                                .gap(px(CELL_GAP))
+                                .children(body_rows),
+                        )
+                        // Painted after the cells so the tint and the
+                        // outline sit on top; being plain frames they leave
+                        // the cells underneath fully clickable. A bin edit
+                        // owns the focus instead: the cell range stays in
+                        // the model but is not drawn until the edit lands.
+                        .when(self.model.axis_editing().is_none(), |this| {
+                            this.child(selection_layer)
+                        }),
+                ),
+        );
 
         // Native text services need a handler registered while the frame
         // paints. A canvas fills the grid without taking part in layout or hit
@@ -1091,9 +1147,22 @@ impl Render for Table {
             .flex_shrink_1()
             .min_w_0()
             .min_h_0()
+            .justify_end()
             .child(input);
 
-        if flipped {
+        if single_row {
+            // The curve keeps each caption on its own axis: flipping moves the
+            // X caption and bins above the values and the Y caption below.
+            grid = if flipped {
+                grid.child(x_label.mb(px(AXIS_LABEL_GAP)))
+                    .child(table_box)
+                    .child(y_label(false, true))
+            } else {
+                grid.child(y_label(false, false))
+                    .child(table_box)
+                    .child(x_label.mt(px(AXIS_LABEL_GAP)))
+            };
+        } else if flipped {
             grid = grid.child(x_label.mb(px(AXIS_LABEL_GAP))).child(table_box);
         } else {
             grid = grid.child(table_box).child(x_label.mt(px(AXIS_LABEL_GAP)));
@@ -1128,20 +1197,31 @@ impl Render for Table {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| this.dragging = false),
             )
-            .child(
+            .child(if single_row {
+                // The curve caption sits above its values, so the table
+                // reads top to bottom: name, values, X bins, X caption. The
+                // row keeps the grid at the cells' width instead of letting
+                // the caption stretch it across the panel.
+                h_flex()
+                    .flex_row()
+                    .flex_grow_1()
+                    .min_h_0()
+                    .child(grid)
+                    .into_any_element()
+            } else {
                 // The Y caption sits beside the grid, so it is centred on the
                 // table rather than on the empty space below it.
-                div()
-                    .flex()
+                h_flex()
                     .flex_row()
                     .items_stretch()
                     .flex_grow_0()
                     .flex_shrink_1()
                     .min_h_0()
                     .gap(px(AXIS_LABEL_GAP))
-                    .child(y_label)
-                    .child(grid),
-            )
+                    .child(y_label(true, false))
+                    .child(grid)
+                    .into_any_element()
+            })
             .into_any_element()
     }
 }
