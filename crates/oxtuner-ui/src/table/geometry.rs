@@ -8,13 +8,13 @@
 use gpui_kit::Pixels;
 
 /// Width of one cell, in pixels.
-pub const CELL_WIDTH: f32 = 60.0;
+pub const CELL_WIDTH: f32 = 56.0;
 /// Height of one cell, in pixels.
-pub const CELL_HEIGHT: f32 = 28.0;
+pub const CELL_HEIGHT: f32 = 26.0;
 /// Width of the row-header column.
-pub const AXIS_WIDTH: f32 = 60.0;
+pub const AXIS_WIDTH: f32 = 56.0;
 /// Height of the column-header band.
-pub const AXIS_HEIGHT: f32 = 28.0;
+pub const AXIS_HEIGHT: f32 = 26.0;
 /// Width of the vertical Y-axis caption band, left of the row headers.
 pub const AXIS_LABEL_WIDTH: f32 = 20.0;
 /// Height of the horizontal X-axis caption band, outside the column headers.
