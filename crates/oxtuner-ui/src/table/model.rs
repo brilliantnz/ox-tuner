@@ -296,18 +296,9 @@ impl TableModel {
     pub fn set_table(&mut self, table: TableSummary) {
         let same_table = self.table.as_ref().map(|current| &current.id) == Some(&table.id);
         if !same_table {
-            // Start at the top displayed cell. The default chart orientation
-            // draws the highest bin at the top, so its data row is the last
-            // one. Flipping the axis puts the lowest bin there instead.
-            let top_row = if self.flip_y {
-                0
-            } else {
-                table.rows.saturating_sub(1)
-            };
-            self.selection = Selection::single(CellPos {
-                row: top_row,
-                column: 0,
-            });
+            // Start at the first definition bin on both axes. Display
+            // orientation changes which side owns that bin, not its index.
+            self.selection = Selection::single(CellPos { row: 0, column: 0 });
             self.editing = None;
             self.axis_editing = None;
             self.pending.clear();
@@ -1691,11 +1682,11 @@ mod tests {
     }
 
     #[test]
-    fn a_new_table_starts_at_the_visible_top_left_on_both_axes() {
+    fn a_new_table_starts_at_the_first_bin_on_both_axes() {
         let mut model = TableModel::new();
         model.set_table(table(4, 2));
 
-        assert_eq!(model.selection().cursor, CellPos { row: 3, column: 0 });
+        assert_eq!(model.selection().cursor, CellPos { row: 0, column: 0 });
 
         model.set_flip_y(true);
         model.clear_table();
@@ -1895,19 +1886,19 @@ mod tests {
         model.set_table(echo);
         assert_eq!(
             model.selection().cursor,
-            CellPos { row: 1, column: 0 },
-            "a new table starts at its top displayed cell, not the old cursor"
+            CellPos { row: 0, column: 0 },
+            "a new table starts at the first definition bin, not the old cursor"
         );
     }
 
     #[test]
-    fn a_new_table_starts_at_the_visible_top_left() {
+    fn a_new_table_starts_at_the_first_bin_on_a_fresh_model() {
         let mut model = TableModel::new();
         model.set_table(table(4, 2));
         assert_eq!(
             model.selection().cursor,
-            CellPos { row: 3, column: 0 },
-            "the default orientation starts at the highest bin"
+            CellPos { row: 0, column: 0 },
+            "the default orientation starts at the first Y bin"
         );
 
         let mut flipped = TableModel::new();
@@ -1916,7 +1907,7 @@ mod tests {
         assert_eq!(
             flipped.selection().cursor,
             CellPos { row: 0, column: 0 },
-            "a flipped axis starts at the lowest bin"
+            "a flipped axis starts at the same first Y bin"
         );
     }
 
