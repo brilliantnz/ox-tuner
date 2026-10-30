@@ -5,7 +5,7 @@
 //! names the open project; this dialog is where it is changed.
 
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -143,6 +143,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                         Button::new("project-choose-folder")
                             .icon(IconName::FolderOpen)
                             .label(t!("app.project.open_folder"))
+                            .primary()
                             .on_click(|_, window, cx| {
                                 project::choose(cx);
                                 window.close_dialog(cx);

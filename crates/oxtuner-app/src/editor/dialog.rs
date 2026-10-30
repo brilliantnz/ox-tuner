@@ -10,7 +10,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -489,6 +489,7 @@ impl DialogEditor {
             Button::new("dialog-save")
                 .label(t!("app.dialog.save"))
                 .tooltip(t!("app.dialog.save_tooltip"))
+                .primary()
                 .disabled(!writable || !dirty)
                 .on_click(|_, _, cx| crate::core::save_tune(cx)),
         );
@@ -738,6 +739,7 @@ impl DialogEditor {
             .child(
                 Button::new("dialog-retry")
                     .label(t!("app.dialog.retry"))
+                    .primary()
                     .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
             )
             .into_any_element()

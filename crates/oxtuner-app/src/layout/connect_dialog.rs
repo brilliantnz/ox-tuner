@@ -417,6 +417,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             let button = Button::new("connect-connect")
                 .label(label)
                 .icon(IconName::Play)
+                .primary()
                 .disabled(!ready || busy);
             match chosen {
                 Some(choice) => button

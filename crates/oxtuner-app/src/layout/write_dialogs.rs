@@ -111,6 +111,7 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("write-confirm")
                             .label(t!("app.write.confirm"))
+                            .primary()
                             .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 core::write_to_ram(cx);
@@ -265,6 +266,7 @@ pub(crate) fn show_revert(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("revert-confirm")
                             .label(t!("app.revert.confirm"))
+                            .primary()
                             .disabled(unsaved == 0)
                             .on_click(|_, window, cx| {
                                 core::revert_tune(cx);

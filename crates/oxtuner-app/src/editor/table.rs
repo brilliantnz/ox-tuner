@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::toolbar::Toolbar;
@@ -314,6 +314,8 @@ impl TableEditor {
         let changed = table.map_or(0, |table| table.changed_cells());
         let operations_button = Button::new("table-operations")
             .label(t!("app.table.operations"))
+            .compact()
+            .secondary()
             .dropdown_caret(true)
             .disabled(!has_table || read_only)
             .dropdown_menu(move |menu, _, _| {

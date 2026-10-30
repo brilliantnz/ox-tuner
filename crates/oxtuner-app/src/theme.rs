@@ -19,7 +19,7 @@
 //! unreadable file is moved aside, the same way the settings and state stores
 //! handle one.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gpui_kit::component::{Theme, ThemeRegistry};
 use gpui_kit::{App, SharedString};
@@ -37,12 +37,19 @@ pub const DARK_NAME: &str = "OxTuner Dark";
 const BUNDLED_FILE_NAME: &str = "oxtuner.json";
 /// The theme set shipped with the app, also written to disk on first launch.
 const BUNDLED: &str = include_str!("../themes/oxtuner.json");
-/// Bump when the bundled set gains a token or changes a theme name.
+/// The snapshot of the bundled set, kept next to the config files.
+///
+/// It lives outside `themes/` so the registry does not load it as a theme. A
+/// migration compares the user's values with it to tell an untouched value
+/// from one the user edited.
+const SNAPSHOT_FILE_NAME: &str = "theme-bundled.json";
+/// Bump when the bundled set gains a token, changes a value or renames a theme.
 ///
 /// The seeded file records the version it came from. A lower version is
-/// migrated by adding the keys it is missing; a higher one is left alone,
-/// because this build cannot know what a newer file means.
+/// migrated against [`SNAPSHOT_FILE_NAME`]: a value still equal to the old
+/// bundle takes the new value, and a value the user changed stays.
 const THEME_SCHEMA_VERSION: u32 = 1;
+
 /// The key that carries [`THEME_SCHEMA_VERSION`] in the theme set.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 
@@ -51,12 +58,17 @@ fn bundled_path(paths: &AppPaths) -> PathBuf {
     paths.themes_dir().join(BUNDLED_FILE_NAME)
 }
 
+/// The snapshot of the bundle the seeded file was last migrated against.
+fn snapshot_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir.join(SNAPSHOT_FILE_NAME)
+}
+
 /// Writes the bundled theme set into the config directory, then keeps it in
 /// step across upgrades.
 ///
 /// A missing file is written from the bundle. An existing file is user-owned:
-/// a current version is left untouched, an older one gains the keys the bundle
-/// defines and keeps every value the user set, and a newer one is left alone.
+/// a current version is left untouched, an older one takes the new bundle
+/// values where the user has not edited them, and a newer one is left alone.
 /// An unreadable file is moved aside so the user can recover it. A failure is
 /// logged, not fatal — the in-memory bundled set is still installed by
 /// [`register`], so the app keeps its colors.
@@ -66,7 +78,7 @@ pub fn seed(paths: &AppPaths) {
     let user = match store::read_json::<Value>(&path) {
         Ok(Some(value)) => value,
         Ok(None) => {
-            write_bundled(&path);
+            write_bundled(paths);
             return;
         }
         Err(error) => {
@@ -84,8 +96,17 @@ pub fn seed(paths: &AppPaths) {
                     return;
                 }
             }
-            write_bundled(&path);
+            write_bundled(paths);
             return;
+        }
+    };
+
+    let snapshot_file = snapshot_path(paths);
+    let snapshot = match store::read_json::<Value>(&snapshot_file) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, path = %snapshot_file.display(), "could not read theme snapshot");
+            None
         }
     };
 
@@ -100,16 +121,41 @@ pub fn seed(paths: &AppPaths) {
         return;
     }
     if user_version == THEME_SCHEMA_VERSION {
+        if snapshot.is_none() {
+            write_snapshot(paths, &bundled_value());
+        }
         return;
     }
 
+    let bundled = bundled_value();
     let mut migrated = user;
-    merge_missing(&mut migrated, &bundled_value());
+
+    if user_version == 2 {
+        // Version 2 could write a new snapshot without rewriting the file when
+        // the snapshot was missing, leaving old values under a current version
+        // stamp. Correct it once; later versions migrate normally.
+        backup_pre_version(paths, &migrated);
+        migrated = reset_known(&migrated, &bundled);
+    } else {
+        match snapshot {
+            Some(old) => merge_from_base(&mut migrated, &old, &bundled),
+            // Before versioning there is no snapshot, so nothing distinguishes
+            // the old bundle from an edit. Keep a copy and start from the bundle.
+            None if user_version == 0 => {
+                backup_pre_version(paths, &migrated);
+                migrated = reset_known(&migrated, &bundled);
+            }
+            None => merge_missing(&mut migrated, &bundled),
+        }
+    }
+
     migrated[SCHEMA_VERSION_KEY] = Value::from(THEME_SCHEMA_VERSION);
 
     if let Err(error) = store::write_json(&path, &migrated) {
         tracing::warn!(%error, path = %path.display(), "could not migrate theme file");
+        return;
     }
+    write_snapshot(paths, &bundled);
 }
 
 /// Parses the embedded set. The file is compiled in, so a parse failure is a
@@ -118,9 +164,41 @@ fn bundled_value() -> Value {
     serde_json::from_str(BUNDLED).expect("the bundled theme set is valid JSON")
 }
 
-fn write_bundled(path: &Path) {
-    if let Err(error) = store::write_json(path, &bundled_value()) {
+fn write_bundled(paths: &AppPaths) {
+    let bundled = bundled_value();
+    let path = bundled_path(paths);
+
+    if let Err(error) = store::write_json(&path, &bundled) {
         tracing::warn!(%error, path = %path.display(), "could not write bundled theme");
+        return;
+    }
+    write_snapshot(paths, &bundled);
+}
+
+fn write_snapshot(paths: &AppPaths, bundled: &Value) {
+    let path = snapshot_path(paths);
+
+    if let Err(error) = store::write_json(&path, bundled) {
+        tracing::warn!(%error, path = %path.display(), "could not write theme snapshot");
+    }
+}
+
+fn backup_pre_version(paths: &AppPaths, user: &Value) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let path = paths
+        .config_dir
+        .join(format!("oxtuner-theme-backup-{stamp}.json"));
+
+    match store::write_json(&path, user) {
+        Ok(()) => {
+            tracing::warn!(path = %path.display(), "pre-version theme replaced; backup kept");
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "could not back up pre-version theme");
+        }
     }
 }
 
@@ -132,11 +210,89 @@ fn schema_version(value: &Value) -> u32 {
         .unwrap_or(0)
 }
 
+/// Replaces the known theme object with the bundle while keeping top-level
+/// keys the bundle does not define.
+fn reset_known(user: &Value, bundled: &Value) -> Value {
+    let mut reset = bundled.clone();
+
+    if let (Some(user), Some(reset)) = (user.as_object(), reset.as_object_mut()) {
+        for (key, value) in user {
+            if !reset.contains_key(key) {
+                reset.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    reset
+}
+
+/// Applies the new bundle over an older one.
+///
+/// A value that still equals the old bundle was not edited, so it takes the
+/// new value. A value the user changed stays. Missing keys are added.
+fn merge_from_base(user: &mut Value, old: &Value, new: &Value) {
+    match (user, new) {
+        (Value::Object(user), Value::Object(new)) => {
+            let old = old.as_object();
+            let null = Value::Null;
+
+            for (key, new_value) in new {
+                let old_value = old.and_then(|old| old.get(key));
+                match user.get_mut(key) {
+                    Some(user_value) => {
+                        if old_value.is_some_and(|old| *old == *user_value) {
+                            *user_value = new_value.clone();
+                        } else if (user_value.is_object() && new_value.is_object())
+                            || (user_value.is_array() && new_value.is_array())
+                        {
+                            merge_from_base(user_value, old_value.unwrap_or(&null), new_value);
+                        }
+                    }
+                    None => {
+                        user.insert(key.clone(), new_value.clone());
+                    }
+                }
+            }
+        }
+        (Value::Array(user), Value::Array(new)) => {
+            let old = old.as_array();
+            let null = Value::Null;
+
+            for new_item in new {
+                let name = new_item.get("name").and_then(Value::as_str);
+                let old_item = name.and_then(|name| {
+                    old.and_then(|old| {
+                        old.iter()
+                            .find(|item| item.get("name").and_then(Value::as_str) == Some(name))
+                    })
+                });
+                let position = name.and_then(|name| {
+                    user.iter()
+                        .position(|item| item.get("name").and_then(Value::as_str) == Some(name))
+                });
+
+                match position {
+                    Some(index) => {
+                        merge_from_base(&mut user[index], old_item.unwrap_or(&null), new_item);
+                    }
+                    None => user.push(new_item.clone()),
+                }
+            }
+        }
+        (user, new) => {
+            if old != &Value::Null && *user == *old {
+                *user = new.clone();
+            }
+        }
+    }
+}
+
 /// Adds every key the bundle defines and the user's copy does not.
 ///
 /// Existing values win, and keys the bundle does not know stay. The `themes`
 /// array is matched by `name`, so a user theme keeps its values and position,
-/// and a bundled theme that is absent is appended.
+/// and a bundled theme that is absent is appended. This is the fallback for a
+/// file with no snapshot, where an old value cannot be told from an edit.
 fn merge_missing(user: &mut Value, bundled: &Value) {
     match (user, bundled) {
         (Value::Object(user), Value::Object(bundled)) => {
@@ -300,6 +456,115 @@ mod tests {
     }
 
     #[test]
+    fn button_states_keep_their_label_readable() {
+        let set: Value = serde_json::from_str(BUNDLED).expect("bundled theme set must parse");
+        let families = [
+            ("button", "button.foreground"),
+            ("button.primary", "button.primary.foreground"),
+            ("button.secondary", "button.secondary.foreground"),
+            ("button.danger", "button.danger.foreground"),
+            ("button.warning", "button.warning.foreground"),
+            ("button.success", "button.success.foreground"),
+            ("button.info", "button.info.foreground"),
+        ];
+
+        for theme in set["themes"].as_array().expect("themes must be an array") {
+            let name = theme["name"].as_str().expect("theme name");
+            let colors = theme["colors"]
+                .as_object()
+                .expect("theme colors must be an object");
+
+            for (prefix, foreground_key) in families {
+                let foreground = colors
+                    .get(foreground_key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{name} needs {foreground_key}"));
+
+                for state in ["background", "hover.background", "active.background"] {
+                    let key = format!("{prefix}.{state}");
+                    let background = colors
+                        .get(&key)
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| panic!("{name} needs {key}"));
+                    let ratio = contrast_ratio(background, foreground);
+
+                    assert!(
+                        ratio >= 4.5,
+                        "{name} has {ratio:.2}:1 for {key} on {foreground_key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn button_states_are_distinct() {
+        let set: Value = serde_json::from_str(BUNDLED).expect("bundled theme set must parse");
+        let families = [
+            "button",
+            "button.primary",
+            "button.secondary",
+            "button.danger",
+            "button.warning",
+            "button.success",
+            "button.info",
+        ];
+
+        for theme in set["themes"].as_array().expect("themes must be an array") {
+            let name = theme["name"].as_str().expect("theme name");
+            let colors = theme["colors"]
+                .as_object()
+                .expect("theme colors must be an object");
+
+            for prefix in families {
+                let base = colors
+                    .get(&format!("{prefix}.background"))
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let hover = colors
+                    .get(&format!("{prefix}.hover.background"))
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let active = colors
+                    .get(&format!("{prefix}.active.background"))
+                    .and_then(Value::as_str)
+                    .unwrap();
+
+                assert_ne!(base, hover, "{name} has no hover step for {prefix}");
+                assert_ne!(base, active, "{name} has no active step for {prefix}");
+                assert_ne!(hover, active, "{name} reuses hover as active for {prefix}");
+            }
+        }
+    }
+
+    fn contrast_ratio(first: &str, second: &str) -> f64 {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        let (lighter, darker) = if first > second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    fn relative_luminance(color: &str) -> f64 {
+        let hex = color.strip_prefix('#').expect("a hex color");
+        let channels = [0, 2, 4].map(|offset| {
+            let value = u8::from_str_radix(&hex[offset..offset + 2], 16).expect("two hex digits")
+                as f64
+                / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        });
+
+        0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+    }
+
+    #[test]
     fn the_bundled_highlight_sections_define_an_editor_style() {
         let set = bundled_set();
 
@@ -347,6 +612,12 @@ mod tests {
             .expect("read seeded theme")
             .expect("seeded file");
         assert_eq!(seeded, bundled_value());
+        assert_eq!(
+            store::read_json::<Value>(&snapshot_path(&paths))
+                .expect("read theme snapshot")
+                .expect("snapshot file"),
+            bundled_value()
+        );
 
         // A file at the current version is user-owned and must not be rewritten.
         let mut edited = seeded;
@@ -384,6 +655,9 @@ mod tests {
             .remove("secondary.background");
         old["themes"][0]["colors"]["background"] = Value::from("#010203");
 
+        // The snapshot is the bundle the file was seeded from, before the user
+        // changed the background and before the token was removed.
+        store::write_json(&snapshot_path(&paths), &bundled).expect("write old snapshot");
         store::write_json(&path, &old).expect("write old theme");
         seed(&paths);
 
@@ -396,6 +670,110 @@ mod tests {
             bundled["themes"][0]["colors"]["secondary.background"]
         );
         assert_eq!(migrated["themes"][0]["colors"]["background"], "#010203");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_unedited_old_value_follows_the_new_bundle() {
+        let paths = temp_paths("palette");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        let bundled = bundled_value();
+        let mut old = bundled.clone();
+        old.as_object_mut()
+            .expect("theme set object")
+            .remove(SCHEMA_VERSION_KEY);
+        old["themes"][0]["colors"]["button.active.background"] = Value::from("#000000");
+
+        store::write_json(&snapshot_path(&paths), &old).expect("write old snapshot");
+        store::write_json(&path, &old).expect("write old theme");
+        seed(&paths);
+
+        let migrated: Value = store::read_json(&path)
+            .expect("read migrated theme")
+            .expect("migrated file");
+        assert_eq!(
+            migrated["themes"][0]["colors"]["button.active.background"],
+            bundled["themes"][0]["colors"]["button.active.background"],
+            "an untouched value must take the new palette"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_pre_version_file_without_a_snapshot_is_backed_up_and_reset() {
+        let paths = temp_paths("pre-version");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        let bundled = bundled_value();
+        let mut old = bundled.clone();
+        old.as_object_mut()
+            .expect("theme set object")
+            .remove(SCHEMA_VERSION_KEY);
+        old["themes"][0]["colors"]["background"] = Value::from("#010203");
+
+        store::write_json(&path, &old).expect("write pre-version theme");
+        seed(&paths);
+
+        let migrated: Value = store::read_json(&path)
+            .expect("read migrated theme")
+            .expect("migrated file");
+        assert_eq!(migrated, bundled);
+
+        let backups: Vec<_> = std::fs::read_dir(&directory)
+            .expect("read config directory")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("oxtuner-theme-backup-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "the pre-version file must be recoverable");
+        let backup: Value = store::read_json(&backups[0].path())
+            .expect("read backup")
+            .expect("backup file");
+        assert_eq!(backup["themes"][0]["colors"]["background"], "#010203");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_version_two_file_is_reset_to_the_corrected_palette() {
+        let paths = temp_paths("v2");
+        let directory = paths.config_dir.clone();
+        let path = bundled_path(&paths);
+
+        let bundled = bundled_value();
+        let mut stale = bundled.clone();
+        stale["schema_version"] = Value::from(2);
+        stale["themes"][0]["colors"]["button.active.background"] = Value::from("#333536b3");
+
+        store::write_json(&snapshot_path(&paths), &bundled).expect("write snapshot");
+        store::write_json(&path, &stale).expect("write stale theme");
+        seed(&paths);
+
+        let migrated: Value = store::read_json(&path)
+            .expect("read migrated theme")
+            .expect("migrated file");
+        assert_eq!(migrated, bundled);
+
+        let backups = std::fs::read_dir(&directory)
+            .expect("read config directory")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("oxtuner-theme-backup-")
+            })
+            .count();
+        assert_eq!(backups, 1, "the stale version 2 file must be recoverable");
 
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -437,6 +815,12 @@ mod tests {
             .expect("read seeded theme")
             .expect("reseeded file");
         assert_eq!(seeded, bundled_value());
+        assert_eq!(
+            store::read_json::<Value>(&snapshot_path(&paths))
+                .expect("read theme snapshot")
+                .expect("snapshot file"),
+            bundled_value()
+        );
 
         let quarantined = std::fs::read_dir(directory.join("themes"))
             .expect("read themes directory")
@@ -474,9 +858,9 @@ mod tests {
             );
         });
 
-        for (mode, background, foreground, button) in [
-            (ThemeMode::Dark, "#121314", "#bfbfbf", "#297AA0"),
-            (ThemeMode::Light, "#FFFFFF", "#202020", "#0069CC"),
+        for (mode, background, foreground, button, primary) in [
+            (ThemeMode::Dark, "#121314", "#bfbfbf", "#202122", "#297AA0"),
+            (ThemeMode::Light, "#FFFFFF", "#202020", "#F2F3F4", "#0069CC"),
         ] {
             cx.update(|cx| {
                 Theme::change(mode, None, cx);
@@ -486,9 +870,12 @@ mod tests {
                 let expected_foreground =
                     try_parse_color(foreground).expect("bundled foreground must parse");
                 let expected_button = try_parse_color(button).expect("bundled button must parse");
+                let expected_primary =
+                    try_parse_color(primary).expect("bundled primary must parse");
                 assert_eq!(theme.background, expected_background);
                 assert_eq!(theme.foreground, expected_foreground);
                 assert_eq!(theme.button, expected_button);
+                assert_eq!(theme.button_primary, expected_primary);
             });
         }
 

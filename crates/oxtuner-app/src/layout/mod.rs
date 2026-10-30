@@ -356,6 +356,7 @@ impl AppLayout {
                                     this.child(
                                         Button::new("open-project")
                                             .label(t!("app.editor.open_project"))
+                                            .primary()
                                             .on_click(|_, window, cx| {
                                                 project_dialog::show(window, cx);
                                             }),

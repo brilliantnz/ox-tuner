@@ -364,9 +364,9 @@ impl RenderOnce for MainBar {
             .h(HEIGHT)
             .w_full()
             .flex_shrink_0()
-            .bg(cx.theme().background)
+            .bg(cx.theme().title_bar)
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().title_bar_border)
             .child(
                 drag_surface("main-titlebar", window, cx)
                     .flex_1()
