@@ -43,7 +43,7 @@ use crate::{
 /// Fixed, and shared with [`UtilityBar`]: the window's drag strip and the
 /// component's own sidebar have to line up exactly for the sidebar to read as
 /// one column running to the top edge of the window.
-pub(crate) const SIDEBAR_WIDTH: Pixels = px(250.);
+pub(crate) const SIDEBAR_WIDTH: Pixels = px(190.);
 
 /// The open Settings window, so invoking `Settings` again focuses the existing
 /// window instead of stacking copies.
@@ -78,7 +78,7 @@ pub(crate) fn open(cx: &mut App) {
         return;
     }
 
-    let bounds = Bounds::centered(None, size(px(820.), px(640.)), cx);
+    let bounds = Bounds::centered(None, size(px(720.), px(640.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         // titlebar: Some(titlebar_options(t!("app.settings.window_title"))),
@@ -133,7 +133,7 @@ impl Render for SettingsWindow {
                         // width, and the range is pinned so a drag cannot
                         // misalign them.
                         .sidebar_width(SIDEBAR_WIDTH)
-                        .sidebar_size_range(SIDEBAR_WIDTH..SIDEBAR_WIDTH)
+                        .sidebar_size_range(SIDEBAR_WIDTH..px(250.))
                         .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages()),
                 ),
