@@ -44,7 +44,7 @@ use super::geometry::{
     AXIS_HEIGHT, AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, AXIS_LABEL_LINE_HEIGHT, AXIS_LABEL_WIDTH,
     AXIS_WIDTH, CELL_GAP, CELL_HEIGHT, CELL_WIDTH, visible_range,
 };
-use super::headers::{ColumnHeader, HeaderEditing, RowHeader};
+use super::headers::{BinHighlight, ColumnHeader, HeaderEditing, RowHeader};
 use super::heatmap::{contrast_text, decoration, heat_color};
 use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
@@ -629,6 +629,10 @@ impl Table {
         let background = theme.secondary;
         let foreground = theme.foreground;
         let danger = theme.danger;
+        // The bins of the selected columns carry the same emphasis as the
+        // selection itself, so a value can be read against both axes at once.
+        let (_, left, _, right) = self.model.selection().bounds();
+        let wash = theme.primary.opacity(0.28);
 
         columns
             .map(|column| {
@@ -675,6 +679,10 @@ impl Table {
                     background,
                     foreground,
                     danger,
+                    highlight: (left..=right).contains(&column).then(|| BinHighlight {
+                        id: ("column-header-highlight", column).into(),
+                        color: wash,
+                    }),
                     editing: header_editing,
                     on_press: Box::new(on_press),
                 }
@@ -696,6 +704,10 @@ impl Table {
         let background = theme.secondary;
         let foreground = theme.foreground;
         let danger = theme.danger;
+        // Rows are matched in definition order: the band may run downhill
+        // when the axis is flipped, while the selection never changes shape.
+        let (top, _, bottom, _) = self.model.selection().bounds();
+        let wash = theme.primary.opacity(0.28);
 
         rows.map(|display_row| {
             let data_row = self.model.data_row(display_row);
@@ -742,6 +754,10 @@ impl Table {
                 background,
                 foreground,
                 danger,
+                highlight: (top..=bottom).contains(&data_row).then(|| BinHighlight {
+                    id: ("row-header-highlight", display_row).into(),
+                    color: wash,
+                }),
                 editing: header_editing,
                 on_press: Box::new(on_press),
             }
@@ -890,7 +906,7 @@ impl Render for Table {
         // The heat colours span the whole hue circle, so a tinted accent
         // disappears on cells of the same hue. Foreground contrasts with every
         // fill in both themes.
-        let selection_fill = theme.foreground.opacity(0.22);
+        let selection_fill = theme.primary.opacity(0.35);
 
         let mut selection_layer = div()
             .absolute()
@@ -933,8 +949,8 @@ impl Render for Table {
                 .border_color(Hsla {
                     h: 288.0 / 360.0,
                     s: 0.90,
-                    l: 0.26,
-                    a: 1.0,
+                    l: 0.38,
+                    a: 0.8,
                 }),
         );
 

@@ -118,6 +118,14 @@ fn column_header(column: usize) -> ElementId {
     ElementId::from(("column-header", column))
 }
 
+fn column_highlight(column: usize) -> ElementId {
+    ElementId::from(("column-header-highlight", column))
+}
+
+fn row_highlight(display_row: usize) -> ElementId {
+    ElementId::from(("row-header-highlight", display_row))
+}
+
 fn selected(grid: &Entity<Table>, cx: &mut TestAppContext) -> CellPos {
     cx.update(|cx| grid.read(cx).model().selection().cursor)
 }
@@ -132,6 +140,140 @@ fn clicking_a_cell_selects_it(cx: &mut TestAppContext) {
     .unwrap();
 
     assert_eq!(selected(&grid, cx), CellPos { row: 3, column: 4 });
+}
+
+#[gpui_kit::test]
+fn a_selected_cell_washes_its_column_and_row_bins(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(cell(3, 4, 8), cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        for column in 0..8 {
+            assert_eq!(
+                window.try_find(column_highlight(column)).is_some(),
+                column == 4,
+                "only the selected column's bin is washed"
+            );
+        }
+
+        // Data row 3 is drawn at display row 4 on the default grid.
+        for display_row in 0..8 {
+            assert_eq!(
+                window.try_find(row_highlight(display_row)).is_some(),
+                display_row == 4,
+                "only the selected row's bin is washed"
+            );
+        }
+
+        let bin = window.find(column_header(4)).bounds();
+        let wash = window.find(column_highlight(4)).bounds();
+        assert_eq!(wash.origin, bin.origin, "the wash covers the whole bin");
+        assert_eq!(
+            wash.size, bin.size,
+            "the wash is an overlay, so the bin keeps its size"
+        );
+
+        let value = window.find(cell(3, 4, 8)).bounds();
+        assert_eq!(
+            f32::from(value.origin.x),
+            f32::from(bin.origin.x),
+            "the wash never moves the bin off its column"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_range_washes_every_bin_it_spans(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 8, 8);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.drag_to(cell(1, 1, 8), cell(5, 6, 8), cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        for column in 0..8 {
+            assert_eq!(
+                window.try_find(column_highlight(column)).is_some(),
+                (1..=6).contains(&column),
+                "the wash spans the selected columns"
+            );
+        }
+
+        // Data rows 1..=5 are drawn at display rows 6..=2 by default.
+        for display_row in 0..8 {
+            assert_eq!(
+                window.try_find(row_highlight(display_row)).is_some(),
+                (2..=6).contains(&display_row),
+                "the wash spans the selected rows, in display order"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_wash_follows_the_axis_when_it_is_flipped(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 8, 8);
+    cx.update(|cx| grid.update(cx, |grid, cx| grid.set_flip_y(true, cx)));
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(cell(3, 4, 8), cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        for display_row in 0..8 {
+            assert_eq!(
+                window.try_find(row_highlight(display_row)).is_some(),
+                display_row == 3,
+                "a flipped axis draws data row 3 at display row 3"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_curve_washes_only_the_column_bin(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 1, 6);
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(cell(0, 2, 6), cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+
+        for column in 0..6 {
+            assert_eq!(
+                window.try_find(column_highlight(column)).is_some(),
+                column == 2,
+                "a curve still names the selected column"
+            );
+        }
+        assert!(
+            window.try_find(row_highlight(0)).is_none(),
+            "a curve has no row band, so there is no bin to wash"
+        );
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

@@ -24,6 +24,19 @@ pub(crate) struct HeaderEditing {
     pub(crate) invalid: bool,
 }
 
+/// The wash that ties a bin to the cells selected along its axis.
+///
+/// It is an overlay inside the bin, not a border or an inset: the bin keeps
+/// its exact size and its label stays where it was, and the tint reads the
+/// same in both themes because it is drawn over the bin's own background.
+#[derive(Clone, Debug)]
+pub(crate) struct BinHighlight {
+    /// Element id, so a test can find the wash.
+    pub(crate) id: ElementId,
+    /// The translucent colour painted over the bin.
+    pub(crate) color: Hsla,
+}
+
 /// One bin of the X axis, in the column-header band.
 #[derive(IntoElement)]
 pub(crate) struct ColumnHeader {
@@ -35,6 +48,8 @@ pub(crate) struct ColumnHeader {
     pub(crate) foreground: Hsla,
     /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
+    /// The selection wash, when the cursor or range covers this bin.
+    pub(crate) highlight: Option<BinHighlight>,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,
 }
@@ -48,6 +63,7 @@ impl RenderOnce for ColumnHeader {
             background,
             foreground,
             danger,
+            highlight,
             editing,
             on_press,
         } = self;
@@ -58,6 +74,7 @@ impl RenderOnce for ColumnHeader {
         let mut element = div()
             .id(id)
             .test_support()
+            .relative()
             .w(px(CELL_WIDTH))
             .h(px(AXIS_HEIGHT))
             .flex()
@@ -71,6 +88,20 @@ impl RenderOnce for ColumnHeader {
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 (on_press)(event, window, cx)
             });
+
+        // Painted under the text so the bin keeps its full contrast, and
+        // absolutely positioned so it neither moves the label nor changes
+        // the bin's size.
+        if let Some(highlight) = highlight {
+            element = element.child(
+                div()
+                    .id(highlight.id)
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .bg(highlight.color),
+            );
+        }
 
         // The bin editor reads like the cell editor: the same frame around
         // the typed text, but a neutral foreground instead of the heatmap's
@@ -105,6 +136,8 @@ pub(crate) struct RowHeader {
     pub(crate) foreground: Hsla,
     /// The theme's danger colour, for an unparsable edit.
     pub(crate) danger: Hsla,
+    /// The selection wash, when the cursor or range covers this bin.
+    pub(crate) highlight: Option<BinHighlight>,
     pub(crate) editing: Option<HeaderEditing>,
     pub(crate) on_press: PressHandler,
 }
@@ -118,6 +151,7 @@ impl RenderOnce for RowHeader {
             background,
             foreground,
             danger,
+            highlight,
             editing,
             on_press,
         } = self;
@@ -128,6 +162,7 @@ impl RenderOnce for RowHeader {
         let mut element = div()
             .id(id)
             .test_support()
+            .relative()
             .w(px(AXIS_WIDTH))
             .h(px(CELL_HEIGHT))
             .flex()
@@ -142,6 +177,20 @@ impl RenderOnce for RowHeader {
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 (on_press)(event, window, cx)
             });
+
+        // Painted under the text so the bin keeps its full contrast, and
+        // absolutely positioned so it neither moves the label nor changes
+        // the bin's size.
+        if let Some(highlight) = highlight {
+            element = element.child(
+                div()
+                    .id(highlight.id)
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .bg(highlight.color),
+            );
+        }
 
         // Same frame as the cell editor, in the neutral foreground.
         if let Some(text) = editing_text {
