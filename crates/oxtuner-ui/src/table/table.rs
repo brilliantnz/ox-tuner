@@ -44,8 +44,8 @@ use oxtuner_core::{CellEdit, TableSummary};
 
 use super::cell::{CellEditing, TableCell};
 use super::geometry::{
-    AXIS_HEIGHT, AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, AXIS_LABEL_LINE_HEIGHT, AXIS_LABEL_WIDTH,
-    AXIS_WIDTH, CELL_GAP, CELL_HEIGHT, CELL_WIDTH, visible_range,
+    AXIS_HEIGHT, AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, AXIS_LABEL_WIDTH, AXIS_WIDTH, CELL_GAP,
+    CELL_HEIGHT, CELL_WIDTH, visible_range,
 };
 use super::headers::{BinHighlight, ColumnHeader, HeaderEditing, RowHeader};
 use super::heatmap::{contrast_text, decoration, heat_color};
@@ -240,6 +240,22 @@ impl Table {
     /// Replaces the snapshot and repaints.
     pub fn set_table(&mut self, table: TableSummary, cx: &mut Context<Self>) {
         self.model.set_table(table);
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Shows a value in one cell while a paired curve drags it, or clears the
+    /// preview with `None`. The value is display-only: it is not recorded for
+    /// undo and it never reaches the core.
+    pub fn preview_cell(&mut self, cell: CellPos, value: Option<f64>, cx: &mut Context<Self>) {
+        self.model.set_preview(value.map(|value| (cell, value)));
+        cx.notify();
+    }
+
+    /// Selects one cell without telling the owner, so a paired view can mirror
+    /// the table cursor without echoing the event back.
+    pub fn select_cell(&mut self, cell: CellPos, cx: &mut Context<Self>) {
+        self.model.select(cell);
         self.ensure_cursor_visible();
         cx.notify();
     }
@@ -1019,19 +1035,6 @@ impl Render for Table {
                     .into_any_element();
             }
 
-            let rows = y_caption
-                .chars()
-                .map(|character| {
-                    if character.is_whitespace() {
-                        div().h(px(AXIS_LABEL_LINE_HEIGHT / 2.))
-                    } else {
-                        div()
-                            .h(px(AXIS_LABEL_LINE_HEIGHT))
-                            .child(character.to_string())
-                    }
-                })
-                .collect::<Vec<_>>();
-
             // The column is as tall as the caption, never shorter: the row
             // takes its height from the stacked text and the grid sits at the
             // foot, so a long name beside a short table is not clipped.
@@ -1039,15 +1042,17 @@ impl Render for Table {
                 .id("y-axis-label")
                 .test_support()
                 .aria_label(y_caption.clone())
-                .w(px(AXIS_LABEL_WIDTH))
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .children(rows)
+                .child(crate::caption::y_caption(
+                    &table.y_axis.label,
+                    &table.y_axis.units,
+                    AXIS_LABEL_WIDTH,
+                    theme.muted_foreground,
+                ))
                 .into_any_element()
         };
 

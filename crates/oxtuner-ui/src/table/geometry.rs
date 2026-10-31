@@ -21,8 +21,6 @@ pub const AXIS_LABEL_WIDTH: f32 = 20.0;
 pub const AXIS_LABEL_HEIGHT: f32 = 18.0;
 /// Space between a caption and the grid box it names.
 pub const AXIS_LABEL_GAP: f32 = 8.0;
-/// Line height of the stacked Y-axis caption.
-pub const AXIS_LABEL_LINE_HEIGHT: f32 = 13.0;
 /// The grid line between cells, drawn as a gap rather than per-cell borders.
 pub const CELL_GAP: f32 = 1.0;
 

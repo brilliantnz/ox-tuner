@@ -49,6 +49,8 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             units: "rpm".to_owned(),
             channel: Some("rpm".to_owned()),
             digits: 0,
+            minimum: Some(0.0),
+            maximum: Some(10_000.0),
             values: (0..columns).map(|value| value as f64 * 500.0).collect(),
         },
         y_axis: AxisSummary {
@@ -57,11 +59,16 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             units: "kPa".to_owned(),
             channel: Some("map".to_owned()),
             digits: 0,
+            minimum: Some(0.0),
+            maximum: Some(255.0),
             values: (0..rows).map(|value| value as f64 * 10.0).collect(),
         },
         minimum: 0.0,
         maximum: (rows * columns) as f64,
+        cell_minimum: Some(0.0),
+        cell_maximum: Some(255.0),
         writable: true,
+        curve: None,
     }
 }
 

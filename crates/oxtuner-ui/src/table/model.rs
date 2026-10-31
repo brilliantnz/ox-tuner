@@ -96,6 +96,10 @@ pub struct AxisEditing {
     pub target: AxisTarget,
     /// Text as typed.
     pub text: String,
+    /// Whether the text is still the seeded value. The first typed character
+    /// replaces it, so a double-click and a number reads as a new value
+    /// instead of being appended to the old one.
+    pub fresh: bool,
     /// Whether the last commit attempt could not parse the text.
     pub invalid: bool,
 }
@@ -253,6 +257,9 @@ pub struct TableModel {
     flip_y: bool,
     pending: HashMap<(usize, usize), f64>,
     pending_axis: HashMap<(bool, usize), f64>,
+    /// A value a paired view is dragging, shown without entering the undo
+    /// history or the write queue.
+    preview: Option<(CellPos, f64)>,
     action: Option<GridAction>,
     /// Commands that can be undone, oldest first.
     undo: Vec<HistoryEntry>,
@@ -282,6 +289,7 @@ impl TableModel {
             flip_y: false,
             pending: HashMap::new(),
             pending_axis: HashMap::new(),
+            preview: None,
             action: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -320,6 +328,10 @@ impl TableModel {
         }
         self.table = Some(table);
         self.clamp();
+
+        // The snapshot is authoritative, so a preview from a paired drag has
+        // served its purpose even when the core clamped the value.
+        self.preview = None;
         self.rebuild_labels();
     }
 
@@ -340,6 +352,7 @@ impl TableModel {
         self.table = None;
         self.pending.clear();
         self.pending_axis.clear();
+        self.preview = None;
         self.display.clear();
         self.aria.clear();
         self.editing = None;
@@ -415,13 +428,14 @@ impl TableModel {
         // The same failure can be observed more than once. Only a write that
         // still has an optimistic value has an entry to drop; a second call
         // must not eat an older, confirmed step.
-        if self.pending.is_empty() && self.pending_axis.is_empty() {
+        if self.pending.is_empty() && self.pending_axis.is_empty() && self.preview.is_none() {
             return;
         }
         self.undo.pop();
         self.redo.clear();
         self.pending.clear();
         self.pending_axis.clear();
+        self.preview = None;
         self.rebuild_labels();
     }
 
@@ -462,15 +476,47 @@ impl TableModel {
     }
 
     /// The displayed value, including an optimistic edit not yet echoed by the
-    /// core.
+    /// core, or a value a paired curve is dragging in this cell.
     pub fn value(&self, cell: CellPos) -> f64 {
+        if let Some((preview, value)) = self.preview
+            && preview == cell
+        {
+            return value;
+        }
+
         if let Some(value) = self.pending.get(&(cell.row, cell.column)) {
             return *value;
         }
+
         self.table
             .as_ref()
             .and_then(|table| table.cell(cell.row, cell.column))
             .unwrap_or(0.0)
+    }
+
+    /// Shows a value in one cell while a paired view drags it, or clears the
+    /// preview with `None`. A preview is display state: it is not recorded for
+    /// undo and it never reaches the core.
+    pub fn set_preview(&mut self, preview: Option<(CellPos, f64)>) {
+        let preview = preview.filter(|(cell, value)| {
+            self.table
+                .as_ref()
+                .is_some_and(|table| cell.row < table.rows && cell.column < table.cols)
+                && value.is_finite()
+        });
+
+        let previous = self.preview;
+        self.preview = preview;
+
+        if let Some((cell, _)) = previous {
+            self.refresh_label(cell);
+        }
+
+        if let Some((cell, value)) = self.preview {
+            self.update_label(cell.row, cell.column, value);
+        }
+
+        self.action = None;
     }
 
     /// The core's write state for one cell.
@@ -565,6 +611,42 @@ impl TableModel {
         })
     }
 
+    /// Clamps a cell to the user limits the definition states for its array.
+    fn clamp_cell_value(&self, value: f64) -> f64 {
+        let Some(table) = &self.table else {
+            return value;
+        };
+        let mut value = value;
+        if let Some(minimum) = table.cell_minimum {
+            value = value.max(minimum);
+        }
+        if let Some(maximum) = table.cell_maximum {
+            value = value.min(maximum);
+        }
+
+        value
+    }
+
+    /// Clamps a bin to the user limits the definition states for its array.
+    fn clamp_axis_value(&self, axis: AxisKind, value: f64) -> f64 {
+        let Some(table) = &self.table else {
+            return value;
+        };
+        let (minimum, maximum) = match axis {
+            AxisKind::X => (table.x_axis.minimum, table.x_axis.maximum),
+            AxisKind::Y => (table.y_axis.minimum, table.y_axis.maximum),
+        };
+        let mut value = value;
+        if let Some(minimum) = minimum {
+            value = value.max(minimum);
+        }
+        if let Some(maximum) = maximum {
+            value = value.min(maximum);
+        }
+
+        value
+    }
+
     /// Whether an axis bin can be edited.
     pub fn is_axis_writable(&self, axis: AxisKind, index: usize) -> bool {
         if !self.is_writable() {
@@ -608,6 +690,7 @@ impl TableModel {
         self.axis_editing = Some(AxisEditing {
             target: AxisTarget { axis, index },
             text: format!("{:.*}", usize::from(digits), self.axis_value(axis, index)),
+            fresh: true,
             invalid: false,
         });
         self.action = None;
@@ -631,7 +714,12 @@ impl TableModel {
             return true;
         }
         if let Some(editing) = self.axis_editing.as_mut() {
-            editing.text = replace_range(&editing.text, range, &filtered);
+            if editing.fresh && !filtered.is_empty() {
+                editing.text = filtered;
+            } else {
+                editing.text = replace_range(&editing.text, range, &filtered);
+            }
+            editing.fresh = false;
             editing.invalid = false;
             self.action = None;
             return true;
@@ -655,6 +743,7 @@ impl TableModel {
     pub fn pop_axis_char(&mut self) {
         if let Some(editing) = self.axis_editing.as_mut() {
             editing.text.pop();
+            editing.fresh = false;
             editing.invalid = false;
             self.action = None;
         }
@@ -678,28 +767,20 @@ impl TableModel {
         let Some(editing) = self.axis_editing.as_ref() else {
             return Ok(Vec::new());
         };
-        let Some(operation) = parse_edit(&editing.text)? else {
+        let Some(value) = parse_axis_edit(&editing.text)? else {
             self.axis_editing = None;
             return Ok(Vec::new());
         };
         if !self.is_writable() {
             return Err(EditError::ReadOnly);
         }
-        let (operation, amount) = operation;
-        // A header bin is one value: relative prefixes nudge it from where it
-        // is, a bare number replaces it.
+        // A bin is a coordinate, not a tune value. A signed number replaces
+        // it; `-10` is a negative bin, never a subtraction from the old one.
+        // The definition's own limits win, so the cell shows the clamped bin
+        // instead of a value the core will never store.
         let current = self.axis_value(editing.target.axis, editing.target.index);
-        let value = match operation {
-            EditOp::Set => amount,
-            EditOp::Add => current + amount,
-            EditOp::Multiply => current * amount,
-            EditOp::Divide => current / amount,
-            EditOp::Percent => current * (1.0 + amount / 100.0),
-        };
-        if !value.is_finite() {
-            return Err(EditError::NotANumber);
-        }
         let axis = editing.target.axis;
+        let value = self.clamp_axis_value(axis, value);
         let index = editing.target.index;
         let key = (matches!(axis, AxisKind::X), index);
         self.record(
@@ -1092,6 +1173,9 @@ impl TableModel {
             }
         }
 
+        for edit in &mut edits {
+            edit.value = self.clamp_cell_value(edit.value);
+        }
         if !edits.is_empty() {
             self.record_cells(&edits);
             self.apply_pending(&edits);
@@ -1277,7 +1361,7 @@ impl TableModel {
                 edits.push(CellEdit {
                     row: data_row,
                     column: left + column_index,
-                    value,
+                    value: self.clamp_cell_value(value),
                 });
             }
         }
@@ -1327,7 +1411,11 @@ impl TableModel {
                 if !value.is_finite() {
                     return Err(EditError::NotANumber);
                 }
-                edits.push(CellEdit { row, column, value });
+                edits.push(CellEdit {
+                    row,
+                    column,
+                    value: self.clamp_cell_value(value),
+                });
             }
         }
         Ok(edits)
@@ -1445,6 +1533,18 @@ impl TableModel {
         for (row, column, value) in pending {
             self.update_label(row, column, value);
         }
+
+        if let Some((cell, value)) = self.preview {
+            self.update_label(cell.row, cell.column, value);
+        }
+    }
+
+    /// Rewrites one label from the value it should show when no preview is on
+    /// it.
+    fn refresh_label(&mut self, cell: CellPos) {
+        let value = self.value(cell);
+
+        self.update_label(cell.row, cell.column, value);
     }
 
     fn update_label(&mut self, row: usize, column: usize, value: f64) {
@@ -1507,6 +1607,31 @@ impl TableModel {
             self.axis_editing = None;
         }
     }
+}
+
+/// Parses a header-bin edit as an absolute value.
+///
+/// Returns `Ok(None)` for an empty text, which means "nothing to do". Unlike
+/// [`parse_edit`], a leading `-` is a sign, not an instruction to subtract:
+/// bins are coordinates and a temperature or gauge pressure can be negative.
+fn parse_axis_edit(text: &str) -> Result<Option<f64>, EditError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+
+    let body = text.strip_prefix('=').unwrap_or(text).trim();
+    if body.is_empty() {
+        return Err(EditError::NotANumber);
+    }
+    let Ok(value) = body.parse::<f64>() else {
+        return Err(EditError::NotANumber);
+    };
+    if !value.is_finite() {
+        return Err(EditError::NotANumber);
+    }
+
+    Ok(Some(value))
 }
 
 /// Parses one edit expression into its operation and number.
@@ -1645,6 +1770,8 @@ mod tests {
                 units: "rpm".to_owned(),
                 channel: Some("rpm".to_owned()),
                 digits: 0,
+                minimum: Some(0.0),
+                maximum: Some(10_000.0),
                 values: (0..columns).map(|value| value as f64 * 500.0).collect(),
             },
             y_axis: oxtuner_core::AxisSummary {
@@ -1653,11 +1780,16 @@ mod tests {
                 units: "kPa".to_owned(),
                 channel: Some("map".to_owned()),
                 digits: 0,
+                minimum: Some(0.0),
+                maximum: Some(255.0),
                 values: (0..rows).map(|value| value as f64 * 10.0).collect(),
             },
             minimum: 0.0,
             maximum: (rows * columns) as f64,
+            cell_minimum: Some(0.0),
+            cell_maximum: Some(255.0),
             writable: true,
+            curve: None,
         }
     }
 
@@ -1797,8 +1929,10 @@ mod tests {
 
     #[test]
     fn a_negative_absolute_value_needs_the_equals_prefix() {
+        let mut summary = table(1, 1);
+        summary.cell_minimum = Some(-40.0);
         let mut model = TableModel::new();
-        model.set_table(table(1, 1));
+        model.set_table(summary);
         model.begin_edit(Some('='));
         model.push_char('-');
         model.push_char('7');
@@ -2371,5 +2505,173 @@ mod tests {
         );
         model.cancel_edit();
         assert_eq!(model.edit_text(), None);
+    }
+
+    #[test]
+    fn an_axis_edit_stops_at_the_definition_limits() {
+        use oxtuner_core::AxisKind;
+
+        let mut summary = table(2, 2);
+        summary.x_axis.minimum = Some(70.0);
+        summary.x_axis.maximum = Some(120.0);
+        let mut model = TableModel::new();
+        model.set_table(summary);
+
+        assert!(model.begin_axis_edit(AxisKind::X, 1));
+        assert!(model.replace_edit_text(None, "30"));
+        model.commit_axis_edit().expect("a valid bin");
+        assert_eq!(
+            model.axis_value(AxisKind::X, 1),
+            70.0,
+            "a bin below the definition limit snaps to the limit"
+        );
+
+        assert!(model.begin_axis_edit(AxisKind::X, 0));
+        assert!(model.replace_edit_text(None, "200"));
+        model.commit_axis_edit().expect("a valid bin");
+        assert_eq!(model.axis_value(AxisKind::X, 0), 120.0);
+    }
+
+    #[test]
+    fn a_y_axis_edit_stops_at_the_definition_limits() {
+        use oxtuner_core::AxisKind;
+
+        let mut model = TableModel::new();
+        model.set_table(table(2, 2));
+        assert!(model.begin_axis_edit(AxisKind::Y, 1));
+        assert!(model.replace_edit_text(None, "300"));
+        model.commit_axis_edit().expect("a valid bin");
+
+        assert_eq!(model.axis_value(AxisKind::Y, 1), 255.0);
+    }
+
+    #[test]
+    fn an_axis_bin_edit_replaces_the_seed_with_the_typed_value() {
+        use oxtuner_core::{AxisEdit, AxisKind};
+
+        let mut model = TableModel::new();
+        model.set_table(table(2, 2));
+        assert!(model.begin_axis_edit(AxisKind::X, 1));
+        assert_eq!(model.edit_text(), Some("500"));
+
+        assert!(model.replace_edit_text(None, "30"));
+        assert_eq!(
+            model.edit_text(),
+            Some("30"),
+            "the first typed character replaces the seeded bin"
+        );
+
+        let edits = model.commit_axis_edit().expect("a valid bin");
+        assert_eq!(
+            edits,
+            vec![AxisEdit {
+                index: 1,
+                value: 30.0
+            }]
+        );
+        assert_eq!(model.axis_value(AxisKind::X, 1), 30.0);
+    }
+
+    #[test]
+    fn a_negative_x_bin_sets_the_value_instead_of_subtracting() {
+        use oxtuner_core::AxisKind;
+
+        let mut summary = table(2, 2);
+        summary.x_axis.minimum = Some(-40.0);
+        let mut model = TableModel::new();
+        model.set_table(summary);
+        assert!(model.begin_axis_edit(AxisKind::X, 1));
+        assert!(model.replace_edit_text(None, "-20"));
+        model.commit_axis_edit().expect("a valid bin");
+
+        assert_eq!(
+            model.axis_value(AxisKind::X, 1),
+            -20.0,
+            "a signed bin is a coordinate, not a relative edit"
+        );
+    }
+
+    #[test]
+    fn a_negative_y_bin_sets_the_value_instead_of_subtracting() {
+        use oxtuner_core::AxisKind;
+
+        let mut summary = table(2, 2);
+        summary.y_axis.minimum = Some(-40.0);
+        let mut model = TableModel::new();
+        model.set_table(summary);
+        assert!(model.begin_axis_edit(AxisKind::Y, 1));
+        assert!(model.replace_edit_text(None, "-20"));
+        model.commit_axis_edit().expect("a valid bin");
+
+        assert_eq!(model.axis_value(AxisKind::Y, 1), -20.0);
+    }
+
+    #[test]
+    fn a_cell_edit_stops_at_the_definition_limits() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 2, &[10.0, 20.0], 0));
+        let cell = CellPos { row: 0, column: 0 };
+
+        model.begin_edit(Some('3'));
+        model.push_char('0');
+        model.push_char('0');
+        model.commit_edit().expect("a valid edit");
+        assert_eq!(model.value(cell), 255.0);
+
+        model.begin_edit(Some('='));
+        model.push_char('-');
+        model.push_char('1');
+        model.push_char('0');
+        model.push_char('0');
+        model.commit_edit().expect("a valid edit");
+        assert_eq!(model.value(cell), 0.0);
+    }
+
+    #[test]
+    fn a_paste_stops_at_the_definition_limits() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 2, &[10.0, 20.0], 0));
+        model.select(CellPos { row: 0, column: 0 });
+
+        model.paste_edits("300\t-20").expect("a valid paste");
+
+        assert_eq!(model.value(CellPos { row: 0, column: 0 }), 255.0);
+        assert_eq!(model.value(CellPos { row: 0, column: 1 }), 0.0);
+    }
+
+    #[test]
+    fn a_preview_shows_a_paired_drag_and_clears_back() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 3, &[1.0, 2.0, 3.0], 0));
+        let cell = CellPos { row: 0, column: 1 };
+
+        model.set_preview(Some((cell, 42.0)));
+
+        assert_eq!(model.value(cell), 42.0);
+        assert_eq!(model.display(cell).as_deref(), Some("42"));
+        assert!(!model.can_undo(), "a preview is not an edit");
+
+        model.set_preview(None);
+
+        assert_eq!(model.value(cell), 2.0);
+        assert_eq!(model.display(cell).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn a_snapshot_that_carries_the_preview_clears_it() {
+        let mut model = TableModel::new();
+        model.set_table(table_with(1, 3, &[1.0, 2.0, 3.0], 0));
+        let cell = CellPos { row: 0, column: 1 };
+        model.set_preview(Some((cell, 42.0)));
+
+        model.set_table(table_with(1, 3, &[1.0, 42.0, 3.0], 0));
+        assert_eq!(model.value(cell), 42.0);
+
+        model.set_table(table_with(1, 3, &[1.0, 2.0, 3.0], 0));
+        assert_eq!(
+            model.value(cell),
+            2.0,
+            "a confirmed preview must not keep winning over a later snapshot"
+        );
     }
 }
