@@ -6,18 +6,22 @@
 //! own. Both draw with base primitives and expose retained state + events
 //! rather than reaching further into globals.
 //!
-//! The widgets are the live chart and the tune table. Each is built as a
-//! retained entity with a small public API — data in, events out — so every
-//! surface embeds the same component instead of copying plot or grid code.
-//! The data shaping lives in `oxtuner-core` and is GPUI-free (ADR-0001,
+//! The widgets are the live chart, the tune table, and the tune curve. Each is
+//! built as a retained entity with a small public API — data in, events out —
+//! so every surface embeds the same component instead of copying plot or grid
+//! code. The data shaping lives in `oxtuner-core` and is GPUI-free (ADR-0001,
 //! ADR-0020); this crate only turns it into paint calls.
 
 #![forbid(unsafe_code)]
 
+mod caption;
+
 pub mod chart;
+pub mod curve;
 pub mod table;
 
 pub use chart::{
     ChartConfig, ChartEvent, ChartMode, ChartSeries, ChartState, ChartStyle, PREFERRED_CHANNELS,
 };
+pub use curve::{Curve, CurveEvent, CurveModel, CurvePoint, CurveSnapshot};
 pub use table::{RealtimePoint, Table, TableEvent, TableModel};

@@ -940,6 +940,26 @@ pub struct DialogSummary {
     pub unavailable: Vec<String>,
 }
 
+/// The fixed axis frame of a curve, from its definition.
+///
+/// A curve's plot is drawn against these limits rather than against the
+/// values, so a point near the top of the range stays near the top while it
+/// is dragged. The frame is also what tells the UI that a one-row table is a
+/// curve rather than a table with a single row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveAxes {
+    /// Left edge of the X axis.
+    pub x_min: f64,
+    /// Right edge of the X axis.
+    pub x_max: f64,
+    /// Bottom edge of the Y axis.
+    pub y_min: f64,
+    /// Top edge of the Y axis.
+    pub y_max: f64,
+    /// Intervals the Y axis aims for.
+    pub divisions: usize,
+}
+
 /// One table, shaped for the grid.
 ///
 /// Values are in **user units**, row-major from the definition's array. The UI
@@ -975,8 +995,15 @@ pub struct TableSummary {
     pub minimum: f64,
     /// Highest cell value, for the heatmap.
     pub maximum: f64,
+    /// Lowest user value the cell variable accepts, when the definition
+    /// states one. An edit is clamped to this limit before it is shown.
+    pub cell_minimum: Option<f64>,
+    /// Highest user value the cell variable accepts, when stated.
+    pub cell_maximum: Option<f64>,
     /// Whether the session may store edits.
     pub writable: bool,
+    /// The definition's axis frame when this snapshot is a curve.
+    pub curve: Option<CurveAxes>,
 }
 
 /// One table axis, as the grid draws it.
@@ -998,6 +1025,11 @@ pub struct AxisSummary {
     pub channel: Option<String>,
     /// Decimal digits to display.
     pub digits: u8,
+    /// Lowest user value the bins variable accepts, when the definition states
+    /// one. A bin edit is clamped to this limit rather than shown as accepted.
+    pub minimum: Option<f64>,
+    /// Highest user value the bins variable accepts, when stated.
+    pub maximum: Option<f64>,
     /// Axis values, in definition order.
     pub values: Vec<f64>,
 }
@@ -1196,7 +1228,10 @@ impl TableSummary {
             y_axis,
             minimum,
             maximum,
+            cell_minimum: spec.minimum,
+            cell_maximum: spec.maximum,
             writable: !project.is_read_only() && tune.is_writable(cells_name),
+            curve: None,
         })
     }
 
@@ -1261,8 +1296,11 @@ impl TableSummary {
             units: spec.units.clone(),
             channel: None,
             digits: spec.digits,
+            minimum: spec.minimum,
+            maximum: spec.maximum,
             values: vec![minimum],
         };
+        let axes = curve_axes(curve, &x_axis.values, &cells);
 
         Ok(Self {
             id: curve.name.clone(),
@@ -1282,7 +1320,10 @@ impl TableSummary {
             y_axis,
             minimum,
             maximum,
+            cell_minimum: spec.minimum,
+            cell_maximum: spec.maximum,
             writable: !project.is_read_only() && tune.is_writable(cells_name),
+            curve: Some(axes),
         })
     }
 
@@ -1303,6 +1344,62 @@ impl TableSummary {
     }
 }
 
+/// The axis frame a curve draws against.
+///
+/// The definition's `xAxis` and `yAxis` are literals in every definition seen
+/// so far. A definition that leaves them out, or writes an expression, still
+/// gets a curve: the frame then hugs the bins and cells themselves.
+fn curve_axes(curve: &oxtuner_ini::Curve, x_values: &[f64], cells: &[f64]) -> CurveAxes {
+    let (x_min, x_max) = axis_range(&curve.x_axis, x_values);
+    let (y_min, y_max) = axis_range(&curve.y_axis, cells);
+    let divisions = curve
+        .y_axis
+        .get(2)
+        .and_then(oxtuner_ini::Number::literal)
+        .filter(|value| value.is_finite())
+        .map_or(4, |value| value.round().clamp(2.0, 12.0) as usize);
+
+    CurveAxes {
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        divisions,
+    }
+}
+
+/// A declared axis range, or a frame around the values when there is none.
+fn axis_range(axis: &[oxtuner_ini::Number], values: &[f64]) -> (f64, f64) {
+    let literal = |index: usize| {
+        axis.get(index)
+            .and_then(oxtuner_ini::Number::literal)
+            .filter(|value| value.is_finite())
+    };
+
+    if let (Some(minimum), Some(maximum)) = (literal(0), literal(1))
+        && minimum < maximum
+    {
+        return (minimum, maximum);
+    }
+
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for value in values.iter().filter(|value| value.is_finite()) {
+        minimum = minimum.min(*value);
+        maximum = maximum.max(*value);
+    }
+
+    if !minimum.is_finite() || !maximum.is_finite() {
+        return (0.0, 1.0);
+    }
+    if maximum - minimum < 1e-12 {
+        let padding = maximum.abs().max(1.0) * 0.05;
+        return (minimum - padding, maximum + padding);
+    }
+
+    (minimum, maximum)
+}
+
 fn axis_summary(
     project: &Project,
     axis: Option<&oxtuner_ini::Axis>,
@@ -1317,6 +1414,8 @@ fn axis_summary(
             units: String::new(),
             channel: None,
             digits: 0,
+            minimum: None,
+            maximum: None,
             values: (0..length).map(|index| index as f64).collect(),
         };
     };
@@ -1346,6 +1445,8 @@ fn axis_summary(
         units: spec.map_or_else(String::new, |spec| spec.units.clone()),
         channel: axis.channel.clone(),
         digits: spec.map_or(0, |spec| spec.digits),
+        minimum: spec.and_then(|spec| spec.minimum),
+        maximum: spec.and_then(|spec| spec.maximum),
         values,
     }
 }

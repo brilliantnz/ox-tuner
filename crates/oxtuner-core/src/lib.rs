@@ -95,7 +95,7 @@ pub use history::{
 pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
-    AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary,
+    AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary, CurveAxes,
     DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
     FailureCode, ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary,
     RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,

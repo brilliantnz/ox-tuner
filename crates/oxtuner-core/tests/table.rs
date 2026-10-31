@@ -176,6 +176,9 @@ fn a_table_arrives_with_cells_axes_and_units() {
     assert_eq!(table.y_axis.units, "kPa");
     assert!(table.writable);
     assert!(table.changed.iter().all(|changed| !changed));
+    assert_eq!(table.cell_minimum, Some(0.0));
+    assert_eq!(table.cell_maximum, Some(255.0));
+    assert_eq!(table.curve, None);
 }
 
 #[test]
@@ -411,7 +414,47 @@ fn a_curve_reads_as_a_one_row_table() {
     assert_eq!((table.rows, table.cols), (1, 2));
     assert_eq!(table.cells, vec![5.0, 6.0]);
     assert_eq!(table.x_axis.values, vec![1000.0, 2000.0]);
+    assert_eq!(table.cell_minimum, Some(0.0));
+    assert_eq!(table.cell_maximum, Some(255.0));
     assert!(table.writable);
+
+    let axes = table.curve.expect("a curve frame");
+    assert_eq!((axes.x_min, axes.x_max), (1000.0, 2000.0));
+    assert_eq!((axes.y_min, axes.y_max), (5.0, 6.0));
+    assert_eq!(axes.divisions, 4);
+}
+
+#[test]
+fn a_curve_axis_edit_echoes_through_its_bin_array() {
+    use oxtuner_core::{AxisEdit, AxisKind};
+
+    let dir = TempDir::new("curve-axis-edit");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .edit_axis(
+            "idleCurve",
+            AxisKind::X,
+            vec![AxisEdit {
+                index: 0,
+                value: 900.0,
+            }],
+        )
+        .expect("the edit is queued");
+
+    let Event::TableEdited {
+        op: answered,
+        table,
+    } = core.next()
+    else {
+        panic!("expected a table edit");
+    };
+    assert_eq!(answered, op);
+    assert_eq!(table.id, "idleCurve");
+    assert_eq!(table.x_axis.values, vec![900.0, 2000.0]);
+    assert_eq!(table.cells, vec![5.0, 6.0]);
 }
 
 #[test]
