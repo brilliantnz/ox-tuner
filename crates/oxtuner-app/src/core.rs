@@ -312,14 +312,14 @@ fn apply(event: Event, cx: &mut App) {
         }
         Event::TableRead { table, .. } => (
             Update::Table {
-                table,
+                table: Box::new(table),
                 edited: false,
             },
             None,
         ),
         Event::TableEdited { table, .. } => (
             Update::Table {
-                table,
+                table: Box::new(table),
                 edited: true,
             },
             None,
@@ -489,7 +489,7 @@ enum Update {
     Opened(ProjectSummary),
     Saved(SaveSummary),
     Table {
-        table: TableSummary,
+        table: Box<TableSummary>,
         edited: bool,
     },
     Dialog {
@@ -558,7 +558,7 @@ impl CoreStatus {
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Table { table, edited } => {
-                self.table = Some(table);
+                self.table = Some(*table);
                 // A successful table operation also proves the earlier failure
                 // is stale.
                 self.failure = None;
