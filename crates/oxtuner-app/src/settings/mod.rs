@@ -148,6 +148,7 @@ fn pages() -> Vec<SettingPage> {
         project_page(),
         shortcuts_page(),
         safety_page(),
+        logging_page(),
         about_page(),
     ]
 }
@@ -344,6 +345,52 @@ fn safety_page() -> SettingPage {
                             .into_any_element()
                     })
                     .keywords(["disclaimer", "safety", "warning"]),
+                ),
+        )
+}
+
+fn logging_page() -> SettingPage {
+    SettingPage::new(t!("app.settings.page.logging"))
+        .icon(IconName::SquareText)
+        .group(
+            SettingGroup::new()
+                .title(t!("app.settings.group.diagnostics"))
+                .item(
+                    SettingItem::new(
+                        t!("app.settings.item.verbose_logging"),
+                        SettingField::switch(
+                            |cx| cx.global::<AppSettings>().settings().logging.verbose,
+                            |value, cx| AppSettings::set_log_verbose(cx, value),
+                        ),
+                    )
+                    .description(t!("app.settings.verbose_logging_description").to_string())
+                    .keywords([
+                        "log",
+                        "logging",
+                        "debug",
+                        "verbose",
+                        "diagnostics",
+                        "tracing",
+                    ]),
+                )
+                .item(
+                    SettingItem::new(
+                        t!("app.settings.item.log_file"),
+                        SettingField::render(|_, _, cx| {
+                            let text = match crate::platform::logging::handle(cx) {
+                                Some(handle) => handle
+                                    .path()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| {
+                                        t!("app.settings.log_file_console_only").to_string()
+                                    }),
+                                None => t!("app.settings.log_file_unavailable").to_string(),
+                            };
+
+                            div().text_sm().child(text)
+                        }),
+                    )
+                    .keywords(["log", "file", "path"]),
                 ),
         )
 }

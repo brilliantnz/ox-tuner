@@ -517,6 +517,8 @@ app:
         en: Shortcuts
       safety:
         en: Safety
+      logging:
+        en: Logging
       about:
         en: About
     group:
@@ -528,6 +530,8 @@ app:
         en: Guardrails
       table:
         en: Table
+      diagnostics:
+        en: Diagnostics
     item:
       mode:
         en: Mode
@@ -545,12 +549,22 @@ app:
         en: Source code
       safety_disclaimer:
         en: Safety disclaimer
+      verbose_logging:
+        en: Verbose logging
+      log_file:
+        en: Log file
     theme_description:
       en: Follow the system appearance, or pin the app to light or dark.
     auto_reopen_description:
       en: Off keeps launching clean; the Projects dialog reopens it in one click.
     header_wash_for_ranges_description:
       en: Off tints only the bins of a single selected cell. On tints every row and column bin the range covers.
+    verbose_logging_description:
+      en: Writes debug records to the console and the log file. Leave this off unless you are diagnosing a problem.
+    log_file_console_only:
+      en: Not written in this build. Use --log-file to write one.
+    log_file_unavailable:
+      en: Logging is unavailable. The startup error names the cause.
     disclaimer_accepted:
       en: Accepted on this installation.
     disclaimer_not_accepted:

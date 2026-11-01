@@ -25,17 +25,19 @@ fn main() {
     // Read before anything is built: the settings choose the language every
     // text is in, and the session decides where the window opens.
     let auto_sim = std::env::args().any(|argument| argument == "--sim");
+    let log_file = std::env::args().any(|argument| argument == "--log-file");
     let paths = AppPaths::discover();
     let settings = AppSettings::load(&paths);
     let session = AppState::load(&paths);
 
+    // The pipeline installs the subscriber, so this must happen before the
+    // first record. Keep the handle alive for the process; dropping it flushes
+    // the file and stops the non-blocking writer.
+    let log_handle = logging::init(paths.log_dir(), log_file, settings.log_verbose());
+
     // The bundled OxTuner themes are seeded next to the settings file before
     // anything reads them; the watcher installed later picks up user edits.
     theme::seed(&paths);
-
-    // Keep the writer guard alive for the process; dropping it stops flushing
-    // the last records.
-    let _log_guard = logging::init(&paths, settings.log_level());
 
     // The locale is global state outside GPUI, so select it before any window
     // or component renders. Only English ships today; the key is persisted so a
@@ -58,6 +60,12 @@ fn main() {
     });
 
     app.run(move |cx| {
+        // Install the pipeline before the first view or action logs anything.
+        // The global keeps the writer guard alive for the whole process.
+        if let Some(handle) = log_handle {
+            logging::install(cx, handle);
+        }
+
         init(cx);
 
         // Globals must exist before the first render: the main layout and the

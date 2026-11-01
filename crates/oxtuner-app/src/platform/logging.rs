@@ -1,59 +1,72 @@
 //! Logging bootstrap.
 //!
-//! One rolling file in the platform's log directory, plus stderr while running
-//! from a terminal. The guard returned here must live for the whole process;
-//! dropping it stops the non-blocking writer from flushing the last records.
+//! The pipeline itself lives in `oxtuner-log`. This module supplies the app's
+//! platform log directory, keeps the handle alive for the process, and gives
+//! the Settings page a way to change the filter.
+//!
+//! The handle is stored in a GPUI global so the writer guard outlives the
+//! window and the filter control is reachable without threading a reference
+//! through every view.
 
-use std::fs;
-use std::io::IsTerminal as _;
+use std::path::Path;
 
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use gpui_kit::{App, Global};
+use oxtuner_log::{FilePolicy, LogConfig, LogHandle, LogStore};
 
-use super::paths::AppPaths;
+/// The installed pipeline, kept for the whole process.
+pub struct Logging {
+    handle: LogHandle,
+}
 
-/// Installs the process-wide tracing subscriber.
+impl Global for Logging {}
+
+/// Installs the process-wide subscriber.
 ///
-/// Returns `None` when the log directory cannot be created; the app still runs,
-/// it just has no file log. An invalid level string falls back to `info`
-/// instead of refusing to start.
-pub fn init(paths: &AppPaths, level: &str) -> Option<WorkerGuard> {
-    let directory = paths.log_dir();
-    if let Err(error) = fs::create_dir_all(directory) {
-        eprintln!(
-            "ox-tuner: cannot create log directory {}: {error}",
-            directory.display()
-        );
-        return None;
+/// Returns `None` when the log directory cannot be created. The app still
+/// starts; it just has no file and no in-memory tail. The caller must keep the
+/// handle alive or hand it to [`install`].
+pub fn init(directory: &Path, log_file: bool, verbose: bool) -> Option<LogHandle> {
+    let policy = if log_file {
+        FilePolicy::On
+    } else {
+        FilePolicy::Auto
+    };
+    let config = LogConfig::new(directory)
+        .with_file(policy)
+        .with_verbose(verbose);
+
+    match oxtuner_log::init(config) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            eprintln!("ox-tuner: logging is unavailable: {error}");
+            None
+        }
     }
+}
 
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(directory, "oxtuner.log"));
+/// Stores the handle in the GPUI global for the rest of the process.
+pub fn install(cx: &mut App, handle: LogHandle) {
+    cx.set_global(Logging { handle });
+}
 
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|error| {
-        eprintln!("ox-tuner: invalid log level {level:?} ({error}), using info");
-        EnvFilter::new("info")
-    });
+/// The installed handle, when logging started.
+pub fn handle(cx: &App) -> Option<&LogHandle> {
+    cx.try_global::<Logging>().map(|logging| &logging.handle)
+}
 
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(std::io::stderr().is_terminal())
-                .with_writer(std::io::stderr),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(writer),
-        )
-        .try_init();
+/// The bounded ring, cloned for a view that wants to read it on its tick.
+pub fn store(cx: &App) -> Option<LogStore> {
+    handle(cx).map(LogHandle::store)
+}
 
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        log_dir = %directory.display(),
-        "ox-tuner starting"
-    );
-
-    Some(guard)
+/// Applies the persisted verbose preference to the running filter.
+///
+/// `RUST_LOG` keeps the final say; in that case this is a no-op inside the
+/// logger and only the saved preference changes.
+pub fn set_verbose(cx: &App, verbose: bool) {
+    if let Some(handle) = handle(cx)
+        && let Err(error) = handle.set_verbose(verbose)
+    {
+        tracing::warn!(%error, "could not change the log filter");
+    }
 }

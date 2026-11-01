@@ -16,14 +16,13 @@ path = "src/main.rs"
 directories = "6.0.0"
 gpui-kit.workspace = true
 oxtuner-core.workspace = true
+oxtuner-log.workspace = true
 oxtuner-sim.workspace = true
 oxtuner-ui.workspace = true
 rust-i18n = "4.2.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tracing = "0.1.44"
-tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [lints]
 workspace = true

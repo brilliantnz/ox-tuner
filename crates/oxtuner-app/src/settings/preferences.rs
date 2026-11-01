@@ -256,18 +256,11 @@ fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct LoggingSettings {
-    pub(crate) level: String,
-}
-
-impl Default for LoggingSettings {
-    fn default() -> Self {
-        Self {
-            level: "info".into(),
-        }
-    }
+    /// Whether debug records go to the console and the file.
+    pub(crate) verbose: bool,
 }
 
 /// The parsed settings document plus the file it came from.
@@ -327,9 +320,9 @@ impl AppSettings {
         &self.settings.ui.language
     }
 
-    /// The log level the user chose.
-    pub fn log_level(&self) -> &str {
-        &self.settings.logging.level
+    /// Whether the user asked for debug records.
+    pub fn log_verbose(&self) -> bool {
+        self.settings.logging.verbose
     }
 
     /// The connection preferences the dialog starts from.
@@ -394,6 +387,13 @@ impl AppSettings {
         Self::update(cx, |settings| {
             settings.ui.table_header_wash_for_ranges = wash;
         });
+    }
+
+    /// Changes the verbose logging preference, applies it to the live filter
+    /// and persists it.
+    pub(crate) fn set_log_verbose(cx: &mut App, verbose: bool) {
+        crate::platform::logging::set_verbose(cx, verbose);
+        Self::update(cx, |settings| settings.logging.verbose = verbose);
     }
 
     /// Records that the safety disclaimer was accepted.
@@ -502,9 +502,7 @@ mod tests {
             recent: RecentSettings {
                 projects: vec![PathBuf::from("/projects/roadster")],
             },
-            logging: LoggingSettings {
-                level: "debug".into(),
-            },
+            logging: LoggingSettings { verbose: true },
         };
 
         let encoded = serde_json::to_string(&settings).expect("serialize");
@@ -526,7 +524,7 @@ mod tests {
         assert_eq!(settings.ui.theme, ThemePreference::Dark);
         assert!(settings.safety.disclaimer_accepted);
         // Fields the old document did not know about get defaults.
-        assert_eq!(settings.logging.level, "info");
+        assert!(!settings.logging.verbose);
     }
 
     #[test]

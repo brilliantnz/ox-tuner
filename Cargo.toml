@@ -10,6 +10,7 @@ members = [
   "crates/oxtuner-core",
   "crates/oxtuner-datalog",
   "crates/oxtuner-ini",
+  "crates/oxtuner-log",
   "crates/oxtuner-project",
   "crates/oxtuner-protocol",
   "crates/oxtuner-sim",
@@ -30,6 +31,7 @@ gpui-kit = "=0.8.1"
 oxtuner-core = { path = "./crates/oxtuner-core" }
 oxtuner-datalog = { path = "./crates/oxtuner-datalog" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
+oxtuner-log = { path = "./crates/oxtuner-log" }
 oxtuner-project = { path = "./crates/oxtuner-project" }
 oxtuner-protocol = { path = "./crates/oxtuner-protocol" }
 oxtuner-sim = { path = "./crates/oxtuner-sim" }

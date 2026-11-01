@@ -113,7 +113,7 @@ impl AppPaths {
         self.config_dir.join("themes")
     }
 
-    /// The current rolling log file's directory.
+    /// The directory for per-run log files.
     pub fn log_dir(&self) -> &Path {
         &self.logs_dir
     }
