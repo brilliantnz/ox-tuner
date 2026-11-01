@@ -81,8 +81,11 @@ impl LogStore {
         self.lock().revision
     }
 
-    pub(crate) fn push(&self, record: LogRecord) {
+    pub(crate) fn push(&self, mut record: LogRecord) {
         let mut ring = self.lock();
+
+        let sequence = ring.revision.saturating_add(1);
+        record.sequence = sequence;
 
         if ring.records.len() >= ring.capacity {
             ring.records.pop_front();
@@ -90,7 +93,7 @@ impl LogStore {
         }
 
         ring.records.push_back(record);
-        ring.revision = ring.revision.saturating_add(1);
+        ring.revision = sequence;
     }
 
     fn lock(&self) -> MutexGuard<'_, Ring> {
@@ -212,7 +215,9 @@ mod tests {
         assert_eq!(snapshot.dropped, 1);
         assert_eq!(snapshot.revision, 3);
         assert_eq!(snapshot.records[0].message.as_ref(), "record 1");
+        assert_eq!(snapshot.records[0].sequence, 2);
         assert_eq!(snapshot.records[1].message.as_ref(), "record 2");
+        assert_eq!(snapshot.records[1].sequence, 3);
     }
 
     #[test]
@@ -240,6 +245,7 @@ mod tests {
         assert_eq!(record.op.as_deref(), Some("op-7"));
         assert_eq!(record.field("pages"), Some("2"));
         assert_eq!(record.level, tracing::Level::INFO);
+        assert!(!record.local_timestamp.is_empty());
     }
 
     #[test]

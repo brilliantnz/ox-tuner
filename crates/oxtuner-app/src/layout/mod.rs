@@ -150,7 +150,8 @@ impl AppLayout {
         let table_editor = cx.new(TableEditor::new);
         let dialog_editor = cx.new(DialogEditor::new);
         let realtime = cx.new(RealtimeView::new);
-        let bottom_panel = cx.new(|_| BottomPanel::new());
+        let diagnostics = cx.new(|cx| bottom_panel::DiagnosticsView::new(window, cx));
+        let bottom_panel = cx.new(|_| BottomPanel::new(diagnostics));
         let _explorer = cx.observe(&explorer, |this, _, cx| {
             this.sync_editors(cx);
             cx.notify();

@@ -222,8 +222,10 @@ app:
       en: Indicators
     tab_telemetry:
       en: Telemetry
-    tab_log:
-      en: Log
+    tab_activity:
+      en: Activity
+    tab_diagnostics:
+      en: Diagnostics
     section_definition:
       en: Definition
     section_tune:
@@ -298,6 +300,57 @@ app:
       en: 'Frame %{sequence} · %{channels} channels'
     revert_done:
       en: 'Reverted %{cells} values to the file baseline.'
+  diagnostics:
+    filter_placeholder:
+      en: Filter messages, targets and fields
+    filter_all:
+      en: All
+    level:
+      en: Level
+    subsystem:
+      en: Subsystem
+    pause:
+      en: Pause
+    resume:
+      en: Resume
+    follow:
+      en: Follow
+    clear:
+      en: Clear
+    copy:
+      en: Copy
+    open:
+      en: Open
+    count:
+      en: '%{shown} of %{total} records'
+    ring_dropped:
+      en: '%{count} dropped from the ring'
+    file_dropped:
+      en: '%{count} file lines dropped'
+    paused:
+      en: Paused
+    empty:
+      en: No log records yet.
+    empty_hint:
+      en: Records appear here as the application runs.
+    empty_filtered:
+      en: No records match the filter.
+    empty_filtered_hint:
+      en: Change the level, subsystem or text filter.
+    unavailable:
+      en: Logging is unavailable.
+    unavailable_hint:
+      en: The startup error names the cause.
+    column_time:
+      en: Time
+    column_level:
+      en: Level
+    column_subsystem:
+      en: Subsystem
+    column_thread:
+      en: Thread
+    column_message:
+      en: Message
   table:
     copy:
       en: Copy

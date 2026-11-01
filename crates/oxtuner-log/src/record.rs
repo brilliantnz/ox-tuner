@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tracing::Level;
 
 /// One captured tracing event.
@@ -15,6 +15,11 @@ pub struct LogRecord {
     pub time: OffsetDateTime,
     /// The same instant as an RFC 3339 UTC string, formatted once.
     pub timestamp: Arc<str>,
+    /// The same instant in the device's local offset, for the Diagnostics view.
+    pub local_timestamp: Arc<str>,
+    /// Monotonic position in the ring; the view uses it to clear only the
+    /// records that existed when the user asked.
+    pub sequence: u64,
     /// Event level.
     pub level: Level,
     /// The `module_path!()` target, or the `log` target through the bridge.
@@ -39,6 +44,11 @@ impl LogRecord {
         fields: Vec<(String, String)>,
     ) -> Self {
         let timestamp = time.format(&Rfc3339).unwrap_or_default();
+        let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        let local_timestamp = time
+            .to_offset(local_offset)
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| timestamp.clone());
         let op = fields
             .iter()
             .find(|(name, _)| name == "op")
@@ -47,6 +57,8 @@ impl LogRecord {
         Self {
             time,
             timestamp: Arc::from(timestamp),
+            local_timestamp: Arc::from(local_timestamp),
+            sequence: 0,
             level,
             target: Arc::from(target),
             thread: thread.map(Arc::from),

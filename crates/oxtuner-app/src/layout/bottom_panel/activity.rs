@@ -16,11 +16,11 @@ use gpui_kit::{
 use crate::core::CoreService;
 use crate::i18n::t;
 
-/// The log tab.
+/// The activity tab.
 #[derive(IntoElement)]
-pub(super) struct Log;
+pub(super) struct Activity;
 
-impl RenderOnce for Log {
+impl RenderOnce for Activity {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let status = CoreService::status(cx);
         let log = CoreService::log(cx);

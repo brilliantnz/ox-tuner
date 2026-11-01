@@ -44,7 +44,7 @@ pub(crate) const PRIMARY_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
 /// Width limits of the secondary (inspector) sidebar.
 pub(crate) const SECONDARY_WIDTH_RANGE: std::ops::Range<f32> = 200.0..480.0;
 /// Height limits of the bottom panel.
-pub(crate) const BOTTOM_HEIGHT_RANGE: std::ops::Range<f32> = 96.0..480.0;
+pub(crate) const BOTTOM_HEIGHT_RANGE: std::ops::Range<f32> = 180.0..480.0;
 
 /// How close a frame must be to a display's usable area to *record* a maximize.
 ///
