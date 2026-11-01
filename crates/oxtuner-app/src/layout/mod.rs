@@ -34,7 +34,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div, px, radians,
+    Render, Styled as _, Subscription, Window, div, px,
 };
 
 pub mod bottom_panel;
@@ -86,6 +86,9 @@ pub(crate) struct AppLayout {
     /// The live charts workspace, kept alive so its view state survives a
     /// switch back to the tune.
     realtime: Entity<RealtimeView>,
+    /// The output panel; one instance so its selected category survives a
+    /// hide and show.
+    bottom_panel: Entity<BottomPanel>,
     /// Which view a dialog-backed node shows: its grid or its constants.
     tab: EditorTab,
     /// The node the tab belongs to, so a new selection starts on the grid.
@@ -147,6 +150,7 @@ impl AppLayout {
         let table_editor = cx.new(TableEditor::new);
         let dialog_editor = cx.new(DialogEditor::new);
         let realtime = cx.new(RealtimeView::new);
+        let bottom_panel = cx.new(|_| BottomPanel::new());
         let _explorer = cx.observe(&explorer, |this, _, cx| {
             this.sync_editors(cx);
             cx.notify();
@@ -160,6 +164,7 @@ impl AppLayout {
             table_editor,
             dialog_editor,
             realtime,
+            bottom_panel,
             tab: EditorTab::Table,
             tab_node: None,
             _explorer,
@@ -469,13 +474,9 @@ impl AppLayout {
                 .into_any_element(),
             Button::new("toggle-bottom-panel")
                 .icon(if bottom {
-                    // The catalog has no bottom-panel "close" icon, so the
-                    // right-panel close icon is turned a quarter-turn clockwise,
-                    // its close bar then sits over the panel at the bottom.
-                    Icon::new(IconName::PanelRightClose)
-                        .rotate(radians(std::f32::consts::FRAC_PI_2))
+                    IconName::PanelBottomClose
                 } else {
-                    Icon::new(IconName::PanelBottom)
+                    IconName::PanelBottom
                 })
                 .ghost()
                 .small()
@@ -674,7 +675,7 @@ impl Render for AppLayout {
                                                             // resizes; the editor
                                                             // absorbs the change.
                                                             .fixed()
-                                                            .child(BottomPanel),
+                                                            .child(self.bottom_panel.clone()),
                                                     )
                                                 }),
                                         ),

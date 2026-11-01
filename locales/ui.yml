@@ -216,10 +216,26 @@ app:
     connect_failed:
       en: 'The connection failed: %{message}'
   bottom_panel:
-    title:
-      en: Output
     close_tooltip:
       en: Close output panel
+    tab_indicators:
+      en: Indicators
+    tab_telemetry:
+      en: Telemetry
+    tab_log:
+      en: Log
+    section_definition:
+      en: Definition
+    section_tune:
+      en: Tune
+    section_link:
+      en: Link
+    section_write:
+      en: Write access
+    section_session_log:
+      en: Session log
+    section_activity:
+      en: Activity
     no_definition:
       en: No ECU definition loaded.
     definition_summary:
@@ -271,7 +287,17 @@ app:
     import_done:
       en: 'Imported %{cells} values from %{path}'
     log_saved:
-      en: 'Session log · %{frames} frames · %{dropped} dropped · %{path}'
+      en: 'Session log · %{frames} frames · %{dropped} dropped'
+    log_recording:
+      en: 'Recording · %{frames} frames · %{dropped} dropped · %{bytes} bytes'
+    log_none:
+      en: No session log has been recorded.
+    log_empty:
+      en: Nothing has been logged yet.
+    frame_summary:
+      en: 'Frame %{sequence} · %{channels} channels'
+    revert_done:
+      en: 'Reverted %{cells} values to the file baseline.'
   table:
     copy:
       en: Copy
