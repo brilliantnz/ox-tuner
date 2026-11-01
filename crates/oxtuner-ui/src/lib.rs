@@ -6,7 +6,8 @@
 //! own. Both draw with base primitives and expose retained state + events
 //! rather than reaching further into globals.
 //!
-//! The widgets are the live chart, the tune table, and the tune curve. Each is
+//! The widgets are the live chart, the tune table, the tune curve, and the
+//! tuning indicator strip. Each is
 //! built as a retained entity with a small public API — data in, events out —
 //! so every surface embeds the same component instead of copying plot or grid
 //! code. The data shaping lives in `oxtuner-core` and is GPUI-free (ADR-0001,
@@ -18,10 +19,12 @@ mod caption;
 
 pub mod chart;
 pub mod curve;
+pub mod indicator;
 pub mod table;
 
 pub use chart::{
     ChartConfig, ChartEvent, ChartMode, ChartSeries, ChartState, ChartStyle, PREFERRED_CHANNELS,
 };
 pub use curve::{Curve, CurveEvent, CurveModel, CurvePoint, CurveSnapshot};
+pub use indicator::{IndicatorState, IndicatorStrip, IndicatorStyle, IndicatorTone, IndicatorView};
 pub use table::{RealtimePoint, Table, TableEvent, TableModel};

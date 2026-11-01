@@ -5084,6 +5084,7 @@ version = "0.0.0"
 dependencies = [
  "gpui-kit",
  "oxtuner-core",
+ "oxtuner-ini",
 ]
 
 [[package]]
