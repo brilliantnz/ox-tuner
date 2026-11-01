@@ -21,7 +21,8 @@ use gpui_kit::{
     SharedString, Styled as _, Subscription, Window, div, px,
 };
 use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
-use oxtuner_ui::table::{BulkOp, GridAction, Table, TableEvent};
+use oxtuner_ui::curve::{Curve, CurveEvent, CurveSnapshot};
+use oxtuner_ui::table::{BulkOp, CellPos, GridAction, Table, TableEvent};
 
 use crate::core::{CoreService, edit_table, read_table};
 use crate::i18n::t;
@@ -31,6 +32,8 @@ use crate::state::session::{AppState, schedule_save};
 /// The table editor for the node selected in the navigation tree.
 pub(crate) struct TableEditor {
     table: Entity<Table>,
+    /// The plot above the grid when the open table is a curve.
+    curve: Entity<Curve>,
     /// The menu label, shown until the snapshot arrives and if it never does.
     label: SharedString,
     /// The table id the selection asked for.
@@ -50,6 +53,7 @@ pub(crate) struct TableEditor {
     flip_y: bool,
     _core: Subscription,
     _table: Subscription,
+    _curve: Subscription,
     _settings: Subscription,
 }
 
@@ -57,7 +61,10 @@ impl TableEditor {
     /// An editor with no table loaded yet.
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let table = cx.new(Table::new);
+        let curve = cx.new(Curve::new);
+        curve.update(cx, |curve, cx| curve.set_title_visible(false, cx));
         let _table = cx.subscribe(&table, |this, _, event, cx| this.on_table(event, cx));
+        let _curve = cx.subscribe(&curve, |this, _, event, cx| this.on_curve(event, cx));
         let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
         // The Settings page edits a global, so a table that is already open
         // picks a new header preference up without being reopened.
@@ -69,6 +76,7 @@ impl TableEditor {
 
         let editor = Self {
             table,
+            curve,
             label: SharedString::default(),
             requested: None,
             last_save: None,
@@ -79,6 +87,7 @@ impl TableEditor {
             flip_y,
             _core,
             _table,
+            _curve,
             _settings,
         };
         editor.table.update(cx, |table, cx| {
@@ -102,6 +111,7 @@ impl TableEditor {
         let Some(name) = target else {
             self.requested = None;
             self.failure = None;
+            self.clear_curve(cx);
             cx.notify();
             return;
         };
@@ -114,6 +124,9 @@ impl TableEditor {
                 .table()
                 .is_some_and(|table| table.id == name);
         if already_shown {
+            if let Some(table) = self.table.read(cx).model().table().cloned() {
+                self.sync_curve(&table, cx);
+            }
             cx.notify();
             return;
         }
@@ -126,11 +139,12 @@ impl TableEditor {
             .filter(|table| table.id == name)
             .cloned();
         if let Some(table) = existing.or_else(|| self.cache.get(name).cloned()) {
-            self.table.update(cx, |grid, cx| grid.set_table(table, cx));
+            self.apply_table(table, cx);
         } else {
             // Do not show the previous table's values while the next snapshot
             // travels through the core; an empty grid plus "Loading" is honest.
             self.table.update(cx, Table::clear_table);
+            self.clear_curve(cx);
             read_table(name, cx);
         }
         cx.notify();
@@ -202,7 +216,7 @@ impl TableEditor {
         if let Some(table) = snapshot {
             self.failure = None;
             self.cache.insert(table.id.clone(), table.clone());
-            self.table.update(cx, |grid, cx| grid.set_table(table, cx));
+            self.apply_table(table, cx);
         }
         if table_matches {
             // The next successful core state proves the previous table failure
@@ -214,12 +228,15 @@ impl TableEditor {
                 self.cache.remove(name);
             }
             self.table.update(cx, Table::clear_table);
+            self.clear_curve(cx);
         }
         if failure.is_some() {
             self.failure = failure;
         }
         if edit_failed {
             self.table.update(cx, Table::reject_pending);
+            self.curve.update(cx, Curve::reject_pending);
+            self.sync_curve_from_model(cx);
         }
         if saved && let Some(name) = reload {
             read_table(&name, cx);
@@ -233,10 +250,125 @@ impl TableEditor {
                 edit_table(name, edits.clone(), cx);
             }
             TableEvent::AxisEditRequested { table, axis, edits } => {
+                // The table paints a bin edit before the core answers. Feed
+                // the same pending values to the plot so the point and its
+                // labels do not lag a frame behind the header.
+                if matches!(axis, oxtuner_core::AxisKind::X) {
+                    self.sync_curve_from_model(cx);
+                }
                 crate::core::edit_axis(table, *axis, edits.clone(), cx);
             }
-            TableEvent::SelectionChanged => cx.notify(),
+            TableEvent::SelectionChanged => {
+                if let Some(column) = self.curve_column(cx) {
+                    self.curve.update(cx, |curve, cx| curve.select(column, cx));
+                }
+                cx.notify();
+            }
         }
+    }
+
+    /// Follows the curve above the grid: writes its edits, mirrors its
+    /// selection, and shows a dragged value in the paired row before the echo.
+    fn on_curve(&mut self, event: &CurveEvent, cx: &mut Context<Self>) {
+        match event {
+            CurveEvent::EditRequested { name, edits } => {
+                // The preview event just before this one cleared the row;
+                // put the committed value back until the core answers.
+                if let Some(edit) = edits.first() {
+                    self.preview_cell(edit.column, Some(edit.value), cx);
+                }
+                edit_table(name, edits.clone(), cx);
+            }
+            CurveEvent::PreviewChanged { index, value } => {
+                self.preview_cell(*index, *value, cx);
+            }
+            CurveEvent::SelectionChanged { index } => {
+                self.table.update(cx, |table, cx| {
+                    table.select_cell(
+                        CellPos {
+                            row: 0,
+                            column: *index,
+                        },
+                        cx,
+                    );
+                });
+            }
+        }
+    }
+
+    fn preview_cell(&self, column: usize, value: Option<f64>, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            table.preview_cell(CellPos { row: 0, column }, value, cx);
+        });
+    }
+
+    /// Whether the open snapshot is a curve.
+    fn is_curve(&self, cx: &Context<Self>) -> bool {
+        self.table
+            .read(cx)
+            .model()
+            .table()
+            .is_some_and(|table| table.curve.is_some())
+    }
+
+    /// The grid column the curve selection should mirror, when the open
+    /// snapshot is a curve.
+    fn curve_column(&self, cx: &Context<Self>) -> Option<usize> {
+        let model = self.table.read(cx).model();
+        let table = model.table()?;
+
+        table
+            .curve
+            .is_some()
+            .then_some(model.selection().cursor.column)
+    }
+
+    /// Sets the grid and the curve from one snapshot, so the two views cannot
+    /// disagree about which curve is open.
+    fn apply_table(&self, table: TableSummary, cx: &mut Context<Self>) {
+        self.sync_curve(&table, cx);
+        self.table.update(cx, |grid, cx| grid.set_table(table, cx));
+    }
+
+    /// Feeds the curve from the table model, including a pending bin edit.
+    fn sync_curve_from_model(&self, cx: &mut Context<Self>) {
+        let model = self.table.read(cx).model();
+        let Some(table) = model.table() else {
+            return;
+        };
+        if table.curve.is_none() {
+            return;
+        }
+        let x_values: Vec<f64> = (0..model.axis_len(oxtuner_core::AxisKind::X))
+            .map(|index| model.axis_value(oxtuner_core::AxisKind::X, index))
+            .collect();
+        let Some(snapshot) =
+            CurveSnapshot::from_table(table).map(|snapshot| snapshot.with_x_values(x_values))
+        else {
+            return;
+        };
+
+        self.curve
+            .update(cx, |curve, cx| curve.set_snapshot(snapshot, cx));
+    }
+
+    /// Feeds one snapshot to the curve, or clears it when the open snapshot is
+    /// an ordinary table.
+    fn sync_curve(&self, table: &TableSummary, cx: &mut Context<Self>) {
+        let snapshot = table
+            .curve
+            .is_some()
+            .then(|| CurveSnapshot::from_table(table))
+            .flatten();
+
+        self.curve.update(cx, |curve, cx| match snapshot {
+            Some(snapshot) => curve.set_snapshot(snapshot, cx),
+            None => curve.clear(cx),
+        });
+    }
+
+    fn clear_curve(&self, cx: &mut Context<Self>) {
+        self.curve.update(cx, Curve::clear);
     }
 
     fn toggle_flip_y(&mut self, cx: &mut Context<Self>) {
@@ -273,6 +405,7 @@ impl TableEditor {
             table.map(|table| format!("{} · {}", table.x_axis.caption(), table.y_axis.caption()));
         let read_only = table.is_some_and(|table| !table.writable);
         let has_table = table.is_some();
+        let is_curve = table.is_some_and(|table| table.curve.is_some());
 
         let copy = self.table.clone();
         let paste = self.table.clone();
@@ -426,8 +559,11 @@ impl TableEditor {
                     .disabled(!has_table || read_only || changed == 0)
                     .on_click(|_, _, cx| crate::core::save_tune(cx)),
             )
-            .content(Separator::vertical().h_5())
-            .child(
+            .content(Separator::vertical().h_5());
+
+        // A curve has one row, so flipping the row axis has nothing to show.
+        let toolbar = toolbar.when(!is_curve, |this| {
+            this.child(
                 Button::new("table-flip-y")
                     .icon(IconName::ChevronsUpDown)
                     .label(t!("app.table.flip_y"))
@@ -439,7 +575,8 @@ impl TableEditor {
                         let focus = this.table.read(cx).focus_handle(cx);
                         window.focus(&focus, cx);
                     })),
-            );
+            )
+        });
 
         h_flex()
             .h_10()
@@ -498,6 +635,33 @@ impl TableEditor {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if has_table {
+            // A curve opens as a plot above its one-row table. The plot takes
+            // the surplus height and the values stay visible under it.
+            if self.is_curve(cx) {
+                return v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .p_2()
+                    .gap_2()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.table.update(cx, |table, cx| table.dismiss_focus(cx));
+                        }),
+                    )
+                    .child(div().flex_1().min_h_0().w_full().child(self.curve.clone()))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w_full()
+                            .overflow_hidden()
+                            .child(self.table.clone()),
+                    )
+                    .into_any_element();
+            }
+
             // The editor owns the surface around the grid: the grid reports
             // its own size, so the surface fits it instead of filling the
             // editor.
