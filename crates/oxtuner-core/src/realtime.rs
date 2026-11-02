@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 use crossfire::{AsyncRx, Rx, Tx, spsc};
 
 use oxtuner_ini::{BitRange, ChannelKind, DataType, Definition, Endianness, Number};
+use oxtuner_tune::Tune;
 
 /// One decoded channel.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +32,18 @@ pub struct LiveValue {
     pub units: String,
 }
 
+/// One `[FrontPage]` indicator evaluated for a frame.
+///
+/// `available` is false when the expression references a channel or a tune
+/// value the frame cannot provide. The frame makes no on or off claim then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndicatorReading {
+    /// Whether the expression evaluated to a non-zero value.
+    pub on: bool,
+    /// Whether the expression could be evaluated at all.
+    pub available: bool,
+}
+
 /// One realtime block, decoded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RealtimeFrame {
@@ -38,6 +51,8 @@ pub struct RealtimeFrame {
     pub sequence: u64,
     /// Channels in definition order, hidden ones excluded.
     pub values: Vec<LiveValue>,
+    /// `[FrontPage]` indicators, in the same order as the definition summary.
+    pub indicators: Vec<IndicatorReading>,
 }
 
 impl RealtimeFrame {
@@ -179,10 +194,18 @@ enum Source {
     },
 }
 
+/// One compiled `[FrontPage]` expression.
+#[derive(Debug, Clone)]
+struct IndicatorSource {
+    /// `None` when the definition's expression could not be parsed.
+    expression: Option<oxtuner_ini::expr::Expr>,
+}
+
 /// Reads realtime blocks for one definition.
 #[derive(Debug, Clone)]
 pub struct RealtimeDecoder {
     sources: Vec<Source>,
+    indicators: Vec<IndicatorSource>,
     endianness: Endianness,
     block_size: usize,
 }
@@ -233,8 +256,36 @@ impl RealtimeDecoder {
             }
         }
 
+        let indicators = definition
+            .front_page
+            .indicators
+            .iter()
+            .filter(|indicator| !indicator.template_only)
+            .map(|indicator| {
+                let expression = match oxtuner_ini::expr::Expr::parse(indicator_expression(
+                    &indicator.channel,
+                )) {
+                    Ok(expression) => Some(expression),
+                    Err(error) => {
+                        // A bad expression is a warning, not a rejected
+                        // definition. The indicator stays unavailable.
+                        tracing::warn!(
+                            line = indicator.line,
+                            expression = %indicator.channel,
+                            %error,
+                            "a [FrontPage] indicator expression could not be compiled"
+                        );
+                        None
+                    }
+                };
+
+                IndicatorSource { expression }
+            })
+            .collect();
+
         Self {
             sources,
+            indicators,
             endianness: definition.endianness,
             block_size: definition
                 .protocol
@@ -269,6 +320,51 @@ impl RealtimeDecoder {
                     hidden,
                     ..
                 } => (!hidden).then(|| (name.clone(), units.clone())),
+            })
+            .collect()
+    }
+
+    /// Evaluates the definition's `[FrontPage]` indicators for one frame.
+    ///
+    /// A name resolves case-insensitively in the frame's channels first, then
+    /// in the tune's scaled values (constants and PC variables). A name that
+    /// neither provides makes the indicator unavailable rather than off.
+    ///
+    /// The list is in definition order, so it zips with the summary by
+    /// position. Template-only entries are excluded.
+    pub fn indicators(&self, values: &[LiveValue], tune: Option<&Tune>) -> Vec<IndicatorReading> {
+        let known: HashMap<String, f64> = values
+            .iter()
+            .map(|value| (value.name.to_ascii_lowercase(), value.value))
+            .collect();
+
+        self.indicators
+            .iter()
+            .map(|indicator| {
+                let Some(expression) = &indicator.expression else {
+                    return IndicatorReading {
+                        on: false,
+                        available: false,
+                    };
+                };
+
+                let lookup = |name: &str| {
+                    known
+                        .get(&name.to_ascii_lowercase())
+                        .copied()
+                        .or_else(|| tune.and_then(|tune| tune.scalar_user(name).ok()))
+                };
+
+                match expression.evaluate(&lookup) {
+                    Some(value) if value.is_finite() => IndicatorReading {
+                        on: value != 0.0,
+                        available: true,
+                    },
+                    _ => IndicatorReading {
+                        on: false,
+                        available: false,
+                    },
+                }
             })
             .collect()
     }
@@ -336,6 +432,7 @@ impl RealtimeDecoder {
             return RealtimeFrame {
                 sequence,
                 values: Vec::new(),
+                indicators: Vec::new(),
             };
         }
 
@@ -418,12 +515,26 @@ impl RealtimeDecoder {
             }
         }
 
-        RealtimeFrame { sequence, values }
+        RealtimeFrame {
+            sequence,
+            values,
+            indicators: Vec::new(),
+        }
     }
 }
 
 fn literal(number: &Number) -> Option<f64> {
     number.literal().filter(|value| value.is_finite())
+}
+
+/// Strips the braces a definition puts around a front-page expression.
+fn indicator_expression(source: &str) -> &str {
+    let trimmed = source.trim();
+    trimmed
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .map(str::trim)
+        .unwrap_or(trimmed)
 }
 
 fn format_value(value: f64) -> String {
@@ -544,6 +655,15 @@ nPages = 1
 pageSize = 8
 page = 1
 reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+tpsflood = scalar, U08, 1, \"%\", 1.0, 0, 0, 255, 0
+crankRPM = scalar, U16, 4, \"rpm\", 1.0, 0, 0, 65535, 0
+
+[FrontPage]
+indicator = { running }, \"Not Running\", \"Running\", white, black, green, black
+indicator = { tps > tpsflood }, \"Below Flood\", \"Flood Clear\", white, black, red, black
+indicator = { missingChannel }, \"Missing\", \"Missing\", white, black, red, black
+indicator = { rpm > }, \"Bad\", \"Bad\", white, black, red, black
+indicatorTemplate = { running }, \"Template\", \"Template\", white, black, green, black
 
 [OutputChannels]
 ochGetCommand = \"r%2o%2c\"
@@ -587,6 +707,98 @@ halfRpm = { rpm / 2 }, \"rpm\"
     }
 
     #[test]
+    fn front_page_indicators_evaluate_against_channels_and_the_tune() {
+        let definition = definition();
+        let decoder = RealtimeDecoder::new(&definition);
+        let mut tune = Tune::from_definition(&definition);
+        tune.set_user("tpsflood", 10.0)
+            .expect("the fixture declares the constant");
+
+        let mut block = vec![0u8; 8];
+        block[2] = 1;
+        block[3] = 40;
+
+        let frame = decoder.decode(&block, 1);
+        let readings = decoder.indicators(&frame.values, Some(&tune));
+
+        assert_eq!(readings.len(), 4, "template-only entries stay out");
+        assert_eq!(
+            readings[0],
+            IndicatorReading {
+                on: true,
+                available: true
+            }
+        );
+        assert_eq!(
+            readings[1],
+            IndicatorReading {
+                on: true,
+                available: true
+            }
+        );
+        assert_eq!(
+            readings[2],
+            IndicatorReading {
+                on: false,
+                available: false
+            }
+        );
+        assert_eq!(
+            readings[3],
+            IndicatorReading {
+                on: false,
+                available: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_tune_value_makes_the_indicator_unavailable() {
+        let definition = definition();
+        let decoder = RealtimeDecoder::new(&definition);
+
+        let mut block = vec![0u8; 8];
+        block[3] = 40;
+
+        let frame = decoder.decode(&block, 1);
+        let readings = decoder.indicators(&frame.values, None);
+
+        assert!(readings[0].available, "the running channel is in the frame");
+        assert!(
+            !readings[1].available,
+            "tpsflood needs the tune, so the reading makes no claim"
+        );
+    }
+
+    #[test]
+    fn an_indicator_is_off_only_when_it_evaluates_to_zero() {
+        let definition = definition();
+        let decoder = RealtimeDecoder::new(&definition);
+        let mut tune = Tune::from_definition(&definition);
+        tune.set_user("tpsflood", 10.0)
+            .expect("the fixture declares the constant");
+
+        let block = vec![0u8; 8];
+        let frame = decoder.decode(&block, 1);
+        let readings = decoder.indicators(&frame.values, Some(&tune));
+
+        assert_eq!(
+            readings[0],
+            IndicatorReading {
+                on: false,
+                available: true
+            }
+        );
+        assert_eq!(
+            readings[1],
+            IndicatorReading {
+                on: false,
+                available: true
+            }
+        );
+    }
+
+    #[test]
     fn a_status_bit_reads_raw_without_decoding_the_frame() {
         let decoder = RealtimeDecoder::new(&definition());
         let mut block = vec![0u8; 8];
@@ -622,6 +834,7 @@ halfRpm = { rpm / 2 }, \"rpm\"
         latest.set(RealtimeFrame {
             sequence: 3,
             values: Vec::new(),
+            indicators: Vec::new(),
         });
         assert_eq!(latest.get().unwrap().sequence, 3);
 

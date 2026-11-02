@@ -638,6 +638,27 @@ impl FailureCode {
 
 /// The load result, shaped for the UI rather than for the parser.
 ///
+/// One `[FrontPage]` indicator as the interface sees it.
+///
+/// The labels are definition text and stay untranslated. The expression is the
+/// source the core evaluates, kept for a future tooltip and for support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndicatorSummary {
+    /// The expression source, as the definition wrote it.
+    pub expression: String,
+    /// The label while the expression is zero.
+    pub off_label: String,
+    /// The label while the expression is non-zero.
+    pub on_label: String,
+    /// The definition's on background colour name, as written.
+    ///
+    /// The UI maps this to a semantic tone; it does not paint the name as a
+    /// colour of its own.
+    pub on_colour: Option<String>,
+    /// The source line, for a diagnostic or a tooltip.
+    pub line: u32,
+}
+
 /// Deliberately small and `Clone`: the core keeps the full [`Definition`];
 /// the UI only needs enough to name what it is looking at.
 #[derive(Debug, Clone, PartialEq)]
@@ -664,6 +685,8 @@ pub struct DefinitionSummary {
     pub gauges: usize,
     /// Dialogs.
     pub dialogs: usize,
+    /// `[FrontPage]` indicators, in definition order.
+    pub indicators: Vec<IndicatorSummary>,
     /// The navigation tree the primary sidebar draws, in definition order.
     pub menu: Vec<MenuNode>,
     /// Share of entries that became model data, 0–100.
@@ -699,6 +722,19 @@ impl DefinitionSummary {
             curves: definition.curves.len(),
             gauges: definition.gauges.len(),
             dialogs: definition.dialogs.len(),
+            indicators: definition
+                .front_page
+                .indicators
+                .iter()
+                .filter(|indicator| !indicator.template_only)
+                .map(|indicator| IndicatorSummary {
+                    expression: indicator.channel.clone(),
+                    off_label: indicator.off_label.clone(),
+                    on_label: indicator.on_label.clone(),
+                    on_colour: indicator.colours.get(2).cloned(),
+                    line: indicator.line,
+                })
+                .collect(),
             menu: crate::menu::build(definition),
             coverage_percent: definition.coverage.percent(),
             errors: severity(Severity::Error),
@@ -1795,12 +1831,38 @@ mod tests {
             curves: 34,
             gauges: 90,
             dialogs: 239,
+            indicators: Vec::new(),
             menu: Vec::new(),
             coverage_percent: 97.95,
             errors: 0,
             warnings: 0,
             active_flags: vec!["mcu_stm32".to_owned()],
         }
+    }
+
+    #[test]
+    fn the_summary_publishes_front_page_indicators_and_their_on_colour() {
+        let definition = oxtuner_ini::parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[FrontPage]
+indicator = { batteryVoltage < batlow }, \"Battery Voltage OK\", \"Battery Voltage Warning\", white, black, red, black
+indicatorTemplate = { running }, \"Off\", \"On\", white, black, green, black
+",
+            &oxtuner_ini::SettingsContext::new(),
+        )
+        .expect("the fixture parses");
+
+        let summary = DefinitionSummary::new("test.ini", &definition);
+
+        assert_eq!(summary.indicators.len(), 1, "templates stay out");
+        assert_eq!(
+            summary.indicators[0].on_label,
+            "Battery Voltage Warning".to_owned()
+        );
+        assert_eq!(summary.indicators[0].on_colour.as_deref(), Some("red"));
     }
 
     #[test]

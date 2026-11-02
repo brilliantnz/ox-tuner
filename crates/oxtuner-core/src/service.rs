@@ -4515,10 +4515,18 @@ fn on_reply(
         (PendingKind::Realtime, IoOutcome::Realtime { block }) => {
             let sequence = live.sequence;
             live.sequence = sequence.wrapping_add(1);
-            let frame = live.decoder.decode(&block, sequence);
+            let mut frame = live.decoder.decode(&block, sequence);
             if frame.values.is_empty() {
                 return true;
             }
+            // Indicators read the same decoded frame and the tune the user is
+            // editing, so the strip and Telemetry cannot disagree.
+            let tune = match session {
+                Session::Project(project) => Some(project.tune()),
+                Session::Definition(_) => live.standalone.as_deref(),
+                Session::Empty => None,
+            };
+            frame.indicators = live.decoder.indicators(&frame.values, tune);
             let first = *live.first_frame.get_or_insert_with(Instant::now);
             let time = first.elapsed().as_secs_f64();
             live.last_frame_time = time;
@@ -4810,6 +4818,7 @@ mod tests {
         let full = RealtimeFrame {
             sequence: 0,
             values: vec![live("rpm", 900.0), live("map", 45.0), live("tps", 3.0)],
+            indicators: Vec::new(),
         };
         assert_eq!(align_log_values(&columns, &full), [900.0, 45.0, 3.0]);
 
@@ -4817,6 +4826,7 @@ mod tests {
         let short = RealtimeFrame {
             sequence: 1,
             values: vec![live("rpm", 900.0), live("tps", 3.0)],
+            indicators: Vec::new(),
         };
         let row = align_log_values(&columns, &short);
         assert_eq!(row.len(), columns.len());

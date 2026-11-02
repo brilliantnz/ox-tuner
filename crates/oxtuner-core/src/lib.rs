@@ -97,12 +97,14 @@ pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
     AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary, CurveAxes,
     DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
-    FailureCode, ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary,
-    RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
+    FailureCode, ImportSummary, IndicatorSummary, JournalEntry, OpId, PortSummary, ProjectSummary,
+    ReadAllSummary, RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
+    WriteSummary,
 };
 pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
 pub use realtime::{
-    BlockingFrameWatch, FrameWatch, LatestFrame, LiveValue, RealtimeDecoder, RealtimeFrame,
+    BlockingFrameWatch, FrameWatch, IndicatorReading, LatestFrame, LiveValue, RealtimeDecoder,
+    RealtimeFrame,
 };
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
