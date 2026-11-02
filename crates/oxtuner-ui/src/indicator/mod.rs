@@ -56,6 +56,26 @@ pub struct IndicatorView {
     pub tone: IndicatorTone,
 }
 
+impl IndicatorTone {
+    /// Maps a definition's on background colour name to a tone.
+    ///
+    /// TunerStudio definitions mark a warning or a fault with red or yellow in
+    /// the on colours, for example Battery Voltage Warning. Everything else is
+    /// a normal active state. Off and unavailable cards ignore the tone.
+    pub fn from_colour_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("red") || name.eq_ignore_ascii_case("darkred") {
+            Self::Danger
+        } else if name.eq_ignore_ascii_case("yellow")
+            || name.eq_ignore_ascii_case("orange")
+            || name.eq_ignore_ascii_case("amber")
+        {
+            Self::Warning
+        } else {
+            Self::Ok
+        }
+    }
+}
+
 impl IndicatorView {
     /// A card with no extra detail.
     pub fn new(label: impl Into<SharedString>, state: IndicatorState, tone: IndicatorTone) -> Self {
@@ -64,6 +84,15 @@ impl IndicatorView {
             state,
             tone,
         }
+    }
+
+    /// A card whose tone comes from a definition's on background colour name.
+    pub fn from_colour_name(
+        label: impl Into<SharedString>,
+        state: IndicatorState,
+        colour: &str,
+    ) -> Self {
+        Self::new(label, state, IndicatorTone::from_colour_name(colour))
     }
 }
 

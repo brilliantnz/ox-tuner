@@ -79,6 +79,28 @@ fn off_uses_inactive_colors_even_with_an_active_tone() {
 }
 
 #[test]
+fn an_ini_on_colour_picks_the_card_tone() {
+    assert_eq!(
+        IndicatorTone::from_colour_name("red"),
+        IndicatorTone::Danger
+    );
+    assert_eq!(
+        IndicatorTone::from_colour_name("darkRed"),
+        IndicatorTone::Danger
+    );
+    assert_eq!(
+        IndicatorTone::from_colour_name("yellow"),
+        IndicatorTone::Warning
+    );
+    assert_eq!(IndicatorTone::from_colour_name("green"), IndicatorTone::Ok);
+    assert_eq!(IndicatorTone::from_colour_name("white"), IndicatorTone::Ok);
+
+    let view =
+        IndicatorView::from_colour_name("Battery Voltage Warning", IndicatorState::On, "red");
+    assert_eq!(view.tone, IndicatorTone::Danger);
+}
+
+#[test]
 fn on_uses_the_tone_colors() {
     let style = IndicatorStyle::default();
 
