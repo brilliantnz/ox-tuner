@@ -15,10 +15,11 @@
 
 use std::path::Path;
 
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, FontWeight, Hsla, IntoElement, ParentElement as _, Render,
-    Styled as _, Window, WindowBounds, WindowOptions, div, point, px, rgb, size,
+    AppContext as _, Bounds, Context, FontWeight, IntoElement, ParentElement as _, Render,
+    Styled as _, Window, WindowBounds, WindowOptions, div, point, px, size,
 };
 use oxtuner_ini::{SettingsContext, parse_bytes};
 use oxtuner_ui::indicator::legend::state_legend;
@@ -45,11 +46,11 @@ struct Preview {
 }
 
 impl Render for Preview {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let style = IndicatorStyle::default();
-        let page = Hsla::from(rgb(0x121212));
-        let panel = Hsla::from(rgb(0x1e1e1e));
-        let text = Hsla::from(rgb(0xe0e0e0));
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let style = IndicatorStyle::from_theme(cx.theme());
+        let page = cx.theme().background;
+        let panel = cx.theme().secondary;
+        let text = cx.theme().foreground;
 
         div()
             .size_full()

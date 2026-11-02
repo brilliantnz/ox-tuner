@@ -12,7 +12,7 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 use oxtuner_core::{Failure, FailureCode, IndicatorReading, IndicatorSummary};
-use oxtuner_ui::indicator::{IndicatorState, IndicatorStrip, IndicatorStyle, IndicatorView};
+use oxtuner_ui::indicator::{IndicatorState, IndicatorStrip, IndicatorView};
 
 use crate::core::CoreService;
 use crate::i18n::t;
@@ -47,7 +47,7 @@ impl RenderOnce for Indicators {
 
                 v_flex()
                     .w_full()
-                    .child(IndicatorStrip::new(views).style(IndicatorStyle::default()))
+                    .child(IndicatorStrip::new(views))
                     .into_any_element()
             }
         };

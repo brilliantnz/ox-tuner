@@ -28,6 +28,7 @@ impl Render for Host {
         div()
             .size_full()
             .p(px(20.))
+            .child(IndicatorStrip::new(sample()))
             .child(IndicatorStrip::new(sample()).style(style.clone()))
             .child(
                 IndicatorStrip::new(sample())
@@ -61,6 +62,19 @@ fn the_strip_renders_every_state(cx: &mut TestAppContext) {
         window.render_frame(cx);
     })
     .expect("render the indicator strip");
+}
+
+#[test]
+fn the_theme_supplies_the_card_colours() {
+    let theme = gpui_kit::component::theme::Theme::default();
+    let style = IndicatorStyle::from_theme(&theme);
+
+    assert_eq!(style.inactive_bg, theme.secondary);
+    assert_eq!(style.inactive_text, theme.muted_foreground);
+    assert_eq!(style.ok_dot, theme.success);
+    assert_eq!(style.warning_dot, theme.warning);
+    assert_eq!(style.danger_dot, theme.danger);
+    assert_eq!(style.gap, IndicatorStyle::default().gap);
 }
 
 #[test]

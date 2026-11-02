@@ -13,6 +13,8 @@
 
 pub mod legend;
 
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::theme::Theme;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, BoxShadow, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce,
@@ -98,9 +100,9 @@ impl IndicatorView {
 
 /// The colour and sizing tokens the strip paints with.
 ///
-/// The defaults are the dark reference palette. A host with a light theme or a
-/// different brand passes its own values; the widget never reads a global
-/// theme.
+/// [`IndicatorStyle::from_theme`] derives the card colours from the host theme,
+/// and the strip uses that when the host supplies no style. The tokens stay
+/// public so a dialog or a different surface can pass its own palette.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndicatorStyle {
     /// Inactive card background.
@@ -187,6 +189,37 @@ impl Default for IndicatorStyle {
     }
 }
 
+impl IndicatorStyle {
+    /// The card colours derived from the host theme.
+    ///
+    /// The inactive card is the theme's secondary surface with muted text.
+    /// Active cards keep a light tint of the same hue as their state colour,
+    /// so a light theme gets pale green, amber and red cards instead of the
+    /// dark palette. The spacing and sizing tokens come from
+    /// [`IndicatorStyle::default`].
+    pub fn from_theme(theme: &Theme) -> Self {
+        Self {
+            inactive_bg: theme.secondary,
+            inactive_border: theme.border,
+            inactive_text: theme.muted_foreground,
+            inactive_dot: theme.muted_foreground.opacity(0.45),
+            ok_bg: theme.success.opacity(0.16),
+            ok_border: theme.success.opacity(0.55),
+            ok_text: theme.success,
+            ok_dot: theme.success,
+            warning_bg: theme.warning.opacity(0.16),
+            warning_border: theme.warning.opacity(0.55),
+            warning_text: theme.warning,
+            warning_dot: theme.warning,
+            danger_bg: theme.danger.opacity(0.16),
+            danger_border: theme.danger.opacity(0.55),
+            danger_text: theme.danger,
+            danger_dot: theme.danger,
+            ..Self::default()
+        }
+    }
+}
+
 /// The wrapping indicator strip.
 ///
 /// The cards use the definition's labels and the host's tones. The strip has no
@@ -195,23 +228,26 @@ impl Default for IndicatorStyle {
 #[derive(IntoElement)]
 pub struct IndicatorStrip {
     indicators: Vec<IndicatorView>,
-    style: IndicatorStyle,
+    style: Option<IndicatorStyle>,
     columns: Option<usize>,
 }
 
 impl IndicatorStrip {
     /// A strip for the given indicators.
+    ///
+    /// The card colours follow the host theme until [`IndicatorStrip::style`]
+    /// supplies a palette of its own.
     pub fn new(indicators: impl IntoIterator<Item = IndicatorView>) -> Self {
         Self {
             indicators: indicators.into_iter().collect(),
-            style: IndicatorStyle::default(),
+            style: None,
             columns: None,
         }
     }
 
     /// Supplies the host's colours and spacing.
     pub fn style(mut self, style: IndicatorStyle) -> Self {
-        self.style = style;
+        self.style = Some(style);
         self
     }
 
@@ -238,8 +274,10 @@ enum CardLayout {
 }
 
 impl RenderOnce for IndicatorStrip {
-    fn render(self, _window: &mut Window, _cx: &mut gpui_kit::App) -> impl IntoElement {
-        let style = self.style;
+    fn render(self, _window: &mut Window, cx: &mut gpui_kit::App) -> impl IntoElement {
+        let style = self
+            .style
+            .unwrap_or_else(|| IndicatorStyle::from_theme(cx.theme()));
         let layout = match self.columns {
             Some(_) => CardLayout::Grid,
             None => CardLayout::Wrap,
