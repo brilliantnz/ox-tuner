@@ -28,7 +28,6 @@ use gpui_kit::{
 
 pub(crate) use self::diagnostics::DiagnosticsView;
 use self::{activity::Activity, indicators::Indicators, telemetry::Telemetry};
-use crate::app::shortcuts;
 use crate::i18n::t;
 
 /// The categories the panel shows, in tab order.
