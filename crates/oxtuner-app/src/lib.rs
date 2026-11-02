@@ -7,7 +7,7 @@
 //! - [`app`] — app-level wiring: actions, the static shortcut table, the menu,
 //!   the main window's identity and geometry
 //! - [`layout`] — the main window's layout view: primary sidebar, secondary
-//!   sidebar, bottom panel, editable column, title bar
+//!   sidebar, bottom panel, editable column, title bar, status bar
 //! - [`settings`] — the settings window and the persisted preferences
 //! - [`state`] — the persisted session document and the JSON store
 //! - [`platform`] — infrastructure: filesystem paths, logging

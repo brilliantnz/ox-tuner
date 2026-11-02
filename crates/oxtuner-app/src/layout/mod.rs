@@ -12,7 +12,8 @@
 //! macOS) the window controls. Because of that no column reaches the window's top
 //! edge, and no column needs its own drag strip. The split-bar arrangement — a
 //! drag strip per column — is still in `titlebar.rs` ([`titlebar::DragTop`]) and
-//! is what the Settings window uses.
+//! is what the Settings window uses. A status bar closes the window's bottom
+//! edge.
 //!
 //! Sizes, widths and open state live in `state.json`; the view reads them when it
 //! renders and writes them back on a drag or a toggle.
@@ -43,6 +44,7 @@ mod explorer;
 pub mod primary_sidebar;
 pub mod project_dialog;
 pub mod secondary_sidebar;
+pub mod status_bar;
 pub mod titlebar;
 pub mod write_dialogs;
 
@@ -50,7 +52,7 @@ use oxtuner_core::MenuNodeKind;
 
 use self::{
     bottom_panel::BottomPanel, explorer::Explorer, primary_sidebar::PrimarySidebar,
-    secondary_sidebar::SecondarySidebar, titlebar::MainBar,
+    secondary_sidebar::SecondarySidebar, status_bar::StatusBarView, titlebar::MainBar,
 };
 use crate::{
     app::{self, menu},
@@ -511,77 +513,6 @@ impl AppLayout {
                 .into_any_element(),
         ]
     }
-
-    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = crate::core::CoreService::status(cx);
-        let connection = status.connection.clone();
-        let lost = status.link_lost.clone();
-        let read_only = connection.as_ref().is_some_and(|state| state.read_only);
-        let live = status.realtime;
-        let writes_enabled = status.writes_enabled;
-        let write_halted = status.write_halted.clone();
-        let danger = cx.theme().danger;
-
-        let link = match connection {
-            Some(connection) => t!(
-                "app.status.connected",
-                signature = connection.signature.clone(),
-                port = connection.port.clone(),
-                framing = connection.framing.to_owned(),
-            ),
-            None => match lost {
-                Some(reason) => t!("app.status.link_lost", reason = reason),
-                None => t!("app.status.not_connected"),
-            },
-        };
-
-        h_flex()
-            .h_8()
-            .flex_shrink_0()
-            .justify_between()
-            .px_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(link)
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .when(read_only, |this| {
-                        this.child(div().text_color(danger).child(t!("app.status.read_only")))
-                    })
-                    .when(live, |this| this.child(t!("app.status.live")))
-                    .child(
-                        Button::new("status-writes")
-                            .label(if writes_enabled {
-                                t!("app.status.writes_on")
-                            } else {
-                                t!("app.status.writes_off")
-                            })
-                            .small()
-                            .ghost()
-                            .on_click(|_, window, cx| {
-                                write_dialogs::show_enable_writes(window, cx);
-                            }),
-                    )
-                    .when_some(write_halted, |this, reason| {
-                        this.child(
-                            Button::new("status-write-halted")
-                                .label(t!("app.status.write_halted"))
-                                .small()
-                                .ghost()
-                                .text_color(danger)
-                                .tooltip(gpui_kit::SharedString::from(reason))
-                                .on_click(|_, window, cx| {
-                                    write_dialogs::show_write(window, cx);
-                                }),
-                        )
-                    })
-                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
-            )
-    }
 }
 
 impl Render for AppLayout {
@@ -697,7 +628,7 @@ impl Render for AppLayout {
                         ),
                 ),
             )
-            .child(self.render_status_bar(cx))
+            .child(StatusBarView)
     }
 }
 
