@@ -136,6 +136,17 @@ impl Render for BottomPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.tab;
         let diagnostics = self.diagnostics.clone();
+        // The theme's own tab-bar tone is almost the same as the active tab
+        // and the content below it, and a folder tab's hover fill is
+        // `secondary`. Move the strip a little past that fill in either mode,
+        // brighter in the dark theme and deeper in the light one, so the
+        // selected tab, the strip and the hover fill all stay distinct
+        // without editing the theme.
+        let tab_bar = cx
+            .theme()
+            .tokens
+            .tab_bar
+            .mix_oklab(cx.theme().foreground, 0.88);
 
         v_flex()
             .size_full()
@@ -146,11 +157,7 @@ impl Render for BottomPanel {
             .child(
                 TabBar::new("bottom-panel-tabs")
                     .folder()
-                    // The theme's own tab-bar tone is almost the same as the
-                    // active tab and the content below it, so the strip and
-                    // the selected tab read as one dark block. Lift that tone
-                    // a little instead of editing the theme.
-                    .bg(cx.theme().tokens.tab_bar.lighten(0.35))
+                    .bg(tab_bar)
                     .small()
                     .selected_index(tab.index())
                     .on_click(cx.listener(|this, index, _, cx| this.select(*index, cx)))
