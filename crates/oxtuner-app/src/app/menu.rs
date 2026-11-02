@@ -12,15 +12,17 @@
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 use gpui_kit::component::{ActiveTheme as _, GlobalState, menu::AppMenuBar};
 use gpui_kit::{
-    App, Entity, Menu, MenuItem, OsAction, ParentElement as _, Styled as _, Window, div,
+    App, Entity, Menu, MenuItem, OsAction, ParentElement as _, Styled as _, SystemMenuType, Window,
+    div,
 };
 use rust_i18n::t;
 
 use super::actions::{
-    About, AdoptEcuTune, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites,
-    ImportTune, ManageProjects, OpenDefinition, OpenHomepage, OpenProject, OpenSnapshots, Quit,
-    RevertTune, SaveSessionTrace, SaveTune, Settings, ShowCharts, ShowDisclaimer, ShowTune,
-    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
+    About, AdoptEcuTune, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites, Hide,
+    HideOthers, ImportTune, ManageProjects, OpenDefinition, OpenHomepage, OpenProject,
+    OpenSnapshots, Quit, RevertTune, SaveSessionTrace, SaveTune, Settings, ShowAll, ShowCharts,
+    ShowDisclaimer, ShowTune, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
+    WriteJournal, WriteToRam,
 };
 use crate::constants::APP_NAME;
 
@@ -88,16 +90,40 @@ fn menus() -> Vec<Menu> {
 
 /// The application menu.
 ///
-/// macOS expects Settings and Quit here, on Windows/Linux Settings moves to
-/// File so the app-name menu does not duplicate it.
+/// macOS expects the standard application commands here, and the ones that
+/// name the product spell it from [`APP_NAME`] so the label cannot drift from
+/// the window title. Windows and Linux have no application menu of their own,
+/// so Settings moves to File there and the macOS-only items are left out.
 fn app_items() -> Vec<MenuItem> {
-    let mut items = vec![MenuItem::action(t!("app.menu.about_item"), About)];
+    let mut items = vec![MenuItem::action(
+        t!("app.menu.about_app", app = APP_NAME),
+        About,
+    )];
+
     if cfg!(target_os = "macos") {
         items.push(MenuItem::separator());
         items.push(MenuItem::action(t!("app.menu.settings"), Settings));
+        items.push(MenuItem::separator());
+        // The OS fills this submenu with the services other applications
+        // register, so it has no items of ours to list.
+        items.push(MenuItem::os_submenu(
+            t!("app.menu.services"),
+            SystemMenuType::Services,
+        ));
+        items.push(MenuItem::separator());
+        items.push(MenuItem::action(
+            t!("app.menu.hide_app", app = APP_NAME),
+            Hide,
+        ));
+        items.push(MenuItem::action(t!("app.menu.hide_others"), HideOthers));
+        items.push(MenuItem::action(t!("app.menu.show_all"), ShowAll));
     }
+
     items.push(MenuItem::separator());
-    items.push(MenuItem::action(t!("app.menu.quit"), Quit));
+    items.push(MenuItem::action(
+        t!("app.menu.quit_app", app = APP_NAME),
+        Quit,
+    ));
     items
 }
 
@@ -107,9 +133,9 @@ fn app_items() -> Vec<MenuItem> {
 /// no application menu of their own, so Settings belongs under File there.
 fn file_items() -> Vec<MenuItem> {
     let mut items = vec![
-        MenuItem::action(t!("app.menu.open_definition"), OpenDefinition),
-        MenuItem::action(t!("app.menu.open_project_folder"), OpenProject),
         MenuItem::action(t!("app.menu.manage_projects"), ManageProjects),
+        MenuItem::action(t!("app.menu.open_project_folder"), OpenProject),
+        MenuItem::action(t!("app.menu.open_definition"), OpenDefinition),
         MenuItem::separator(),
         MenuItem::action(t!("app.menu.save_tune"), SaveTune),
         MenuItem::action(t!("app.menu.close_project"), CloseProject),

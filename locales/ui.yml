@@ -46,12 +46,20 @@ app:
       en: Toggle Secondary Sidebar
     toggle_bottom_panel:
       en: Toggle Bottom Panel
-    about_item:
-      en: About Ox Tuner
+    services:
+      en: Services
+    hide_others:
+      en: Hide Others
+    show_all:
+      en: Show All
+    about_app:
+      en: About %{app}
+    hide_app:
+      en: Hide %{app}
+    quit_app:
+      en: Quit %{app}
     settings:
-      en: Settings
-    quit:
-      en: Quit
+      en: Settings…
     open_project_folder:
       en: Open Project Folder…
     manage_projects:

@@ -42,6 +42,9 @@ pub fn init(cx: &mut App) {
     // Window-independent commands run at app level so they work when nothing in
     // a window holds focus — which is the case for every menu command.
     cx.on_action(|_: &actions::Quit, cx| cx.quit());
+    cx.on_action(|_: &actions::Hide, cx| cx.hide());
+    cx.on_action(|_: &actions::HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &actions::ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &actions::Settings, cx| settings::open(cx));
     cx.on_action(|_: &actions::OpenDefinition, cx| {
         core::choose_definition(cx);

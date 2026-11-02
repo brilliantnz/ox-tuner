@@ -9,6 +9,9 @@ gpui_kit::actions!(
     [
         Quit,
         About,
+        Hide,
+        HideOthers,
+        ShowAll,
         OpenDefinition,
         OpenProject,
         ManageProjects,
