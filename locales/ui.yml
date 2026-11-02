@@ -216,8 +216,8 @@ app:
     connect_failed:
       en: 'The connection failed: %{message}'
   bottom_panel:
-    close_tooltip:
-      en: Close output panel
+    hide_tooltip:
+      en: Hide Panel
     tab_indicators:
       en: Indicators
     tab_telemetry:

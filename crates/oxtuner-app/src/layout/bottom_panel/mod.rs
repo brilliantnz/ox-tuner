@@ -18,7 +18,7 @@ mod telemetry;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Colorize as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
@@ -28,6 +28,7 @@ use gpui_kit::{
 
 pub(crate) use self::diagnostics::DiagnosticsView;
 use self::{activity::Activity, indicators::Indicators, telemetry::Telemetry};
+use crate::app::shortcuts;
 use crate::i18n::t;
 
 /// The categories the panel shows, in tab order.
@@ -146,6 +147,11 @@ impl Render for BottomPanel {
             .child(
                 TabBar::new("bottom-panel-tabs")
                     .folder()
+                    // The theme's own tab-bar tone is almost the same as the
+                    // active tab and the content below it, so the strip and
+                    // the selected tab read as one dark block. Lift that tone
+                    // a little instead of editing the theme.
+                    .bg(cx.theme().tokens.tab_bar.lighten(0.35))
                     .small()
                     .selected_index(tab.index())
                     .on_click(cx.listener(|this, index, _, cx| this.select(*index, cx)))
@@ -156,7 +162,7 @@ impl Render for BottomPanel {
                                 .icon(IconName::Close)
                                 .ghost()
                                 .xsmall()
-                                .tooltip(t!("app.bottom_panel.close_tooltip"))
+                                .tooltip(t!("app.bottom_panel.hide_tooltip"))
                                 .on_click(|_, _, cx| super::toggle_bottom_panel(cx)),
                         ),
                     ),
