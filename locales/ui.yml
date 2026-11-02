@@ -226,22 +226,14 @@ app:
       en: Activity
     tab_diagnostics:
       en: Diagnostics
-    section_definition:
-      en: Definition
-    section_tune:
-      en: Tune
-    section_link:
-      en: Link
-    section_write:
-      en: Write access
     section_session_log:
       en: Session log
     section_activity:
       en: Activity
     no_definition:
       en: No ECU definition loaded.
-    definition_summary:
-      en: '%{pages} pages · %{constants} constants · %{coverage}% of entries understood'
+    no_indicators:
+      en: This definition declares no front-page indicators.
     definition_failed:
       en: The definition could not be loaded.
     project_failed:
@@ -252,36 +244,16 @@ app:
       en: There is no open tune to save.
     command_failed:
       en: The command failed.
-    tune_summary:
-      en: '%{loaded} values loaded from %{tune}'
-    tune_warnings:
-      en: 'Warnings: %{count}'
-    read_only:
-      en: 'Read-only: %{reason}'
     saved:
       en: 'Saved %{cells} values to %{tune}.'
     table_failed:
       en: The table could not be read or changed.
     dialog_failed:
       en: The dialog could not be read or changed.
-    connected:
-      en: '%{signature} on %{port} · %{framing} framing'
-    ecu_read_only:
-      en: 'Read-only session: %{reason}'
-    link_lost:
-      en: 'The link was lost: %{reason}'
-    pages_read:
-      en: '%{pages} pages read · %{bytes} bytes · %{constants} constants'
     trace_saved:
       en: 'Trace saved (%{frames} frames) to %{path}'
     no_live_values:
       en: Waiting for realtime values…
-    writes_on:
-      en: Writes are enabled. Every operation is verified and journaled.
-    writes_off:
-      en: Writes are off. Enable them from Connection ▸ Write Access….
-    write_halted:
-      en: 'Write path halted: %{reason}'
     write_done:
       en: 'Verified write · %{pages} pages · %{cells} cells'
     burn_done:

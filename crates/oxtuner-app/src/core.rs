@@ -1241,6 +1241,7 @@ mod tests {
             curves: 34,
             gauges: 90,
             dialogs: 239,
+            indicators: Vec::new(),
             menu: Vec::new(),
             coverage_percent: 97.95,
             errors: 0,
