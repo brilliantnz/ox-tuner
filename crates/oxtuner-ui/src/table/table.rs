@@ -37,7 +37,7 @@ use gpui_kit::{
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, Pixels, Point, Render, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, UTF16Selection, Window,
-    canvas, div, point, px,
+    canvas, div, point, px, rgb,
 };
 
 use oxtuner_core::{CellEdit, TableSummary};
@@ -48,7 +48,12 @@ use super::geometry::{
     CELL_HEIGHT, CELL_WIDTH, visible_range,
 };
 use super::headers::{BinHighlight, ColumnHeader, HeaderEditing, RowHeader};
-use super::heatmap::{contrast_text, decoration, heat_color};
+use super::heatmap::{decoration, heat_color};
+
+// use super::heatmap::contrast_text;
+// Unused while cell text is fixed at #121314. Put the import back together
+// with the call site in render_cell if the per-cell contrast picker is needed
+// again.
 use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
@@ -591,7 +596,12 @@ impl Table {
         let editing = editing.filter(|editing| editing.cell == cell);
 
         let fill = heat_color(minimum, maximum, value);
-        let text_color = contrast_text(fill);
+
+        // let text_color = contrast_text(fill);
+        // The old per-cell contrast picker, commented out because a fixed dark
+        // text colour reads fine on the palette. Restore it with its import
+        // above if the palette ever grows bright enough to need white text.
+        let text_color = Hsla::from(rgb(0x121314));
         let display = self.model.display(cell).unwrap_or_else(|| Arc::from(""));
         let aria = self.model.aria(cell).unwrap_or_else(|| Arc::from(""));
         let theme = cx.theme();

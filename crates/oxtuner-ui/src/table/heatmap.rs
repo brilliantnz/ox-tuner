@@ -6,7 +6,10 @@
 //! take their colours as arguments for the same reason: the caller reads the
 //! theme, this module only decides which colour a state means.
 
-use gpui_kit::{Hsla, Rgba, rgb};
+use gpui_kit::{Hsla, rgb};
+
+#[cfg(test)]
+use gpui_kit::Rgba;
 
 use oxtuner_core::CellState;
 
@@ -43,16 +46,18 @@ pub(crate) fn heat_color(minimum: f64, maximum: f64, value: f64) -> Hsla {
     low.blend(high.opacity(ratio))
 }
 
-/// Black or white text, whichever reads on the heat colour.
-pub(crate) fn contrast_text(fill: Hsla) -> Hsla {
-    let rgba = Rgba::from(fill);
-    let luminance = 0.299 * rgba.r + 0.587 * rgba.g + 0.114 * rgba.b;
-    if luminance > 0.55 {
-        Hsla::from(rgb(0x111418))
-    } else {
-        Hsla::from(rgb(0xFFFFFF))
-    }
-}
+// Black or white text, whichever reads on the heat colour.
+// pub(crate) fn contrast_text(fill: Hsla) -> Hsla {
+//     let rgba = Rgba::from(fill);
+//     let luminance = 0.299 * rgba.r + 0.587 * rgba.g + 0.114 * rgba.b;
+//     if luminance > 0.55 {
+//         Hsla::from(rgb(0x111418))
+//     } else {
+//         Hsla::from(rgb(0xFFFFFF))
+//     }
+// }
+// Unused while cell text is fixed at #121314 in the table. Kept around in case
+// the palette changes and per-cell contrast is needed again.
 
 /// The write-state dot for one cell, or `None` when the cell needs no mark.
 pub(crate) fn decoration(
@@ -141,11 +146,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn text_contrast_flips_at_the_bright_end_of_the_scale() {
-        let on_blue = Rgba::from(contrast_text(heat_color(0.0, 100.0, 0.0)));
-        assert!(on_blue.r > 0.9 && on_blue.g > 0.9 && on_blue.b > 0.9);
-        let on_yellow = Rgba::from(contrast_text(heat_color(0.0, 100.0, 60.0)));
-        assert!(on_yellow.r < 0.2 && on_yellow.g < 0.2);
-    }
+    // #[test]
+    // fn text_contrast_flips_at_the_bright_end_of_the_scale() {
+    //     let on_blue = Rgba::from(contrast_text(heat_color(0.0, 100.0, 0.0)));
+    //     assert!(on_blue.r > 0.9 && on_blue.g > 0.9 && on_blue.b > 0.9);
+    //     let on_yellow = Rgba::from(contrast_text(heat_color(0.0, 100.0, 60.0)));
+    //     assert!(on_yellow.r < 0.2 && on_yellow.g < 0.2);
+    // }
 }
