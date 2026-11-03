@@ -315,8 +315,8 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
 
 fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     let entries = msq.entries();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut orphans: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut orphans: Vec<&str> = Vec::new();
     let mut nameless = 0usize;
 
     for entry in &entries {
@@ -324,12 +324,12 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             nameless += 1;
             continue;
         }
-        seen.insert(entry.name.clone());
+        seen.insert(entry.name.as_str());
 
         let constant = definition.constant(&entry.name);
         let pc_variable = definition.pc_variables.get(&entry.name);
         if constant.is_none() && pc_variable.is_none() {
-            orphans.push(entry.name.clone());
+            orphans.push(entry.name.as_str());
             continue;
         }
 
@@ -401,20 +401,15 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         );
     }
 
-    let mut missing: Vec<String> = definition
+    let mut missing: Vec<&str> = definition
         .constants
         .iter()
         .filter(|(_, constant)| !constant.flags.no_msq_save)
-        .map(|(name, _)| name.to_owned())
-        .chain(
-            definition
-                .pc_variables
-                .iter()
-                .map(|(name, _)| name.to_owned()),
-        )
-        .filter(|name| !seen.contains(name))
+        .map(|(name, _)| name)
+        .chain(definition.pc_variables.iter().map(|(name, _)| name))
+        .filter(|name| !seen.contains(*name))
         .collect();
-    missing.sort();
+    missing.sort_unstable();
     if !missing.is_empty() {
         report.warn(
             IssueKind::MissingValue,
@@ -427,7 +422,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     }
 }
 
-fn preview(names: &[String]) -> String {
+fn preview(names: &[&str]) -> String {
     const LIMIT: usize = 5;
     let mut text = String::new();
     for name in names.iter().take(LIMIT) {
