@@ -130,23 +130,15 @@ pub fn seed(paths: &AppPaths) {
     let bundled = bundled_value();
     let mut migrated = user;
 
-    if user_version == 2 {
-        // Version 2 could write a new snapshot without rewriting the file when
-        // the snapshot was missing, leaving old values under a current version
-        // stamp. Correct it once; later versions migrate normally.
-        backup_pre_version(paths, &migrated);
-        migrated = reset_known(&migrated, &bundled);
-    } else {
-        match snapshot {
-            Some(old) => merge_from_base(&mut migrated, &old, &bundled),
-            // Before versioning there is no snapshot, so nothing distinguishes
-            // the old bundle from an edit. Keep a copy and start from the bundle.
-            None if user_version == 0 => {
-                backup_pre_version(paths, &migrated);
-                migrated = reset_known(&migrated, &bundled);
-            }
-            None => merge_missing(&mut migrated, &bundled),
+    match snapshot {
+        Some(old) => merge_from_base(&mut migrated, &old, &bundled),
+        // Before versioning there is no snapshot, so nothing distinguishes
+        // the old bundle from an edit. Keep a copy and start from the bundle.
+        None if user_version == 0 => {
+            backup_pre_version(paths, &migrated);
+            migrated = reset_known(&migrated, &bundled);
         }
+        None => merge_missing(&mut migrated, &bundled),
     }
 
     migrated[SCHEMA_VERSION_KEY] = Value::from(THEME_SCHEMA_VERSION);
@@ -739,41 +731,6 @@ mod tests {
             .expect("read backup")
             .expect("backup file");
         assert_eq!(backup["themes"][0]["colors"]["background"], "#010203");
-
-        let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    #[test]
-    fn a_version_two_file_is_reset_to_the_corrected_palette() {
-        let paths = temp_paths("v2");
-        let directory = paths.config_dir.clone();
-        let path = bundled_path(&paths);
-
-        let bundled = bundled_value();
-        let mut stale = bundled.clone();
-        stale["schema_version"] = Value::from(2);
-        stale["themes"][0]["colors"]["button.active.background"] = Value::from("#333536b3");
-
-        store::write_json(&snapshot_path(&paths), &bundled).expect("write snapshot");
-        store::write_json(&path, &stale).expect("write stale theme");
-        seed(&paths);
-
-        let migrated: Value = store::read_json(&path)
-            .expect("read migrated theme")
-            .expect("migrated file");
-        assert_eq!(migrated, bundled);
-
-        let backups = std::fs::read_dir(&directory)
-            .expect("read config directory")
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("oxtuner-theme-backup-")
-            })
-            .count();
-        assert_eq!(backups, 1, "the stale version 2 file must be recoverable");
 
         let _ = std::fs::remove_dir_all(&directory);
     }
