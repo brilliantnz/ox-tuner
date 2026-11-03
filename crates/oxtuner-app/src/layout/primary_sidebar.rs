@@ -43,7 +43,9 @@ impl PrimarySidebar {
 
 impl RenderOnce for PrimarySidebar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let has_definition = CoreService::status(cx).definition().is_some();
+        let status = CoreService::status(cx);
+        let has_definition = status.definition().is_some();
+        let pending = status.pending_project.is_some();
 
         let explorer = self.explorer.read(cx);
         let state = explorer.tree().clone();
@@ -62,7 +64,10 @@ impl RenderOnce for PrimarySidebar {
                     .min_h_0()
                     .px_2()
                     .pt_1()
-                    .when(!has_definition, |this| {
+                    .when(!has_definition && pending, |this| {
+                        this.child(empty_state(t!("app.editor.opening_project"), cx))
+                    })
+                    .when(!has_definition && !pending, |this| {
                         this.child(empty_state(t!("app.primary_sidebar.no_definition"), cx))
                     })
                     .when(has_definition && !has_menu, |this| {

@@ -83,6 +83,13 @@ pub(crate) fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOption
 /// so it clears on save and survives switching between nodes.
 pub(crate) fn window_title(cx: &App) -> SharedString {
     let status = crate::core::CoreService::status(cx);
+
+    // The folder the user just chose is what the window is about while the
+    // core reads it, even when an older project is still open underneath.
+    if let Some(pending) = &status.pending_project {
+        return format!("{} - {APP_NAME}", pending.name).into();
+    }
+
     let dirty = status
         .table
         .as_ref()

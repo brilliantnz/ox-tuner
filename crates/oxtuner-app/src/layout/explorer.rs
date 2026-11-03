@@ -27,6 +27,8 @@ pub(crate) struct Explorer {
     tree: Entity<TreeState>,
     /// The menu the tree was built from; compared to skip no-op rebuilds.
     menu: Vec<MenuNode>,
+    /// The core status revision the current menu belongs to.
+    revision: u64,
     /// Every node by id, for row decoration and selection lookup.
     nodes: Rc<HashMap<String, MenuNode>>,
     /// Ids of the folders the user opened. The tree component's own state is
@@ -48,6 +50,7 @@ impl Explorer {
     /// Builds the tree from the definition the core already owns, if any.
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let menu = current_menu(cx);
+        let revision = CoreService::status(cx).definition_revision;
         let expanded = HashSet::new();
         let (items, nodes) = build(&menu, &expanded);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
@@ -66,6 +69,7 @@ impl Explorer {
         Self {
             tree,
             menu,
+            revision,
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
@@ -87,6 +91,7 @@ impl Explorer {
         Self {
             tree,
             menu,
+            revision: 0,
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
@@ -118,6 +123,15 @@ impl Explorer {
 
     /// Rebuilds the tree when the core publishes a different menu.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // Every core status change notifies this observer. The revision is the
+        // cheap gate: cloning the menu to compare it on a table read or a save
+        // was work with no possible outcome.
+        let revision = CoreService::status(cx).definition_revision;
+        if revision == self.revision {
+            return;
+        }
+        self.revision = revision;
+
         let menu = current_menu(cx);
         if menu == self.menu {
             return;
