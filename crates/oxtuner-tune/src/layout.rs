@@ -5,7 +5,7 @@
 //! its presentation attributes. Building that layout once, up front, is what
 //! keeps the rest of the crate cheap:
 //!
-//! - a value lookup is `O(1)` by name (lowercased, like INI references);
+//! - a value lookup is `O(1)` by name (ASCII-case-insensitive, like INI references);
 //! - a table cell is `O(1)` by `row × cols + column`;
 //! - a page is a pre-built list of variable indices, so write intents and
 //!   state derivation never scan the whole tune.
@@ -23,6 +23,21 @@ use std::fmt;
 use oxtuner_ini::{ConstantClass, DataType, Definition, Endianness, Number, Shape};
 
 use crate::IniPage;
+
+/// FNV-1a over the ASCII-lowercased bytes.
+///
+/// The layout lookup is case-insensitive without allocating a lowercased
+/// `String` per variable at build time or per value at load time. A collision
+/// keeps the first index and makes `index` fall back to the linear scan, so
+/// the result is the same as the old lowercased-string map.
+fn ci_hash(name: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in name.as_bytes() {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// The declared shape of one variable, with every dimension resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +280,8 @@ pub struct Layout {
     signature: String,
     endianness: Endianness,
     variables: Vec<VariableSpec>,
-    lookup: HashMap<String, usize>,
+    /// Hash of the folded name -> first variable index with that hash.
+    lookup: HashMap<u64, usize>,
     pages: Vec<PageLayout>,
     issues: Vec<LayoutIssue>,
 }
@@ -394,9 +410,7 @@ impl Layout {
     }
 
     fn insert(&mut self, spec: VariableSpec) {
-        let index = self.variables.len();
-        let key = spec.name.to_ascii_lowercase();
-        if self.lookup.contains_key(&key) {
+        if self.index(&spec.name).is_some() {
             self.issues.push(LayoutIssue::new(
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedAttribute,
@@ -405,7 +419,9 @@ impl Layout {
             ));
             return;
         }
-        self.lookup.insert(key, index);
+
+        let index = self.variables.len();
+        self.lookup.entry(ci_hash(&spec.name)).or_insert(index);
         self.variables.push(spec);
     }
 
@@ -476,7 +492,22 @@ impl Layout {
 
     /// The index of a variable by name, case-insensitively.
     pub fn index(&self, name: &str) -> Option<usize> {
-        self.lookup.get(&name.to_ascii_lowercase()).copied()
+        let hash = ci_hash(name);
+        if let Some(&index) = self.lookup.get(&hash) {
+            let variable = &self.variables[index];
+            if variable.name.eq_ignore_ascii_case(name) {
+                return Some(index);
+            }
+
+            // A hash collision stored another name first; the linear scan is
+            // the oracle for that case.
+            return self
+                .variables
+                .iter()
+                .position(|variable| variable.name.eq_ignore_ascii_case(name));
+        }
+
+        None
     }
 
     /// Calibration pages, ordered by page number.
@@ -624,4 +655,47 @@ fn default_raw(
     }
 
     0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxtuner_ini::{SettingsContext, parse_str};
+
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+reqFuel = scalar, U08, 0, "", 1, 0, 0, 3, 0
+REQFUEL = scalar, U08, 1, "", 1, 0, 0, 3, 0
+"#;
+
+    #[test]
+    fn the_layout_index_is_case_insensitive_and_keeps_the_first_name() {
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
+        let layout = Layout::build(&definition, &|_| None);
+
+        let index = layout.index("reqFuel").expect("first spelling");
+        assert_eq!(layout.index("REQFUEL"), Some(index));
+        assert_eq!(layout.index("ReqFuel"), Some(index));
+        assert!(layout.index("missing").is_none());
+
+        assert_eq!(
+            layout.variables().len(),
+            1,
+            "the case-insensitive duplicate is ignored"
+        );
+        assert!(
+            layout
+                .issues()
+                .iter()
+                .any(|issue| issue.message.contains("same name")),
+            "the ignored duplicate is reported: {:?}",
+            layout.issues()
+        );
+    }
 }

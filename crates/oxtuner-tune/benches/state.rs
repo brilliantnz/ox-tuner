@@ -102,6 +102,10 @@ fn budget(criterion: &mut Criterion) {
         bencher.iter(|| black_box(Layout::build(black_box(&definition), &|_| None)));
     });
 
+    criterion.bench_function("layout_lookup_mixed_case", |bencher| {
+        bencher.iter(|| black_box(layout.index(black_box("ScAlAr_8_40"))));
+    });
+
     criterion.bench_function("state_table_build_15_pages", |bencher| {
         bencher.iter(|| black_box(StateTable::build(black_box(&images))));
     });
