@@ -1,0 +1,273 @@
+//! INI parser benchmarks: preprocess, full parse, `#define` expansion, and
+//! expression evaluation.
+//!
+//! Run locally with:
+//!
+//! ```text
+//! cargo bench -p oxtuner-ini
+//! ```
+//!
+//! Three fixtures, each covering a different cost:
+//!
+//! - **small** — two pages, 400 scalars, a 16×16 table, channels, a menu. A
+//!   smoke run that finishes fast and catches gross regressions.
+//! - **reference shape** — fifteen pages and 818 constants, the shape of the
+//!   reference project. Use this one when comparing against a start-up number.
+//! - **defines** — a single 65 536-field `#define`, the CAN address table a
+//!   real definition spells out. It guards the memoized [`Expander`]: expanding
+//!   that list once per reference made `[Constants]` dominate the whole parse.
+//!
+//! The fixtures are synthetic. Never commit a real vendor INI here; the
+//! clean-room rule applies to benchmarks too.
+
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use oxtuner_ini::{SettingsContext, expr::Expr, parse_str, preprocess::preprocess};
+
+/// Two pages, 400 scalars, one 16x16 table, four channels, one menu.
+fn fixture() -> String {
+    let mut text = String::from(
+        "\
+[MegaTune]
+signature = \"bench 1\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 2
+pageSize = 288, 288
+",
+    );
+
+    for page in 1..=2 {
+        text.push_str(&format!("page = {page}\n"));
+
+        for index in 0..200 {
+            text.push_str(&format!(
+                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0\n",
+                index % 240
+            ));
+        }
+    }
+
+    text.push_str(
+        "\
+table_bins = array, U08, 0, [16], \"\", 1, 0, 0, 255, 0
+table_cells = array, U08, 16, [16x16], \"\", 1, 0, 0, 255, 0
+
+[OutputChannels]
+rpm = scalar, U16, 0, \"RPM\", 1.0, 0.0
+map = scalar, U16, 2, \"kPa\", 0.1, 0.0
+afr = { ego1 / 10.0 }, \"AFR\"
+clt = scalar, U16, 4, \"C\", 0.1, 0.0
+
+[TableEditor]
+table = veTable, veMap, \"VE Table\"
+xBins = table_bins, rpm
+yBins = table_bins, map
+zBins = table_cells
+
+[Menu]
+menu = \"Fuel\"
+subMenu = veTable, \"VE Table\"
+std_separator
+",
+    );
+
+    text
+}
+
+/// Fifteen pages, 818 constants, eight tables: the budget's own shape.
+fn reference_fixture() -> String {
+    const PAGES: usize = 15;
+    const CONSTANTS: usize = 818;
+    const TABLES: usize = 8;
+
+    let scalars_per_page = (CONSTANTS - TABLES) / PAGES;
+    let mut text = String::from(
+        "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 15
+",
+    );
+
+    for _ in 0..PAGES {
+        text.push_str("pageSize = 288\n");
+    }
+
+    for page in 1..=PAGES {
+        text.push_str(&format!("page = {page}\n"));
+
+        for index in 0..scalars_per_page {
+            text.push_str(&format!(
+                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0\n",
+                index % 240
+            ));
+        }
+
+        if page <= TABLES {
+            // The largest grid the editor draws; the other seven are 16x16.
+            let shape = if page == 1 { "[32x32]" } else { "[16x16]" };
+            text.push_str(&format!(
+                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0\n"
+            ));
+        }
+    }
+
+    text.push_str(
+        "\
+[OutputChannels]
+rpm = scalar, U16, 0, \"RPM\", 1.0, 0.0
+map = scalar, U16, 2, \"kPa\", 0.1, 0.0
+clt = scalar, U16, 4, \"C\", 0.1, 0.0
+afr = scalar, U16, 6, \"AFR\", 0.1, 0.0
+
+[Menu]
+menu = \"Fuel\"
+subMenu = table_1, \"VE Table\"
+menu = \"Ignition\"
+subMenu = table_2, \"Advance\"
+",
+    );
+
+    text
+}
+
+/// One 65 536-field `#define`, the CAN address table in the speeduino shape.
+fn defines_fixture() -> String {
+    const ADDRESSES: usize = 65_536;
+
+    let mut addresses = String::with_capacity(ADDRESSES * 8);
+    for index in 0..ADDRESSES {
+        if index > 0 {
+            addresses.push_str(", ");
+        }
+        addresses.push_str(&format!("\"0x{index:x}\""));
+    }
+
+    format!(
+        "\
+[MegaTune]
+signature = \"bench 1\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+#define canAddresses = {addresses}
+"
+    )
+}
+
+fn bench_preprocess(criterion: &mut Criterion) {
+    let text = fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_preprocess_synthetic", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                preprocess(black_box(&text), black_box(&settings), None).expect("preprocesses"),
+            )
+        });
+    });
+}
+
+fn bench_parse_str(criterion: &mut Criterion) {
+    let text = fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_synthetic", |bencher| {
+        bencher
+            .iter(|| black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses")));
+    });
+}
+
+fn bench_parse_bytes(criterion: &mut Criterion) {
+    let text = fixture();
+    let bytes = text.into_bytes();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_bytes_synthetic", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                oxtuner_ini::parse_bytes(black_box(&bytes), black_box(&settings)).expect("parses"),
+            )
+        });
+    });
+}
+
+fn bench_parse_reference_shape(criterion: &mut Criterion) {
+    let text = reference_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_reference_shape", |bencher| {
+        bencher
+            .iter(|| black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses")));
+    });
+}
+
+fn bench_preprocess_defines(criterion: &mut Criterion) {
+    let text = defines_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_preprocess_defines_65536", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                preprocess(black_box(&text), black_box(&settings), None).expect("preprocesses"),
+            )
+        });
+    });
+}
+
+fn bench_expander_build(criterion: &mut Criterion) {
+    let text = defines_fixture();
+    let settings = SettingsContext::new();
+    let preprocessed = preprocess(&text, &settings, None).expect("preprocesses");
+
+    criterion.bench_function("ini_expander_build_65536", |bencher| {
+        bencher.iter(|| black_box(black_box(&preprocessed).expander()));
+    });
+}
+
+fn bench_expand_reference(criterion: &mut Criterion) {
+    let text = defines_fixture();
+    let settings = SettingsContext::new();
+    let preprocessed = preprocess(&text, &settings, None).expect("preprocesses");
+    let expander = preprocessed.expander();
+    let fields = vec!["$canAddresses".to_owned()];
+
+    criterion.bench_function("ini_expand_one_reference_65536", |bencher| {
+        bencher.iter(|| black_box(expander.expand(black_box(&fields))));
+    });
+}
+
+fn bench_expr(criterion: &mut Criterion) {
+    let expression = Expr::parse("ego1 / 10.0 + clt * 2.0").expect("parses");
+    let lookup = |name: &str| match name {
+        "ego1" => Some(147.0),
+        "clt" => Some(80.0),
+        _ => None,
+    };
+
+    criterion.bench_function("ini_expr_evaluate", |bencher| {
+        bencher.iter(|| black_box(expression.evaluate(black_box(&lookup))));
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_preprocess,
+    bench_parse_str,
+    bench_parse_bytes,
+    bench_parse_reference_shape,
+    bench_preprocess_defines,
+    bench_expander_build,
+    bench_expand_reference,
+    bench_expr
+);
+criterion_main!(benches);

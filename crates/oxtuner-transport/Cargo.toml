@@ -8,9 +8,21 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[[bench]]
+name = "trace"
+harness = false
+
 [dependencies]
 serial2 = "0.2.39"
-tracing = "0.1.44"
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
 
 [lints]
 workspace = true

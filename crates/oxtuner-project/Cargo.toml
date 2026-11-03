@@ -1,6 +1,6 @@
 [package]
 name = "oxtuner-project"
-description = "TunerStudio projects and .msq tune files. load, check, round-trip."
+description = "TunerStudio projects and .msq tune files: load, check, round-trip."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,23 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[[bench]]
+name = "open"
+harness = false
+
 [dependencies]
 oxtuner-ini.workspace = true
 oxtuner-tune.workspace = true
 
 [dev-dependencies]
-proptest = "1.12.0"
+criterion.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

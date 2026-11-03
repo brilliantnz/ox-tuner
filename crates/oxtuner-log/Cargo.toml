@@ -8,15 +8,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[[bench]]
+name = "pipeline"
+harness = false
+
 [dependencies]
 thiserror = "2.0.21"
-time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
-tracing = "0.1.44"
+time = { workspace = true, features = ["formatting", "macros", "local-offset"] }
+tracing.workspace = true
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true
-
-[dev-dependencies]
-tempfile = "3.27.0"

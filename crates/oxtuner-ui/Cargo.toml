@@ -8,13 +8,23 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[[bench]]
+name = "model"
+harness = false
+
 [dependencies]
 gpui-kit = { workspace = true, default-features = false, features = ["assets", "component"] }
 oxtuner-core.workspace = true
 
-[lints]
-workspace = true
-
 [dev-dependencies]
+criterion.workspace = true
 gpui-kit = { workspace = true, default-features = false, features = ["test-support"] }
 oxtuner-ini.workspace = true
+
+[lints]
+workspace = true

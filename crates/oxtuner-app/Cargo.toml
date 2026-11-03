@@ -11,6 +11,13 @@ publish = false
 [[bin]]
 name = "oxtuner"
 path = "src/main.rs"
+bench = false
+
+# The window and the GPUI views are covered by the headless UI tests, so this
+# crate has no benchmarks; the flags keep `cargo bench` from building empty
+# harnesses for it.
+[lib]
+bench = false
 
 [dependencies]
 directories = "6.0.0"
@@ -20,13 +27,13 @@ oxtuner-log.workspace = true
 oxtuner-sim.workspace = true
 oxtuner-ui.workspace = true
 rust-i18n = "4.2.4"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
-tracing = "0.1.44"
-
-[lints]
-workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 # Headless UI tests need the Kit's observation helpers.
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

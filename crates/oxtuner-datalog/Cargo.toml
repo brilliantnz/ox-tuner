@@ -8,9 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[[bench]]
+name = "log"
+harness = false
+
 [dependencies]
-crossfire = "3.1.22"
-tracing = "0.1.44"
+crossfire.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

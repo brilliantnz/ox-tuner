@@ -8,16 +8,21 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[dependencies]
-oxtuner-ini.workspace = true
-
-[dev-dependencies]
-criterion = "0.8.2"
-proptest = "1.12.0"
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
 
 [[bench]]
 name = "state"
 harness = false
+
+[dependencies]
+oxtuner-ini.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

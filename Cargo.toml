@@ -27,7 +27,19 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/brilliantnz/ox-tuner"
 
 [workspace.dependencies]
+# Third-party crates used by more than one member. A member that needs extra
+# features says so locally; the version lives here, once.
+criterion = "0.8.2"
+crossfire = "3.1.22"
 gpui-kit = "=0.8.1"
+proptest = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+time = "0.3.55"
+tracing = "0.1.44"
+
+# Workspace crates, all by path.
 oxtuner-core = { path = "./crates/oxtuner-core" }
 oxtuner-datalog = { path = "./crates/oxtuner-datalog" }
 oxtuner-ini = { path = "./crates/oxtuner-ini" }
@@ -49,6 +61,12 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# Criterion keeps its own profiles in `target/criterion`; unwinding debug info
+# in the bench profile is what lets `samply` / `instruments` resolve symbols
+# when a bench needs a flame graph. It does not change the measured code.
+[profile.bench]
+debug = true
 
 # gpui-kit's installation guide: debug builds leave GPUI, layout and text
 # rendering unoptimized, which makes the window feel slow while developing.

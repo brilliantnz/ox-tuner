@@ -4990,6 +4990,7 @@ dependencies = [
 name = "oxtuner-core"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "crossfire",
  "oxtuner-datalog",
  "oxtuner-ini",
@@ -5008,7 +5009,9 @@ dependencies = [
 name = "oxtuner-datalog"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "crossfire",
+ "tempfile",
  "tracing",
 ]
 
@@ -5016,6 +5019,7 @@ dependencies = [
 name = "oxtuner-ini"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "proptest",
 ]
 
@@ -5023,6 +5027,7 @@ dependencies = [
 name = "oxtuner-log"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -5035,36 +5040,39 @@ dependencies = [
 name = "oxtuner-project"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "oxtuner-ini",
  "oxtuner-tune",
  "proptest",
+ "tempfile",
 ]
 
 [[package]]
 name = "oxtuner-protocol"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "oxtuner-ini",
  "oxtuner-transport",
  "proptest",
- "tracing",
 ]
 
 [[package]]
 name = "oxtuner-sim"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "oxtuner-ini",
  "oxtuner-protocol",
  "oxtuner-transport",
  "proptest",
- "tracing",
 ]
 
 [[package]]
 name = "oxtuner-transport"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "serial2",
  "tracing",
 ]
@@ -5082,6 +5090,7 @@ dependencies = [
 name = "oxtuner-ui"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "gpui-kit",
  "oxtuner-core",
  "oxtuner-ini",
