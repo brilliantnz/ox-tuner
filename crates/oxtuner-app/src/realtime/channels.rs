@@ -13,40 +13,68 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
 use oxtuner_ui::chart::ChartState;
 
 use crate::app::dialog;
 use crate::i18n::t;
 
+/// One channel row whose display strings are built once per dialog, not once
+/// per repaint. Selection is still read from the chart every frame.
+struct ChannelRow {
+    name: SharedString,
+    label: SharedString,
+    id: ElementId,
+    search: String,
+}
+
 /// Opens the picker for `chart`.
 pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>) {
     let search =
         cx.new(|cx| InputState::new(window, cx).placeholder(t!("app.realtime.channel_filter")));
 
+    let rows: Vec<ChannelRow> = chart
+        .read(cx)
+        .history()
+        .channels()
+        .iter()
+        .filter(|channel| !channel.hidden)
+        .map(|channel| {
+            let name = SharedString::from(channel.name.as_str());
+            let label = if channel.units.is_empty() {
+                name.clone()
+            } else {
+                SharedString::from(format!("{} ({})", channel.name, channel.units))
+            };
+            let id = ElementId::Name(SharedString::from(format!(
+                "chart-channel-{}",
+                channel.name
+            )));
+            let search = channel.name.to_lowercase();
+
+            ChannelRow {
+                name,
+                label,
+                id,
+                search,
+            }
+        })
+        .collect();
+
     dialog::open(window, cx, move |dialog, _, cx| {
         let query = search.read(cx).value().to_lowercase();
-        let channels = chart.read(cx).history().channels();
-        let rows: Vec<_> = channels
+        let items: Vec<_> = rows
             .iter()
-            .filter(|channel| {
-                !channel.hidden
-                    && (query.is_empty() || channel.name.to_lowercase().contains(&query))
-            })
+            .filter(|row| query.is_empty() || row.search.contains(&query))
             .take(400)
-            .map(|channel| {
-                let selected = chart.read(cx).is_selected(&channel.name);
-                let name = channel.name.clone();
+            .map(|row| {
+                let selected = chart.read(cx).is_selected(&row.name);
+                let name = row.name.clone();
                 let chart = chart.clone();
-                let label = if channel.units.is_empty() {
-                    channel.name.clone()
-                } else {
-                    format!("{} ({})", channel.name, channel.units)
-                };
-                let id = ElementId::Name(format!("chart-channel-{}", channel.name).into());
-                Checkbox::new(id)
-                    .label(label)
+                Checkbox::new(row.id.clone())
+                    .label(row.label.clone())
                     .checked(selected)
                     .on_click(move |_checked, _, cx| {
                         // `toggle_selected` is idempotent in the sense that the
@@ -87,7 +115,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .when(rows.is_empty(), |this| {
+                                    .when(items.is_empty(), |this| {
                                         this.child(
                                             div()
                                                 .text_xs()
@@ -95,7 +123,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
                                                 .child(t!("app.realtime.no_channels")),
                                         )
                                     })
-                                    .children(rows),
+                                    .children(items),
                             ),
                     ),
             )
