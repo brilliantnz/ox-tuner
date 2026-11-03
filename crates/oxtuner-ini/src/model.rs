@@ -170,8 +170,33 @@ impl<T> Ordered<T> {
     }
 }
 
+/// Serializes only the ordered entries; the indexes are an implementation
+/// detail and are rebuilt on load.
+impl<T: serde::Serialize> serde::Serialize for Ordered<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_seq(&self.entries)
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Ordered<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = <Vec<(String, T)> as serde::Deserialize<'de>>::deserialize(deserializer)?;
+        let mut ordered = Self::new();
+        for (name, value) in entries {
+            ordered.insert(name, value);
+        }
+        Ok(ordered)
+    }
+}
+
 /// Byte order of multi-byte values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Endianness {
     /// Low byte first. The dialect's documented default is big, but every
     /// Speeduino and rusEFI file states `little` explicitly.
@@ -202,7 +227,7 @@ impl fmt::Display for Endianness {
 }
 
 /// The numeric and string types a constant or channel can use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
     /// Unsigned 8-bit.
     U08,
@@ -283,7 +308,7 @@ impl fmt::Display for DataType {
 }
 
 /// A numeric attribute: a literal, or an expression that stays dynamic.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Number {
     /// A value known at parse time.
     Literal(f64),
@@ -356,7 +381,7 @@ impl fmt::Display for Number {
 
 /// A text attribute: a literal string, or a string function such as
 /// `{ bitStringValue(algorithmUnits, algorithm) }`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Text {
     /// Plain text, quotes removed.
     Literal(String),
@@ -407,7 +432,7 @@ impl fmt::Display for Text {
 }
 
 /// A dimension: fixed, or an expression over constants (resizable arrays).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Dimension {
     /// Known at parse time.
     Fixed(u32),
@@ -448,7 +473,7 @@ impl fmt::Display for Dimension {
 }
 
 /// The declared size of a constant.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Shape {
     /// One value.
     Scalar,
@@ -527,7 +552,7 @@ impl fmt::Display for Shape {
 }
 
 /// What kind of entry a constant is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstantClass {
     /// A bit field with an option list.
     Bits,
@@ -556,7 +581,7 @@ impl ConstantClass {
 }
 
 /// One label in a `bits` option list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct BitOption {
     /// The value this label stands for: the explicit `3="Three"` number, or
     /// the label's position when the dialect leaves it out.
@@ -568,7 +593,7 @@ pub struct BitOption {
 }
 
 /// Storage modifiers that change who owns a constant's value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConstantFlags {
     /// Never loaded from calibration files.
     pub no_msq_save: bool,
@@ -577,7 +602,7 @@ pub struct ConstantFlags {
 }
 
 /// How the offset was written.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Offset {
     /// An explicit address (decimal or hex).
     Fixed(u32),
@@ -594,7 +619,7 @@ pub enum Offset {
 }
 
 /// One editable calibration parameter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Constant {
     /// Name used by expressions and by the `.msq`.
     pub name: String,
@@ -652,7 +677,7 @@ impl Constant {
 }
 
 /// A PC-side variable: same syntax as a constant, stored only in the project.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct PcVariable {
     /// Name used by expressions and `$name` command substitutions.
     pub name: String,
@@ -677,7 +702,7 @@ pub struct PcVariable {
 }
 
 /// A bit range inside a channel's backing word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BitRange {
     /// Lowest bit, inclusive.
     pub low: u8,
@@ -693,7 +718,7 @@ impl BitRange {
 }
 
 /// How a realtime channel gets its value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum ChannelKind {
     /// Read from the realtime block at an offset.
     Measured {
@@ -712,7 +737,7 @@ pub enum ChannelKind {
 }
 
 /// One realtime value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Channel {
     /// Channel name.
     pub name: String,
@@ -740,7 +765,7 @@ impl Channel {
 }
 
 /// Scattered ("full optimized") realtime reads.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScatteredConfig {
     /// Command used for a scattered read.
     pub get_command: Option<Command>,
@@ -751,7 +776,7 @@ pub struct ScatteredConfig {
 }
 
 /// Communication parameters, derived **after** settings resolution.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Protocol {
     /// Maximum payload bytes per read/write chunk.
     pub blocking_factor: Option<u32>,
@@ -793,7 +818,7 @@ pub struct Protocol {
 }
 
 /// One calibration page.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Page {
     /// Page number as written, 1-based.
     pub number: u8,
@@ -834,7 +859,7 @@ impl Page {
 
 /// One axis of a table: an array constant plus the live channel that moves the
 /// cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Axis {
     /// Array constant holding the axis values.
     pub array: String,
@@ -845,7 +870,7 @@ pub struct Axis {
 }
 
 /// A 2-D table from `[TableEditor]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Table {
     /// View id (also names the `.table` snapshot).
     pub id: String,
@@ -876,7 +901,7 @@ pub struct Table {
 }
 
 /// A 1-D curve from `[CurveEditor]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Curve {
     /// Curve name.
     pub name: String,
@@ -905,7 +930,7 @@ pub struct Curve {
 }
 
 /// One gauge template from `[GaugeConfigurations]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Gauge {
     /// Category the template belongs to.
     pub category: Option<String>,
@@ -940,7 +965,7 @@ pub struct Gauge {
 }
 
 /// One dashboard indicator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Indicator {
     /// Channel (or expression source) that drives it.
     pub channel: String,
@@ -957,7 +982,7 @@ pub struct Indicator {
 }
 
 /// `[FrontPage]`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct FrontPage {
     /// Gauges in slot order.
     pub gauges: Vec<(u8, String)>,
@@ -973,7 +998,7 @@ impl FrontPage {
 }
 
 /// The row kinds the dynamic dialog system defines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// `field` — label plus constant.
     Field,
@@ -1052,7 +1077,7 @@ impl RowKind {
 }
 
 /// One row of a dialog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DialogRow {
     /// The keyword.
     pub kind: RowKind,
@@ -1065,7 +1090,7 @@ pub struct DialogRow {
 }
 
 /// A dialog from `[UiDialogs]` / `[UserDefined]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Dialog {
     /// Dialog id (a stable key for window geometry).
     pub name: String,
@@ -1080,7 +1105,7 @@ pub struct Dialog {
 }
 
 /// What a menu item points at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuTargetKind {
     /// Another dialog / table / curve.
     Panel,
@@ -1093,7 +1118,7 @@ pub enum MenuTargetKind {
 }
 
 /// One menu item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct MenuItem {
     /// Item kind.
     pub kind: MenuTargetKind,
@@ -1111,7 +1136,7 @@ pub struct MenuItem {
 }
 
 /// One top-level menu.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
     /// Menu label without the surrounding quotes.
     pub title: String,
@@ -1122,7 +1147,7 @@ pub struct Menu {
 }
 
 /// `[SettingGroups]`: a named multi-choice whose options become `#if` flags.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SettingGroup {
     /// Group id used in the project snapshot.
     pub name: String,
@@ -1133,7 +1158,7 @@ pub struct SettingGroup {
 }
 
 /// One option of a [`SettingGroup`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SettingOption {
     /// Flag name the `#if` tests.
     pub name: String,
@@ -1142,7 +1167,7 @@ pub struct SettingOption {
 }
 
 /// One raw controller command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ControllerCommand {
     /// Command name.
     pub name: String,
@@ -1155,7 +1180,7 @@ pub struct ControllerCommand {
 }
 
 /// One sensor calibration table from `[ReferenceTables]`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct ReferenceTable {
     /// Table name.
     pub name: String,
@@ -1180,7 +1205,7 @@ pub struct ReferenceTable {
 }
 
 /// One `[Datalog]` field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DatalogEntry {
     /// Channel name.
     pub channel: String,
@@ -1201,7 +1226,7 @@ pub struct DatalogEntry {
 }
 
 /// One hidden-dialog hotkey from `[KeyActions]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct KeyAction {
     /// Keys in order.
     pub keys: String,
@@ -1212,7 +1237,7 @@ pub struct KeyAction {
 }
 
 /// A section this build keeps as raw data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedSection {
     /// Section name as written.
     pub name: String,
@@ -1241,7 +1266,7 @@ impl UnsupportedSection {
 }
 
 /// Per-section coverage of the definition.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct SectionCoverage {
     /// Section name.
     pub name: String,
@@ -1264,7 +1289,7 @@ impl SectionCoverage {
 }
 
 /// Coverage for the whole file.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct Coverage {
     /// One row per section, in document order.
     pub sections: Vec<SectionCoverage>,
@@ -1290,7 +1315,7 @@ impl Coverage {
 }
 
 /// `[ConstantsExtensions]` / `[ConstantExtensions]` metadata.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Extensions {
     /// `defaultValue` entries.
     pub defaults: Ordered<Number>,
@@ -1326,7 +1351,7 @@ impl Extensions {
 }
 
 /// The frozen result of parsing an INI file.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Definition {
     /// Firmware signature from `[MegaTune]` or `[TunerStudio]`.
     pub signature: String,
@@ -1443,6 +1468,21 @@ impl Definition {
     /// A channel by name.
     pub fn channel(&self, name: &str) -> Option<&Channel> {
         self.channels.get_ci(name)
+    }
+
+    /// Whether a definition that did not just come from the parser is still
+    /// structurally usable.
+    ///
+    /// This is the gate for a cache hit: deserialization proves the bytes are
+    /// a `Definition`, not that they are a *sane* one. The checks are the
+    /// invariants every parse enforces and every consumer relies on, not a
+    /// second full validation pass — a definition that fails them is rebuilt
+    /// from its source instead of shown.
+    pub fn is_usable(&self) -> bool {
+        !self.signature.is_empty()
+            && self
+                .spec_version
+                .is_none_or(|version| version <= crate::MAX_SPEC_VERSION)
     }
 
     /// A table by id.
@@ -1790,4 +1830,18 @@ mod tests {
         assert!(page.is_burnable());
     }
 
+    #[test]
+    fn a_cached_definition_must_look_like_the_parser_could_have_produced_it() {
+        assert!(!Definition::empty().is_usable());
+
+        let mut definition = Definition::empty();
+        definition.signature = "speeduino 202501".to_owned();
+        assert!(definition.is_usable());
+
+        definition.spec_version = Some(crate::MAX_SPEC_VERSION + 1.0);
+        assert!(
+            !definition.is_usable(),
+            "a spec this build cannot read is not a usable cache entry"
+        );
+    }
 }

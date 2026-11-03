@@ -10,10 +10,13 @@
 //!   entry is dropped or kept as data. Nothing panics, and one bad line never
 //!   costs the user the whole file.
 
+use std::borrow::Cow;
 use std::fmt;
 
 /// How serious a diagnostic is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
 pub enum Severity {
     /// Informational: the file was read differently than written.
     Note,
@@ -41,12 +44,12 @@ impl fmt::Display for Severity {
 }
 
 /// One structured message about one place in the source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// How serious it is.
     pub severity: Severity,
     /// Stable machine-readable code (`"unknown-type"`, `"duplicate-name"`, …).
-    pub code: &'static str,
+    pub code: Cow<'static, str>,
     /// What happened, in the user's terms.
     pub message: String,
     /// 1-based line in the source file, when the problem has one.
@@ -66,7 +69,7 @@ impl Diagnostic {
     ) -> Self {
         Self {
             severity,
-            code,
+            code: code.into(),
             message: message.into(),
             line: Some(line),
             section: Some(section.to_owned()),
@@ -77,7 +80,7 @@ impl Diagnostic {
     pub fn whole_file(severity: Severity, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             severity,
-            code,
+            code: code.into(),
             message: message.into(),
             line: None,
             section: None,

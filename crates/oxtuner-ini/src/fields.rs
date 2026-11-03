@@ -171,7 +171,7 @@ pub fn parse_f64(value: &str) -> Option<f64> {
 /// from PC variables, and the `%` placeholders. Anything else is kept as
 /// [`Segment::Unparsed`] so a definition we only partly understand still loads
 /// and can be reported precisely.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct Command {
     /// The command as written, minus the surrounding quotes.
     pub raw: String,
@@ -180,7 +180,7 @@ pub struct Command {
 }
 
 /// One piece of a command string.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
     /// One byte with a known value.
     Byte(u8),
@@ -193,7 +193,7 @@ pub enum Segment {
 }
 
 /// The parameter placeholders the dialect defines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placeholder {
     /// `%2i` — page identifier, two bytes: the `[canId][page]` pair, written
     /// big-endian. It is read byte-wise on the wire (canId first), so this is

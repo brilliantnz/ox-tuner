@@ -36,6 +36,7 @@ impl Platform {
 pub(crate) struct PlatformDirs {
     pub(crate) config_base: PathBuf,
     pub(crate) data_local_base: PathBuf,
+    pub(crate) cache_base: PathBuf,
     pub(crate) home: PathBuf,
 }
 
@@ -46,6 +47,7 @@ impl PlatformDirs {
         Some(Self {
             config_base: base.config_dir().to_path_buf(),
             data_local_base: base.data_local_dir().to_path_buf(),
+            cache_base: base.cache_dir().to_path_buf(),
             home: base.home_dir().to_path_buf(),
         })
     }
@@ -55,6 +57,7 @@ impl PlatformDirs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub(crate) config_dir: PathBuf,
+    pub(crate) cache_dir: PathBuf,
     pub(crate) logs_dir: PathBuf,
 }
 
@@ -69,28 +72,32 @@ impl AppPaths {
             .map(|dirs| Self::resolve(Platform::current(), &dirs))
             .unwrap_or_else(|| Self {
                 config_dir: PathBuf::from(".oxtuner"),
+                cache_dir: PathBuf::from(".oxtuner/cache"),
                 logs_dir: PathBuf::from(".oxtuner/logs"),
             })
     }
 
     /// Applies the application directory names to a platform's bases.
     ///
-    /// macOS uses the display-style `OxTuner` in Application Support and Logs.
-    /// Windows uses `OxTuner` under Roaming (settings) and Local (logs). Linux
-    /// follows the XDG convention: lowercase `oxtuner` under `~/.config` and
-    /// `~/.local/state`.
+    /// macOS uses the display-style `OxTuner` in Application Support, Caches
+    /// and Logs. Windows uses `OxTuner` under Roaming (settings), Local (cache
+    /// and logs). Linux follows the XDG convention: lowercase `oxtuner` under
+    /// `~/.config`, `~/.cache` and `~/.local/state`.
     pub(crate) fn resolve(platform: Platform, dirs: &PlatformDirs) -> Self {
         match platform {
             Platform::Macos => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
+                cache_dir: dirs.cache_base.join("OxTuner"),
                 logs_dir: dirs.home.join("Library/Logs/OxTuner"),
             },
             Platform::Windows => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
+                cache_dir: dirs.data_local_base.join("OxTuner").join("cache"),
                 logs_dir: dirs.data_local_base.join("OxTuner").join("logs"),
             },
             Platform::Linux => Self {
                 config_dir: dirs.config_base.join("oxtuner"),
+                cache_dir: dirs.cache_base.join("oxtuner"),
                 logs_dir: dirs.home.join(".local/state/oxtuner/logs"),
             },
         }
@@ -104,6 +111,14 @@ impl AppPaths {
     /// Window geometry, panel sizes and the last project.
     pub fn state_file(&self) -> PathBuf {
         self.config_dir.join("state.json")
+    }
+
+    /// Parsed definitions, keyed by their source fingerprints.
+    ///
+    /// A cache, not user data: deleting it costs one parse per definition and
+    /// changes nothing else.
+    pub fn definition_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("definitions")
     }
 
     /// The directory that holds the user-editable color themes. The bundled
@@ -140,10 +155,11 @@ impl AppPaths {
 mod tests {
     use super::*;
 
-    fn dirs(config: &str, local: &str, home: &str) -> PlatformDirs {
+    fn dirs(config: &str, local: &str, cache: &str, home: &str) -> PlatformDirs {
         PlatformDirs {
             config_base: PathBuf::from(config),
             data_local_base: PathBuf::from(local),
+            cache_base: PathBuf::from(cache),
             home: PathBuf::from(home),
         }
     }
@@ -153,6 +169,7 @@ mod tests {
         let dirs = dirs(
             "/Users/me/Library/Application Support",
             "/Users/me/Library/Application Support",
+            "/Users/me/Library/Caches",
             "/Users/me",
         );
         let paths = AppPaths::resolve(Platform::Macos, &dirs);
@@ -164,6 +181,14 @@ mod tests {
         assert_eq!(
             paths.logs_dir,
             PathBuf::from("/Users/me/Library/Logs/OxTuner")
+        );
+        assert_eq!(
+            paths.cache_dir,
+            PathBuf::from("/Users/me/Library/Caches/OxTuner")
+        );
+        assert_eq!(
+            paths.definition_cache_dir(),
+            PathBuf::from("/Users/me/Library/Caches/OxTuner/definitions")
         );
         assert_eq!(
             paths.settings_file(),
@@ -184,6 +209,7 @@ mod tests {
         let dirs = dirs(
             r"C:\Users\me\AppData\Roaming",
             r"C:\Users\me\AppData\Local",
+            r"C:\Users\me\AppData\Local",
             r"C:\Users\me",
         );
         let paths = AppPaths::resolve(Platform::Windows, &dirs);
@@ -191,6 +217,12 @@ mod tests {
         assert_eq!(
             paths.config_dir,
             PathBuf::from(r"C:\Users\me\AppData\Roaming").join("OxTuner")
+        );
+        assert_eq!(
+            paths.cache_dir,
+            PathBuf::from(r"C:\Users\me\AppData\Local")
+                .join("OxTuner")
+                .join("cache")
         );
         assert_eq!(
             paths.logs_dir,
@@ -202,10 +234,16 @@ mod tests {
 
     #[test]
     fn linux_follows_xdg_for_config_and_state() {
-        let dirs = dirs("/home/me/.config", "/home/me/.local/share", "/home/me");
+        let dirs = dirs(
+            "/home/me/.config",
+            "/home/me/.local/share",
+            "/home/me/.cache",
+            "/home/me",
+        );
         let paths = AppPaths::resolve(Platform::Linux, &dirs);
 
         assert_eq!(paths.config_dir, PathBuf::from("/home/me/.config/oxtuner"));
+        assert_eq!(paths.cache_dir, PathBuf::from("/home/me/.cache/oxtuner"));
         assert_eq!(
             paths.logs_dir,
             PathBuf::from("/home/me/.local/state/oxtuner/logs")

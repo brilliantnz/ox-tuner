@@ -589,6 +589,7 @@ mod tests {
         ));
         AppPaths {
             config_dir: directory.clone(),
+            cache_dir: directory.join("cache"),
             logs_dir: directory.join("logs"),
         }
     }

@@ -463,6 +463,7 @@ mod tests {
 
         let paths = AppPaths {
             config_dir: directory.clone(),
+            cache_dir: directory.join("cache"),
             logs_dir: directory.join("logs"),
         };
         fs::write(paths.settings_file(), b"{ this is not json").expect("write malformed settings");

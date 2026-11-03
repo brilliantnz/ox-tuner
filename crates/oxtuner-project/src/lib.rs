@@ -15,8 +15,15 @@
 //!
 //! # Guarantees
 //!
-//! - **In place.** Nothing is copied or restructured; writes are confined to
-//!   `CurrentTune.msq` and the `.ox-tuner/` sidecar (ADR-0007).
+//! - **In place.** Nothing is copied or restructured; inside the project,
+//!   writes are confined to `CurrentTune.msq` and the `.ox-tuner/` sidecar
+//!   (ADR-0007). The optional definition cache is written only under the
+//!   caller-supplied cache directory (ADR-0026).
+//! - **Cached, never owned.** A caller may pass a cache directory
+//!   ([`Project::open_with_cache`]); the parsed definition is then memoized by
+//!   content, settings and parser version. The cache is a derived artifact:
+//!   deleting it costs one parse and changes nothing about the project, and a
+//!   read-only project is still cacheable because the cache lives outside it.
 //! - **No silent guesses.** A signature/page/size mismatch opens the tune
 //!   read-only with reasons (ADR-0011); values that cannot be converted are
 //!   reported and left at their default, with the original text untouched.
@@ -48,6 +55,7 @@
 
 mod atomic;
 pub mod check;
+mod definition_cache;
 pub mod encoding;
 mod flags;
 pub mod hash;
@@ -58,6 +66,7 @@ pub mod sidecar;
 pub mod xml;
 
 pub use check::{IssueKind, LoadIssue, LoadReport, check};
+pub use definition_cache::{CACHE_FORMAT_VERSION, DefinitionSource};
 pub use encoding::EncodeError;
 pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};

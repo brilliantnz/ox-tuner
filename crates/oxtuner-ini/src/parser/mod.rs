@@ -30,6 +30,14 @@ use crate::source;
 /// half-parsed, the way the reference application refuses it.
 pub const MAX_SPEC_VERSION: f64 = 3.80;
 
+/// Version of the parser's output contract.
+///
+/// Bump this whenever the same input bytes and settings can produce a
+/// different `Definition` (a grammar fix, a new section, a changed default).
+/// The definition cache includes it in its key, so an upgrade misses instead
+/// of serving a definition this build no longer agrees with.
+pub const PARSER_VERSION: u32 = 1;
+
 /// Parses bytes into a frozen definition.
 pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Definition, IniError> {
     let decoded = source::decode(bytes);
@@ -61,7 +69,10 @@ fn assemble(
     includes: Option<IncludeResolver<'_>>,
     extra_diagnostics: Vec<Diagnostic>,
 ) -> Result<Definition, IniError> {
-    let preprocessed = crate::preprocess::preprocess(text, settings, includes)?;
+    let preprocessed = {
+        let _span = tracing::debug_span!("ini_preprocess").entered();
+        crate::preprocess::preprocess(text, settings, includes)?
+    };
 
     let mut definition = Definition::empty();
     definition.defines = preprocessed.defines.clone();
@@ -73,14 +84,22 @@ fn assemble(
         .extend(preprocessed.diagnostics.iter().cloned());
 
     let expander = Expander::new(&preprocessed.defines);
-    let sections = split_sections(&preprocessed.lines);
 
-    let mut coverage = Coverage::default();
-    for section in &sections {
-        let mut parser = SectionParser::new(&section.name);
-        dispatch(&mut definition, &mut parser, &section.lines, &expander);
-        parser.finish(&mut definition, &mut coverage);
+    {
+        let _span = tracing::debug_span!("ini_parse_sections").entered();
+        let sections = split_sections(&preprocessed.lines);
+
+        let mut coverage = Coverage::default();
+        for section in &sections {
+            let mut parser = SectionParser::new(&section.name);
+            dispatch(&mut definition, &mut parser, &section.lines, &expander);
+            parser.finish(&mut definition, &mut coverage);
+        }
+
+        definition.coverage = coverage;
     }
+
+    let _span = tracing::debug_span!("ini_resolve_validate").entered();
 
     if definition.signature.is_empty() {
         return Err(IniError::new(vec![Diagnostic::whole_file(
@@ -103,7 +122,6 @@ fn assemble(
         )]));
     }
 
-    definition.coverage = coverage;
     finalize(&mut definition);
     Ok(definition)
 }

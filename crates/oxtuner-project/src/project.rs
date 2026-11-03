@@ -3,12 +3,16 @@
 //! A project folder is recognised by `projectCfg/`. The definition is
 //! `projectCfg/mainController.ini` (or the only `.ini` there), resolved with
 //! `#include` files relative to `projectCfg/`; the tune is `CurrentTune.msq`.
-//! Nothing is copied or restructured (ADR-0007), and the only writes are:
+//! Nothing is copied or restructured (ADR-0007), and the only writes inside the
+//! project are:
 //!
 //! - `CurrentTune.msq` — and only the constants whose values changed;
 //! - `.ox-tuner/provenance` — which INI was used, by hash and signature.
 //!
-//! Consistency is the S1 gate ([`crate::check`]): a mismatch opens the tune
+//! A caller may additionally pass a cache directory; the parsed definition is
+//! then memoized there, never inside the project (ADR-0026).
+//!
+//! Consistency is the S1 gate ([`crate::check()`]): a mismatch opens the tune
 //! **read-only** and [`Project::save`] refuses with the reasons. There is no
 //! bypass (ADR-0011).
 //!
@@ -26,11 +30,13 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use oxtuner_ini::{Definition, IniError, SettingsContext};
 use oxtuner_tune::{Layout, Tune, TuneDiff, TuneError, TuneImages};
 
 use crate::check::LoadReport;
+use crate::definition_cache::{DefinitionCache, DefinitionSource, IncludeRecorder};
 use crate::load::{self, FileValueError};
 use crate::msq::{EntryKind, EntryPage, Msq, MsqError};
 use crate::sidecar::Provenance;
@@ -203,6 +209,7 @@ pub struct Project {
     definition_path: PathBuf,
     definition_digest: String,
     definition: Definition,
+    definition_source: DefinitionSource,
     settings: SettingsContext,
     tune_path: PathBuf,
     msq: Msq,
@@ -235,7 +242,24 @@ impl Project {
 
     /// Opens a TunerStudio project folder in place.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ProjectError> {
+        Self::open_with_cache(root, None)
+    }
+
+    /// Opens a TunerStudio project folder, using `cache_dir` for the parsed
+    /// definition when one is given.
+    ///
+    /// The cache is optional on purpose: without it the project opens exactly
+    /// as it always did, and a cache that is missing, stale or corrupt is
+    /// treated as a miss. Reading the definition bytes is not skipped — they
+    /// are the fingerprint that decides whether the cached value still applies.
+    pub fn open_with_cache(
+        root: impl AsRef<Path>,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, ProjectError> {
         let root = root.as_ref();
+        let _span = tracing::info_span!("project_open", root = %root.display()).entered();
+        let mut phase = Instant::now();
+
         if !root.join(CONFIG_DIR).is_dir() {
             return Err(ProjectError::NotAProject {
                 path: root.to_owned(),
@@ -246,32 +270,71 @@ impl Project {
         let definition_path = find_definition(&config)?;
         let tune_path = root.join(TUNE_FILE);
 
-        let definition_bytes = read(&definition_path)?;
-        let tune_bytes = read(&tune_path).map_err(|error| match error {
-            ProjectError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
-                ProjectError::MissingTune {
-                    path: tune_path.clone(),
-                }
-            }
-            other => other,
-        })?;
+        let definition_bytes = {
+            let _span = tracing::debug_span!("project_read_definition").entered();
+            read(&definition_path)?
+        };
+        let definition_digest = crate::hash::sha256(&definition_bytes);
+        let read_definition_ms = elapsed_ms(&mut phase);
 
-        let msq = Msq::parse(&tune_bytes)?;
+        let tune_bytes = {
+            let _span = tracing::debug_span!("project_read_tune").entered();
+            read(&tune_path).map_err(|error| match error {
+                ProjectError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
+                    ProjectError::MissingTune {
+                        path: tune_path.clone(),
+                    }
+                }
+                other => other,
+            })?
+        };
+        let read_tune_ms = elapsed_ms(&mut phase);
+
+        let msq = {
+            let _span = tracing::debug_span!("project_msq_parse").entered();
+            Msq::parse(&tune_bytes)?
+        };
+        let msq_ms = elapsed_ms(&mut phase);
 
         // The snapshot records the flags the tune was written with. Parsing the
         // definition under different flags would interpret the file through a
         // different shape than the one that produced it.
         let settings = snapshot_settings(&msq);
-        let definition = parse_definition(&definition_bytes, &settings, &config)?;
+        let (definition, definition_source) = {
+            let _span = tracing::debug_span!("project_definition_load").entered();
+            load_definition(
+                &definition_bytes,
+                definition_digest,
+                &settings,
+                &config,
+                cache_dir,
+            )
+        }?;
+        let definition_ms = elapsed_ms(&mut phase);
 
-        let loaded = load::load(&msq, &definition);
+        let loaded = {
+            let _span = tracing::debug_span!("project_tune_load").entered();
+            load::load(&msq, &definition)
+        };
         let images = TuneImages::from_working(loaded.tune);
+        let tune_ms = elapsed_ms(&mut phase);
+
+        tracing::debug!(
+            read_definition_ms,
+            read_tune_ms,
+            msq_ms,
+            definition_ms,
+            tune_ms,
+            cache_hit = definition_source == DefinitionSource::Cache,
+            "project open phases"
+        );
 
         Ok(Self {
             root: root.to_owned(),
             definition_path,
-            definition_digest: crate::hash::hex(&crate::hash::sha256(&definition_bytes)),
+            definition_digest: crate::hash::hex(&definition_digest),
             definition,
+            definition_source,
             settings,
             tune_path,
             msq,
@@ -286,26 +349,78 @@ impl Project {
         tune_path: impl AsRef<Path>,
         definition_path: impl AsRef<Path>,
     ) -> Result<Self, ProjectError> {
+        Self::open_standalone_with_cache(tune_path, definition_path, None)
+    }
+
+    /// Opens a bare `.msq`, caching the parsed definition when `cache_dir` is
+    /// given.
+    pub fn open_standalone_with_cache(
+        tune_path: impl AsRef<Path>,
+        definition_path: impl AsRef<Path>,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, ProjectError> {
         let tune_path = tune_path.as_ref();
         let definition_path = definition_path.as_ref();
+        let _span = tracing::info_span!("project_open", root = %tune_path.display()).entered();
+        let mut phase = Instant::now();
 
-        let definition_bytes = read(definition_path)?;
-        let tune_bytes = read(tune_path)?;
-        let msq = Msq::parse(&tune_bytes)?;
+        let definition_bytes = {
+            let _span = tracing::debug_span!("project_read_definition").entered();
+            read(definition_path)?
+        };
+        let definition_digest = crate::hash::sha256(&definition_bytes);
+        let read_definition_ms = elapsed_ms(&mut phase);
+
+        let tune_bytes = {
+            let _span = tracing::debug_span!("project_read_tune").entered();
+            read(tune_path)?
+        };
+        let read_tune_ms = elapsed_ms(&mut phase);
+
+        let msq = {
+            let _span = tracing::debug_span!("project_msq_parse").entered();
+            Msq::parse(&tune_bytes)?
+        };
+        let msq_ms = elapsed_ms(&mut phase);
 
         let settings = snapshot_settings(&msq);
         let base = definition_path.parent().unwrap_or(Path::new("."));
-        let definition = parse_definition(&definition_bytes, &settings, base)?;
+        let (definition, definition_source) = {
+            let _span = tracing::debug_span!("project_definition_load").entered();
+            load_definition(
+                &definition_bytes,
+                definition_digest,
+                &settings,
+                base,
+                cache_dir,
+            )
+        }?;
+        let definition_ms = elapsed_ms(&mut phase);
 
-        let loaded = load::load(&msq, &definition);
+        let loaded = {
+            let _span = tracing::debug_span!("project_tune_load").entered();
+            load::load(&msq, &definition)
+        };
         let images = TuneImages::from_working(loaded.tune);
+        let tune_ms = elapsed_ms(&mut phase);
         let root = tune_path.parent().unwrap_or(Path::new(".")).to_owned();
+
+        tracing::debug!(
+            read_definition_ms,
+            read_tune_ms,
+            msq_ms,
+            definition_ms,
+            tune_ms,
+            cache_hit = definition_source == DefinitionSource::Cache,
+            "project open phases"
+        );
 
         Ok(Self {
             root,
             definition_path: definition_path.to_owned(),
-            definition_digest: crate::hash::hex(&crate::hash::sha256(&definition_bytes)),
+            definition_digest: crate::hash::hex(&definition_digest),
             definition,
+            definition_source,
             settings,
             tune_path: tune_path.to_owned(),
             msq,
@@ -323,6 +438,11 @@ impl Project {
     /// The definition that was loaded.
     pub fn definition(&self) -> &Definition {
         &self.definition
+    }
+
+    /// Whether this open parsed the definition or loaded the cache.
+    pub fn definition_source(&self) -> DefinitionSource {
+        self.definition_source
     }
 
     /// Path of the definition file that was loaded.
@@ -531,6 +651,14 @@ fn read(path: &Path) -> Result<Vec<u8>, ProjectError> {
     })
 }
 
+/// Milliseconds since the last mark, and moves the mark to now.
+fn elapsed_ms(since: &mut Instant) -> f64 {
+    let now = Instant::now();
+    let elapsed = now.duration_since(*since).as_secs_f64() * 1000.0;
+    *since = now;
+    elapsed
+}
+
 fn find_definition(config: &Path) -> Result<PathBuf, ProjectError> {
     let main = config.join(MAIN_DEFINITION);
     if main.is_file() {
@@ -569,18 +697,46 @@ fn find_definition(config: &Path) -> Result<PathBuf, ProjectError> {
     }
 }
 
-fn parse_definition(
+/// Loads the definition from the cache or parses it, and stores the result.
+///
+/// A cache miss is not an error: parsing is the source of truth, and any write
+/// failure leaves the freshly parsed definition in place.
+fn load_definition(
     bytes: &[u8],
+    definition_digest: [u8; 32],
     settings: &SettingsContext,
     base: &Path,
-) -> Result<Definition, ProjectError> {
+    cache_dir: Option<&Path>,
+) -> Result<(Definition, DefinitionSource), ProjectError> {
+    let cache = cache_dir
+        .and_then(|directory| DefinitionCache::new(directory, base, definition_digest, settings));
+
+    if let Some(cache) = &cache
+        && let Some(definition) = cache.load()
+    {
+        tracing::debug!(
+            base = %base.display(),
+            "definition loaded from the cache"
+        );
+        return Ok((definition, DefinitionSource::Cache));
+    }
+
     let text = oxtuner_ini::source::decode(bytes).text;
-    let resolver = |name: &str| read_include(base, name);
-    oxtuner_ini::parse_str_with_includes(&text, settings, &resolver).map_err(ProjectError::Ini)
+    let recorder = IncludeRecorder::new(base);
+    let resolver = |name: &str| recorder.resolve(name);
+    let definition = oxtuner_ini::parse_str_with_includes(&text, settings, &resolver)
+        .map_err(ProjectError::Ini)?;
+    let includes = recorder.finish();
+
+    if let Some(cache) = &cache {
+        cache.store(&definition, &includes);
+    }
+
+    Ok((definition, DefinitionSource::Parsed))
 }
 
 /// Reads an `#include` file from `base`, refusing to leave it.
-fn read_include(base: &Path, name: &str) -> Option<String> {
+pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     let path = Path::new(name);
     if path.components().any(|component| {
         matches!(

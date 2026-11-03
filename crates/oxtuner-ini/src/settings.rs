@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Which symbols are active for one parse.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsContext {
     /// Explicit choices from the project snapshot or the user.
     overrides: BTreeMap<String, bool>,

@@ -1,9 +1,9 @@
-//! SHA-256 for sidecar provenance and duplicate-file detection.
+//! SHA-256 for sidecar provenance and cache keys.
 //!
-//! Hand-written for the same reason as the XML reader: the crate stays
-//! dependency-free, and the algorithm is small enough to test against the
-//! standard vectors. This is **not** used as a security primitive — it answers
-//! "did the INI I opened change since last time?".
+//! Hand-written so the crate keeps its dependency set small and the algorithm
+//! stays testable against the standard vectors. This is **not** used as a
+//! security primitive — it answers "did the INI I opened change since last
+//! time?" and identifies a cache entry.
 
 const INITIAL: [u32; 8] = [
     0x6a09_e667,
