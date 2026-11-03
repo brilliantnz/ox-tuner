@@ -22,8 +22,13 @@
 //! - **Never guess.** Presentation attributes stay symbolic
 //!   ([`model::Number::Expression`]) because they re-evaluate at runtime;
 //!   expressions that cannot be folded exactly stay unfolded.
-//! - **Zero dependencies.** The dialect is hand-written; a dependency-free
-//!   parser keeps the clean-room and `cargo deny` stories trivial.
+//! - **Lightweight.** The dialect is hand-written. The runtime dependencies
+//!   are `serde` (the derives that let `oxtuner-project` cache a frozen
+//!   definition) and `tracing` (the phase spans around preprocessing, section
+//!   parsing and validation); there is no INI or parsing dependency.
+//! - **Versioned output.** [`PARSER_VERSION`] changes whenever the same bytes
+//!   and settings can produce a different [`Definition`], so a definition
+//!   cache written by an older parser is never served by a newer one.
 //!
 //! # Example
 //!
@@ -65,7 +70,9 @@ pub use model::{
     Offset, Ordered, Page, PcVariable, Protocol, ReferenceTable, RowKind, ScatteredConfig,
     SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text, UnsupportedSection,
 };
-pub use parser::{MAX_SPEC_VERSION, parse_bytes, parse_str, parse_str_with_includes};
+pub use parser::{
+    MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,
+};
 pub use preprocess::{LogicalLine, Preprocessed, preprocess};
 pub use settings::SettingsContext;
 

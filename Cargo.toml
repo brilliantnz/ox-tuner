@@ -32,6 +32,7 @@ repository = "https://github.com/brilliantnz/ox-tuner"
 criterion = "0.8.2"
 crossfire = "3.1.22"
 gpui-kit = "=0.8.1"
+postcard = "1.1.3"
 proptest = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

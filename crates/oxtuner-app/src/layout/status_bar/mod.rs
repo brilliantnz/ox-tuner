@@ -9,7 +9,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div};
 
@@ -24,25 +24,30 @@ pub(crate) struct StatusBarView;
 impl RenderOnce for StatusBarView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let status = CoreService::status(cx);
-        let connection = status.connection.clone();
-        let lost = status.link_lost.clone();
-        let read_only = connection.as_ref().is_some_and(|state| state.read_only);
+        let pending = status.pending_project.is_some();
+        let read_only = status
+            .connection
+            .as_ref()
+            .is_some_and(|state| state.read_only);
         let live = status.realtime;
         let writes_enabled = status.writes_enabled;
-        let write_halted = status.write_halted.clone();
         let danger = cx.theme().danger;
 
-        let link = match connection {
-            Some(connection) => t!(
-                "app.status.connected",
-                signature = connection.signature.clone(),
-                port = connection.port.clone(),
-                framing = connection.framing.to_owned(),
-            ),
-            None => match lost {
-                Some(reason) => t!("app.status.link_lost", reason = reason),
-                None => t!("app.status.not_connected"),
-            },
+        let link = if pending {
+            t!("app.editor.opening_project")
+        } else {
+            match &status.connection {
+                Some(connection) => t!(
+                    "app.status.connected",
+                    signature = &connection.signature,
+                    port = &connection.port,
+                    framing = connection.framing,
+                ),
+                None => match status.link_lost.as_deref() {
+                    Some(reason) => t!("app.status.link_lost", reason = reason),
+                    None => t!("app.status.not_connected"),
+                },
+            }
         };
 
         StatusBar::new()
@@ -62,16 +67,18 @@ impl RenderOnce for StatusBarView {
                     })
                     .ghost()
                     .xsmall()
+                    .disabled(pending)
                     .on_click(|_, window, cx| {
                         write_dialogs::show_enable_writes(window, cx);
                     }),
             )
-            .when_some(write_halted, |this, reason| {
+            .when_some(status.write_halted.as_deref(), |this, reason| {
                 this.right(
                     Button::new("status-write-halted")
                         .label(t!("app.status.write_halted"))
                         .ghost()
                         .xsmall()
+                        .disabled(pending)
                         .text_color(danger)
                         .tooltip(gpui_kit::SharedString::from(reason))
                         .on_click(|_, window, cx| {

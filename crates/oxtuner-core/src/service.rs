@@ -25,7 +25,7 @@ use std::{
 use crossfire::{MTx, RecvTimeoutError, Rx, mpsc, spsc};
 use oxtuner_datalog::{LogColumn, LogStatus, Logger};
 use oxtuner_ini::Definition;
-use oxtuner_project::Project;
+use oxtuner_project::{DefinitionSource, Project};
 use oxtuner_protocol::{Behavior, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
@@ -70,6 +70,10 @@ pub struct CoreConfig {
     /// Where a standalone definition's write journal and logs live. A project
     /// always uses its own `.ox-tuner/` sidecar.
     pub journal_dir: Option<PathBuf>,
+    /// Where parsed definitions are cached. `None` disables the cache, which is
+    /// what tests and tools get unless they ask for it; the application passes
+    /// its own cache directory.
+    pub definition_cache_dir: Option<PathBuf>,
     /// Frames retained for the live charts. 6 000 holds one minute at 100 Hz.
     pub history_capacity: usize,
 }
@@ -81,6 +85,7 @@ impl Default for CoreConfig {
             event_capacity: 1024,
             writes_enabled: false,
             journal_dir: None,
+            definition_cache_dir: None,
             history_capacity: 6_000,
         }
     }
@@ -330,6 +335,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
     let log = LogStatus::new();
     let safety = Safety::new(config.writes_enabled);
     let journal_dir = config.journal_dir.clone();
+    let definition_cache_dir = config.definition_cache_dir.clone();
     let core_latest = latest.clone();
     let core_history = history.clone();
     let core_log = log.clone();
@@ -347,6 +353,7 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
                 frame_notify,
                 safety,
                 journal_dir,
+                definition_cache_dir,
             )
         })
         .map_err(CoreError::Spawn)?;
@@ -388,6 +395,7 @@ fn run(
     frames: FrameNotify,
     mut safety: Safety,
     journal_dir: Option<PathBuf>,
+    definition_cache_dir: Option<PathBuf>,
 ) -> CoreReport {
     let started = Instant::now();
     let mut report = CoreReport::default();
@@ -417,6 +425,7 @@ fn run(
                 &mut live,
                 &mut safety,
                 journal_dir.as_deref(),
+                definition_cache_dir.as_deref(),
                 &events,
                 &latest,
                 &history,
@@ -582,6 +591,7 @@ fn handle(
     live: &mut Option<Live>,
     safety: &mut Safety,
     journal_dir: Option<&std::path::Path>,
+    definition_cache_dir: Option<&std::path::Path>,
     events: &EventTx,
     latest: &LatestFrame,
     history: &ChartHistory,
@@ -1054,8 +1064,11 @@ fn handle(
         Command::OpenProject { path } => {
             // Reading and parsing happen here, on the core thread: the UI must
             // never wait on a project's INI and `.msq`.
-            match Project::open(&path) {
+            let _span =
+                tracing::debug_span!("core_open_project", %op, path = %path.display()).entered();
+            match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
+                    let cache_hit = project.definition_source() == DefinitionSource::Cache;
                     let summary = ProjectSummary::from_project(&project);
                     tracing::info!(
                         %op,
@@ -1065,6 +1078,7 @@ fn handle(
                         skipped = summary.skipped,
                         warnings = summary.warnings.len(),
                         read_only = summary.read_only,
+                        cache_hit,
                         "project opened"
                     );
                     teardown(

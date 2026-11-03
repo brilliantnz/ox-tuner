@@ -19,6 +19,13 @@ use crate::i18n::t;
 
 mod channels;
 
+/// The chart windows offered in the toolbar: seconds, label and stable id.
+const WINDOW_CHOICES: [(f64, &str, &str); 3] = [
+    (10.0, "10s", "realtime-window-10"),
+    (30.0, "30s", "realtime-window-30"),
+    (60.0, "60s", "realtime-window-60"),
+];
+
 /// The chart tokens from the application theme.
 fn chart_style(theme: &gpui_kit::component::Theme) -> ChartStyle {
     ChartStyle {
@@ -104,9 +111,9 @@ impl RealtimeView {
                     }),
             )
             .child(div().w(px(1.)).h_4().bg(cx.theme().border))
-            .children([10.0, 30.0, 60.0].into_iter().map(|seconds| {
-                Button::new(SharedString::from(format!("realtime-window-{seconds:.0}")))
-                    .label(SharedString::from(format!("{seconds:.0}s")))
+            .children(WINDOW_CHOICES.into_iter().map(|(seconds, label, id)| {
+                Button::new(id)
+                    .label(SharedString::new_static(label))
                     .small()
                     .ghost()
                     .selected((window - seconds).abs() < 0.01)

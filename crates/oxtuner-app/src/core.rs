@@ -19,13 +19,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui_kit::{App, Global, PathPromptOptions};
+use gpui_kit::{App, Global, PathPromptOptions, SharedString};
 use oxtuner_core::{
     AxisEdit, AxisKind, BurnSummary, CellEdit, ChartHistory, ConnectionSummary, CoreConfig,
     CoreHandle, CoreParts, CoreThread, DefinitionSummary, DialogSummary, Event, EventStream,
     Failure, FailureCode, FrameWatch, ImportSummary, JournalEntry, LatestFrame, LinkMode,
-    LogSnapshot, LogStatus, LogSummary, PortChoice, PortSummary, ProjectSummary, ReadAllSummary,
-    RealtimeFrame, RevertSummary, SaveSummary, TableSummary, TuneStatus, WriteSummary,
+    LogSnapshot, LogStatus, LogSummary, OpId, PortChoice, PortSummary, ProjectSummary,
+    ReadAllSummary, RealtimeFrame, RevertSummary, SaveSummary, TableSummary, TuneStatus,
+    WriteSummary,
 };
 use rust_i18n::t;
 
@@ -37,6 +38,16 @@ pub(crate) struct CoreStatus {
     pub(crate) definition: Option<DefinitionSummary>,
     /// The project the core currently owns, when one is open.
     pub(crate) project: Option<ProjectSummary>,
+    /// The project folder the UI asked to open and is waiting for.
+    ///
+    /// Transient view state, never persisted and never part of the project
+    /// model: it only holds the request between the click and the core's
+    /// `ProjectOpened`/`Failed` answer.
+    pub(crate) pending_project: Option<PendingProject>,
+    /// Whether the open project's folder was found missing at the last
+    /// lifecycle check. Rendering reads this instead of touching the
+    /// filesystem; it starts false because no check has failed yet.
+    pub(crate) project_missing: bool,
     /// The last successful save, shown until the next open or failure.
     pub(crate) last_save: Option<SaveSummary>,
     /// The table the UI last read, kept until another table replaces it.
@@ -96,6 +107,23 @@ pub(crate) struct CoreStatus {
     pub(crate) definition_revision: u64,
 }
 
+/// A project open the UI is waiting for.
+///
+/// The op id correlates the completion event: a slow answer to an earlier
+/// request must not clear the loading state of a newer request. `None` only
+/// exists between setting the state and handing the command to the core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingProject {
+    /// The folder the user chose.
+    pub(crate) path: PathBuf,
+    /// Folder name for the title bar and the opening splash, resolved once.
+    pub(crate) name: SharedString,
+    /// The core operation that will answer this request, once accepted.
+    ///
+    /// Stored as the raw id only for equality; the UI never inspects it.
+    pub(crate) op: Option<u64>,
+}
+
 /// The journal file and its newest entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JournalView {
@@ -130,6 +158,50 @@ impl CoreStatus {
             .as_ref()
             .map(|project| &project.definition)
             .or(self.definition.as_ref())
+    }
+
+    /// Marks a folder as being opened, before the command is sent.
+    pub(crate) fn begin_pending_project(&mut self, path: &Path) {
+        self.pending_project = Some(PendingProject {
+            path: path.to_owned(),
+            name: crate::project::display_name(path).into(),
+            op: None,
+        });
+    }
+
+    /// Records the op the core accepted for the pending open.
+    pub(crate) fn pending_project_sent(&mut self, op: OpId) {
+        if let Some(pending) = &mut self.pending_project {
+            pending.op = Some(op.get());
+        }
+    }
+
+    /// Clears the pending open if `op` is its answer.
+    ///
+    /// Returns whether the loading state ended, so the caller knows a repaint
+    /// is needed. An answer to an older request is ignored.
+    pub(crate) fn finish_pending_project(&mut self, op: Option<OpId>) -> bool {
+        self.finish_pending_project_at(op.map(OpId::get))
+    }
+
+    fn finish_pending_project_at(&mut self, op: Option<u64>) -> bool {
+        let Some(pending) = &self.pending_project else {
+            return false;
+        };
+        if pending.op.is_some() && pending.op != op {
+            return false;
+        }
+        tracing::debug!(
+            path = %pending.path.display(),
+            "the pending project open finished"
+        );
+        self.pending_project = None;
+        true
+    }
+
+    /// Clears the pending open after a command that never reached the core.
+    pub(crate) fn cancel_pending_project(&mut self) {
+        self.pending_project = None;
     }
 }
 
@@ -195,12 +267,11 @@ impl CoreService {
 /// start, its handle is `None` and every command reports a failure.
 pub fn start(cx: &mut App, auto_sim: bool) {
     let writes_enabled = crate::settings::preferences::AppSettings::writes_enabled(cx);
-    let journal_dir = crate::platform::paths::AppPaths::discover()
-        .config_dir
-        .join("write-journal.log");
+    let paths = crate::platform::paths::AppPaths::discover();
     let config = CoreConfig {
         writes_enabled,
-        journal_dir: Some(journal_dir),
+        journal_dir: Some(paths.config_dir.join("write-journal.log")),
+        definition_cache_dir: Some(paths.definition_cache_dir()),
         ..CoreConfig::default()
     };
     let service = match oxtuner_core::start(config) {
@@ -275,6 +346,8 @@ fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
 
 /// Folds one event into the status and repaints.
 fn apply(event: Event, cx: &mut App) {
+    let event_op = event.op();
+
     // The port list is stored for the dialog, which stays open while it scans:
     // closing and reopening would lose the user's selection and scroll.
     if let Event::PortsListed { ports, .. } = event {
@@ -413,6 +486,7 @@ fn apply(event: Event, cx: &mut App) {
     };
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
+    let finishes_open = matches!(&update, Update::Opened(_) | Update::Failed(_));
     // Remember the port that worked, so the next dialog opens on it.
     let persist_port = match &update {
         Update::Connected(connection) if !connection.custom => {
@@ -432,6 +506,11 @@ fn apply(event: Event, cx: &mut App) {
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
+        if finishes_open {
+            cx.global_mut::<CoreService>()
+                .status
+                .finish_pending_project(event_op);
+        }
         if let Some(path) = import_consent.clone() {
             cx.global_mut::<CoreService>().status.import_consent = Some(path);
         }
@@ -543,6 +622,7 @@ impl CoreStatus {
             Update::Opened(project) => {
                 self.project = Some(project);
                 self.definition = None;
+                self.project_missing = false;
                 self.last_save = None;
                 self.table = None;
                 self.dialog = None;
@@ -737,15 +817,60 @@ impl CoreStatus {
 /// Asks the core to open a project folder.
 ///
 /// The read and parse happen on the core thread; the reply is
-/// [`Event::ProjectOpened`] or [`Event::Failed`]. A refused command (a full
-/// queue, or a stopped core) produces no event, so the failure is shown here.
+/// [`Event::ProjectOpened`] or [`Event::Failed`]. The pending state is set
+/// before the command is sent so the window can draw the opening splash on the
+/// next frame, and cleared on every outcome — including a queue that refuses
+/// the command, which produces no event at all.
 pub(crate) fn open_project(path: &Path, cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::ProjectRejected) else {
         return;
     };
-    if let Err(error) = handle.open_project(path) {
-        tracing::warn!(%error, path = %path.display(), "the core refused the project");
-        report_failure(cx, FailureCode::ProjectRejected, error.to_string());
+
+    cx.global_mut::<CoreService>()
+        .status
+        .begin_pending_project(path);
+
+    match handle.open_project(path) {
+        Ok(op) => {
+            cx.global_mut::<CoreService>()
+                .status
+                .pending_project_sent(op);
+            cx.refresh_windows();
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "the core refused the project");
+            cx.global_mut::<CoreService>()
+                .status
+                .cancel_pending_project();
+            report_failure(cx, FailureCode::ProjectRejected, error.to_string());
+        }
+    }
+}
+
+/// Re-checks that the open project's folder still exists.
+///
+/// Called at lifecycle boundaries — window activation, opening the Projects
+/// dialog, and a successful open — never from a render function. A filesystem
+/// `stat` per frame is what this replaces; the result is cached in
+/// [`CoreStatus::project_missing`] for rendering.
+pub(crate) fn refresh_project_availability(cx: &mut App) {
+    let path = cx
+        .global::<CoreService>()
+        .status
+        .project
+        .as_ref()
+        .map(|project| project.root.clone());
+
+    let missing = path.is_some_and(|path| !crate::project::is_available(&path));
+    let changed = {
+        let status = &mut cx.global_mut::<CoreService>().status;
+        let changed = status.project_missing != missing;
+        status.project_missing = missing;
+        changed
+    };
+
+    if changed {
+        cx.refresh_windows();
     }
 }
 
@@ -1260,6 +1385,7 @@ mod tests {
             in_project: true,
             definition: summary(),
             read_only: false,
+            read_only_reason: None,
             read_only_reasons: Vec::new(),
             loaded: 817,
             skipped: 0,
@@ -1496,5 +1622,97 @@ mod tests {
         assert!(status.definition.is_none());
         assert!(status.last_save.is_none());
         assert!(status.failure.is_none());
+    }
+
+    #[test]
+    fn opening_marks_the_folder_pending_until_its_own_answer_arrives() {
+        let mut status = CoreStatus::default();
+
+        status.begin_pending_project(Path::new("/projects/roadster"));
+        assert_eq!(
+            status
+                .pending_project
+                .as_ref()
+                .map(|pending| pending.name.as_str()),
+            Some("roadster")
+        );
+        assert_eq!(
+            status
+                .pending_project
+                .as_ref()
+                .and_then(|pending| pending.op),
+            None
+        );
+
+        status.pending_project.as_mut().unwrap().op = Some(7);
+        assert_eq!(
+            status
+                .pending_project
+                .as_ref()
+                .and_then(|pending| pending.op),
+            Some(7)
+        );
+
+        status.apply(Update::Opened(project()));
+        assert!(
+            status.finish_pending_project_at(Some(7)),
+            "the request's own answer ends the loading state"
+        );
+        assert!(status.pending_project.is_none());
+        assert!(!status.project_missing);
+    }
+
+    #[test]
+    fn a_stale_answer_does_not_clear_a_newer_request() {
+        let mut status = CoreStatus::default();
+        status.begin_pending_project(Path::new("/projects/old"));
+        status.pending_project.as_mut().unwrap().op = Some(7);
+        status.begin_pending_project(Path::new("/projects/new"));
+        status.pending_project.as_mut().unwrap().op = Some(8);
+
+        assert!(
+            !status.finish_pending_project_at(Some(7)),
+            "the older request finishing must not clear the newer one"
+        );
+        assert_eq!(
+            status
+                .pending_project
+                .as_ref()
+                .and_then(|pending| pending.op),
+            Some(8)
+        );
+
+        assert!(status.finish_pending_project_at(Some(8)));
+        assert!(status.pending_project.is_none());
+    }
+
+    #[test]
+    fn a_refused_command_cancels_the_loading_state() {
+        let mut status = CoreStatus::default();
+        status.begin_pending_project(Path::new("/projects/roadster"));
+
+        status.cancel_pending_project();
+
+        assert!(
+            status.pending_project.is_none(),
+            "a send failure must never leave the splash up"
+        );
+    }
+
+    #[test]
+    fn a_failed_open_clears_the_loading_state_but_keeps_the_old_project() {
+        let mut status = CoreStatus::default();
+        status.apply(Update::Opened(project()));
+        status.begin_pending_project(Path::new("/projects/other"));
+        status.pending_project.as_mut().unwrap().op = Some(9);
+        status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
+
+        assert!(status.finish_pending_project_at(Some(9)));
+        assert!(status.pending_project.is_none());
+        assert!(
+            status.project.is_some(),
+            "the project that was already open is still owned"
+        );
+        assert!(status.failure.is_some());
     }
 }

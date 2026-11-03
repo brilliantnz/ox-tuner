@@ -178,6 +178,10 @@ fn opening_a_project_summarises_the_tune_for_the_ui() {
     assert!(summary.in_project);
     assert!(!summary.read_only, "{:?}", summary.read_only_reasons);
     assert!(summary.read_only_reasons.is_empty());
+    assert!(
+        summary.read_only_reason.is_none(),
+        "a writable project allocates no joined reason"
+    );
     assert_eq!(summary.definition.signature, "speeduino 202501");
     assert_eq!(summary.definition.pages, 2);
     assert_eq!(summary.definition.constants, 5);
@@ -224,6 +228,13 @@ fn a_signature_mismatch_opens_read_only_and_refuses_to_save() {
     assert!(
         !summary.read_only_reasons.is_empty(),
         "read-only mode must explain itself (S1)"
+    );
+    assert!(
+        summary
+            .read_only_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the joined reason is precomputed for the editor"
     );
 
     let op = core.handle.save_tune().expect("the command is queued");

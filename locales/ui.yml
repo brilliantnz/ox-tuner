@@ -466,6 +466,10 @@ app:
       en: Help topics open in a later milestone.
     project_missing:
       en: This project folder is missing. Choose it again or open another folder.
+    opening_project:
+      en: Opening project…
+    opening_hint:
+      en: Reading the definition and tune. The editor appears as soon as they are ready.
     read_only:
       en: 'Read-only: %{reason}'
     no_tune:

@@ -20,6 +20,10 @@ use crate::{i18n::t, project, settings::preferences::AppSettings};
 /// A plain dialog: the action buttons close it themselves after running, and
 /// the standard close button and Escape dismiss it without doing anything.
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
+    // The dialog is a lifecycle boundary: a folder moved since the project
+    // opened is noticed here, not by a `stat` in the editor's render.
+    crate::core::refresh_project_availability(cx);
+
     let status = CoreService::status(cx).clone();
     let recent: Vec<std::path::PathBuf> = cx
         .global::<AppSettings>()

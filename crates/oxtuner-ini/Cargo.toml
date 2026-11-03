@@ -17,8 +17,13 @@ bench = false
 name = "parse"
 harness = false
 
-# No runtime dependencies on purpose: the dialect is hand-written (ADR-0006),
-# which keeps the parser easy to audit and `cargo deny` trivial.
+# The model carries `serde` derives so `oxtuner-project` can cache a parsed
+# definition, and `tracing` supplies the parse-phase spans. The dialect itself
+# is still hand-written and reads no parser dependency.
+[dependencies]
+serde = { workspace = true, features = ["rc"] }
+tracing.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true

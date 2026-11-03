@@ -709,6 +709,11 @@ impl DefinitionSummary {
                 .filter(|diagnostic| diagnostic.severity == wanted)
                 .count()
         };
+        let menu = {
+            let _span =
+                tracing::debug_span!("menu_build", menus = definition.menus.len()).entered();
+            crate::menu::build(definition)
+        };
 
         Self {
             label: label.into(),
@@ -735,7 +740,7 @@ impl DefinitionSummary {
                     line: indicator.line,
                 })
                 .collect(),
-            menu: crate::menu::build(definition),
+            menu,
             coverage_percent: definition.coverage.percent(),
             errors: severity(Severity::Error),
             warnings: severity(Severity::Warning),
@@ -768,6 +773,12 @@ pub struct ProjectSummary {
     pub definition: DefinitionSummary,
     /// Whether saving is refused (S1).
     pub read_only: bool,
+    /// Why the tune opened read-only, joined once for display.
+    ///
+    /// `None` for a writable project, so the editor never allocates in the
+    /// normal case. The individual reasons stay available in
+    /// [`ProjectSummary::read_only_reasons`].
+    pub read_only_reason: Option<String>,
     /// Why the tune opened read-only, for the editor and output panel that
     /// explain it.
     pub read_only_reasons: Vec<String>,
@@ -791,6 +802,12 @@ impl ProjectSummary {
                 || project.definition_path().display().to_string(),
                 str::to_owned,
             );
+        let read_only_reasons: Vec<String> = report
+            .read_only_reasons()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let read_only_reason = report.is_read_only().then(|| read_only_reasons.join("; "));
 
         Self {
             root: project.root().to_owned(),
@@ -799,11 +816,8 @@ impl ProjectSummary {
             in_project: project.is_in_project(),
             definition: DefinitionSummary::new(label, project.definition()),
             read_only: report.is_read_only(),
-            read_only_reasons: report
-                .read_only_reasons()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            read_only_reason,
+            read_only_reasons,
             loaded: report.loaded,
             skipped: report.skipped,
             warnings: report

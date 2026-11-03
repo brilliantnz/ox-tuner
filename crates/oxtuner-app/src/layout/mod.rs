@@ -28,14 +28,16 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, Theme, ThemeMode,
+    menu::AppMenuBar,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div, px,
 };
 
 pub mod bottom_panel;
@@ -58,7 +60,6 @@ use crate::{
     app::{self, menu},
     editor::{dialog::DialogEditor, table::TableEditor},
     i18n::t,
-    project,
     realtime::RealtimeView,
     settings::preferences::AppSettings,
     state::session::{
@@ -74,6 +75,8 @@ pub(crate) struct AppLayout {
     _appearance: Subscription,
     /// Keeps the window-bounds observer alive so geometry changes are saved.
     _bounds: Subscription,
+    /// Re-checks project availability when the window comes back to the front.
+    _activation: Subscription,
     /// The in-window menu bar. Rendered only where the OS has no global menu.
     menu_bar: Entity<AppMenuBar>,
     /// The definition-driven navigation tree. The sidebar renders it; the
@@ -145,6 +148,14 @@ impl AppLayout {
             schedule_save(cx);
         });
 
+        // A project folder can be moved or unmounted while it is open. The
+        // render path must not `stat` it every frame, so the check runs when
+        // the window is activated — the moment the user comes back to the app
+        // — and the result is cached in `CoreStatus`.
+        let _activation = cx.observe_window_activation(window, |_, _, cx| {
+            crate::core::refresh_project_availability(cx);
+        });
+
         // The tree is its own entity: it observes the core, owns the gpui-kit
         // tree state and keeps the selection. The layout watches it only to
         // repaint the editor column when the selection changes.
@@ -162,6 +173,7 @@ impl AppLayout {
         Self {
             _appearance,
             _bounds,
+            _activation,
             menu_bar,
             explorer,
             table_editor,
@@ -232,6 +244,21 @@ impl AppLayout {
     /// editor shows only the selected node, plus a read-only banner when the
     /// workspace itself is read-only.
     fn render_editor_column(&self, cx: &mut Context<Self>) -> AnyElement {
+        // The editor names what the core owns. `AppState::last_project` only
+        // remembers the path between launches.
+        let status = crate::core::CoreService::status(cx);
+
+        // The opening splash covers the workspace. Leave a blank surface
+        // underneath it rather than the empty-project call to action, which
+        // would be the wrong thing to show for the half-frame before the
+        // overlay paints.
+        if status.pending_project.is_some() {
+            return div()
+                .size_full()
+                .bg(cx.theme().background)
+                .into_any_element();
+        }
+
         if cx.global::<AppState>().data().layout.work_view == WorkView::Charts {
             return div()
                 .size_full()
@@ -239,11 +266,32 @@ impl AppLayout {
                 .child(self.realtime.clone())
                 .into_any_element();
         }
-        // The editor names what the core owns. `AppState::last_project` only
-        // remembers the path between launches.
-        let status = crate::core::CoreService::status(cx);
-        let project = status.project.clone();
+
         let has_definition = status.definition().is_some();
+        let has_project = status.project.is_some();
+        // Built once here rather than joined in the banner closure: the
+        // reasons are already joined in the project summary at open time, and
+        // a writable project allocates nothing at all.
+        let read_only_banner = status
+            .project
+            .as_ref()
+            .filter(|project| project.read_only)
+            .and_then(|project| project.read_only_reason.as_deref())
+            .map(|reason| {
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(t!("app.editor.read_only", reason = reason))
+                    .into_any_element()
+            });
+        // `project_missing` is refreshed on window activation and project
+        // open, never by a filesystem call in this render.
+        let available = !status.project_missing;
         let selected = self.explorer.read(cx).selected().cloned();
         let has_selection = selected.is_some();
         let is_table = selected.as_ref().is_some_and(|node| {
@@ -258,16 +306,6 @@ impl AppLayout {
                 .is_some_and(|node| node.embedded.is_some());
         let show_table = is_table || (dialog_has_grid && self.tab == EditorTab::Table);
         let show_dialog = is_dialog && !show_table;
-        let has_project = project.is_some();
-
-        let read_only = project.as_ref().is_some_and(|project| project.read_only);
-        let reasons = project
-            .as_ref()
-            .map(|project| project.read_only_reasons.join("; "))
-            .unwrap_or_default();
-        let available = project
-            .as_ref()
-            .is_none_or(|project| project::is_available(&project.root));
 
         let heading = if has_definition {
             t!("app.editor.nothing_selected")
@@ -289,19 +327,7 @@ impl AppLayout {
             .text_color(cx.theme().foreground)
             // A read-only tune is a property of the workspace, not of the
             // selected node, so it stays visible above the editor body.
-            .when(read_only, |this| {
-                this.child(
-                    div()
-                        .flex_shrink_0()
-                        .px_4()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(t!("app.editor.read_only", reason = reasons)),
-                )
-            })
+            .when_some(read_only_banner, |this, banner| this.child(banner))
             .child(
                 v_flex()
                     .flex_1()
@@ -425,6 +451,9 @@ impl AppLayout {
             layout.bottom_visible,
         );
         let work_view = layout.work_view;
+        let pending = crate::core::CoreService::status(cx)
+            .pending_project
+            .is_some();
 
         vec![
             Button::new("show-tune")
@@ -432,6 +461,7 @@ impl AppLayout {
                 .small()
                 .ghost()
                 .selected(work_view == WorkView::Tune)
+                .disabled(pending)
                 .tooltip(tooltip("show-tune", t!("app.view.tune_tooltip")))
                 .on_click(|_, _, cx| {
                     cx.stop_propagation();
@@ -443,6 +473,7 @@ impl AppLayout {
                 .small()
                 .ghost()
                 .selected(work_view == WorkView::Charts)
+                .disabled(pending)
                 .tooltip(tooltip("show-charts", t!("app.view.charts_tooltip")))
                 .on_click(|_, _, cx| {
                     cx.stop_propagation();
@@ -462,6 +493,7 @@ impl AppLayout {
                 })
                 .ghost()
                 .small()
+                .disabled(pending)
                 // .selected(primary)
                 .tooltip(tooltip(
                     "toggle-primary-sidebar",
@@ -483,6 +515,7 @@ impl AppLayout {
                 })
                 .ghost()
                 .small()
+                .disabled(pending)
                 // .selected(bottom)
                 .tooltip(tooltip(
                     "toggle-bottom-panel",
@@ -501,6 +534,7 @@ impl AppLayout {
                 })
                 .ghost()
                 .small()
+                .disabled(pending)
                 // .selected(secondary)
                 .tooltip(tooltip(
                     "toggle-secondary-sidebar",
@@ -515,6 +549,73 @@ impl AppLayout {
     }
 }
 
+/// The editor column while a project is being opened.
+///
+/// The shape follows the real editor — header, toolbar row, grid — so the
+/// switch to the tune does not move the frame around. Only the official
+/// The opening splash over the workspace.
+///
+/// It sits between the title bar and the status bar, covers the sidebars, the
+/// editor and the bottom panel, and blocks mouse interaction with everything
+/// underneath. The window chrome stays visible: the title bar names the folder
+/// and the status bar says what is happening, while their controls are
+/// disabled until the open finishes.
+fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+
+    v_flex()
+        .id("opening-project-splash")
+        .occlude()
+        .absolute()
+        .inset_0()
+        .items_center()
+        .justify_center()
+        .bg(cx.theme().background)
+        .text_color(cx.theme().foreground)
+        .child(
+            v_flex()
+                .items_center()
+                .gap_3()
+                .max_w(px(420.))
+                .px_6()
+                .text_center()
+                .child(
+                    ProgressCircle::new("opening-project-ring")
+                        .loading(true)
+                        .with_size(px(160.))
+                        .color(cx.theme().primary)
+                        .accessibility_label(t!("app.editor.opening_project"))
+                        .child(
+                            Icon::new(IconName::Cpu)
+                                .with_size(px(40.))
+                                .text_color(muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(t!("app.editor.opening_project")),
+                )
+                .child(
+                    div()
+                        .max_w_full()
+                        .truncate()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_center()
+                        .text_color(muted)
+                        .child(t!("app.editor.opening_hint")),
+                ),
+        )
+        .into_any_element()
+}
+
 impl Render for AppLayout {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
@@ -522,6 +623,10 @@ impl Render for AppLayout {
         let primary_visible = layout.primary_visible;
         let secondary_visible = layout.secondary_visible;
         let bottom_visible = layout.bottom_visible;
+        let pending = crate::core::CoreService::status(cx)
+            .pending_project
+            .as_ref()
+            .map(|pending| pending.name.clone());
 
         v_flex()
             .size_full()
@@ -533,100 +638,110 @@ impl Render for AppLayout {
             // rather than three columns with separate chrome.
             .child(MainBar::new(self.menu_bar.clone()).actions(self.render_panel_buttons(cx)))
             .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("layout-primary")
-                        .on_resize(move |state, _, cx| {
-                            // Only a visible sidebar has a handle, and a hidden
-                            // one would report the editor's width instead.
-                            if !primary_visible {
-                                return;
-                            }
-                            let sizes = state.read(cx).sizes().clone();
-                            AppState::update_global(cx, |data| {
-                                data.layout.apply_primary(&sizes);
-                            });
-                            schedule_save(cx);
-                        })
-                        // Panels are left out while closed rather than hidden:
-                        // a hidden panel still renders its resize handle, which
-                        // would leave a stray divider on the window's edge.
-                        .when(primary_visible, |this| {
-                            this.child(
-                                resizable_panel()
-                                    .size(primary)
-                                    .size_range(
-                                        px(PRIMARY_WIDTH_RANGE.start)..px(PRIMARY_WIDTH_RANGE.end),
-                                    )
-                                    .fixed()
-                                    .child(PrimarySidebar::new(self.explorer.clone())),
-                            )
-                        })
-                        .child(
-                            resizable_panel().child(
-                                h_resizable("layout-panels")
-                                    .on_resize(move |state, _, cx| {
-                                        if !secondary_visible {
-                                            return;
-                                        }
-                                        let sizes = state.read(cx).sizes().clone();
-                                        AppState::update_global(cx, |data| {
-                                            data.layout.apply_secondary(&sizes);
-                                        });
-                                        schedule_save(cx);
-                                    })
-                                    .child(
-                                        resizable_panel().child(
-                                            v_resizable("layout-editor")
-                                                .on_resize(move |state, _, cx| {
-                                                    if !bottom_visible {
-                                                        return;
-                                                    }
-                                                    let sizes = state.read(cx).sizes().clone();
-                                                    AppState::update_global(cx, |data| {
-                                                        data.layout.apply_bottom(&sizes);
-                                                    });
-                                                    schedule_save(cx);
-                                                })
-                                                .child(
-                                                    resizable_panel()
-                                                        .child(self.render_editor_column(cx)),
-                                                )
-                                                // The editor keeps the space it
-                                                // has when the panel opens or
-                                                .when(bottom_visible, |this| {
-                                                    this.child(
-                                                        resizable_panel()
-                                                            .size(bottom)
-                                                            .size_range(
-                                                                px(BOTTOM_HEIGHT_RANGE.start)
-                                                                    ..px(BOTTOM_HEIGHT_RANGE.end),
-                                                            )
-                                                            // A panel keeps the
-                                                            // height the user gave
-                                                            // it when the window
-                                                            // resizes; the editor
-                                                            // absorbs the change.
-                                                            .fixed()
-                                                            .child(self.bottom_panel.clone()),
-                                                    )
-                                                }),
-                                        ),
-                                    )
-                                    .when(secondary_visible, |this| {
-                                        this.child(
-                                            resizable_panel()
-                                                .size(secondary)
-                                                .size_range(
-                                                    px(SECONDARY_WIDTH_RANGE.start)
-                                                        ..px(SECONDARY_WIDTH_RANGE.end),
-                                                )
-                                                .fixed()
-                                                .child(SecondarySidebar),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        h_resizable("layout-primary")
+                            .on_resize(move |state, _, cx| {
+                                // Only a visible sidebar has a handle, and a hidden
+                                // one would report the editor's width instead.
+                                if !primary_visible {
+                                    return;
+                                }
+                                let sizes = state.read(cx).sizes().clone();
+                                AppState::update_global(cx, |data| {
+                                    data.layout.apply_primary(&sizes);
+                                });
+                                schedule_save(cx);
+                            })
+                            // Panels are left out while closed rather than hidden:
+                            // a hidden panel still renders its resize handle, which
+                            // would leave a stray divider on the window's edge.
+                            .when(primary_visible, |this| {
+                                this.child(
+                                    resizable_panel()
+                                        .size(primary)
+                                        .size_range(
+                                            px(PRIMARY_WIDTH_RANGE.start)
+                                                ..px(PRIMARY_WIDTH_RANGE.end),
                                         )
-                                    }),
+                                        .fixed()
+                                        .child(PrimarySidebar::new(self.explorer.clone())),
+                                )
+                            })
+                            .child(
+                                resizable_panel().child(
+                                    h_resizable("layout-panels")
+                                        .on_resize(move |state, _, cx| {
+                                            if !secondary_visible {
+                                                return;
+                                            }
+                                            let sizes = state.read(cx).sizes().clone();
+                                            AppState::update_global(cx, |data| {
+                                                data.layout.apply_secondary(&sizes);
+                                            });
+                                            schedule_save(cx);
+                                        })
+                                        .child(
+                                            resizable_panel().child(
+                                                v_resizable("layout-editor")
+                                                    .on_resize(move |state, _, cx| {
+                                                        if !bottom_visible {
+                                                            return;
+                                                        }
+                                                        let sizes = state.read(cx).sizes().clone();
+                                                        AppState::update_global(cx, |data| {
+                                                            data.layout.apply_bottom(&sizes);
+                                                        });
+                                                        schedule_save(cx);
+                                                    })
+                                                    .child(
+                                                        resizable_panel()
+                                                            .child(self.render_editor_column(cx)),
+                                                    )
+                                                    // The editor keeps the space it
+                                                    // has when the panel opens or
+                                                    .when(bottom_visible, |this| {
+                                                        this.child(
+                                                            resizable_panel()
+                                                                .size(bottom)
+                                                                .size_range(
+                                                                    px(BOTTOM_HEIGHT_RANGE.start)
+                                                                        ..px(
+                                                                            BOTTOM_HEIGHT_RANGE.end
+                                                                        ),
+                                                                )
+                                                                // A panel keeps the
+                                                                // height the user gave
+                                                                // it when the window
+                                                                // resizes; the editor
+                                                                // absorbs the change.
+                                                                .fixed()
+                                                                .child(self.bottom_panel.clone()),
+                                                        )
+                                                    }),
+                                            ),
+                                        )
+                                        .when(secondary_visible, |this| {
+                                            this.child(
+                                                resizable_panel()
+                                                    .size(secondary)
+                                                    .size_range(
+                                                        px(SECONDARY_WIDTH_RANGE.start)
+                                                            ..px(SECONDARY_WIDTH_RANGE.end),
+                                                    )
+                                                    .fixed()
+                                                    .child(SecondarySidebar),
+                                            )
+                                        }),
+                                ),
                             ),
-                        ),
-                ),
+                    )
+                    .when_some(pending.as_ref(), |this, name| {
+                        this.child(render_opening_splash(name, cx))
+                    }),
             )
             .child(StatusBarView)
     }
@@ -733,5 +848,66 @@ fn tooltip(shortcut_id: &str, title: gpui_kit::SharedString) -> gpui_kit::Shared
         )
         .into(),
         None => title,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, Bounds, Context, IntoElement, Render, TestAppContext, Window,
+        WindowBounds, WindowOptions, div, size,
+    };
+
+    use crate::core::PendingProject;
+
+    struct Host {
+        pending: PendingProject,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .relative()
+                .size_full()
+                .child(render_opening_splash(&self.pending.name, cx))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> AnyWindowHandle {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            let pending = PendingProject {
+                path: std::path::PathBuf::from("/projects/roadster"),
+                name: "roadster".into(),
+                op: None,
+            };
+            let host = cx.new(|_| Host { pending });
+            let (handle, _) = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Default::default(),
+                        size(px(1200.), px(800.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                move |_, _| host,
+            )
+            .expect("open test window");
+            handle
+        })
+    }
+
+    /// The loading state must render with the real gpui-kit progress ring,
+    /// over the workspace, and survive a frame of animation.
+    #[gpui_kit::test]
+    fn the_opening_splash_renders(cx: &mut TestAppContext) {
+        let handle = open(cx);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
     }
 }

@@ -26,12 +26,14 @@ impl RenderOnce for Indicators {
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let status = CoreService::status(cx);
+        let pending = status.pending_project.is_some();
         let failure = status
             .failure
             .as_ref()
             .map(|failure| failure_banner(failure, danger, muted));
 
         let content = match status.definition() {
+            None if pending => empty(t!("app.editor.opening_project"), muted),
             None => empty(t!("app.bottom_panel.no_definition"), muted),
             Some(definition) if definition.indicators.is_empty() => {
                 empty(t!("app.bottom_panel.no_indicators"), muted)

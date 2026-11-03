@@ -17,7 +17,7 @@
 use std::fmt;
 
 /// An expression from a `{ … }` field.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Expr {
     /// A numeric literal.
     Number(f64),
@@ -35,7 +35,7 @@ pub enum Expr {
 }
 
 /// Prefix operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Arithmetic negation.
     Negate,
@@ -48,7 +48,7 @@ pub enum UnaryOp {
 }
 
 /// Infix operators, loosest binding first in the parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     /// `||`
     Or,

@@ -41,6 +41,27 @@ fn replace(temporary: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Replaces `path` with `bytes` without flushing to disk.
+///
+/// For derived data — the definition cache — where a crash losing the new file
+/// costs one parse and nothing else. The rename is still atomic, so a reader
+/// never sees a half-written file, but the caller does not wait for the disk.
+pub(crate) fn write_derived(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = derived_temporary_path(path);
+    let result = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// A sibling temporary name a second process cannot take.
+fn derived_temporary_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}.tmp", std::process::id()));
+    PathBuf::from(name)
+}
+
 fn temporary_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".oxtuner-tmp");
@@ -110,6 +131,25 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_derived_write_replaces_the_file_and_cleans_up_its_temporary() {
+        let root = temp_dir("derived");
+        let path = root.join("definition.defcache");
+        fs::write(&path, b"old").unwrap();
+
+        write_derived(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let names: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["definition.defcache"], "{names:?}");
 
         fs::remove_dir_all(&root).unwrap();
     }

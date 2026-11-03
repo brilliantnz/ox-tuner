@@ -20,6 +20,9 @@ harness = false
 [dependencies]
 oxtuner-ini.workspace = true
 oxtuner-tune.workspace = true
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
+serde.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
