@@ -16,10 +16,37 @@ use crate::expr::Expr;
 use crate::fields::Command;
 
 /// A name-keyed, insertion-ordered collection.
+///
+/// `entries` is the source of truth for order and contents. The two maps are
+/// indexes into it: `lookup` answers an exact name, `ci_lookup` answers the
+/// trimmed ASCII-lowercase form `get_ci` falls back to. Both are rebuilt by
+/// `insert` and nothing else renames or removes an entry, so they cannot drift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ordered<T> {
     entries: Vec<(String, T)>,
     lookup: HashMap<String, usize>,
+    /// Hash of the folded name -> first entry with that hash.
+    ///
+    /// A hash rather than a lowercased `String` key: building the index must
+    /// not allocate once per entry, because a large definition inserts
+    /// hundreds of constants during a parse. A hash collision keeps the first
+    /// index and makes `get_ci` fall back to the linear scan, which preserves
+    /// the first-declaration rule without ever changing a result.
+    ci_lookup: HashMap<u64, usize>,
+}
+
+/// FNV-1a over the ASCII-lowercased bytes.
+///
+/// `eq_ignore_ascii_case` folds only A–Z, and so does this; non-ASCII bytes
+/// are hashed unchanged. The name is hashed untrimmed at insertion and the
+/// query trimmed at lookup, which is exactly the comparison `get_ci` makes.
+fn ci_hash(name: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in name.as_bytes() {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 impl<T> Default for Ordered<T> {
@@ -27,6 +54,7 @@ impl<T> Default for Ordered<T> {
         Self {
             entries: Vec::new(),
             lookup: HashMap::new(),
+            ci_lookup: HashMap::new(),
         }
     }
 }
@@ -45,7 +73,13 @@ impl<T> Ordered<T> {
             let previous = std::mem::replace(&mut self.entries[position].1, value);
             return Some(previous);
         }
-        self.lookup.insert(name.clone(), self.entries.len());
+
+        let position = self.entries.len();
+        // The case-insensitive index keeps the first declaration: two names
+        // that differ only by case are distinct entries, and a `get_ci` has
+        // always returned the earlier one.
+        self.ci_lookup.entry(ci_hash(&name)).or_insert(position);
+        self.lookup.insert(name.clone(), position);
         self.entries.push((name, value));
         None
     }
@@ -59,18 +93,35 @@ impl<T> Ordered<T> {
 
     /// Looks an entry up case-insensitively, the way references in the dialect
     /// are usually written.
+    ///
+    /// The exact index is tried first without trimming, then the hash of the
+    /// trimmed ASCII-folded form. That is the semantics the previous linear
+    /// scan had: candidates were never trimmed, so a name with surrounding
+    /// spaces only matched an equally spaced query.
     pub fn get_ci(&self, name: &str) -> Option<&T> {
         if let Some(found) = self.get(name) {
             return Some(found);
         }
-        // ASCII-case-insensitive comparison without lowering every candidate:
-        // this runs for every reference in the file, and a capitalization
-        // mismatch would otherwise allocate once per entry.
+
         let name = name.trim();
-        self.entries
-            .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value)
+        match self.ci_lookup.get(&ci_hash(name)) {
+            Some(&position) => {
+                let (candidate, value) = &self.entries[position];
+                if candidate.eq_ignore_ascii_case(name) {
+                    return Some(value);
+                }
+
+                // A hash collision stored another name first. The linear scan
+                // is the oracle for that case; it is unreachable in practice
+                // with a 64-bit hash, but keeping it makes a collision a
+                // slowdown rather than a wrong answer.
+                self.entries
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value)
+            }
+            None => None,
+        }
     }
 
     /// Mutably borrows an entry by exact name.
@@ -1589,6 +1640,86 @@ mod tests {
     }
 
     #[test]
+    fn a_case_insensitive_lookup_returns_the_first_declaration() {
+        let mut constants: Ordered<u32> = Ordered::new();
+        constants.insert("reqFuel", 1);
+        constants.insert("reqfuel", 2);
+        constants.insert("REQFUEL", 3);
+
+        assert_eq!(constants.get_ci("ReqFuel"), Some(&1));
+        assert_eq!(constants.get("reqfuel"), Some(&2));
+        assert_eq!(
+            constants.names().collect::<Vec<_>>(),
+            vec!["reqFuel", "reqfuel", "REQFUEL"],
+            "the index must not reorder or merge entries"
+        );
+    }
+
+    #[test]
+    fn a_case_insensitive_lookup_trims_the_query_but_not_the_entry() {
+        let mut constants: Ordered<u32> = Ordered::new();
+        constants.insert(" spaced ", 1);
+
+        assert_eq!(
+            constants.get_ci("spaced"),
+            None,
+            "a stored name keeps its spaces, matching the linear scan this replaced"
+        );
+        assert_eq!(constants.get_ci("  spaced  "), None);
+    }
+
+    #[test]
+    fn redefining_a_name_keeps_order_and_the_index_consistent() {
+        let mut constants: Ordered<u32> = Ordered::new();
+        constants.insert("first", 1);
+        constants.insert("second", 2);
+        constants.insert("First", 3);
+        constants.insert("first", 10);
+
+        assert_eq!(constants.get_ci("FIRST"), Some(&10));
+        assert_eq!(constants.get("First"), Some(&3));
+        assert_eq!(
+            constants.names().collect::<Vec<_>>(),
+            vec!["first", "second", "First"]
+        );
+        assert_eq!(constants.len(), 3);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// The map-backed lookup must agree with the linear scan it replaced.
+        #[test]
+        fn a_case_insensitive_lookup_matches_a_linear_scan(
+            entries in proptest::collection::vec(
+                ("[A-Za-z0-9_ ]{0,10}", proptest::prelude::any::<u32>()),
+                0..40,
+            ),
+            queries in proptest::collection::vec("[A-Za-z0-9_ ]{0,12}", 0..24),
+        ) {
+            let mut ordered: Ordered<u32> = Ordered::new();
+            for (name, value) in &entries {
+                ordered.insert(name.clone(), *value);
+            }
+
+            for query in queries {
+                let expected = ordered
+                    .get(&query)
+                    .or_else(|| {
+                        ordered
+                            .entries
+                            .iter()
+                            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(query.trim()))
+                            .map(|(_, value)| value)
+                    })
+                    .copied();
+
+                proptest::prop_assert_eq!(ordered.get_ci(&query).copied(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn a_table_shape_is_column_first() {
         // rusEFI's `[6x2]` is six columns by two rows: the first token is the
         // column count.
@@ -1658,4 +1789,5 @@ mod tests {
         page.burn_command = Some(Command::parse(r#""B%2i""#));
         assert!(page.is_burnable());
     }
+
 }

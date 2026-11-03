@@ -23,7 +23,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use oxtuner_ini::{SettingsContext, expr::Expr, parse_str, preprocess::preprocess};
+use oxtuner_ini::{Ordered, SettingsContext, expr::Expr, parse_str, preprocess::preprocess};
 
 /// Two pages, 400 scalars, one 16x16 table, four channels, one menu.
 fn fixture() -> String {
@@ -259,6 +259,35 @@ fn bench_expr(criterion: &mut Criterion) {
     });
 }
 
+/// A name-keyed collection the size of the reference definition's constants.
+fn ordered_constants(count: usize) -> Ordered<usize> {
+    let mut constants = Ordered::new();
+    for index in 0..count {
+        constants.insert(format!("constant_{index}"), index);
+    }
+    constants
+}
+
+/// `Definition::constant`/`channel`/`table` all go through `get_ci`, so a
+/// resolution pass makes this lookup once per reference in the file.
+fn bench_ordered_lookup(criterion: &mut Criterion) {
+    let constants = ordered_constants(818);
+    let small = ordered_constants(8);
+
+    criterion.bench_function("ini_ordered_get_ci_exact", |bencher| {
+        bencher.iter(|| black_box(constants.get_ci(black_box("constant_400"))));
+    });
+    criterion.bench_function("ini_ordered_get_ci_mixed_case", |bencher| {
+        bencher.iter(|| black_box(constants.get_ci(black_box("CoNsTaNt_400"))));
+    });
+    criterion.bench_function("ini_ordered_get_ci_missing", |bencher| {
+        bencher.iter(|| black_box(constants.get_ci(black_box("missing_400"))));
+    });
+    criterion.bench_function("ini_ordered_get_ci_small_mixed_case", |bencher| {
+        bencher.iter(|| black_box(small.get_ci(black_box("CoNsTaNt_4"))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_preprocess,
@@ -268,6 +297,7 @@ criterion_group!(
     bench_preprocess_defines,
     bench_expander_build,
     bench_expand_reference,
-    bench_expr
+    bench_expr,
+    bench_ordered_lookup
 );
 criterion_main!(benches);
