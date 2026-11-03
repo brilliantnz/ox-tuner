@@ -6,7 +6,8 @@
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
+    App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div,
 };
 use oxtuner_core::LiveValue;
 
@@ -50,21 +51,30 @@ impl RenderOnce for Telemetry {
             );
         };
 
-        let mut chosen: Vec<&LiveValue> = frame
-            .values
-            .iter()
-            .filter(|value| {
-                PREFERRED_CHANNELS
-                    .iter()
-                    .any(|name| value.name.eq_ignore_ascii_case(name))
-            })
-            .collect();
-
-        if chosen.is_empty() {
-            chosen = frame.values.iter().take(10).collect();
+        let mut chosen: [Option<&LiveValue>; PREFERRED_CHANNELS.len()] =
+            [None; PREFERRED_CHANNELS.len()];
+        let mut count = 0usize;
+        for value in &frame.values {
+            if PREFERRED_CHANNELS
+                .iter()
+                .any(|name| value.name.eq_ignore_ascii_case(name))
+            {
+                chosen[count] = Some(value);
+                count += 1;
+                if count == chosen.len() {
+                    break;
+                }
+            }
         }
 
-        if chosen.is_empty() {
+        if count == 0 {
+            for value in frame.values.iter().take(10) {
+                chosen[count] = Some(value);
+                count += 1;
+            }
+        }
+
+        if count == 0 {
             return v_flex().child(
                 div()
                     .text_xs()
@@ -82,41 +92,37 @@ impl RenderOnce for Telemetry {
             )))
             // A fixed value column keeps the numbers on one reading line as the
             // grid wraps, without turning a handful of channels into a table.
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_x_6()
-                    .gap_y_3()
-                    .children(chosen.into_iter().map(|value| {
-                        v_flex()
-                            .gap_0p5()
-                            .w_32()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .truncate()
-                                    .child(value.name.clone()),
-                            )
-                            .child(
-                                h_flex()
-                                    .items_baseline()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(value.text.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(value.units.clone()),
-                                    ),
-                            )
-                            .into_any_element()
-                    })),
-            )
+            .child(h_flex().flex_wrap().gap_x_6().gap_y_3().children(
+                chosen[..count].iter().copied().flatten().map(|value| {
+                    v_flex()
+                        .gap_0p5()
+                        .w_32()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .truncate()
+                                .child(SharedString::from(value.name.as_str())),
+                        )
+                        .child(
+                            h_flex()
+                                .items_baseline()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(SharedString::from(value.text.as_str())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(SharedString::from(value.units.as_str())),
+                                ),
+                        )
+                        .into_any_element()
+                }),
+            ))
     }
 }
