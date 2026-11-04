@@ -55,6 +55,11 @@ impl std::error::Error for ScenarioError {}
 
 impl Scenario {
     /// Parses the line format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScenarioError`] naming the line when a directive is unknown
+    /// or malformed.
     pub fn parse(text: &str) -> Result<Self, ScenarioError> {
         let mut scenario = Scenario::default();
 
@@ -94,6 +99,11 @@ impl Scenario {
     }
 
     /// Loads a scenario from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScenarioError`] when the file cannot be read or does not
+    /// parse.
     pub fn load(path: &std::path::Path) -> Result<Self, ScenarioError> {
         let text = std::fs::read_to_string(path).map_err(|error| ScenarioError {
             line: 0,

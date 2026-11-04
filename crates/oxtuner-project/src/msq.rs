@@ -13,7 +13,7 @@
 //! - **The document is kept, not rebuilt.** This type exposes values and the
 //!   one text mutation the save path needs; everything else — unknown
 //!   attributes, comments, the `<bibliography>`, elements from a newer
-//!   TunerStudio — serializes back byte-for-byte.
+//!   `TunerStudio` — serializes back byte-for-byte.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -26,6 +26,10 @@ use crate::flags;
 use crate::xml::{Document, Element, Node, XmlError};
 
 /// A `.msq` page address: the unnumbered PC page, or a numbered calibration page.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a file page is either the PC page or a numbered calibration page"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntryPage {
     /// The leading page without a `number` attribute (PC variables).
@@ -45,7 +49,7 @@ impl fmt::Display for EntryPage {
 
 /// The address a `<page>` element declares.
 ///
-/// TunerStudio and LibreTune write `number="-1"` for the page that holds PC
+/// `TunerStudio` and `LibreTune` write `number="-1"` for the page that holds PC
 /// variables when they do not use an unnumbered page, so a negative number is
 /// the PC page rather than a calibration page. A number that is not an integer
 /// at all is left to the consistency check, which blocks it by name.
@@ -63,6 +67,10 @@ fn page_address(element: &Element) -> Option<EntryPage> {
 }
 
 /// Which kind of entry a value came from.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an entry is either a constant or a PC variable"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     /// A calibration constant.
@@ -141,6 +149,7 @@ pub struct Msq {
 }
 
 /// Why a `.msq` could not be parsed or written.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MsqError {
     /// The XML layer rejected the bytes.
@@ -200,6 +209,11 @@ impl From<EncodeError> for MsqError {
 
 impl Msq {
     /// Parses `.msq` bytes (ISO-8859-1) into the document model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError`] when the XML is malformed or the root is not
+    /// `<msq>`.
     pub fn parse(bytes: &[u8]) -> Result<Self, MsqError> {
         let source = encoding::decode(bytes);
         let document = Document::parse(&source)?;
@@ -215,6 +229,11 @@ impl Msq {
     }
 
     /// Serializes back to ISO-8859-1 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError::Encoding`] when the text has a character outside
+    /// ISO-8859-1.
     pub fn save(&self) -> Result<Vec<u8>, MsqError> {
         Ok(encoding::encode(&self.document.serialize())?)
     }
@@ -330,12 +349,12 @@ impl Msq {
     ///
     /// An entry whose name or value maps to a flag the definition tests is kept
     /// only when that flag is active; entries this build cannot map
-    /// (TunerStudio setting-group choices) are preserved. Flags that became
+    /// (`TunerStudio` setting-group choices) are preserved. Flags that became
     /// active but have no entry are appended, so a standalone reopen sees the
     /// same definition.
     ///
     /// A document that already agrees with the context is left untouched:
-    /// TunerStudio writes a disabled boolean as an explicit `enablehardware_test_OFF`
+    /// `TunerStudio` writes a disabled boolean as an explicit `enablehardware_test_OFF`
     /// entry, and a save with no settings change must not delete it (the file
     /// has to stay byte-for-byte).
     ///
@@ -343,6 +362,11 @@ impl Msq {
     /// (`pressure_units` → `pressure_bar`), while the `name` is the group, so
     /// both halves are read. Without that, a tune saved with a non-default
     /// group would gain a second entry for the option name on its first save.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError`] when the document cannot represent a setting
+    /// update.
     pub fn set_settings(
         &mut self,
         settings: &SettingsContext,
@@ -446,6 +470,10 @@ impl Msq {
     ///
     /// The caller supplies the final text (already formatted and *decoded*);
     /// XML escaping happens here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError::EntryNotFound`] when the page or entry is missing.
     pub fn set_entry_text(
         &mut self,
         page: EntryPage,
@@ -503,7 +531,11 @@ impl Msq {
     /// A definition entry the file omitted is a warning, not an error: the
     /// tune opened with the default, the user may edit it, and saving must
     /// write that edit instead of pretending it does not exist. The new
-    /// element carries only `name`; TunerStudio reads the rest from the INI.
+    /// element carries only `name`; `TunerStudio` reads the rest from the INI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError`] when the document cannot gain the element.
     pub fn put_entry_text(
         &mut self,
         page: EntryPage,
@@ -558,7 +590,7 @@ fn attribute_usize(element: &Element, name: &str) -> Option<usize> {
 
 /// The flags one `<setting>` entry documents, with the state each implies.
 ///
-/// TunerStudio writes a boolean as name and value (`enablehardware_test_OFF`),
+/// `TunerStudio` writes a boolean as name and value (`enablehardware_test_OFF`),
 /// and a setting-group choice as the group in `name` and the selected option in
 /// `value` (`pressure_units` → `pressure_bar`). Both halves are flags the
 /// definition can test in `#if`, so both are returned, deduplicated and
@@ -590,6 +622,10 @@ fn find_child_mut<'a>(element: &'a mut Element, name: &str) -> Option<&'a mut El
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>

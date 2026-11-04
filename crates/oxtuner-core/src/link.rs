@@ -30,10 +30,18 @@ pub trait CustomLink: Send + Sync + 'static {
     ///
     /// The error is shown to the user as a connect failure, so it should say
     /// what could not be opened rather than carry a debug dump.
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing reason the link could not be opened.
     fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String>;
 }
 
 /// Where a connection's bytes go.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a link is either a serial device or an application-supplied transport"
+)]
 #[derive(Clone)]
 pub enum PortChoice {
     /// A serial device at a baud rate.

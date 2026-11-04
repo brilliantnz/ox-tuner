@@ -61,8 +61,7 @@ pub(crate) fn parse_gauges(
             value_digits: Number::parse(&fields[9]),
             label_digits: fields
                 .get(10)
-                .map(|field| Number::parse(field))
-                .unwrap_or_else(|| Number::parse(&fields[9])),
+                .map_or_else(|| Number::parse(&fields[9]), |field| Number::parse(field)),
             active: fields
                 .get(11)
                 .and_then(|field| crate::fields::expression_body(field))

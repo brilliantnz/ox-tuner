@@ -99,7 +99,7 @@ impl LogStore {
     fn lock(&self) -> MutexGuard<'_, Ring> {
         self.inner
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

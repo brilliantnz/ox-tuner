@@ -5,25 +5,28 @@
 //! here is production code; the core's own transport path is what the tests
 //! exercise.
 
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "not every integration test binary uses every helper"
+)]
 
 use oxtuner_core::{CustomLink, Definition, PortChoice, Transport};
 use oxtuner_sim::{SimConfig, SimTransport};
 
 /// The simulator as a link implementation.
-pub struct Simulator {
+pub(crate) struct Simulator {
     config: SimConfig,
 }
 
 impl Simulator {
     /// A simulator with `config`.
-    pub fn new(config: SimConfig) -> Self {
+    pub(crate) fn new(config: SimConfig) -> Self {
         Self { config }
     }
 }
 
 impl CustomLink for Simulator {
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "simulator"
     }
 
@@ -35,11 +38,11 @@ impl CustomLink for Simulator {
 }
 
 /// A simulator connection with the default configuration.
-pub fn simulator() -> PortChoice {
+pub(crate) fn simulator() -> PortChoice {
     PortChoice::custom(Simulator::new(SimConfig::default()))
 }
 
 /// A simulator connection with a specific configuration.
-pub fn simulator_with(config: SimConfig) -> PortChoice {
+pub(crate) fn simulator_with(config: SimConfig) -> PortChoice {
     PortChoice::custom(Simulator::new(config))
 }

@@ -21,6 +21,12 @@
 //! Run bench tests with `--test-threads=1`: two sessions on one tty interleave
 //! their bytes and both time out.
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the ignored hardware test prints a readable write/burn report"
+)]
+
 use std::{
     env,
     path::PathBuf,
@@ -47,7 +53,7 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let parts = start(CoreConfig {
+        let parts = start(&CoreConfig {
             writes_enabled: true,
             ..CoreConfig::default()
         })
@@ -177,10 +183,10 @@ impl Harness {
 }
 
 fn project_path() -> PathBuf {
-    match env::var("OX_TUNER_PROJECT") {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => panic!("set OX_TUNER_PROJECT to the bench project's folder"),
-    }
+    let Ok(path) = env::var("OX_TUNER_PROJECT") else {
+        panic!("set OX_TUNER_PROJECT to the bench project's folder");
+    };
+    PathBuf::from(path)
 }
 
 fn port() -> String {
@@ -205,6 +211,10 @@ fn shifted(value: f64) -> f64 {
 
 #[test]
 #[ignore = "writes to the bench ECU's RAM and flash; see the module docs"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bench gate is one ordered write-and-burn session and reads best in sequence"
+)]
 fn the_bench_ecu_verifies_a_write_and_a_burn_and_leaves_the_tune_as_found() {
     if env::var("OX_TUNER_WRITE").as_deref() != Ok("1") {
         eprintln!("skipped: set OX_TUNER_WRITE=1 to allow a RAM write");
@@ -335,10 +345,7 @@ fn the_bench_ecu_verifies_a_write_and_a_burn_and_leaves_the_tune_as_found() {
         after_restore.cells[index], original,
         "the tune was not restored"
     );
-    println!(
-        "restored: {}[{}][{}] back to {} and burned",
-        TABLE, row, column, original
-    );
+    println!("restored: {TABLE}[{row}][{column}] back to {original} and burned");
 
     let entries = harness.journal();
     for entry in entries

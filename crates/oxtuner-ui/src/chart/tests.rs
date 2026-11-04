@@ -5,13 +5,17 @@
 //! legend toggles, pause/follow, pan/zoom limits and a render pass in both
 //! layouts.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "UI tests may unwrap; a failed call is a failed test"
+)]
 use std::{cell::RefCell, rc::Rc};
 
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, TestAppContext, Window, WindowBounds, WindowOptions, div, point, px,
-    size,
+    AnyWindowHandle, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Point,
+    Render, Styled as _, Subscription, TestAppContext, Window, WindowBounds, WindowOptions, div,
+    point, px, size,
 };
 use oxtuner_core::{ChannelInfo, ChartHistory};
 
@@ -23,7 +27,7 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         div().size_full().child(self.chart.clone())
     }
 }
@@ -55,6 +59,10 @@ fn history() -> ChartHistory {
     history
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the helper takes the history it clones into the chart view"
+)]
 fn open(
     cx: &mut TestAppContext,
     history: ChartHistory,
@@ -67,19 +75,19 @@ fn open(
     let events = Rc::new(RefCell::new(Vec::new()));
     let (handle, chart) = cx.update(|cx| {
         let chart = cx.new(|cx| ChartState::new(history.clone(), cx));
-        let sink = events.clone();
-        let _subscription = cx.subscribe(&chart, move |_, event: &ChartEvent, _| {
+        let sink = Rc::clone(&events);
+        let subscription = cx.subscribe(&chart, move |_, event: &ChartEvent, _| {
             sink.borrow_mut().push(event.clone());
         });
         // Keep the subscription alive through the host.
         let host = cx.new(|_| Host {
             chart: chart.clone(),
-            _events: _subscription,
+            _events: subscription,
         });
         let (handle, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    Default::default(),
+                    Point::default(),
                     size(px(1000.), px(800.)),
                 ))),
                 ..Default::default()
@@ -197,7 +205,7 @@ fn pause_freezes_the_window_and_follow_resumes_it(cx: &mut TestAppContext) {
     );
 
     cx.update(|cx| {
-        chart.update(cx, |chart, cx| chart.follow(cx));
+        chart.update(cx, ChartState::follow);
     });
     assert!(!cx.update(|cx| chart.read(cx).is_paused()));
     assert!(cx.update(|cx| chart.read(cx).is_following()));

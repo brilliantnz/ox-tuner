@@ -19,6 +19,10 @@ use crate::{i18n::t, project, settings::preferences::AppSettings};
 ///
 /// A plain dialog: the action buttons close it themselves after running, and
 /// the standard close button and Escape dismiss it without doing anything.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the project dialog builds its recent folders, picker and actions in one place"
+)]
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
     // The dialog is a lifecycle boundary: a folder moved since the project
     // opened is noticed here, not by a `stat` in the editor's render.

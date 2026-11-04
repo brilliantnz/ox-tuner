@@ -6,6 +6,8 @@
 //! are still first-class data — a definition that carries them must not lose
 //! them.
 
+use std::collections::BTreeMap;
+
 use crate::fields::{Command, split_fields};
 use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Ordered, ReferenceTable};
 
@@ -241,78 +243,101 @@ pub(crate) fn parse_reference_tables(
             continue;
         };
 
-        match lowered.as_str() {
-            "tableidentifier" => {
-                let mut index = 0usize;
-                while index + 1 < fields.len() {
-                    if let Some(id) = crate::fields::parse_u32(&fields[index]) {
-                        table
-                            .identifiers
-                            .push((id, crate::fields::unquote(&fields[index + 1]).to_owned()));
-                    }
-                    index += 2;
-                }
-            }
-            "adccount" => {
-                table.adc_count = fields
-                    .first()
-                    .and_then(|field| crate::fields::parse_u32(field));
-            }
-            "bytesperadc" => {
-                table.bytes_per_adc = fields
-                    .first()
-                    .and_then(|field| crate::fields::parse_u32(field));
-            }
-            "scale" => {
-                table.scale = fields.first().map(|field| Number::parse(field));
-            }
-            "tablestartoffset" => {
-                table.start_offset = fields
-                    .first()
-                    .and_then(|field| crate::fields::parse_u32(field));
-            }
-            "tablelimits" => {
-                if fields.len() >= 4
-                    && let Some(id) = crate::fields::parse_u32(&fields[0])
-                {
-                    table.limits.push((
-                        id,
-                        Number::parse(&fields[1]),
-                        Number::parse(&fields[2]),
-                        Number::parse(&fields[3]),
-                    ));
-                }
-            }
-            "solution" => {
-                table.solutions.push((
-                    fields
-                        .first()
-                        .map(|field| crate::fields::unquote(field).to_owned())
-                        .unwrap_or_default(),
-                    fields.get(1).cloned().unwrap_or_default(),
-                ));
-            }
-            // Generation helpers are kept verbatim until the calibration UI
-            // arrives; they are self-contained data.
-            "solutionslabel"
-            | "thermgenerator"
-            | "lineargenerator"
-            | "filebrowsegenerator"
-            | "thermoption"
-            | "tablegenerator"
-            | "topichelp" => {
-                definition
-                    .protocol
-                    .raw
-                    .insert(format!("referenceTable.{name}.{key}"), value.clone());
-            }
-            _ => {
-                section.unrecognized_key(&key, *line);
-                continue;
-            }
+        let understood = apply_reference_table_key(
+            table,
+            &mut definition.protocol.raw,
+            &lowered,
+            &fields,
+            &name,
+            &key,
+            &value,
+        );
+        if !understood {
+            section.unrecognized_key(&key, *line);
+            continue;
         }
         section.understand(*line);
     }
+}
+
+/// Applies one key inside an open `[ReferenceTables]` entry.
+///
+/// Returns `false` when the key belongs to no known reference-table field, so
+/// the caller can report it once.
+fn apply_reference_table_key(
+    table: &mut ReferenceTable,
+    raw: &mut BTreeMap<String, String>,
+    lowered: &str,
+    fields: &[String],
+    name: &str,
+    key: &str,
+    value: &str,
+) -> bool {
+    match lowered {
+        "tableidentifier" => {
+            let mut index = 0usize;
+            while index + 1 < fields.len() {
+                if let Some(id) = crate::fields::parse_u32(&fields[index]) {
+                    table
+                        .identifiers
+                        .push((id, crate::fields::unquote(&fields[index + 1]).to_owned()));
+                }
+                index += 2;
+            }
+        }
+        "adccount" => {
+            table.adc_count = fields
+                .first()
+                .and_then(|field| crate::fields::parse_u32(field));
+        }
+        "bytesperadc" => {
+            table.bytes_per_adc = fields
+                .first()
+                .and_then(|field| crate::fields::parse_u32(field));
+        }
+        "scale" => {
+            table.scale = fields.first().map(|field| Number::parse(field));
+        }
+        "tablestartoffset" => {
+            table.start_offset = fields
+                .first()
+                .and_then(|field| crate::fields::parse_u32(field));
+        }
+        "tablelimits" => {
+            if fields.len() >= 4
+                && let Some(id) = crate::fields::parse_u32(&fields[0])
+            {
+                table.limits.push((
+                    id,
+                    Number::parse(&fields[1]),
+                    Number::parse(&fields[2]),
+                    Number::parse(&fields[3]),
+                ));
+            }
+        }
+        "solution" => {
+            table.solutions.push((
+                fields
+                    .first()
+                    .map(|field| crate::fields::unquote(field).to_owned())
+                    .unwrap_or_default(),
+                fields.get(1).cloned().unwrap_or_default(),
+            ));
+        }
+        // Generation helpers are kept verbatim until the calibration UI
+        // arrives; they are self-contained data.
+        "solutionslabel"
+        | "thermgenerator"
+        | "lineargenerator"
+        | "filebrowsegenerator"
+        | "thermoption"
+        | "tablegenerator"
+        | "topichelp" => {
+            raw.insert(format!("referenceTable.{name}.{key}"), value.to_owned());
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// `[Datalog]`.
@@ -388,7 +413,7 @@ mod tests {
                 .extensions
                 .defaults
                 .get("fuel_rows")
-                .and_then(|value| value.literal()),
+                .and_then(Number::literal),
             Some(16.0)
         );
         assert_eq!(
@@ -396,7 +421,7 @@ mod tests {
                 .extensions
                 .defaults
                 .get("fuel_cols")
-                .and_then(|value| value.literal()),
+                .and_then(Number::literal),
             Some(12.0)
         );
         assert!(definition.extensions.is_read_only("engineMake"));

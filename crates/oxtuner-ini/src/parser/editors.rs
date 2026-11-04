@@ -236,8 +236,7 @@ pub(crate) fn parse_curves(
             "linelabel" => curve.line_labels.push(
                 fields
                     .first()
-                    .map(|field| Text::parse(field))
-                    .unwrap_or(Text::Literal(String::new())),
+                    .map_or(Text::Literal(String::new()), |field| Text::parse(field)),
             ),
             // Presentation keys the curve editor owns: window size and help
             // topic. Kept verbatim rather than dropped.

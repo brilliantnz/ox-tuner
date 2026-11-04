@@ -2,7 +2,7 @@
 //!
 //! It is built here, from the definition, for two reasons: the menu structure is
 //! definition data (the UI never sees `oxtuner-ini` types), and the labels need
-//! the `&` mnemonic markers TunerStudio writes removed.
+//! the `&` mnemonic markers `TunerStudio` writes removed.
 //!
 //! The tree mirrors the `[Menu]` sections: a top-level `menu =` is a folder, a
 //! `groupMenu` is a nested folder, and every other entry is a leaf pointing at a
@@ -18,6 +18,10 @@ use std::collections::{HashMap, HashSet};
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
 /// What a node in the navigation tree is.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the navigation tree has a fixed set of node kinds"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuNodeKind {
     /// A top-level `menu =` section.
@@ -32,13 +36,17 @@ pub enum MenuNodeKind {
     Dialog,
     /// A help topic declared in a dialog (`help = name, "Title"`).
     Help,
-    /// One of TunerStudio's built-in dialogs (`std_*`).
+    /// One of `TunerStudio`'s built-in dialogs (`std_*`).
     Standard,
     /// A target the definition does not declare.
     Missing,
 }
 
 /// A size or count, left for the UI to phrase in its own language.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a menu detail is a table grid, a curve point count or a row count"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuDetail {
     /// A table's fixed grid, columns first.
@@ -375,7 +383,7 @@ fn is_separator(item: &MenuItem) -> bool {
     item.target.eq_ignore_ascii_case("std_separator")
 }
 
-/// A label without TunerStudio's `&` mnemonics.
+/// A label without `TunerStudio`'s `&` mnemonics.
 ///
 /// `&` before a character marks the keyboard mnemonic and is dropped; `&&`
 /// means a literal ampersand and keeps one. Any other `&` is text.
@@ -526,14 +534,15 @@ menu = \"3D &Tuning Maps\"
 
     #[test]
     fn every_node_has_a_unique_stable_id() {
-        let tree = build(&parse(FIXTURE));
-        let mut ids = Vec::new();
         fn collect(nodes: &[MenuNode], ids: &mut Vec<String>) {
             for node in nodes {
                 ids.push(node.id.clone());
                 collect(&node.children, ids);
             }
         }
+
+        let tree = build(&parse(FIXTURE));
+        let mut ids = Vec::new();
         collect(&tree, &mut ids);
 
         let unique: std::collections::HashSet<&String> = ids.iter().collect();
@@ -546,7 +555,10 @@ menu = \"3D &Tuning Maps\"
     #[test]
     fn a_definition_without_menus_has_an_empty_tree() {
         let definition = parse("[MegaTune]\nsignature = \"x\"\n");
-        assert!(build(&definition).is_empty());
+        assert!(
+            build(&definition).is_empty(),
+            "a definition without menus must build an empty tree"
+        );
     }
 
     #[test]

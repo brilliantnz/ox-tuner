@@ -9,6 +9,7 @@
 //! The fixtures are synthetic and built in a temp dir. Never commit a real
 //! vendor INI or `.msq` here.
 
+use std::fmt::Write as _;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -53,20 +54,22 @@ nPages = 15
     }
 
     for page in 1..=PAGES {
-        text.push_str(&format!("page = {page}\n"));
+        let _ = writeln!(text, "page = {page}");
 
         for index in 0..scalars_per_page {
-            text.push_str(&format!(
-                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0\n",
+            let _ = writeln!(
+                text,
+                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0",
                 index % 240
-            ));
+            );
         }
 
         if page <= TABLES {
             let shape = if page == 1 { "[32x32]" } else { "[16x16]" };
-            text.push_str(&format!(
-                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0\n"
-            ));
+            let _ = writeln!(
+                text,
+                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0"
+            );
         }
     }
 
@@ -95,7 +98,7 @@ fn reference_msq() -> Vec<u8> {
     );
 
     for page in 0..15 {
-        body.push_str(&format!("<page number=\"{page}\" size=\"288\">"));
+        let _ = write!(body, "<page number=\"{page}\" size=\"288\">");
         if page == 0 {
             body.push_str("<constant name=\"scalar_1_0\">10.0</constant>");
         }
@@ -114,16 +117,18 @@ fn msq_bytes() -> Vec<u8> {
     body.push_str("<constant digits=\"1\" name=\"reqFuel\" units=\"ms\">10.0</constant>");
 
     let bins: Vec<String> = (0..16).map(|index| (index * 500).to_string()).collect();
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "<constant cols=\"16\" name=\"rpmBins\" rows=\"1\">{}</constant>",
         bins.join(" ")
-    ));
+    );
 
     let cells: Vec<String> = (0..256).map(|index| (index % 100).to_string()).collect();
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "<constant cols=\"16\" name=\"veTable\" rows=\"16\">{}</constant>",
         cells.join(" ")
-    ));
+    );
 
     body.push_str("</page></msq>");
 
@@ -193,7 +198,11 @@ fn bench_project_open_reference_warm(criterion: &mut Criterion) {
 
     let first = Project::open_with_cache(dir.path(), Some(cache.path()))
         .expect("the reference project opens");
-    assert_eq!(first.definition_source(), DefinitionSource::Parsed);
+    assert_eq!(
+        first.definition_source(),
+        DefinitionSource::Parsed,
+        "a cold open must parse the definition"
+    );
     drop(first);
 
     let warm = Project::open_with_cache(dir.path(), Some(cache.path()))

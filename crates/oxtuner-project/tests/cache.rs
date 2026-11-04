@@ -4,6 +4,11 @@
 //! a read-only project cacheable. A test that deletes the cache must be able
 //! to open the project again with exactly the same definition.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap; a failed call is a failed test"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

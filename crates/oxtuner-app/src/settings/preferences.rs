@@ -67,11 +67,10 @@ impl Settings {
         let version = value
             .get("schema_version")
             .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
+            .map_or(0, |version| u32::try_from(version).unwrap_or(u32::MAX));
 
         match version {
-            SETTINGS_SCHEMA_VERSION => {}
-            0 => {
+            SETTINGS_SCHEMA_VERSION | 0 => {
                 // Version 0 is a file written before the field existed, or the
                 // first-run state. Nothing needs rewriting yet; applying the
                 // defaults below is the migration.
@@ -84,8 +83,7 @@ impl Settings {
             version => {
                 return Err(format!(
                     "settings schema {version} is newer than this build supports \
-                     ({}); update ox-tuner instead of overwriting it",
-                    SETTINGS_SCHEMA_VERSION
+                     ({SETTINGS_SCHEMA_VERSION}); update ox-tuner instead of overwriting it"
                 ));
             }
         }
@@ -132,12 +130,19 @@ pub(crate) const DEFAULT_LANGUAGE: &str = "en";
 
 /// The theme the user asked for. `System` follows the OS appearance; the other
 /// two pin the app.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the preference is the system theme, light or dark"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePreference {
+    /// Follow the operating system appearance.
     #[default]
     System,
+    /// Always use the light theme.
     Light,
+    /// Always use the dark theme.
     Dark,
 }
 
@@ -267,6 +272,7 @@ pub(crate) struct LoggingSettings {
 ///
 /// A GPUI global because the component library's settings fields read and write
 /// through `&App`/`&mut App` closures, not a view entity.
+#[derive(Debug)]
 pub struct AppSettings {
     path: PathBuf,
     settings: Settings,

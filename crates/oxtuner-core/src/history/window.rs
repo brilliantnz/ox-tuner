@@ -1,4 +1,6 @@
 //! One sample of one series.
+
+/// One decoded sample of a realtime channel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
     /// Seconds, relative to the session's first frame.
@@ -57,6 +59,7 @@ impl TimeWindow {
     }
 
     /// Moves the window by `seconds`.
+    #[must_use]
     pub fn shifted(self, seconds: f64) -> Self {
         Self::new(self.start + seconds, self.end + seconds)
     }

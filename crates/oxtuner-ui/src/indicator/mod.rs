@@ -11,6 +11,13 @@
 //! "on" state. The strip paints only the cards; the host supplies the panel
 //! background, padding and radius around it.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::unreadable_literal,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 pub mod legend;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -22,6 +29,10 @@ use gpui_kit::{
 };
 
 /// What one indicator is doing in the current frame.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an indicator is off, on, or cannot be evaluated"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndicatorState {
     /// The expression evaluated to zero.
@@ -36,6 +47,10 @@ pub enum IndicatorState {
 ///
 /// The definition does not say whether "on" is good or bad, so the host picks
 /// the tone. Off indicators use the inactive colours and ignore the tone.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an indicator tone is normal, a warning or a fault"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndicatorTone {
     /// Normal operation, for example "Running" or "SD OK".
@@ -61,7 +76,7 @@ pub struct IndicatorView {
 impl IndicatorTone {
     /// Maps a definition's on background colour name to a tone.
     ///
-    /// TunerStudio definitions mark a warning or a fault with red or yellow in
+    /// `TunerStudio` definitions mark a warning or a fault with red or yellow in
     /// the on colours, for example Battery Voltage Warning. Everything else is
     /// a normal active state. Off and unavailable cards ignore the tone.
     pub fn from_colour_name(name: &str) -> Self {
@@ -225,7 +240,7 @@ impl IndicatorStyle {
 /// The cards use the definition's labels and the host's tones. The strip has no
 /// internal state and emits no events; a click does nothing because the
 /// indicator is a reading, not a command.
-#[derive(IntoElement)]
+#[derive(Debug, IntoElement)]
 pub struct IndicatorStrip {
     indicators: Vec<IndicatorView>,
     style: Option<IndicatorStyle>,
@@ -246,6 +261,7 @@ impl IndicatorStrip {
     }
 
     /// Supplies the host's colours and spacing.
+    #[must_use]
     pub fn style(mut self, style: IndicatorStyle) -> Self {
         self.style = Some(style);
         self
@@ -253,6 +269,7 @@ impl IndicatorStrip {
 
     /// Fixes the column count, for a dialog's `indicatorPanel`. Without it the
     /// strip wraps fixed-width cards and leaves a short last row empty.
+    #[must_use]
     pub fn columns(mut self, columns: usize) -> Self {
         self.columns = Some(columns.max(1));
         self
@@ -284,7 +301,7 @@ impl RenderOnce for IndicatorStrip {
         };
         let cards = self
             .indicators
-            .into_iter()
+            .iter()
             .map(|indicator| card(indicator, &style, layout))
             .collect::<Vec<_>>();
 
@@ -297,7 +314,7 @@ impl RenderOnce for IndicatorStrip {
     }
 }
 
-fn card(indicator: IndicatorView, style: &IndicatorStyle, layout: CardLayout) -> AnyElement {
+fn card(indicator: &IndicatorView, style: &IndicatorStyle, layout: CardLayout) -> AnyElement {
     let (background, border, text, dot) = colors(indicator.state, indicator.tone, style);
     let hollow = indicator.state == IndicatorState::Unavailable;
 

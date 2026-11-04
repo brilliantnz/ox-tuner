@@ -159,9 +159,9 @@ const RETRY_SECOND: std::time::Duration = std::time::Duration::from_millis(500);
 /// The window was created windowed at a size smaller than the display, so a zoom
 /// request here always expands it — which is why macOS's toggle semantics are
 /// safe. Asking for it during creation is too early for the platform; asking with
-/// `restore_native_window_state` instead is worse: AppKit applies that
+/// `restore_native_window_state` instead is worse: `AppKit` applies that
 /// synchronously, its frame change re-enters the app through GPUI's resize
-/// callback, and the app is already mutably borrowed ("RefCell already borrowed").
+/// callback, and the app is already mutably borrowed (`RefCell` already borrowed).
 /// `zoom_window()` is asynchronous, so it never re-enters.
 ///
 /// Windows and Linux retry, because their window managers may still be mapping the

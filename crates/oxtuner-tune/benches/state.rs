@@ -7,9 +7,9 @@
 //! cargo bench -p oxtuner-tune
 //! ```
 
-use std::sync::Arc;
-
+use std::fmt::Write as _;
 use std::hint::black_box;
+use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_ini::{Definition, SettingsContext, parse_str};
@@ -40,19 +40,21 @@ pageSize = 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288,
 
     let mut written = 0usize;
     for page in 1..=PAGES {
-        text.push_str(&format!("page = {page}\n"));
+        let _ = writeln!(text, "page = {page}");
         for index in 0..scalars_per_page {
-            text.push_str(&format!(
-                "scalar_{page}_{index} = scalar, U08, {index}, \"\", 1, 0, 0, 255, 0\n"
-            ));
+            let _ = writeln!(
+                text,
+                "scalar_{page}_{index} = scalar, U08, {index}, \"\", 1, 0, 0, 255, 0"
+            );
             written += 1;
         }
         if page <= TABLES {
             // The largest grid the editor draws; the other seven are 16×16.
             let shape = if page == 1 { "[32x32]" } else { "[16x16]" };
-            text.push_str(&format!(
-                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0\n"
-            ));
+            let _ = writeln!(
+                text,
+                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0"
+            );
             written += 1;
         }
     }
@@ -79,8 +81,11 @@ fn images(layout: Arc<Layout>) -> TuneImages {
             continue;
         }
         if index % 10 == 0 {
-            ram.set_raw_at(&variable.name, 0, 7.0).unwrap();
-            working.set_raw_at(&variable.name, 0, 9.0).unwrap();
+            ram.set_raw_at(&variable.name, 0, 7.0)
+                .expect("the fixture variable exists");
+            working
+                .set_raw_at(&variable.name, 0, 9.0)
+                .expect("the fixture variable exists");
         }
     }
 
@@ -115,7 +120,7 @@ fn budget(criterion: &mut Criterion) {
             black_box(
                 table
                     .cell(black_box("table_1"), black_box(31), black_box(31))
-                    .unwrap(),
+                    .expect("the fixture table cell exists"),
             )
         });
     });

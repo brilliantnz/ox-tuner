@@ -39,6 +39,7 @@ impl ChannelInfo {
     }
 
     /// Marks the channel hidden, as the definition's `hide` flag does.
+    #[must_use]
     pub fn hidden(mut self, hidden: bool) -> Self {
         self.hidden = hidden;
         self
@@ -62,7 +63,7 @@ pub struct HistoryStats {
 impl HistoryStats {
     /// Whether every pushed frame is either retained or counted as an overrun.
     pub fn is_accounted(&self) -> bool {
-        self.pushed == self.frames as u64 + self.overruns
+        self.pushed == u64::try_from(self.frames).unwrap_or(u64::MAX) + self.overruns
     }
 }
 
@@ -358,13 +359,13 @@ impl ChartHistory {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
         self.inner
             .read()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
         self.inner
             .write()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

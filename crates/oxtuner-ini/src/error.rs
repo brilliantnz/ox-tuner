@@ -14,6 +14,10 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// How serious a diagnostic is.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "note, warning and error are the three severity levels the format uses"
+)]
 #[derive(
     serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
 )]

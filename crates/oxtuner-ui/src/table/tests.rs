@@ -4,13 +4,24 @@
 //! real view through pointer and keyboard events, including the frozen headers,
 //! which are a layout result rather than a model property.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::print_stderr,
+    clippy::float_cmp,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "UI tests may unwrap; a failed call is a failed test"
+)]
 use std::{cell::RefCell, rc::Rc, time::Instant};
 
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Subscription, TestAppContext, Window,
-    WindowBounds, WindowOptions, div, px, size,
+    IntoElement, ParentElement as _, Point, Render, Styled as _, Subscription, TestAppContext,
+    Window, WindowBounds, WindowOptions, div, px, size,
 };
 use oxtuner_core::{AxisKind, AxisSummary, CellState, TableSummary};
 
@@ -25,7 +36,7 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         div().size_full().child(self.grid.clone())
     }
 }
@@ -81,7 +92,7 @@ fn open(
     let events = Rc::new(RefCell::new(Vec::new()));
     let (handle, grid) = cx.update(|cx| {
         let grid = cx.new(Table::new);
-        let sink = events.clone();
+        let sink = Rc::clone(&events);
         let subscription = cx.subscribe(&grid, move |_, event: &TableEvent, _| {
             sink.borrow_mut().push(event.clone());
         });
@@ -92,7 +103,7 @@ fn open(
         let (handle, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    Default::default(),
+                    Point::default(),
                     size(px(1000.), px(800.)),
                 ))),
                 ..Default::default()

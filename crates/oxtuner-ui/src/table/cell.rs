@@ -108,7 +108,7 @@ impl RenderOnce for TableCell {
             .role(Role::GridCell)
             .aria_label(aria)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                (on_press)(event, window, cx)
+                (on_press)(event, window, cx);
             })
             .on_mouse_move(move |event, window, cx| (on_drag)(event, window, cx));
 

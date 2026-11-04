@@ -12,7 +12,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_protocol::{Frame, FrameDecoder, crc32};
 
 fn bench_crc32(criterion: &mut Criterion) {
-    let block: Vec<u8> = (0..288u32).map(|index| (index % 251) as u8).collect();
+    let block: Vec<u8> = (0..288u32)
+        .map(|index| u8::try_from(index % 251).unwrap_or(0))
+        .collect();
 
     criterion.bench_function("protocol_crc32_288_bytes", |bencher| {
         bencher.iter(|| black_box(crc32(black_box(&block))));

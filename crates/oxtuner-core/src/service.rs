@@ -35,11 +35,12 @@ use crate::io_thread::{
     self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
 };
 use crate::journal::{self, Journal};
+use crate::link::PortChoice;
 use crate::message::{
     AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary,
-    Envelope, Event, Failure, FailureCode, ImportSummary, JournalEntry, OpId, PortChoice,
-    PortSummary, ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SignatureVerdict,
-    TableSummary, WriteSummary,
+    Envelope, Event, Failure, FailureCode, ImportSummary, JournalEntry, OpId, PortSummary,
+    ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
+    WriteSummary,
 };
 use crate::realtime::{FrameNotify, FrameWatch, LatestFrame, RealtimeDecoder, RealtimeFrame};
 use crate::safety::{Safety, clamp_user};
@@ -92,6 +93,7 @@ impl Default for CoreConfig {
 }
 
 /// A command queue that cannot take the command right now.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum CoreError {
     /// The command was refused before entering the core; it will not be
@@ -240,6 +242,12 @@ pub struct CoreParts {
     pub thread: CoreThread,
 }
 
+impl std::fmt::Debug for CoreParts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CoreParts").finish_non_exhaustive()
+    }
+}
+
 /// Owns the core thread and joins it on drop.
 ///
 /// Dropping is a safe shutdown: it queues [`Command::Shutdown`], raises the stop
@@ -253,6 +261,15 @@ pub struct CoreThread {
     join: Option<JoinHandle<CoreReport>>,
     commands: MTx<mpsc::Array<Envelope>>,
     stop: Arc<StopFlag>,
+}
+
+impl std::fmt::Debug for CoreThread {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CoreThread")
+            .field("finished", &self.join.is_none())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CoreThread {
@@ -312,7 +329,11 @@ impl Drop for CoreThread {
 }
 
 /// Starts the core thread.
-pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
+///
+/// # Errors
+///
+/// Returns [`CoreError::Spawn`] when the thread cannot be created.
+pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
     let command_capacity = config.command_capacity.max(1);
     // The floor is enforced rather than only documented: every accepted command
     // owes exactly one answer, so `command_capacity` answers plus `Stopped`
@@ -384,7 +405,11 @@ pub fn start(config: CoreConfig) -> Result<CoreParts, CoreError> {
 ///
 /// Blocks on the queue: with no poller yet there is nothing to do while idle,
 /// and a timed wait would only wake the thread for nothing.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    reason = "the thread loop owns its channels and shared views for the life of the core"
+)]
 fn run(
     commands: Rx<mpsc::Array<Envelope>>,
     events: EventTx,
@@ -405,7 +430,7 @@ fn run(
     // Every handle is gone (`Err`) also ends the loop, which is what makes a
     // dropped UI a shutdown rather than a leak.
     loop {
-        let envelope = match next_wait(&live) {
+        let envelope = match next_wait(live.as_ref()) {
             Some(timeout) => match commands.recv_timeout(timeout) {
                 Ok(envelope) => Some(envelope),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -527,7 +552,7 @@ enum Session {
     /// this definition, and a definition-only session keeps the ECU RAM image
     /// here.
     Definition(Box<Definition>),
-    /// A TunerStudio project: definition, tune images and the file they came
+    /// A `TunerStudio` project: definition, tune images and the file they came
     /// from.
     ///
     /// Boxed: a `Project` is a few kilobytes of tune images, and the session
@@ -584,7 +609,14 @@ impl Session {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive match over every UI command reads as a single dispatcher"
+)]
 fn handle(
     envelope: Envelope,
     session: &mut Session,
@@ -639,10 +671,10 @@ fn handle(
             if let Some(definition) = session.definition() {
                 configure_history(history, definition);
             }
-            connect(op, session, live, events, report, port, framing, false)
+            connect(op, session, live, events, report, &port, framing, false)
         }
         Command::TestConnection { port, framing } => {
-            connect(op, session, live, events, report, port, framing, true)
+            connect(op, session, live, events, report, &port, framing, true)
         }
         Command::Disconnect => {
             let Some(connection) = live.as_mut() else {
@@ -1016,7 +1048,7 @@ fn handle(
         } => {
             match oxtuner_ini::parse_bytes(&bytes, &settings) {
                 Ok(parsed) => {
-                    let summary = DefinitionSummary::new(label.clone(), &parsed);
+                    let summary = DefinitionSummary::new(label, &parsed);
                     tracing::info!(
                         %op,
                         label = %summary.label,
@@ -1558,6 +1590,10 @@ fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
 /// turn "leave the ECU's tune alone" into a write of a different number — a
 /// definition's range is not the firmware's limit. Controller-owned values are
 /// not part of the write plan either. Returns how many cells changed.
+#[expect(
+    clippy::float_cmp,
+    reason = "a value needs sending only when the ECU's stored raw value differs exactly"
+)]
 fn clamp_working_changes(project: &mut Project) -> usize {
     let mut clamped: Vec<(String, usize, f64)> = Vec::new();
     {
@@ -1726,7 +1762,14 @@ fn adopt_ecu_image(
 }
 
 /// Starts a verified RAM write (S1–S3, S6–S8).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the write path is one linear protocol sequence and reads best in order"
+)]
 fn write_to_ram(
     op: OpId,
     session: &mut Session,
@@ -1966,7 +2009,14 @@ fn write_to_ram(
 }
 
 /// Starts a verified burn (S3–S5, S7, S8).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the burn path is one linear protocol sequence and reads best in order"
+)]
 fn burn_to_flash(
     op: OpId,
     session: &mut Session,
@@ -2224,7 +2274,14 @@ fn revert_tune(
 }
 
 /// Imports one `.msq` into the working image (S4, S9).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the import path joins several consent and layout checks into one report"
+)]
 fn import_tune(
     op: OpId,
     session: &mut Session,
@@ -2708,9 +2765,8 @@ fn validate_scalar_edit(project: &Project, name: &str, value: f64) -> Result<(),
 /// reading; it is counted in the report so a lost answer is never silent.
 fn send(events: &EventTx, event: Event) {
     match events.send(event) {
-        Ok(()) => {}
+        Ok(()) | Err(SendFailure::Dropped) => {}
         Err(SendFailure::Closed) => tracing::debug!("the events channel is closed"),
-        Err(SendFailure::Dropped) => {}
     }
 }
 
@@ -2721,8 +2777,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
     }
     payload
         .downcast_ref::<String>()
-        .map(String::as_str)
-        .unwrap_or("unknown panic")
+        .map_or("unknown panic", String::as_str)
 }
 
 /// The default realtime poll rate.
@@ -2898,6 +2953,10 @@ struct WriteTxn {
 
 /// A live ECU session: the I/O thread, its pending conversations and the
 /// summary the UI shows.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the session's flags describe independent link and polling states"
+)]
 struct Live {
     thread: IoThread,
     replies: Rx<spsc::Array<IoReply>>,
@@ -3170,7 +3229,10 @@ impl Live {
 ///
 /// A transaction that was in flight is failed loudly and the write path halts:
 /// a closed session must never look like a successful write.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
 fn teardown(
     live: &mut Option<Live>,
     session: &mut Session,
@@ -3239,8 +3301,8 @@ fn teardown(
 }
 
 /// How long the core may wait for the next command.
-fn next_wait(live: &Option<Live>) -> Option<Duration> {
-    let live = live.as_ref()?;
+fn next_wait(live: Option<&Live>) -> Option<Duration> {
+    let live = live?;
     if !live.pending.is_empty() {
         return Some(PENDING_WAIT);
     }
@@ -3305,14 +3367,18 @@ fn align_log_values(columns: &[String], frame: &RealtimeFrame) -> Vec<f64> {
 }
 
 /// Starts a connection for `Connect`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the handler mirrors the fields of one protocol request and keeps the connect sequence in order"
+)]
 fn connect(
     op: OpId,
     session: &mut Session,
     live: &mut Option<Live>,
     events: &EventTx,
     report: &mut CoreReport,
-    port: PortChoice,
+    port: &PortChoice,
     framing: Option<LinkMode>,
     probe: bool,
 ) -> Outcome {
@@ -3380,7 +3446,7 @@ fn connect(
         link: link.clone(),
     };
 
-    match IoThread::start(plan) {
+    match IoThread::start(&plan) {
         Ok((thread, replies)) => {
             let mut connection = Live::new(
                 thread,
@@ -3440,7 +3506,10 @@ fn default_framing(definition: &Definition) -> LinkMode {
 }
 
 /// Drains replies and runs the poll/reconnect timers.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
 fn service_live(
     live: &mut Option<Live>,
     session: &mut Session,
@@ -3543,7 +3612,14 @@ fn service_live(
 
 /// Moves one write or burn transaction through its read → write/burn → verify
 /// sequence.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the write/burn transaction advances through one linear protocol sequence"
+)]
 fn advance_write(
     live: &mut Live,
     op: OpId,
@@ -3560,7 +3636,10 @@ fn advance_write(
         tracing::warn!(%op, "a write reply arrived without a transaction");
         return;
     };
-    debug_assert_eq!(transaction.op, op);
+    debug_assert_eq!(
+        transaction.op, op,
+        "the write transaction belongs to the reply's operation"
+    );
 
     match outcome {
         IoOutcome::Pages { pages } => match transaction.phase {
@@ -3715,10 +3794,10 @@ fn advance_write(
                             );
                             return;
                         }
-                        transaction.changed_variables = variables.clone();
+                        transaction.changed_variables.clone_from(&variables);
                         transaction.cells = cells;
                         transaction.variables = variables.len();
-                        transaction.pages = targets.clone();
+                        transaction.pages.clone_from(&targets);
 
                         let mut writes = Vec::with_capacity(targets.len());
                         for page in &targets {
@@ -3948,8 +4027,8 @@ fn advance_write(
                 start_verify(live, op, transaction, session, safety, events, report);
             }
         }
-        IoOutcome::Realtime { block } => match transaction.phase {
-            TxnPhase::BurnWait => {
+        IoOutcome::Realtime { block } => {
+            if transaction.phase == TxnPhase::BurnWait {
                 let Some(wait) = live.burn_wait else {
                     tracing::warn!(%op, "a burn check arrived without a wait");
                     live.write_tx = Some(transaction);
@@ -4013,12 +4092,11 @@ fn advance_write(
                 }
                 tracing::debug!(%op, "the burn reached flash; reading it back");
                 start_verify(live, op, transaction, session, safety, events, report);
-            }
-            _ => {
+            } else {
                 tracing::warn!(%op, "an unexpected realtime block arrived during a transaction");
                 live.write_tx = Some(transaction);
             }
-        },
+        }
         IoOutcome::Failed(failure) => {
             let link_lost = matches!(
                 failure.kind,
@@ -4048,7 +4126,6 @@ fn advance_write(
 }
 
 /// Queues the read-back that ends a write or burn transaction.
-#[allow(clippy::too_many_arguments)]
 fn start_verify(
     live: &mut Live,
     op: OpId,
@@ -4099,7 +4176,7 @@ fn verification_message(transaction: &WriteTxn) -> String {
             let actual = transaction.readback.get(page);
             expected.is_none() || expected != actual
         })
-        .map(|page| page.to_string())
+        .map(ToString::to_string)
         .collect();
     format!(
         "the read-back did not match on page {}. The ECU image was reloaded from the read-back; \
@@ -4262,7 +4339,14 @@ fn apply_verified_burn(transaction: &WriteTxn, session: &mut Session) -> Result<
 }
 
 /// Ends a transaction that failed (or could not be sent), halting writes.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the failed transaction is finished and dropped by this call"
+)]
 fn fail_transaction(
     live: &mut Live,
     transaction: WriteTxn,
@@ -4366,6 +4450,10 @@ fn record_result(transaction: &WriteTxn, live: &Live, result: &str, detail: &str
 }
 
 /// Ends a transaction before the wire saw it, without halting.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the refused transaction is finished and dropped by this call"
+)]
 fn finish_refused(
     live: &mut Live,
     transaction: WriteTxn,
@@ -4389,7 +4477,14 @@ fn finish_refused(
 }
 
 /// Handles one I/O reply. Returns `false` when the session is finished.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the reply handler is one exhaustive match over every I/O outcome"
+)]
 fn on_reply(
     live: &mut Live,
     reply: IoReply,
@@ -4702,8 +4797,7 @@ fn connection_lost(
 fn schedule_reconnect(live: &mut Live) {
     let attempts = live
         .reconnect
-        .map(|reconnect| reconnect.attempts.saturating_add(1))
-        .unwrap_or(0);
+        .map_or(0, |reconnect| reconnect.attempts.saturating_add(1));
     // First retry after RECONNECT_BASE, then doubling: 500 ms, 1 s, 2 s, 4 s, 5 s.
     let delay = RECONNECT_BASE
         .saturating_mul(1u32 << attempts.saturating_sub(1).min(4))

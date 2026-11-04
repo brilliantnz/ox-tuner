@@ -116,7 +116,11 @@ enum EditorTab {
 }
 
 impl AppLayout {
-    fn new(window: &mut Window, menu_bar: Entity<AppMenuBar>, cx: &mut Context<Self>) -> Self {
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the underscore marks observers kept only for their lifetime"
+    )]
+    fn new(window: &mut Window, menu_bar: Entity<AppMenuBar>, cx: &mut Context<'_, Self>) -> Self {
         // Start-up applies the stored preference once; this follows live OS
         // changes only while the user chose `System`. A Light or Dark preference
         // must not be overridden when the OS appearance changes.
@@ -138,7 +142,7 @@ impl AppLayout {
         // window's initial geometry, which `main` already read from the file.
         // Skipping it avoids writing the same document back on every launch.
         let first_bounds = Rc::new(Cell::new(true));
-        let first_bounds_callback = first_bounds.clone();
+        let first_bounds_callback = Rc::clone(&first_bounds);
         let _bounds = cx.observe_window_bounds(window, move |_this, window, cx| {
             if first_bounds_callback.replace(false) {
                 return;
@@ -190,7 +194,7 @@ impl AppLayout {
     /// curve resolves as a one-row table, so its bins and values edit the same
     /// way. Dialogs get the grid they embed, with their constants behind a tab,
     /// or the constants alone. Every other kind keeps the placeholder.
-    fn sync_editors(&mut self, cx: &mut Context<Self>) {
+    fn sync_editors(&mut self, cx: &mut Context<'_, Self>) {
         let selected = self.explorer.read(cx).selected().cloned();
         let node_id = selected.as_ref().map(|node| node.id.clone());
         if node_id != self.tab_node {
@@ -243,7 +247,11 @@ impl AppLayout {
     /// Project identity lives in the title bar and the Projects dialog; the
     /// editor shows only the selected node, plus a read-only banner when the
     /// workspace itself is read-only.
-    fn render_editor_column(&self, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the editor column composes its tabs, toolbar and active editor together"
+    )]
+    fn render_editor_column(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         // The editor names what the core owns. `AppState::last_project` only
         // remembers the path between launches.
         let status = crate::core::CoreService::status(cx);
@@ -327,7 +335,7 @@ impl AppLayout {
             .text_color(cx.theme().foreground)
             // A read-only tune is a property of the workspace, not of the
             // selected node, so it stays visible above the editor body.
-            .when_some(read_only_banner, |this, banner| this.child(banner))
+            .when_some(read_only_banner, gpui_kit::ParentElement::child)
             .child(
                 v_flex()
                     .flex_1()
@@ -403,7 +411,7 @@ impl AppLayout {
     }
 
     /// The grid/constants switch above a dialog that wraps a table.
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tabs(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         h_flex()
             .h_9()
             .flex_shrink_0()
@@ -431,7 +439,7 @@ impl AppLayout {
     }
 
     /// Switches which view a dialog-backed node shows.
-    fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<Self>) {
+    fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<'_, Self>) {
         if self.tab == tab {
             return;
         }
@@ -443,7 +451,7 @@ impl AppLayout {
     /// The panel toggles at the trailing edge of the main bar.
     /// Each reads its state from the session document, so the
     /// pressed appearance and the panel itself cannot disagree.
-    fn render_panel_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_panel_buttons(cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
         let layout = &cx.global::<AppState>().data().layout;
         let (primary, secondary, bottom) = (
             layout.primary_visible,
@@ -617,7 +625,11 @@ fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement 
 }
 
 impl Render for AppLayout {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the main window layout composes every persistent region in one pass"
+    )]
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
         let (primary, secondary, bottom) = (layout.primary(), layout.secondary(), layout.bottom());
         let primary_visible = layout.primary_visible;
@@ -636,7 +648,7 @@ impl Render for AppLayout {
             // the window controls. Both sidebars therefore start below it and
             // keep their own header rows, so the layout reads as one workspace
             // rather than three columns with separate chrome.
-            .child(MainBar::new(self.menu_bar.clone()).actions(self.render_panel_buttons(cx)))
+            .child(MainBar::new(self.menu_bar.clone()).actions(Self::render_panel_buttons(cx)))
             .child(
                 div()
                     .relative()
@@ -751,6 +763,10 @@ impl Render for AppLayout {
 ///
 /// Called by `main` after the settings and session documents are installed;
 /// everything the layout needs from them is read here or during its first render.
+///
+/// # Panics
+///
+/// Panics when the platform refuses to open the main window.
 pub fn open_main_window(cx: &mut App) {
     // The menu must be installed after the keymap, so item shortcuts come from
     // the bindings `init` applied.
@@ -853,7 +869,13 @@ fn tooltip(shortcut_id: &str, title: gpui_kit::SharedString) -> gpui_kit::Shared
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
+
     use super::*;
+    use gpui_kit::Point;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         AnyWindowHandle, Bounds, Context, IntoElement, Render, TestAppContext, Window,
@@ -867,7 +889,7 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
             div()
                 .relative()
                 .size_full()
@@ -887,7 +909,7 @@ mod tests {
             let (handle, _) = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        Default::default(),
+                        Point::default(),
                         size(px(1200.), px(800.)),
                     ))),
                     ..Default::default()

@@ -14,6 +14,7 @@ use gpui_kit::{App, Global};
 use oxtuner_log::{FilePolicy, LogConfig, LogHandle, LogStore};
 
 /// The installed pipeline, kept for the whole process.
+#[derive(Debug)]
 pub struct Logging {
     handle: LogHandle,
 }
@@ -35,10 +36,16 @@ pub fn init(directory: &Path, log_file: bool, verbose: bool) -> Option<LogHandle
         .with_file(policy)
         .with_verbose(verbose);
 
-    match oxtuner_log::init(config) {
+    match oxtuner_log::init(&config) {
         Ok(handle) => Some(handle),
         Err(error) => {
-            eprintln!("ox-tuner: logging is unavailable: {error}");
+            #[expect(
+                clippy::print_stderr,
+                reason = "the logging pipeline failed to start, so tracing cannot report it"
+            )]
+            {
+                eprintln!("ox-tuner: logging is unavailable: {error}");
+            }
             None
         }
     }

@@ -88,6 +88,7 @@ impl CommandPattern {
     }
 
     /// Fixes the wire order of the 16-bit arguments.
+    #[must_use]
     pub fn with_big_endian(mut self, big_endian: bool) -> Self {
         self.force_big_endian = big_endian;
         self

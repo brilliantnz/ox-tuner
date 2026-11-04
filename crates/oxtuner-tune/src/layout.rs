@@ -40,6 +40,10 @@ fn ci_hash(name: &str) -> u64 {
 }
 
 /// The declared shape of one variable, with every dimension resolved.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines a closed set of storage shapes"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryShape {
     /// One value.
@@ -113,6 +117,10 @@ impl EntryShape {
 }
 
 /// Who owns a variable's value.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a variable is either on an INI page or PC-side"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Owner {
     /// A calibration constant on an INI page (1-based).
@@ -214,6 +222,10 @@ impl PageLayout {
 }
 
 /// How serious a layout problem is.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a layout problem either degrades a variable or drops it"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IssueSeverity {
     /// The variable loaded, but something about it is degraded.
@@ -223,6 +235,10 @@ pub enum IssueSeverity {
 }
 
 /// Why a definition entry did not become a usable layout entry.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "layout issues are a closed set of resolution failures"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutIssueKind {
     /// A constant was declared before any `page =` line.
@@ -303,110 +319,129 @@ impl Layout {
         };
 
         for (name, constant) in definition.constants.iter() {
-            let Some(page) = IniPage::new(constant.page) else {
-                layout.issues.push(LayoutIssue::new(
-                    IssueSeverity::Error,
-                    LayoutIssueKind::NoPage,
-                    Some(name),
-                    "the constant is declared before any `page =` line, so it has no ECU address",
-                ));
-                continue;
-            };
-
-            let Some(shape) = shape_of(&constant.shape) else {
-                layout.issues.push(LayoutIssue::new(
-                    IssueSeverity::Error,
-                    LayoutIssueKind::UnresolvedShape,
-                    Some(name),
-                    "the declared shape depends on a value this build cannot resolve, so the \
-                     constant has no fixed size",
-                ));
-                continue;
-            };
-
-            let attributes = Attributes::resolve(
-                constant.scale.as_ref(),
-                constant.translate.as_ref(),
-                constant.minimum.as_ref(),
-                constant.maximum.as_ref(),
-                constant.digits.as_ref(),
-                values,
-            );
-            if attributes.unresolved.is_some() {
-                layout.issues.push(LayoutIssue::new(
-                    IssueSeverity::Warning,
-                    LayoutIssueKind::UnresolvedAttribute,
-                    Some(name),
-                    format!(
-                        "presentation attribute `{}` is an expression this build could not \
-                         evaluate; values cannot be converted until it resolves",
-                        attributes.unresolved.unwrap_or("?")
-                    ),
-                ));
-            }
-
-            let controller_owned =
-                constant.flags.controller_priority || constant.class == ConstantClass::OddArray;
-            let spec = VariableSpec {
-                name: name.to_owned(),
-                owner: Owner::Page(page),
-                shape,
-                data_type: constant.data_type,
-                address: constant.address,
-                units: constant.units.literal().unwrap_or_default().to_owned(),
-                scale: attributes.scale,
-                translate: attributes.translate,
-                minimum: attributes.minimum,
-                maximum: attributes.maximum,
-                digits: attributes.digits,
-                controller_owned,
-                no_msq_save: constant.flags.no_msq_save,
-                default_raw: 0.0,
-            };
-            let default_raw = default_raw(definition, name, &spec, values);
-            layout.insert(VariableSpec {
-                default_raw,
-                ..spec
-            });
+            layout.add_constant(definition, name, constant, values);
         }
 
         for (name, variable) in definition.pc_variables.iter() {
-            let Some(shape) = shape_of(&variable.shape) else {
-                layout.issues.push(LayoutIssue::new(
-                    IssueSeverity::Error,
-                    LayoutIssueKind::UnresolvedShape,
-                    Some(name),
-                    "the PC variable declares a shape that cannot be resolved",
-                ));
-                continue;
-            };
-
-            let spec = VariableSpec {
-                name: name.to_owned(),
-                owner: Owner::Pc,
-                shape,
-                data_type: variable.data_type,
-                // PC variables live in the project file, not on a page.
-                address: None,
-                units: variable.units.literal().unwrap_or_default().to_owned(),
-                scale: Some(1.0),
-                translate: Some(0.0),
-                minimum: None,
-                maximum: None,
-                digits: 0,
-                controller_owned: false,
-                no_msq_save: false,
-                default_raw: 0.0,
-            };
-            let default_raw = default_raw(definition, name, &spec, values);
-            layout.insert(VariableSpec {
-                default_raw,
-                ..spec
-            });
+            layout.add_pc_variable(definition, name, variable, values);
         }
 
         layout.build_pages(definition);
         layout
+    }
+
+    fn add_constant(
+        &mut self,
+        definition: &Definition,
+        name: &str,
+        constant: &oxtuner_ini::Constant,
+        values: &dyn Fn(&str) -> Option<f64>,
+    ) {
+        let Some(page) = IniPage::new(constant.page) else {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Error,
+                LayoutIssueKind::NoPage,
+                Some(name),
+                "the constant is declared before any `page =` line, so it has no ECU address",
+            ));
+            return;
+        };
+
+        let Some(shape) = shape_of(&constant.shape) else {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Error,
+                LayoutIssueKind::UnresolvedShape,
+                Some(name),
+                "the declared shape depends on a value this build cannot resolve, so the \
+                 constant has no fixed size",
+            ));
+            return;
+        };
+
+        let attributes = Attributes::resolve(
+            constant.scale.as_ref(),
+            constant.translate.as_ref(),
+            constant.minimum.as_ref(),
+            constant.maximum.as_ref(),
+            constant.digits.as_ref(),
+            values,
+        );
+        if let Some(unresolved) = attributes.unresolved {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Warning,
+                LayoutIssueKind::UnresolvedAttribute,
+                Some(name),
+                format!(
+                    "presentation attribute `{unresolved}` is an expression this build could \
+                     not evaluate; values cannot be converted until it resolves"
+                ),
+            ));
+        }
+
+        let controller_owned =
+            constant.flags.controller_priority || constant.class == ConstantClass::OddArray;
+        let spec = VariableSpec {
+            name: name.to_owned(),
+            owner: Owner::Page(page),
+            shape,
+            data_type: constant.data_type,
+            address: constant.address,
+            units: constant.units.literal().unwrap_or_default().to_owned(),
+            scale: attributes.scale,
+            translate: attributes.translate,
+            minimum: attributes.minimum,
+            maximum: attributes.maximum,
+            digits: attributes.digits,
+            controller_owned,
+            no_msq_save: constant.flags.no_msq_save,
+            default_raw: 0.0,
+        };
+        let default_raw = default_raw(definition, name, &spec, values);
+        self.insert(VariableSpec {
+            default_raw,
+            ..spec
+        });
+    }
+
+    fn add_pc_variable(
+        &mut self,
+        definition: &Definition,
+        name: &str,
+        variable: &oxtuner_ini::PcVariable,
+        values: &dyn Fn(&str) -> Option<f64>,
+    ) {
+        let Some(shape) = shape_of(&variable.shape) else {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Error,
+                LayoutIssueKind::UnresolvedShape,
+                Some(name),
+                "the PC variable declares a shape that cannot be resolved",
+            ));
+            return;
+        };
+
+        let spec = VariableSpec {
+            name: name.to_owned(),
+            owner: Owner::Pc,
+            shape,
+            data_type: variable.data_type,
+            // PC variables live in the project file, not on a page.
+            address: None,
+            units: variable.units.literal().unwrap_or_default().to_owned(),
+            scale: Some(1.0),
+            translate: Some(0.0),
+            minimum: None,
+            maximum: None,
+            digits: 0,
+            controller_owned: false,
+            no_msq_save: false,
+            default_raw: 0.0,
+        };
+        let default_raw = default_raw(definition, name, &spec, values);
+        self.insert(VariableSpec {
+            default_raw,
+            ..spec
+        });
     }
 
     fn insert(&mut self, spec: VariableSpec) {
@@ -444,25 +479,24 @@ impl Layout {
             let Some(page) = variable.ini_page() else {
                 continue;
             };
-            match pages.iter_mut().find(|candidate| candidate.page == page) {
-                Some(entry) => entry.variables.push(index),
-                None => {
-                    self.issues.push(LayoutIssue::new(
-                        IssueSeverity::Warning,
-                        LayoutIssueKind::UnknownPage,
-                        Some(&variable.name),
-                        format!(
-                            "the definition puts this constant on page {page}, which it never \
-                             declares; the constant stays readable but has no page size"
-                        ),
-                    ));
-                    pages.push(PageLayout {
-                        page,
-                        size: 0,
-                        start_offset: 0,
-                        variables: vec![index],
-                    });
-                }
+            if let Some(entry) = pages.iter_mut().find(|candidate| candidate.page == page) {
+                entry.variables.push(index);
+            } else {
+                self.issues.push(LayoutIssue::new(
+                    IssueSeverity::Warning,
+                    LayoutIssueKind::UnknownPage,
+                    Some(&variable.name),
+                    format!(
+                        "the definition puts this constant on page {page}, which it never \
+                         declares; the constant stays readable but has no page size"
+                    ),
+                ));
+                pages.push(PageLayout {
+                    page,
+                    size: 0,
+                    start_offset: 0,
+                    variables: vec![index],
+                });
             }
         }
 
@@ -585,9 +619,7 @@ impl Attributes {
         };
         let minimum = resolve(minimum, "min");
         let maximum = resolve(maximum, "max");
-        let digits = resolve(digits, "digits")
-            .map(|value| value.round().clamp(0.0, 9.0) as u8)
-            .unwrap_or(0);
+        let digits = resolve(digits, "digits").map_or(0, digit_count);
 
         Self {
             scale,
@@ -598,6 +630,17 @@ impl Attributes {
             unresolved,
         }
     }
+}
+
+/// A resolved digit count in the range the definition allows.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "the value is rounded and clamped to 0..=9 before the cast"
+)]
+fn digit_count(value: f64) -> u8 {
+    value.round().clamp(0.0, 9.0) as u8
 }
 
 fn shape_of(shape: &Shape) -> Option<EntryShape> {

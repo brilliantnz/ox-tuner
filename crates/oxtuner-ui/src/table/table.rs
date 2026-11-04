@@ -24,6 +24,13 @@
 //! There is no scrollbar; the body scrolls with the wheel, drag-select and
 //! the keyboard.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::unreadable_literal,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -57,6 +64,10 @@ use super::heatmap::{decoration, heat_color};
 use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the table's owner handles a closed set of interactions"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum TableEvent {
     /// The user committed edits for `name` (the cell variable's name).
@@ -106,6 +117,16 @@ pub struct Table {
     header_wash_for_ranges: bool,
 }
 
+impl std::fmt::Debug for Table {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Table")
+            .field("model", &self.model)
+            .field("dragging", &self.dragging)
+            .finish_non_exhaustive()
+    }
+}
+
 impl EventEmitter<TableEvent> for Table {}
 
 impl Focusable for Table {
@@ -134,7 +155,7 @@ impl EntityInputHandler for Table {
         range: Range<usize>,
         adjusted_range: &mut Option<Range<usize>>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        _: &mut Context<'_, Self>,
     ) -> Option<String> {
         let text = self.model.edit_text()?;
         let start = range.start.min(text.len());
@@ -147,7 +168,7 @@ impl EntityInputHandler for Table {
         &mut self,
         _: bool,
         _: &mut Window,
-        _: &mut Context<Self>,
+        _: &mut Context<'_, Self>,
     ) -> Option<UTF16Selection> {
         let text = self.model.edit_text()?;
         Some(UTF16Selection {
@@ -156,18 +177,18 @@ impl EntityInputHandler for Table {
         })
     }
 
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<'_, Self>) -> Option<Range<usize>> {
         None
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<'_, Self>) {}
 
     fn replace_text_in_range(
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
         _: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         // Typing into an idle table starts an edit at the cursor, exactly as a
         // key press did before text came through the platform handler.
@@ -195,7 +216,7 @@ impl EntityInputHandler for Table {
         new_text: &str,
         _: Option<Range<usize>>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.replace_text_in_range(range, new_text, window, cx);
     }
@@ -205,7 +226,7 @@ impl EntityInputHandler for Table {
         _: Range<usize>,
         element_bounds: Bounds<Pixels>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        _: &mut Context<'_, Self>,
     ) -> Option<Bounds<Pixels>> {
         Some(element_bounds)
     }
@@ -214,19 +235,19 @@ impl EntityInputHandler for Table {
         &mut self,
         _: Point<Pixels>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        _: &mut Context<'_, Self>,
     ) -> Option<usize> {
         None
     }
 
-    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> Option<usize> {
         self.model.edit_text().map(str::len)
     }
 }
 
 impl Table {
     /// An empty table.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<'_, Self>) -> Self {
         Self {
             model: TableModel::new(),
             focus: cx.focus_handle(),
@@ -243,7 +264,7 @@ impl Table {
     }
 
     /// Replaces the snapshot and repaints.
-    pub fn set_table(&mut self, table: TableSummary, cx: &mut Context<Self>) {
+    pub fn set_table(&mut self, table: TableSummary, cx: &mut Context<'_, Self>) {
         self.model.set_table(table);
         self.ensure_cursor_visible();
         cx.notify();
@@ -252,21 +273,21 @@ impl Table {
     /// Shows a value in one cell while a paired curve drags it, or clears the
     /// preview with `None`. The value is display-only: it is not recorded for
     /// undo and it never reaches the core.
-    pub fn preview_cell(&mut self, cell: CellPos, value: Option<f64>, cx: &mut Context<Self>) {
+    pub fn preview_cell(&mut self, cell: CellPos, value: Option<f64>, cx: &mut Context<'_, Self>) {
         self.model.set_preview(value.map(|value| (cell, value)));
         cx.notify();
     }
 
     /// Selects one cell without telling the owner, so a paired view can mirror
     /// the table cursor without echoing the event back.
-    pub fn select_cell(&mut self, cell: CellPos, cx: &mut Context<Self>) {
+    pub fn select_cell(&mut self, cell: CellPos, cx: &mut Context<'_, Self>) {
         self.model.select(cell);
         self.ensure_cursor_visible();
         cx.notify();
     }
 
     /// Flips the displayed Y axis.
-    pub fn set_flip_y(&mut self, flip: bool, cx: &mut Context<Self>) {
+    pub fn set_flip_y(&mut self, flip: bool, cx: &mut Context<'_, Self>) {
         self.model.set_flip_y(flip);
         self.ensure_cursor_visible();
         cx.notify();
@@ -277,19 +298,19 @@ impl Table {
     /// Off by default: a range is read on the cells themselves, and washing
     /// every bin it spans only adds noise to the headers. A single selected
     /// cell tints its two bins either way.
-    pub fn set_header_wash_for_ranges(&mut self, wash: bool, cx: &mut Context<Self>) {
+    pub fn set_header_wash_for_ranges(&mut self, wash: bool, cx: &mut Context<'_, Self>) {
         self.header_wash_for_ranges = wash;
         cx.notify();
     }
 
     /// Drops optimistic values after the core rejected an edit.
-    pub fn reject_pending(&mut self, cx: &mut Context<Self>) {
+    pub fn reject_pending(&mut self, cx: &mut Context<'_, Self>) {
         self.model.reject_pending();
         cx.notify();
     }
 
     /// Drops the table, keeping the Y-axis preference.
-    pub fn clear_table(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_table(&mut self, cx: &mut Context<'_, Self>) {
         self.model.clear_table();
         cx.notify();
     }
@@ -299,7 +320,7 @@ impl Table {
     /// Clicks that land on table chrome or outside the grid call this: one
     /// focus owner at a time, and a click that selects nothing still leaves
     /// the grid in a clean state for the next gesture.
-    pub fn dismiss_focus(&mut self, cx: &mut Context<Self>) {
+    pub fn dismiss_focus(&mut self, cx: &mut Context<'_, Self>) {
         self.model.cancel_edit();
         self.model.cancel_axis_edit();
         self.model.collapse_selection();
@@ -308,13 +329,13 @@ impl Table {
     }
 
     /// Sets the realtime operating point, or clears it.
-    pub fn set_realtime(&mut self, point: Option<RealtimePoint>, cx: &mut Context<Self>) {
+    pub fn set_realtime(&mut self, point: Option<RealtimePoint>, cx: &mut Context<'_, Self>) {
         self.realtime = point;
         cx.notify();
     }
 
     /// Copies the selection as TSV.
-    pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
+    pub fn copy_selection(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(text) = self.model.copy_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -322,7 +343,7 @@ impl Table {
     }
 
     /// Pastes TSV at the selection's top-left corner.
-    pub fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+    pub fn paste_clipboard(&mut self, cx: &mut Context<'_, Self>) {
         let text = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(text) = text else {
             cx.notify();
@@ -335,7 +356,7 @@ impl Table {
     }
 
     /// Applies a bulk operation to the selection.
-    pub fn bulk(&mut self, op: BulkOp, cx: &mut Context<Self>) {
+    pub fn bulk(&mut self, op: BulkOp, cx: &mut Context<'_, Self>) {
         match self.model.bulk_edit(op) {
             Ok(edits) => {
                 if !edits.is_empty() {
@@ -348,7 +369,7 @@ impl Table {
     }
 
     /// Takes the newest edit back and asks the core to write the old values.
-    pub fn undo(&mut self, cx: &mut Context<Self>) {
+    pub fn undo(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(step) = self.model.undo() {
             self.request_step(step, cx);
         }
@@ -357,7 +378,7 @@ impl Table {
     }
 
     /// Re-applies the newest undone edit.
-    pub fn redo(&mut self, cx: &mut Context<Self>) {
+    pub fn redo(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(step) = self.model.redo() {
             self.request_step(step, cx);
         }
@@ -366,7 +387,7 @@ impl Table {
     }
 
     /// Spaces one axis onto even steps between its endpoints.
-    pub fn rebin(&mut self, axis: oxtuner_core::AxisKind, cx: &mut Context<Self>) {
+    pub fn rebin(&mut self, axis: oxtuner_core::AxisKind, cx: &mut Context<'_, Self>) {
         match self.model.rebin_axis(axis) {
             Ok(edits) => {
                 if edits.is_empty() {
@@ -379,7 +400,7 @@ impl Table {
         }
     }
 
-    fn request_step(&mut self, step: HistoryStep, cx: &mut Context<Self>) {
+    fn request_step(&mut self, step: HistoryStep, cx: &mut Context<'_, Self>) {
         match step {
             HistoryStep::Cells(edits) => self.request_edits(edits, cx),
             HistoryStep::Axis { axis, edits } => self.request_axis_edits(axis, edits, cx),
@@ -388,7 +409,7 @@ impl Table {
 
     /// The keyboard contract, in one place so tests can drive it through real
     /// events and a reader can see the whole rule set.
-    pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
         let extend = modifiers.shift;
@@ -397,20 +418,17 @@ impl Table {
             match key {
                 "enter" | "tab" => {
                     let axis = self.model.axis_editing().map(|editing| editing.target.axis);
-                    match self.model.commit_axis_edit() {
-                        Ok(edits) => {
-                            if !edits.is_empty()
-                                && let Some(axis) = axis
-                            {
-                                self.request_axis_edits(axis, edits, cx);
-                            } else {
-                                cx.notify();
-                            }
-                        }
-                        Err(_) => {
-                            self.model.mark_axis_invalid();
+                    if let Ok(edits) = self.model.commit_axis_edit() {
+                        if !edits.is_empty()
+                            && let Some(axis) = axis
+                        {
+                            self.request_axis_edits(axis, edits, cx);
+                        } else {
                             cx.notify();
                         }
+                    } else {
+                        self.model.mark_axis_invalid();
+                        cx.notify();
                     }
                 }
                 "escape" => {
@@ -502,7 +520,7 @@ impl Table {
 
     /// Moves the cursor one cell, for the frame-budget harness.
     #[cfg(test)]
-    pub(crate) fn nudge_selection(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn nudge_selection(&mut self, cx: &mut Context<'_, Self>) {
         let rows = self.model.rows();
         let columns = self.model.columns();
         if rows == 0 || columns == 0 {
@@ -519,7 +537,7 @@ impl Table {
         cx.notify();
     }
 
-    fn request_edits(&mut self, edits: Vec<CellEdit>, cx: &mut Context<Self>) {
+    fn request_edits(&mut self, edits: Vec<CellEdit>, cx: &mut Context<'_, Self>) {
         let Some(table) = self.model.table() else {
             return;
         };
@@ -532,7 +550,7 @@ impl Table {
         &mut self,
         axis: oxtuner_core::AxisKind,
         edits: Vec<oxtuner_core::AxisEdit>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let Some(table) = self.model.table() else {
             return;
@@ -578,7 +596,6 @@ impl Table {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_cell(
         &self,
         data_row: usize,
@@ -586,7 +603,7 @@ impl Table {
         editing: Option<&Editing>,
         minimum: f64,
         maximum: f64,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let cell = CellPos {
             row: data_row,
@@ -662,7 +679,7 @@ impl Table {
     fn render_column_headers(
         &self,
         columns: std::ops::Range<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let Some(snapshot) = self.model.table() else {
             return Vec::new();
@@ -743,7 +760,7 @@ impl Table {
     fn render_row_headers(
         &self,
         rows: std::ops::Range<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let Some(snapshot) = self.model.table() else {
             return Vec::new();
@@ -822,7 +839,11 @@ impl Table {
 }
 
 impl Render for Table {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the grid composes headers, rows, cells and input in one retained render"
+    )]
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let Some(table) = self.model.table().cloned() else {
             return div().size_full().into_any_element();
         };
@@ -1164,7 +1185,7 @@ impl Render for Table {
             let entity = cx.entity();
             canvas(
                 |_, _, _| {},
-                move |bounds, _, window, cx| {
+                move |bounds, (), window, cx| {
                     window.handle_input(
                         &focus,
                         ElementInputHandler::new(bounds, entity.clone()),

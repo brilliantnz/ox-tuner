@@ -31,19 +31,27 @@ use crate::i18n::t;
 
 /// A shortcut's category. Kept on each entry for ordering and future filtering;
 /// the settings page shows one flat list.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the shortcut list is grouped into general and view commands"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShortcutGroup {
+    /// Commands that work anywhere.
     General,
+    /// Commands that apply to a view.
     View,
 }
 
 /// One shortcut: what it does, what it is called, and the keys on each
 /// platform family.
+#[derive(Debug)]
 pub struct Shortcut {
     /// Stable identifier, also the element id used by UI that shows it.
     pub id: &'static str,
     /// Locale key for the command's name.
     pub label: &'static str,
+    /// Which group the shortcut is listed under.
     pub group: ShortcutGroup,
     /// Where it works: anywhere, or in these key contexts.
     contexts: &'static [&'static str],
@@ -393,6 +401,6 @@ mod tests {
         assert_eq!(key_caps("cmd-b").len(), 2);
         assert_eq!(key_caps(""), Vec::<SharedString>::new());
         assert_eq!(key_text(""), "");
-        assert!(!key_text("cmd-b").is_empty());
+        assert_ne!(key_text("cmd-b"), "");
     }
 }

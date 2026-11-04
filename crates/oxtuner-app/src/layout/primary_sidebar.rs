@@ -112,6 +112,11 @@ fn empty_state(text: SharedString, cx: &App) -> impl IntoElement {
 /// A folder row is its own disclosure control. The tree component disables
 /// folder entries so a click cannot select them; this row's click toggles the
 /// folder and leaves the selected leaf alone.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "tree depth is a small row indent converted to pixels"
+)]
 fn tree_row(
     entry: &TreeEntry,
     selected: bool,
@@ -209,7 +214,13 @@ fn tree_row(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "UI tests may unwrap; a failed frame is a failed test"
+    )]
+
     use super::*;
+    use gpui_kit::Point;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, IntoElement, Render,
@@ -222,7 +233,7 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
             let explorer = self.explorer.read(cx);
             let state = explorer.tree().clone();
             let nodes = explorer.nodes();
@@ -265,7 +276,7 @@ mod tests {
             let (handle, _) = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        Default::default(),
+                        Point::default(),
                         size(px(420.), px(600.)),
                     ))),
                     ..Default::default()
@@ -285,7 +296,7 @@ mod tests {
                 .tree()
                 .read(cx)
                 .entry(0)
-                .is_some_and(|entry| entry.is_expanded())
+                .is_some_and(TreeEntry::is_expanded)
         })
     }
 

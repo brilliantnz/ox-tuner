@@ -135,7 +135,7 @@ impl LogStatus {
         self.inner
             .path
             .read()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -179,7 +179,7 @@ impl LogStatus {
             .inner
             .path
             .write()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(path.to_owned());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_owned());
     }
 
     fn stopped(&self) {
@@ -193,7 +193,7 @@ impl std::fmt::Debug for Logger {
             .debug_struct("Logger")
             .field("path", &self.path)
             .field("status", &self.status)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -202,6 +202,11 @@ impl Logger {
     ///
     /// The header write happens before the thread starts, so an unwritable file
     /// is an error the caller can report instead of a silently empty log.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O error when the parent directory cannot be created, the
+    /// file cannot be opened, or the writer thread cannot be spawned.
     pub fn start(
         path: impl AsRef<Path>,
         columns: Vec<LogColumn>,
@@ -220,7 +225,7 @@ impl Logger {
         let thread_status = status.clone();
         let join = thread::Builder::new()
             .name("oxtuner-datalog".to_owned())
-            .spawn(move || writer_loop(writer, &columns, receiver, thread_status))?;
+            .spawn(move || writer_loop(writer, &columns, &receiver, &thread_status))?;
 
         status.started(&path);
         Ok(Self {
@@ -267,6 +272,11 @@ impl Logger {
     }
 
     /// Stops the writer, flushes and returns what the session wrote.
+    ///
+    /// # Errors
+    ///
+    /// Returns the writer thread's final I/O error, including a panic in the
+    /// thread.
     pub fn stop(mut self) -> io::Result<LogSummary> {
         self.finish()?;
         Ok(LogSummary {
@@ -305,8 +315,8 @@ impl Drop for Logger {
 fn writer_loop(
     mut writer: BufWriter<File>,
     columns: &[LogColumn],
-    receiver: crossfire::Rx<spsc::Array<Message>>,
-    status: LogStatus,
+    receiver: &crossfire::Rx<spsc::Array<Message>>,
+    status: &LogStatus,
 ) -> io::Result<()> {
     let mut since_flush = 0u64;
     let mut last_flush = Instant::now();
@@ -319,7 +329,8 @@ fn writer_loop(
                 let line = row(time, columns, &values);
                 writer.write_all(line.as_bytes())?;
                 frames = frames.saturating_add(1);
-                bytes = bytes.saturating_add(line.len() as u64);
+                let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+                bytes = bytes.saturating_add(line_bytes);
                 since_flush = since_flush.saturating_add(1);
                 status.inner.frames.store(frames, Ordering::Relaxed);
                 status.inner.bytes.store(bytes, Ordering::Relaxed);

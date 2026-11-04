@@ -43,6 +43,11 @@ impl DecodeReport {
 /// The image is expected to be a snapshot of the tune; values are overwritten
 /// in place, so a caller can decode several pages into one image. Values are
 /// stored **raw**, exactly as the ECU sent them.
+///
+/// # Errors
+///
+/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare
+/// and [`TuneError::ShortPage`] when the image is shorter than the page.
 pub fn decode_page(
     layout: &Layout,
     page: IniPage,
@@ -85,7 +90,7 @@ pub fn decode_page(
                 }
             }
             EntryShape::Scalar | EntryShape::Bits { .. } => {
-                let width = variable.data_type.size() as usize;
+                let width = type_width(variable.data_type);
                 let Some(raw) = read_value(bytes, start, variable.data_type, layout.endianness())
                 else {
                     report.skipped += 1;
@@ -110,7 +115,7 @@ pub fn decode_page(
             }
             EntryShape::Array { cols, rows } => {
                 let count = cols.saturating_mul(rows);
-                let width = variable.data_type.size() as usize;
+                let width = type_width(variable.data_type);
                 let mut decoded = 0usize;
                 for element in 0..count {
                     let at = start.saturating_add(element.saturating_mul(width));
@@ -140,8 +145,12 @@ pub fn decode_page(
 ///
 /// Bits that belong to a `bits` constant keep the rest of their word: the word
 /// is read from `tune`'s current value first, then modified. Values whose
-/// address is unknown are skipped — a page image is never shifted to make one
+/// address is unknown are skipped; a page image is never shifted to make one
 /// fit.
+///
+/// # Errors
+///
+/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare.
 pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
@@ -187,27 +196,23 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
                 let Ok(value) = tune.raw_at(&variable.name, 0) else {
                     continue;
                 };
-                let width = variable.data_type.size() as usize;
                 let Some(existing) =
                     read_value(&bytes, start, variable.data_type, layout.endianness())
                 else {
                     continue;
                 };
-                let mask = bit_mask(low, high);
-                let merged = (existing as i64 & !i64::from(mask))
-                    | ((value as i64) << low & i64::from(mask));
-                let _ = width;
+                let merged = merge_bits(existing, value, low, high);
                 write_value(
                     &mut bytes,
                     start,
                     variable.data_type,
                     layout.endianness(),
-                    merged as f64,
+                    merged,
                 );
             }
             EntryShape::Array { cols, rows } => {
                 let count = cols.saturating_mul(rows);
-                let width = variable.data_type.size() as usize;
+                let width = type_width(variable.data_type);
                 for element in 0..count {
                     let Ok(raw) = tune.raw_at(&variable.name, element) else {
                         break;
@@ -232,6 +237,11 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
 ///
 /// Names are matched case-insensitively, as the layout is. A name that is not on
 /// this page contributes nothing.
+///
+/// # Errors
+///
+/// Returns [`TuneError::UnknownPage`] for an undeclared page and
+/// [`TuneError::ShortPage`] when the base image is shorter than the page.
 pub fn patch_page(
     layout: &Layout,
     page: IniPage,
@@ -300,20 +310,18 @@ pub fn patch_page(
                 else {
                     continue;
                 };
-                let mask = bit_mask(low, high);
-                let merged = (existing as i64 & !i64::from(mask))
-                    | ((value as i64) << low & i64::from(mask));
+                let merged = merge_bits(existing, value, low, high);
                 write_value(
                     &mut bytes,
                     start,
                     variable.data_type,
                     layout.endianness(),
-                    merged as f64,
+                    merged,
                 );
             }
             EntryShape::Array { cols, rows } => {
                 let count = cols.saturating_mul(rows);
-                let width = variable.data_type.size() as usize;
+                let width = type_width(variable.data_type);
                 for element in 0..count {
                     let Ok(raw) = tune.raw_at(&variable.name, element) else {
                         break;
@@ -335,6 +343,23 @@ fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
     usize::try_from(offset).ok()
 }
 
+fn type_width(data_type: DataType) -> usize {
+    usize::try_from(data_type.size()).unwrap_or(usize::MAX)
+}
+
+/// Replaces a bit range in an existing word, keeping every other bit.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "bit constants live in the low 32 bits of a word and return to f64 storage"
+)]
+fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
+    let mask = bit_mask(low, high);
+    let merged = (existing as i64 & !i64::from(mask)) | (((value as i64) << low) & i64::from(mask));
+    merged as f64
+}
+
 fn bit_mask(low: u8, high: u8) -> u32 {
     let width = high.saturating_sub(low).saturating_add(1).min(32);
     if width >= 32 {
@@ -344,6 +369,12 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "the value is checked finite and non-negative before the bit-field cast"
+)]
 fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
     if !raw.is_finite() || raw < 0.0 {
         return None;
@@ -355,13 +386,18 @@ fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
 }
 
 /// Reads one value of `data_type` at `start`, in the layout's byte order.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "64-bit raw values are stored as f64, the tune model's documented limit"
+)]
 fn read_value(
     bytes: &[u8],
     start: usize,
     data_type: DataType,
     endianness: Endianness,
 ) -> Option<f64> {
-    let width = data_type.size() as usize;
+    let width = type_width(data_type);
     let slice = bytes.get(start..start.checked_add(width)?)?;
 
     // The value is assembled as if the wire were little-endian, so a big-endian
@@ -378,7 +414,7 @@ fn read_value(
 
     Some(match data_type {
         DataType::U08 | DataType::M08 => f64::from(ordered[0]),
-        DataType::S08 => f64::from(ordered[0] as i8),
+        DataType::S08 => f64::from(ordered[0].cast_signed()),
         DataType::U16 => f64::from(u16::from_le_bytes([ordered[0], ordered[1]])),
         DataType::S16 => f64::from(i16::from_le_bytes([ordered[0], ordered[1]])),
         DataType::U32 => f64::from(u32::from_le_bytes([
@@ -397,6 +433,12 @@ fn read_value(
 }
 
 /// Writes one value at `start`, in the layout's byte order.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "each cast is clamped to the storage type's range or is the documented f64 raw representation"
+)]
 fn write_value(
     bytes: &mut [u8],
     start: usize,
@@ -404,7 +446,7 @@ fn write_value(
     endianness: Endianness,
     raw: f64,
 ) {
-    let width = data_type.size() as usize;
+    let width = type_width(data_type);
     let Some(end) = start.checked_add(width) else {
         return;
     };
@@ -464,6 +506,10 @@ fn write_value(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use std::sync::Arc;
 
     use oxtuner_ini::SettingsContext;

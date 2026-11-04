@@ -19,7 +19,7 @@ use crate::error::ProtocolError;
 /// A Speeduino's serial buffer is 257 bytes, and a page read adds the return
 /// code and the frame overhead on top; 4 KiB leaves room for a larger board
 /// without letting a corrupt length field ask for a huge allocation.
-pub const MAX_PAYLOAD: usize = 4096;
+pub(crate) const MAX_PAYLOAD: usize = 4096;
 
 /// A validated frame payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,7 @@ pub struct Frame {
 }
 
 /// Why a byte slice is not a frame.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     /// Fewer bytes than the smallest possible frame.
@@ -90,6 +91,11 @@ impl From<FrameError> for ProtocolError {
 
 impl Frame {
     /// Wraps `payload` in the envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::TooLarge`] when the payload exceeds
+    /// [`MAX_PAYLOAD`].
     pub fn encode(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
         if payload.len() > MAX_PAYLOAD {
             return Err(FrameError::TooLarge {
@@ -108,6 +114,11 @@ impl Frame {
     }
 
     /// Parses a whole frame, including its length header.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameError`] for a short, oversized, mismatched or
+    /// checksum-invalid frame.
     pub fn parse(bytes: &[u8]) -> Result<Self, FrameError> {
         if bytes.len() < 6 {
             return Err(FrameError::Short {
@@ -171,6 +182,10 @@ impl FrameDecoder {
     /// than any frame can hold **resets itself** and returns the error. A
     /// caller that keeps feeding a wedged buffer would otherwise re-hit the
     /// same bad bytes forever; after a reset, the next `push` starts clean.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`FrameError`] when the bytes contain an invalid frame.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, FrameError> {
         // One call may carry at most one frame's worth of bytes. A stream is
         // fed in pieces anyway, and this keeps a single huge slice from being
@@ -286,7 +301,7 @@ mod tests {
         let mut decoder = FrameDecoder::new();
 
         let first = decoder.push(&encoded[..4]).expect("no frame yet");
-        assert!(first.is_empty());
+        assert!(first.is_empty(), "unexpected frames: {first:?}");
         assert_eq!(decoder.pending(), 4);
 
         let second = decoder.push(&encoded[4..]).expect("one frame");

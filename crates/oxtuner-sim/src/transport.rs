@@ -174,8 +174,25 @@ pub struct SimTransport {
     burn_pending_left: u32,
 }
 
+impl std::fmt::Debug for SimTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SimTransport")
+            .field("counters", &self.counters)
+            .field("open", &self.open)
+            .field("connected", &self.connected)
+            .field("step", &self.step)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SimTransport {
     /// Builds the simulator for `definition`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] when the definition has no usable signature or
+    /// pages, or when a configured page does not fit.
     pub fn new(definition: &Definition, config: SimConfig) -> Result<Self, SimError> {
         let signature = config
             .signature
@@ -197,9 +214,9 @@ impl SimTransport {
             faults.arm(rule);
         }
 
-        let reply_code = Behavior::select(definition)
-            .map(|behavior| behavior.as_dyn().reply_code(definition))
-            .unwrap_or(ReplyCode::Leading);
+        let reply_code = Behavior::select(definition).map_or(ReplyCode::Leading, |behavior| {
+            behavior.as_dyn().reply_code(definition)
+        });
 
         Ok(Self {
             ecu,
@@ -219,6 +236,10 @@ impl SimTransport {
     }
 
     /// Builds the simulator from a scenario file, against `definition`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] for the same reasons as [`Self::new`].
     pub fn with_scenario(definition: &Definition, scenario: &Scenario) -> Result<Self, SimError> {
         Self::new(definition, SimConfig::from(scenario.clone()))
     }
@@ -253,6 +274,11 @@ impl SimTransport {
     }
 
     /// Replaces a page's RAM, for a test's setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] when the page does not exist or the bytes do not
+    /// fit.
     pub fn set_ram(&mut self, page: u8, bytes: &[u8]) -> Result<(), SimError> {
         self.memory.set_ram(page, bytes)
     }
@@ -312,7 +338,7 @@ impl SimTransport {
 
         let mut reply = self.respond(request, fault.as_ref(), framed);
         if framed {
-            reply = self.frame_reply(&reply);
+            reply = Self::frame_reply(&reply);
         }
 
         if let Some(fault) = &fault {
@@ -346,7 +372,7 @@ impl SimTransport {
     }
 
     /// Wraps a reply that `respond` built as a *payload*.
-    fn frame_reply(&self, payload: &[u8]) -> Vec<u8> {
+    fn frame_reply(payload: &[u8]) -> Vec<u8> {
         Frame::encode(payload).unwrap_or_default()
     }
 
@@ -366,9 +392,7 @@ impl SimTransport {
         match request {
             Request::Signature => {
                 self.counters.signatures += 1;
-                if !framed {
-                    self.ecu.signature.clone()
-                } else {
+                if framed {
                     match self.reply_code {
                         ReplyCode::Leading => {
                             let mut payload = vec![0];
@@ -377,6 +401,8 @@ impl SimTransport {
                         }
                         ReplyCode::Absent => self.ecu.signature.clone(),
                     }
+                } else {
+                    self.ecu.signature.clone()
                 }
             }
             Request::ReadPage {
@@ -439,59 +465,67 @@ impl SimTransport {
                 page,
                 offset,
                 count,
-            } => {
-                let Some(page_memory) = self.memory.page(page) else {
-                    return error(0x84);
-                };
-                let start = usize::from(offset);
-                let end = start.saturating_add(usize::from(count));
-                if end > page_memory.ram.len() {
-                    return error(0x84);
-                }
-                let crc = crc32(&page_memory.ram[start..end]);
-                let bytes = crc.to_be_bytes().to_vec();
-                if !framed {
-                    return bytes;
-                }
-                match self.reply_code {
-                    ReplyCode::Leading => {
-                        let mut payload = vec![0];
-                        payload.extend_from_slice(&bytes);
-                        payload
-                    }
-                    ReplyCode::Absent => bytes,
-                }
-            }
-            Request::Realtime { offset, count } => {
-                self.counters.realtime += 1;
-                let Some(realtime) = self.ecu.realtime() else {
-                    return error(0x83);
-                };
-                let Some(data) = realtime_block(
-                    realtime,
-                    &self.generator,
-                    self.step,
-                    offset,
-                    count,
-                    self.burn_pending_left > 0,
-                ) else {
-                    return error(0x84);
-                };
-                self.step = self.step.wrapping_add(1);
-                self.burn_pending_left = self.burn_pending_left.saturating_sub(1);
-                if !framed {
-                    return data;
-                }
-                match self.reply_code {
-                    ReplyCode::Leading => {
-                        let mut payload = vec![0];
-                        payload.extend_from_slice(&data);
-                        payload
-                    }
-                    ReplyCode::Absent => data,
-                }
-            }
+            } => self.crc_reply(page, offset, count, framed),
+            Request::Realtime { offset, count } => self.realtime_reply(offset, count, framed),
         }
+    }
+
+    /// The payload of one page-CRC reply, before framing.
+    fn crc_reply(&self, page: u8, offset: u16, count: u16, framed: bool) -> Vec<u8> {
+        let Some(page_memory) = self.memory.page(page) else {
+            return error_reply(0x84, framed);
+        };
+        let start = usize::from(offset);
+        let end = start.saturating_add(usize::from(count));
+        if end > page_memory.ram.len() {
+            return error_reply(0x84, framed);
+        }
+
+        let bytes = crc32(&page_memory.ram[start..end]).to_be_bytes().to_vec();
+        data_payload(self.reply_code, bytes, framed)
+    }
+
+    /// The payload of one realtime reply, before framing.
+    fn realtime_reply(&mut self, offset: u16, count: u16, framed: bool) -> Vec<u8> {
+        self.counters.realtime += 1;
+        let Some(realtime) = self.ecu.realtime() else {
+            return error_reply(0x83, framed);
+        };
+        let Some(data) = realtime_block(
+            realtime,
+            &self.generator,
+            self.step,
+            offset,
+            count,
+            self.burn_pending_left > 0,
+        ) else {
+            return error_reply(0x84, framed);
+        };
+
+        self.step = self.step.wrapping_add(1);
+        self.burn_pending_left = self.burn_pending_left.saturating_sub(1);
+        data_payload(self.reply_code, data, framed)
+    }
+}
+
+/// A framed error payload, or silence on a legacy link.
+fn error_reply(code: u8, framed: bool) -> Vec<u8> {
+    if framed { vec![code] } else { Vec::new() }
+}
+
+/// Wraps a data payload with the behavior's leading return code.
+fn data_payload(reply_code: ReplyCode, data: Vec<u8>, framed: bool) -> Vec<u8> {
+    if !framed {
+        return data;
+    }
+
+    match reply_code {
+        ReplyCode::Leading => {
+            let mut payload = vec![0];
+            payload.extend_from_slice(&data);
+            payload
+        }
+        ReplyCode::Absent => data,
     }
 }
 

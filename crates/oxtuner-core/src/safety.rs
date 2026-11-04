@@ -100,6 +100,10 @@ impl Safety {
 /// Returns the value to store and whether it had to be clamped. A definition
 /// without a finite min/max leaves the value alone; an inverted pair is treated
 /// as absent rather than guessed.
+#[expect(
+    clippy::float_cmp,
+    reason = "clamping compares exact stored values, including the signed-zero case"
+)]
 pub(crate) fn clamp_user(spec: &VariableSpec, value: f64) -> (f64, bool) {
     let (Some(minimum), Some(maximum)) = (spec.minimum, spec.maximum) else {
         return (value, false);

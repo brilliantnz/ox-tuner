@@ -83,6 +83,10 @@ fn sync_parent(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {

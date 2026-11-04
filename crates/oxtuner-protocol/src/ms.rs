@@ -23,6 +23,10 @@ use crate::error::ProtocolError;
 use crate::frame::Frame;
 
 /// How the bytes are framed on the wire.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the protocol defines exactly the legacy and envelope framings"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LinkMode {
     /// A command byte, its arguments, then an unframed reply. Verified on the
@@ -35,6 +39,10 @@ pub enum LinkMode {
 }
 
 /// What the definition declares about one page.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent page capability, not a state machine"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageSpec {
     /// INI page number, 1-based.
@@ -84,9 +92,19 @@ struct PageCommands {
 /// definition (`blockReadTimeout`, `blockingFactor`).
 pub trait Protocol: Send {
     /// Reads the firmware signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the command is missing, the transport
+    /// fails, or the reply is empty.
     fn signature(&mut self, io: &mut dyn Transport) -> Result<String, ProtocolError>;
 
     /// Reads `len` bytes from `page` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the page is unknown, the transport fails,
+    /// or the reply is shorter than requested.
     fn read_page(
         &mut self,
         io: &mut dyn Transport,
@@ -96,6 +114,11 @@ pub trait Protocol: Send {
     ) -> Result<Vec<u8>, ProtocolError>;
 
     /// Writes `data` to `page` at `offset`, chunked at the blocking factor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the page is not writable, the payload is
+    /// malformed, or the transport fails.
     fn write_page(
         &mut self,
         io: &mut dyn Transport,
@@ -105,9 +128,19 @@ pub trait Protocol: Send {
     ) -> Result<(), ProtocolError>;
 
     /// Burns one page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the page has no burn command or the
+    /// transport fails.
     fn burn(&mut self, io: &mut dyn Transport, page: u8) -> Result<(), ProtocolError>;
 
     /// Reads one realtime block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the definition declares no realtime
+    /// command, the transport fails, or the reply is short.
     fn read_realtime(&mut self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError>;
 }
 
@@ -118,7 +151,7 @@ impl std::fmt::Debug for MsProtocol {
             .field("name", &self.name)
             .field("pages", &self.pages.len())
             .field("link", &self.link)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -174,12 +207,111 @@ struct Realtime {
     spec: RealtimeSpec,
 }
 
+fn build_pages(
+    definition: &Definition,
+    behavior: &dyn EcuBehavior,
+    variables: &HashMap<String, u8>,
+) -> Vec<PageCommands> {
+    definition
+        .pages
+        .iter()
+        .map(|page| {
+            let number = page.number;
+            let burnable = matches!(behavior.burn(definition, number), BurnPlan::Immediate);
+            let crc = behavior.crc(definition, number);
+
+            PageCommands {
+                switch: behavior.switch_page(definition, number),
+                spec: PageSpec {
+                    number,
+                    size: page.size,
+                    start_offset: page.start_offset,
+                    readable: page.read_command.is_some(),
+                    writable: page.is_writable(),
+                    burnable,
+                    crc: crc.is_some(),
+                },
+                identifier: crate::pattern::page_identifier(
+                    page.number,
+                    page.identifier.as_ref(),
+                    &|name| variables.get(&name.to_ascii_lowercase()).copied(),
+                ),
+                read: page
+                    .read_command
+                    .clone()
+                    .filter(|command| !command.is_empty()),
+                write: page
+                    .chunk_write
+                    .clone()
+                    .filter(|command| !command.is_empty())
+                    .or_else(|| {
+                        page.value_write
+                            .clone()
+                            .filter(|command| !command.is_empty())
+                    }),
+                burn: burnable
+                    .then(|| page.burn_command.clone())
+                    .flatten()
+                    .filter(|command| !command.is_empty()),
+                crc: page
+                    .crc_command
+                    .clone()
+                    .filter(|command| !command.is_empty()),
+                crc_reply: crc.map(|crc| crc.reply),
+            }
+        })
+        .collect()
+}
+
+fn build_handshake(
+    definition: &Definition,
+    behavior: &dyn EcuBehavior,
+    variables: &HashMap<String, u8>,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    behavior
+        .handshake(definition)
+        .iter()
+        .map(|command| {
+            command
+                .encode(&CommandArguments::default(), &|name| {
+                    variables.get(&name.to_ascii_lowercase()).copied()
+                })
+                .map_err(ProtocolError::Encoding)
+        })
+        .collect()
+}
+
+fn build_realtime(definition: &Definition) -> Option<Realtime> {
+    definition
+        .protocol
+        .och_get_command
+        .clone()
+        .zip(definition.protocol.och_block_size)
+        .and_then(|(command, block_size)| {
+            let block_size = u16::try_from(block_size).ok()?;
+            (block_size > 0).then(|| Realtime {
+                command,
+                spec: RealtimeSpec {
+                    block_size,
+                    start_offset: u16::try_from(definition.protocol.output_channel_start_offset)
+                        .unwrap_or(u16::MAX),
+                },
+            })
+        })
+}
+
 impl MsProtocol {
     /// Builds the protocol for `definition`, with `behavior` deciding the parts
     /// an INI cannot express.
     ///
     /// Fails when the definition is not an MS-compatible ECU at all, so a
     /// mis-picked file is refused before a port is opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
+    /// definition, or [`ProtocolError::Encoding`] when a handshake command
+    /// cannot be encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
             return Err(ProtocolError::Unsupported(format!(
@@ -195,85 +327,9 @@ impl MsProtocol {
             }
         }
 
-        let pages = definition
-            .pages
-            .iter()
-            .map(|page| {
-                let number = page.number;
-                let burnable = matches!(behavior.burn(definition, number), BurnPlan::Immediate);
-                let crc = behavior.crc(definition, number);
-                PageCommands {
-                    switch: behavior.switch_page(definition, number),
-                    spec: PageSpec {
-                        number,
-                        size: page.size,
-                        start_offset: page.start_offset,
-                        readable: page.read_command.is_some(),
-                        writable: page.is_writable(),
-                        burnable,
-                        crc: crc.is_some(),
-                    },
-                    identifier: crate::pattern::page_identifier(
-                        page.number,
-                        page.identifier.as_ref(),
-                        &|name| variables.get(&name.to_ascii_lowercase()).copied(),
-                    ),
-                    read: page
-                        .read_command
-                        .clone()
-                        .filter(|command| !command.is_empty()),
-                    write: page
-                        .chunk_write
-                        .clone()
-                        .filter(|command| !command.is_empty())
-                        .or_else(|| {
-                            page.value_write
-                                .clone()
-                                .filter(|command| !command.is_empty())
-                        }),
-                    burn: burnable
-                        .then(|| page.burn_command.clone())
-                        .flatten()
-                        .filter(|command| !command.is_empty()),
-                    crc: page
-                        .crc_command
-                        .clone()
-                        .filter(|command| !command.is_empty()),
-                    crc_reply: crc.map(|crc| crc.reply),
-                }
-            })
-            .collect();
-
-        let handshake = behavior
-            .handshake(definition)
-            .iter()
-            .map(|command| {
-                command
-                    .encode(&CommandArguments::default(), &|name| {
-                        variables.get(&name.to_ascii_lowercase()).copied()
-                    })
-                    .map_err(ProtocolError::Encoding)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let realtime = definition
-            .protocol
-            .och_get_command
-            .clone()
-            .zip(definition.protocol.och_block_size)
-            .and_then(|(command, block_size)| {
-                let block_size = u16::try_from(block_size).ok()?;
-                (block_size > 0).then(|| Realtime {
-                    command,
-                    spec: RealtimeSpec {
-                        block_size,
-                        start_offset: u16::try_from(
-                            definition.protocol.output_channel_start_offset,
-                        )
-                        .unwrap_or(u16::MAX),
-                    },
-                })
-            });
+        let pages = build_pages(definition, behavior, &variables);
+        let handshake = build_handshake(definition, behavior, &variables)?;
+        let realtime = build_realtime(definition);
 
         Ok(Self {
             name: behavior.name(),
@@ -298,18 +354,21 @@ impl MsProtocol {
             block_read_timeout: definition
                 .protocol
                 .block_read_timeout_ms
-                .map(|milliseconds| Duration::from_millis(u64::from(milliseconds)))
-                .unwrap_or(Duration::from_secs(2)),
+                .map_or(Duration::from_secs(2), |milliseconds| {
+                    Duration::from_millis(u64::from(milliseconds))
+                }),
             page_activation_delay: definition
                 .protocol
                 .page_activation_delay_ms
-                .map(|milliseconds| Duration::from_millis(u64::from(milliseconds)))
-                .unwrap_or(Duration::ZERO),
+                .map_or(Duration::ZERO, |milliseconds| {
+                    Duration::from_millis(u64::from(milliseconds))
+                }),
             port_open_delay: definition
                 .protocol
                 .delay_after_port_open_ms
-                .map(|milliseconds| Duration::from_millis(u64::from(milliseconds)))
-                .unwrap_or(Duration::ZERO),
+                .map_or(Duration::ZERO, |milliseconds| {
+                    Duration::from_millis(u64::from(milliseconds))
+                }),
             force_big_endian: definition.protocol.force_big_endian_protocol,
             realtime,
             link: default_link(definition),
@@ -325,6 +384,7 @@ impl MsProtocol {
 
     /// Selects the framing. Legacy stays the default because it is the path
     /// verified read-only on hardware.
+    #[must_use]
     pub fn with_link_mode(mut self, link: LinkMode) -> Self {
         self.link = link;
         self
@@ -375,6 +435,11 @@ impl MsProtocol {
     ///
     /// The page size is the definition's, so a short page in the middle of a
     /// read cannot leave the caller with a half image it believes is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the page is unknown or unreadable, the
+    /// page is too large for one conversation, or a chunk read fails.
     pub fn read_page_all(
         &mut self,
         io: &mut dyn Transport,
@@ -418,6 +483,11 @@ impl MsProtocol {
     ///
     /// The algorithm and the reply encoding come from [`EcuBehavior::crc`];
     /// this method only moves the bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the page switch or the transport fails,
+    /// or when the CRC reply is not the expected four bytes.
     pub fn read_page_crc(
         &mut self,
         io: &mut dyn Transport,
@@ -483,6 +553,10 @@ impl MsProtocol {
     ///
     /// Speeduino and rusEFI need none; the hook exists for a firmware that must
     /// be woken before its first query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the transport rejects a handshake write.
     pub fn handshake(&self, io: &mut dyn Transport) -> Result<(), ProtocolError> {
         for command in &self.handshake {
             io.write_all(command)?;
@@ -606,8 +680,7 @@ impl MsProtocol {
     ) -> Result<&'a [u8], ProtocolError> {
         match (self.reply_code, payload.first()) {
             (_, None) => Ok(&[]),
-            (ReplyCode::Leading, Some(0)) => Ok(&payload[1..]),
-            (ReplyCode::Absent, Some(0)) => Ok(&payload[1..]),
+            (ReplyCode::Leading | ReplyCode::Absent, Some(0)) => Ok(&payload[1..]),
             (_, Some(code)) => Err(ProtocolError::ReturnCode {
                 code: *code,
                 operation,

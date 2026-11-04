@@ -1,6 +1,7 @@
 use std::io;
 
 /// Why the logging pipeline could not start or could not be reconfigured.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
     /// The log directory could not be created.

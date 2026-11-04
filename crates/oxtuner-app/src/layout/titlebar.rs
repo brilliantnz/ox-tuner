@@ -40,7 +40,7 @@ pub(crate) const HEIGHT: Pixels = px(HEIGHT_PX);
 /// The line the bar's contents and the traffic lights share.
 const CONTENT_CENTRE_PX: f32 = HEIGHT_PX / 2.;
 
-/// Height of AppKit's standard window-button frame. The lights are drawn inside
+/// Height of `AppKit`'s standard window-button frame. The lights are drawn inside
 /// it; it does not follow our bar's height.
 const BUTTON_H_PX: f32 = 14.;
 
@@ -51,13 +51,13 @@ const LIGHT_INSET_PX: f32 = 11.;
 ///
 /// The single bar spans the whole window, so its leading edge sits under the
 /// lights. Three buttons at 14 px, the inset before them and a gap after: the
-/// same cluster geometry AppKit lays out, so menus and the title never hide
+/// same cluster geometry `AppKit` lays out, so menus and the title never hide
 /// behind a light.
 const MACOS_LEAD_PX: f32 = LIGHT_INSET_PX + 54. + 12.;
 
-/// Where AppKit should hang the traffic lights.
+/// Where `AppKit` should hang the traffic lights.
 ///
-/// AppKit positions them by the *top* of their frame, so this subtracts half a
+/// `AppKit` positions them by the *top* of their frame, so this subtracts half a
 /// button from the content centre. The window options and the sidebar region must
 /// agree on the number, which is why it comes from one function.
 pub(crate) fn traffic_light_position() -> Point<Pixels> {
@@ -130,8 +130,8 @@ struct DragState {
 ///
 /// - a move only starts while the left button is **still held**
 ///   (`MouseMoveEvent::pressed_button`). `start_window_move` hands the drag to
-///   AppKit through `performWindowDragWithEvent:`, which uses the *current*
-///   event; calling it after release makes AppKit log "Window move completed
+///   `AppKit` through `performWindowDragWithEvent:`, which uses the *current*
+///   event; calling it after release makes `AppKit` log "Window move completed
 ///   without beginning" and can leave the window in a half-dragged state;
 /// - anything interactive inside the band must stop its own mouse-down, or the
 ///   press arms the band and the next move starts a window drag from a button.
@@ -190,7 +190,7 @@ fn drag_surface(id: &'static str, window: &mut Window, cx: &mut App) -> Stateful
 ///
 /// Wraps menus, toggle buttons and window controls so a press on them never arms
 /// the drag surface they sit on. Without it the press arms the band, the next
-/// pointer move starts a window drag from a button, and AppKit logs
+/// pointer move starts a window drag from a button, and `AppKit` logs
 /// "Window move completed without beginning".
 ///
 /// Mouse **moves** are stopped as well: the band listens for moves to begin a
@@ -220,7 +220,7 @@ pub(crate) fn drag_child(id: &'static str) -> Stateful<Div> {
 ///
 /// The `id` must be unique within the window: keyed state means two regions
 /// sharing an id would share one armed flag.
-#[allow(
+#[expect(
     dead_code,
     reason = "kept for windows that let a column reach the top edge; the current \
               layouts draw one bar across the window, and this is the helper those \
@@ -232,7 +232,7 @@ pub(crate) struct DragTop {
     width: Option<Pixels>,
 }
 
-#[allow(dead_code, reason = "see `DragTop`")]
+#[expect(dead_code, reason = "see `DragTop`")]
 impl DragTop {
     pub(crate) const fn new(id: &'static str) -> Self {
         Self { id, width: None }
@@ -263,7 +263,7 @@ impl RenderOnce for DragTop {
 /// sidebar, in the sidebar's colour, so the sidebar reads as one column that
 /// reaches the top edge of the window — and on macOS the traffic lights float
 /// there, as they do in the main window.
-#[allow(
+#[expect(
     dead_code,
     reason = "the split-bar layout the Settings window is designed around; its call \
               site is currently commented out while the component's own bar is used"
@@ -274,7 +274,7 @@ pub(crate) struct UtilityBar {
     sidebar_width: Pixels,
 }
 
-#[allow(dead_code, reason = "see `UtilityBar`")]
+#[expect(dead_code, reason = "see `UtilityBar`")]
 impl UtilityBar {
     pub(crate) fn new(title: impl Into<SharedString>, sidebar_width: Pixels) -> Self {
         Self {
@@ -397,7 +397,7 @@ impl RenderOnce for MainBar {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .truncate()
-                                    .child(title.clone()),
+                                    .child(title),
                             ),
                     )
                     .child(
@@ -481,7 +481,7 @@ fn control(id: &'static str, icon: IconName, cx: &App) -> Stateful<Div> {
 mod tests {
     use super::*;
 
-    /// AppKit hangs the lights from the top of their frame, so their centre is
+    /// `AppKit` hangs the lights from the top of their frame, so their centre is
     /// half a button below the number we hand it. That centre is the line the
     /// bar's own rows are centred on; a hand-tuned offset drifts away from it the
     /// moment the height changes.

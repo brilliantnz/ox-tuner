@@ -20,7 +20,7 @@
 //! - CDATA is preserved as raw text and still round-trips.
 //!
 //! This is not a general XML implementation: namespaces are compared as
-//! literal `prefix:name` strings, and there is no schema, DTD or XPath.
+//! literal `prefix:name` strings, and there is no schema, DTD or `XPath`.
 
 use std::fmt;
 
@@ -52,6 +52,10 @@ impl fmt::Display for XmlError {
 impl std::error::Error for XmlError {}
 
 /// The structured reason a document was rejected.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the parser reports a closed set of structural XML errors"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XmlErrorKind {
     /// The document has no elements at all.
@@ -157,6 +161,10 @@ pub struct Attr {
 }
 
 /// One node of the document tree.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the document tree has a fixed set of node kinds"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// An element.
@@ -327,6 +335,11 @@ pub struct Document {
 
 impl Document {
     /// Parses an XML document from decoded source text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`XmlError`] with the byte position of the first structural
+    /// problem.
     pub fn parse(source: &str) -> Result<Self, XmlError> {
         Parser::new(source).parse_document()
     }
@@ -680,29 +693,7 @@ impl<'a> Parser<'a> {
                     } else if self.starts_with(b"<![CDATA[") {
                         children.push(Node::Cdata(self.parse_cdata()?));
                     } else if self.starts_with(b"</") {
-                        let close_start = self.pos;
-                        self.pos += 2;
-                        self.skip_inline_whitespace();
-                        let close_name_start = self.pos;
-                        while let Some(byte) = self.peek() {
-                            if byte.is_ascii_whitespace() || byte == b'>' {
-                                break;
-                            }
-                            self.pos += 1;
-                        }
-                        let close_name = self.source[close_name_start..self.pos].to_owned();
-                        self.skip_inline_whitespace();
-                        if self.peek() != Some(b'>') {
-                            return self.error(XmlErrorKind::UnterminatedCloseTag);
-                        }
-                        self.pos += 1;
-                        let raw_close = self.source[close_start..self.pos].to_owned();
-                        if close_name != name {
-                            return self.error(XmlErrorKind::MismatchedCloseTag {
-                                open: name,
-                                close: close_name,
-                            });
-                        }
+                        let raw_close = self.parse_close_tag(&name)?;
                         return Ok(Element {
                             name,
                             attrs,
@@ -733,6 +724,36 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// Reads a close tag for `open_name` and returns its raw text.
+    fn parse_close_tag(&mut self, open_name: &str) -> Result<String, XmlError> {
+        let close_start = self.pos;
+        self.pos += 2;
+        self.skip_inline_whitespace();
+
+        let close_name_start = self.pos;
+        while let Some(byte) = self.peek() {
+            if byte.is_ascii_whitespace() || byte == b'>' {
+                break;
+            }
+            self.pos += 1;
+        }
+        let close_name = self.source[close_name_start..self.pos].to_owned();
+        self.skip_inline_whitespace();
+        if self.peek() != Some(b'>') {
+            return self.error(XmlErrorKind::UnterminatedCloseTag);
+        }
+        self.pos += 1;
+
+        if close_name != open_name {
+            return self.error(XmlErrorKind::MismatchedCloseTag {
+                open: open_name.to_owned(),
+                close: close_name,
+            });
+        }
+
+        Ok(self.source[close_start..self.pos].to_owned())
     }
 
     fn parse_cdata(&mut self) -> Result<String, XmlError> {
@@ -782,9 +803,8 @@ impl<'a> Parser<'a> {
         self.pos += 1;
         self.skip_inline_whitespace();
 
-        let quote = match self.peek() {
-            Some(quote @ (b'"' | b'\'')) => quote,
-            _ => return self.error(XmlErrorKind::MalformedAttribute { name }),
+        let Some(quote @ (b'"' | b'\'')) = self.peek() else {
+            return self.error(XmlErrorKind::MalformedAttribute { name });
         };
         self.pos += 1;
         let value_start = self.pos;
@@ -809,6 +829,10 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     fn parse(source: &str) -> Document {

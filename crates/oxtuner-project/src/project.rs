@@ -1,4 +1,4 @@
-//! Opening a TunerStudio project **in place** and saving its tune.
+//! Opening a `TunerStudio` project **in place** and saving its tune.
 //!
 //! A project folder is recognised by `projectCfg/`. The definition is
 //! `projectCfg/mainController.ini` (or the only `.ini` there), resolved with
@@ -46,19 +46,24 @@ use crate::{atomic, flags};
 pub const TUNE_FILE: &str = "CurrentTune.msq";
 /// The definition directory inside a project.
 pub const CONFIG_DIR: &str = "projectCfg";
-/// The definition a TunerStudio project normally uses.
+/// The definition a `TunerStudio` project normally uses.
 pub const MAIN_DEFINITION: &str = "mainController.ini";
 
 /// What a path looks like before opening it.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a path is either a project folder or a standalone tune file"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectKind {
-    /// A TunerStudio project folder.
+    /// A `TunerStudio` project folder.
     Folder(PathBuf),
     /// A bare `.msq` file opened with a separate INI.
     TuneFile(PathBuf),
 }
 
 /// Why a project could not be opened or saved.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ProjectError {
     /// The path is neither a project folder nor a `.msq`.
@@ -164,12 +169,11 @@ impl fmt::Display for ProjectError {
 impl std::error::Error for ProjectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io { source, .. } => Some(source),
+            Self::Io { source, .. } | Self::Sidecar { source, .. } => Some(source),
             Self::Msq(error) => Some(error),
             Self::Ini(error) => Some(error),
             Self::Unrepresentable { source, .. } => Some(source),
             Self::Tune(error) => Some(error),
-            Self::Sidecar { source, .. } => Some(source),
             Self::NotAProject { .. }
             | Self::MissingDefinition { .. }
             | Self::AmbiguousDefinition { .. }
@@ -215,11 +219,16 @@ pub struct Project {
     msq: Msq,
     images: TuneImages,
     report: LoadReport,
-    in_project: bool,
+    in_folder: bool,
 }
 
 impl Project {
     /// Classifies a path without opening anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::NotAProject`] when the path is neither a project
+    /// folder nor a `.msq` file.
     pub fn detect(path: &Path) -> Result<ProjectKind, ProjectError> {
         if path.is_dir() {
             if path.join(CONFIG_DIR).is_dir() {
@@ -240,18 +249,28 @@ impl Project {
         })
     }
 
-    /// Opens a TunerStudio project folder in place.
+    /// Opens a `TunerStudio` project folder in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the folder is not a project, its
+    /// definition or tune is missing, or either cannot be read.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ProjectError> {
         Self::open_with_cache(root, None)
     }
 
-    /// Opens a TunerStudio project folder, using `cache_dir` for the parsed
+    /// Opens a `TunerStudio` project folder, using `cache_dir` for the parsed
     /// definition when one is given.
     ///
     /// The cache is optional on purpose: without it the project opens exactly
     /// as it always did, and a cache that is missing, stale or corrupt is
     /// treated as a miss. Reading the definition bytes is not skipped — they
     /// are the fingerprint that decides whether the cached value still applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the folder is not a project, its
+    /// definition or tune is missing, or either cannot be read.
     pub fn open_with_cache(
         root: impl AsRef<Path>,
         cache_dir: Option<&Path>,
@@ -340,11 +359,15 @@ impl Project {
             msq,
             images,
             report: loaded.report,
-            in_project: true,
+            in_folder: true,
         })
     }
 
     /// Opens a bare `.msq` with a user-picked INI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the tune or definition cannot be read.
     pub fn open_standalone(
         tune_path: impl AsRef<Path>,
         definition_path: impl AsRef<Path>,
@@ -354,6 +377,10 @@ impl Project {
 
     /// Opens a bare `.msq`, caching the parsed definition when `cache_dir` is
     /// given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the tune or definition cannot be read.
     pub fn open_standalone_with_cache(
         tune_path: impl AsRef<Path>,
         definition_path: impl AsRef<Path>,
@@ -426,7 +453,7 @@ impl Project {
             msq,
             images,
             report: loaded.report,
-            in_project: false,
+            in_folder: false,
         })
     }
 
@@ -457,7 +484,7 @@ impl Project {
 
     /// Whether this is a project folder (as opposed to standalone).
     pub fn is_in_project(&self) -> bool {
-        self.in_project
+        self.in_folder
     }
 
     /// The settings context the definition was parsed with.
@@ -505,6 +532,10 @@ impl Project {
     /// Only variables whose values differ from the baseline are touched, so an
     /// unedited project keeps its file byte-for-byte; unknown elements,
     /// comments and entries this build does not model are never rewritten.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the check blocks saving or a file cannot
+    /// be written.
     pub fn save(&mut self) -> Result<SaveOutcome, ProjectError> {
         if self.is_read_only() {
             return Err(ProjectError::ReadOnly {
@@ -571,7 +602,7 @@ impl Project {
         // if the sidecar below fails, so a retry cannot write an older tune.
         self.msq = document;
 
-        if self.in_project {
+        if self.in_folder {
             let relative = self
                 .definition_path
                 .strip_prefix(&self.root)
@@ -610,6 +641,9 @@ impl Project {
     /// not evaluate (Speeduino's `{idleRes}`). The last case is safe because
     /// such a value is never loaded from the file nor edited, so the tune holds
     /// no change worth snapshotting.
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the tune cannot be serialized.
     pub fn snapshot_msq(&self) -> Result<Vec<u8>, ProjectError> {
         let mut document = self.msq.clone();
         for spec in self.layout().variables() {
@@ -637,7 +671,7 @@ impl Project {
 
     /// The sidecar provenance recorded for this project, when any.
     pub fn provenance(&self) -> Option<Provenance> {
-        if !self.in_project {
+        if !self.in_folder {
             return None;
         }
         Provenance::read(&self.root).ok().flatten()
@@ -801,6 +835,10 @@ fn settings_overrides(entries: &[(String, String)]) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     #[test]

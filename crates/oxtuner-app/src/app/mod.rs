@@ -20,6 +20,7 @@ use gpui_kit::{App, Window};
 
 use crate::{core, disclaimer, layout, project, settings};
 
+/// The application identifier the platform stores window state under.
 pub fn app_identity() -> &'static str {
     "com.oxtuner.OxTuner"
 }
@@ -75,26 +76,26 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &actions::ShowTune, cx| layout::show_tune(cx));
     cx.on_action(|_: &actions::ShowCharts, cx| layout::show_charts(cx));
     cx.on_action(|_: &actions::WriteToRam, cx| {
-        with_main_window(cx, layout::write_dialogs::show_write)
+        with_main_window(cx, layout::write_dialogs::show_write);
     });
     cx.on_action(|_: &actions::BurnToFlash, cx| {
-        with_main_window(cx, layout::write_dialogs::show_burn)
+        with_main_window(cx, layout::write_dialogs::show_burn);
     });
     cx.on_action(|_: &actions::AdoptEcuTune, cx| core::adopt_ecu_tune(cx));
     cx.on_action(|_: &actions::RevertTune, cx| {
-        with_main_window(cx, layout::write_dialogs::show_revert)
+        with_main_window(cx, layout::write_dialogs::show_revert);
     });
     cx.on_action(|_: &actions::EnableWrites, cx| {
-        with_main_window(cx, layout::write_dialogs::show_enable_writes)
+        with_main_window(cx, layout::write_dialogs::show_enable_writes);
     });
     cx.on_action(|_: &actions::ImportTune, cx| core::choose_import(cx));
     cx.on_action(|_: &actions::WriteJournal, cx| {
         core::read_journal(cx);
-        with_main_window(cx, layout::write_dialogs::show_journal)
+        with_main_window(cx, layout::write_dialogs::show_journal);
     });
     cx.on_action(|_: &actions::OpenSnapshots, cx| {
         core::list_snapshots(cx);
-        with_main_window(cx, layout::write_dialogs::show_snapshots)
+        with_main_window(cx, layout::write_dialogs::show_snapshots);
     });
     cx.on_action(|_: &actions::OpenHomepage, cx| {
         cx.open_url("https://github.com/brilliantnz/ox-tuner");

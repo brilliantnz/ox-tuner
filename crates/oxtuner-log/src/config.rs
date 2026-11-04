@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 ///
 /// The profile only selects defaults. Call sites are never gated on it, so a
 /// shipped binary can still raise its own level at runtime.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a build is either debug or release; the set cannot grow"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// A development build: console by default, no file.
@@ -24,6 +28,10 @@ impl Profile {
 }
 
 /// When the file layer should write.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "auto, on and off cover every file policy"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilePolicy {
     /// A file in release builds, no file in debug builds.
@@ -62,18 +70,21 @@ impl LogConfig {
 
     /// Selects a profile explicitly. The binary normally keeps
     /// [`Profile::current`], so this is mainly for tests and tools.
+    #[must_use]
     pub fn with_profile(mut self, profile: Profile) -> Self {
         self.profile = profile;
         self
     }
 
     /// Overrides when a file is written.
+    #[must_use]
     pub fn with_file(mut self, policy: FilePolicy) -> Self {
         self.file = policy;
         self
     }
 
     /// Starts with the verbose level, normally from the persisted setting.
+    #[must_use]
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
@@ -83,6 +94,7 @@ impl LogConfig {
     ///
     /// The ring is a view buffer, not the file. A larger value costs memory
     /// per record; a smaller value drops older records sooner.
+    #[must_use]
     pub fn with_ring_capacity(mut self, capacity: usize) -> Self {
         self.ring_capacity = capacity.max(1);
         self

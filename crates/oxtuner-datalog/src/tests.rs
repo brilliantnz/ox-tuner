@@ -43,7 +43,10 @@ fn a_session_writes_the_header_and_every_frame_in_order() {
     assert_eq!(status.path().as_deref(), Some(path.as_path()));
 
     for step in 0..200 {
-        assert!(logger.try_log(step as f64 * 0.05, &[1000.0 + step as f64, 50.0, 14.7]));
+        assert!(logger.try_log(
+            f64::from(step) * 0.05,
+            &[1000.0 + f64::from(step), 50.0, 14.7]
+        ));
     }
     let summary = logger.stop().expect("stops cleanly");
 
@@ -70,7 +73,7 @@ fn a_stopped_log_is_flushed_without_a_grace_period() {
     let logger = Logger::start(&path, columns(), status).expect("starts");
 
     for step in 0..3 {
-        logger.try_log(step as f64, &[1.0, 2.0, 3.0]);
+        logger.try_log(f64::from(step), &[1.0, 2.0, 3.0]);
     }
     logger.stop().expect("stops");
 
@@ -106,17 +109,17 @@ fn the_queue_accounts_for_every_frame_it_is_given() {
     let directory = temp_dir("accounting");
     let path: PathBuf = directory.join("accounting.csv");
     let status = LogStatus::new();
-    let logger = Logger::start(&path, columns(), status.clone()).expect("starts");
+    let logger = Logger::start(&path, columns(), status).expect("starts");
 
-    let attempts = 10_000;
+    let attempts = 10_000u32;
     for step in 0..attempts {
-        logger.try_log(step as f64, &[step as f64, 0.0, 0.0]);
+        logger.try_log(f64::from(step), &[f64::from(step), 0.0, 0.0]);
     }
     let summary = logger.stop().expect("stops");
 
     assert_eq!(
         summary.frames + summary.dropped,
-        attempts,
+        u64::from(attempts),
         "every queued or refused frame is counted exactly once"
     );
 

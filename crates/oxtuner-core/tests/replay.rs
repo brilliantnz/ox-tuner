@@ -5,7 +5,7 @@
 //! every declared page and one realtime block, recorded through the production
 //! transport stack. Replaying it here proves the wire format still matches what
 //! the hardware actually sent (ADR-0012), and that the decoder still produces
-//! the values TunerStudio would show.
+//! the values `TunerStudio` would show.
 //!
 //! The bench capture is in `tests/fixtures/no2c-202501-envelope.trace`.
 
@@ -95,11 +95,11 @@ fn the_recorded_no2c_session_replays_without_hardware() {
     );
 
     let mut total = 0usize;
-    for page in definition.pages.iter() {
+    for page in &definition.pages {
         let bytes = protocol
             .read_page_all(&mut replay, page.number)
             .expect("the recorded page read");
-        assert_eq!(bytes.len(), page.size as usize);
+        assert_eq!(bytes.len(), usize::try_from(page.size).unwrap_or(0));
         total += bytes.len();
     }
     assert_eq!(total, 3_408);
@@ -125,7 +125,7 @@ fn the_recorded_no2c_session_replays_without_hardware() {
         .expect("complete")
         .with_link_mode(LinkMode::Envelope);
     protocol.signature(&mut second).expect("signature");
-    for page in definition.pages.iter() {
+    for page in &definition.pages {
         protocol
             .read_page_all(&mut second, page.number)
             .expect("page");
@@ -148,33 +148,34 @@ fn one_hundred_replays_are_identical() {
     let trace = Trace::load(&fixture()).expect("the fixture parses");
     let behavior = Behavior::select(&definition).expect("a known family");
 
-    fn run(
-        trace: &Trace,
-        definition: &oxtuner_ini::Definition,
-        behavior: &Behavior,
-    ) -> (String, Vec<u8>, Vec<u8>) {
-        let mut replay = ReplayTransport::new(trace.clone());
-        replay.open().expect("opens");
-        let mut protocol = MsProtocol::new(definition, behavior.as_dyn())
-            .expect("complete")
-            .with_link_mode(LinkMode::Envelope);
-        let signature = protocol.signature(&mut replay).expect("signature");
-        // The replay answers in recorded order, so the sequence must match the
-        // capture: every page, then the realtime block.
-        let mut pages = Vec::new();
-        for page in definition.pages.iter() {
-            pages.extend(
-                protocol
-                    .read_page_all(&mut replay, page.number)
-                    .expect("page"),
-            );
-        }
-        let block = protocol.read_realtime(&mut replay).expect("realtime");
-        (signature, pages, block)
-    }
-
-    let expected = run(&trace, &definition, &behavior);
+    let expected = run(&trace, &definition, behavior);
     for _ in 0..100 {
-        assert_eq!(run(&trace, &definition, &behavior), expected);
+        assert_eq!(run(&trace, &definition, behavior), expected);
     }
+}
+
+/// Replays the whole capture and returns the signature, page bytes and block.
+fn run(
+    trace: &Trace,
+    definition: &oxtuner_ini::Definition,
+    behavior: Behavior,
+) -> (String, Vec<u8>, Vec<u8>) {
+    let mut replay = ReplayTransport::new(trace.clone());
+    replay.open().expect("opens");
+    let mut protocol = MsProtocol::new(definition, behavior.as_dyn())
+        .expect("complete")
+        .with_link_mode(LinkMode::Envelope);
+    let signature = protocol.signature(&mut replay).expect("signature");
+    // The replay answers in recorded order, so the sequence must match the
+    // capture: every page, then the realtime block.
+    let mut pages = Vec::new();
+    for page in &definition.pages {
+        pages.extend(
+            protocol
+                .read_page_all(&mut replay, page.number)
+                .expect("page"),
+        );
+    }
+    let block = protocol.read_realtime(&mut replay).expect("realtime");
+    (signature, pages, block)
 }

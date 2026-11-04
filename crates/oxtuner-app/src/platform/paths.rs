@@ -11,10 +11,17 @@
 use std::path::{Path, PathBuf};
 
 /// The operating-system layout a set of base directories belongs to.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the app ships for exactly these three desktop platforms"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
+    /// macOS.
     Macos,
+    /// Windows.
     Windows,
+    /// Linux.
     Linux,
 }
 
@@ -42,7 +49,7 @@ pub(crate) struct PlatformDirs {
 
 impl PlatformDirs {
     /// Reads the current machine's base directories.
-    pub fn discover() -> Option<Self> {
+    pub(crate) fn discover() -> Option<Self> {
         let base = directories::BaseDirs::new()?;
         Some(Self {
             config_base: base.config_dir().to_path_buf(),
@@ -54,6 +61,10 @@ impl PlatformDirs {
 }
 
 /// The directories ox-tuner reads and writes.
+#[expect(
+    clippy::struct_field_names,
+    reason = "each field names one of the app's directories"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub(crate) config_dir: PathBuf,
@@ -68,13 +79,14 @@ impl AppPaths {
     /// directory rather than panicking: an app that cannot find a place for its
     /// settings should still start.
     pub fn discover() -> Self {
-        PlatformDirs::discover()
-            .map(|dirs| Self::resolve(Platform::current(), &dirs))
-            .unwrap_or_else(|| Self {
+        PlatformDirs::discover().map_or_else(
+            || Self {
                 config_dir: PathBuf::from(".oxtuner"),
                 cache_dir: PathBuf::from(".oxtuner/cache"),
                 logs_dir: PathBuf::from(".oxtuner/logs"),
-            })
+            },
+            |dirs| Self::resolve(Platform::current(), &dirs),
+        )
     }
 
     /// Applies the application directory names to a platform's bases.
@@ -122,7 +134,7 @@ impl AppPaths {
     }
 
     /// The directory that holds the user-editable color themes. The bundled
-    /// OxTuner light and dark themes are seeded here on first launch, next to
+    /// `OxTuner` light and dark themes are seeded here on first launch, next to
     /// `settings.json` and `state.json`, and reloaded live when edited.
     pub fn themes_dir(&self) -> PathBuf {
         self.config_dir.join("themes")
@@ -145,8 +157,7 @@ impl AppPaths {
     pub fn next_trace_path(&self) -> PathBuf {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |duration| duration.as_millis());
         self.traces_dir().join(format!("session-{millis}.trace"))
     }
 }

@@ -67,7 +67,7 @@ impl RunFile {
                         max_bytes,
                     });
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
         }
@@ -100,7 +100,8 @@ impl RunFile {
 impl Write for RunFile {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let written = self.file.write(buffer)?;
-        self.written = self.written.saturating_add(written as u64);
+        let written_bytes = u64::try_from(written).unwrap_or(u64::MAX);
+        self.written = self.written.saturating_add(written_bytes);
 
         if self.written >= self.max_bytes {
             self.rotate()?;

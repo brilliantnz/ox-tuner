@@ -92,7 +92,10 @@ fn the_speeduino_dialect_parses_into_the_expected_model() {
     let outputs = definition.constant("boardFuelOutputs").expect("outputs");
     assert!(outputs.flags.no_msq_save);
     assert_eq!(
-        outputs.translate.as_ref().and_then(|value| value.literal()),
+        outputs
+            .translate
+            .as_ref()
+            .and_then(oxtuner_ini::Number::literal),
         Some(0.0)
     );
 
@@ -114,7 +117,7 @@ fn the_speeduino_dialect_parses_into_the_expected_model() {
     assert!(
         definition
             .channel("pulseLimit")
-            .is_some_and(|channel| channel.is_computed())
+            .is_some_and(oxtuner_ini::Channel::is_computed)
     );
     assert!(matches!(
         squirting.kind,
@@ -238,7 +241,11 @@ fn the_rusefi_dialect_parses_into_the_expected_model() {
     );
 
     // An empty burn command makes the page unbootable-to-burn, not missing.
-    assert!(definition.page(1).is_some_and(|page| page.is_burnable()));
+    assert!(
+        definition
+            .page(1)
+            .is_some_and(oxtuner_ini::Page::is_burnable)
+    );
     assert!(definition.page(2).is_some_and(|page| !page.is_burnable()));
 
     // `;+help` between the key and the `=` must not swallow the entry.

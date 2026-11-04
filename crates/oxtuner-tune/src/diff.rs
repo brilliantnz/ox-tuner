@@ -25,6 +25,11 @@ pub struct TuneDiff {
 
 impl TuneDiff {
     /// Compares `baseline` with `other`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the tunes use different
+    /// layouts.
     pub fn between(baseline: &Tune, other: &Tune) -> Result<Self, TuneError> {
         if !baseline.same_layout(other) {
             return Err(TuneError::LayoutMismatch);
@@ -85,6 +90,10 @@ pub(crate) fn diff_values(layout: &Layout, baseline: &[Values], other: &[Values]
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use oxtuner_ini::{SettingsContext, parse_str};
 
     use super::*;

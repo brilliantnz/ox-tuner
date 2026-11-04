@@ -1,6 +1,6 @@
-//! TunerStudio projects and `.msq` tune files.
+//! `TunerStudio` projects and `.msq` tune files.
 //!
-//! The v1 persistence layer (ADR-0007): open a TunerStudio project **in
+//! The v1 persistence layer (ADR-0007): open a `TunerStudio` project **in
 //! place**, read `CurrentTune.msq` into the tune model, and write only the
 //! values that changed. The native project format is deferred (ADR-0018).
 //!
@@ -28,7 +28,7 @@
 //!   read-only with reasons (ADR-0011); values that cannot be converted are
 //!   reported and left at their default, with the original text untouched.
 //! - **Raw-preserving.** The XML tree keeps untouched nodes byte-for-byte, so
-//!   unknown elements, comments and newer TunerStudio data survive a save.
+//!   unknown elements, comments and newer `TunerStudio` data survive a save.
 //! - **No panics on hostile input.** The reader has a depth limit, structured
 //!   errors and no entity expansion.
 //!

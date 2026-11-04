@@ -21,6 +21,10 @@
 use oxtuner_ini::Definition;
 
 /// How well a behavior claims a definition.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a behavior either matches exactly, compatibly, or not at all"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Match {
     /// The definition describes exactly this firmware.
@@ -33,6 +37,10 @@ pub enum Match {
 }
 
 /// The CRC algorithm a firmware's page checksum uses.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "every firmware this build supports uses the same CRC variant"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Crc32Variant {
     /// CRC-32/ISO-HDLC with the standard polynomial.
@@ -40,6 +48,10 @@ pub enum Crc32Variant {
 }
 
 /// How a CRC reply is encoded on the wire.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialect defines a fixed set of CRC reply encodings"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrcReply {
     /// Four raw bytes, most significant first.
@@ -65,6 +77,10 @@ pub struct Crc {
 /// Speeduino puts a one-byte return code in front of every reply, while rusEFI
 /// answers with the data alone (an empty payload for a successful write). The
 /// definition cannot say which, so the behavior does.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a reply either leads with a code or carries only data"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyCode {
     /// The payload starts with a one-byte return code (`0x00` ok).
@@ -74,6 +90,10 @@ pub enum ReplyCode {
 }
 
 /// What the firmware needs before a page can be used.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialect defines a fixed set of page switch requirements"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSwitch {
     /// No switch: the page is named in every command.
@@ -85,6 +105,10 @@ pub enum PageSwitch {
 }
 
 /// What a burn would do for one page.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a page either burns immediately or cannot be burned"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BurnPlan {
     /// The definition declares a burn command for the page.
@@ -127,6 +151,10 @@ pub trait EcuBehavior: Send + Sync {
 /// A definition's signature decides which one claims it. The protocol then
 /// talks to whatever the definition declares; nothing downstream knows the
 /// family name except the connection summary.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the shipped behavior families are a closed set"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Behavior {
     /// Speeduino, the first target (ADR-0009); the read-only path verified on
@@ -168,7 +196,7 @@ impl Behavior {
 
 /// Speeduino (ADR-0009).
 ///
-/// Speeduino speaks the MegaSquirt message set, puts the page in every command,
+/// Speeduino speaks the `MegaSquirt` message set, puts the page in every command,
 /// needs no wake handshake, and reports a page CRC-32 as four big-endian bytes.
 /// Its legacy burn command is accepted; a page with an empty `burnCommand` is
 /// RAM-only and says so.
@@ -288,7 +316,7 @@ impl EcuBehavior for MsCompatibleBehavior {
 }
 
 /// The shared CRC answer: the dialect's command, and the encoding the
-/// MegaSquirt family uses (four raw bytes, most significant first — rusEFI
+/// `MegaSquirt` family uses (four raw bytes, most significant first — rusEFI
 /// swaps the word before sending it, which is the same bytes).
 fn page_crc(definition: &Definition, page: u8) -> Option<Crc> {
     definition

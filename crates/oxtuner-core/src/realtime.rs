@@ -78,7 +78,7 @@ impl LatestFrame {
     pub fn get(&self) -> Option<Arc<RealtimeFrame>> {
         self.inner
             .read()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -87,7 +87,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *slot = Some(Arc::new(frame));
     }
 
@@ -96,7 +96,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *slot = None;
     }
 }
@@ -130,6 +130,12 @@ pub struct FrameWatch {
     wake: AsyncRx<spsc::Array<()>>,
 }
 
+impl std::fmt::Debug for FrameWatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("FrameWatch").finish_non_exhaustive()
+    }
+}
+
 impl FrameWatch {
     /// Waits for the next frame to be announced.
     ///
@@ -155,6 +161,14 @@ impl FrameWatch {
 /// The blocking counterpart of [`FrameWatch`].
 pub struct BlockingFrameWatch {
     wake: Rx<spsc::Array<()>>,
+}
+
+impl std::fmt::Debug for BlockingFrameWatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockingFrameWatch")
+            .finish_non_exhaustive()
+    }
 }
 
 impl BlockingFrameWatch {
@@ -533,8 +547,7 @@ fn indicator_expression(source: &str) -> &str {
     trimmed
         .strip_prefix('{')
         .and_then(|rest| rest.strip_suffix('}'))
-        .map(str::trim)
-        .unwrap_or(trimmed)
+        .map_or(trimmed, str::trim)
 }
 
 fn format_value(value: f64) -> String {
@@ -551,13 +564,18 @@ fn format_value(value: f64) -> String {
 }
 
 /// Reads one numeric value from the block.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "64-bit raw values are stored as f64, the realtime model's documented limit"
+)]
 fn read_raw(
     bytes: &[u8],
     offset: usize,
     data_type: DataType,
     endianness: Endianness,
 ) -> Option<f64> {
-    let width = data_type.size() as usize;
+    let width = usize::try_from(data_type.size()).unwrap_or(usize::MAX);
     let slice = bytes.get(offset..offset.checked_add(width)?)?;
     let mut ordered = [0u8; 8];
     match endianness {
@@ -570,7 +588,7 @@ fn read_raw(
     }
     Some(match data_type {
         DataType::U08 | DataType::M08 => f64::from(ordered[0]),
-        DataType::S08 => f64::from(ordered[0] as i8),
+        DataType::S08 => f64::from(ordered[0].cast_signed()),
         DataType::U16 => f64::from(u16::from_le_bytes([ordered[0], ordered[1]])),
         DataType::S16 => f64::from(i16::from_le_bytes([ordered[0], ordered[1]])),
         DataType::U32 => f64::from(u32::from_le_bytes([
@@ -588,6 +606,13 @@ fn read_raw(
     })
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "the value is checked finite and non-negative; bit fields live in 64-bit words and return to f64 storage"
+)]
 fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
     if !raw.is_finite() || raw < 0.0 {
         return None;
@@ -611,6 +636,11 @@ fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
+
     use std::time::Duration;
 
     use oxtuner_ini::{SettingsContext, parse_str};
@@ -823,7 +853,10 @@ halfRpm = { rpm / 2 }, \"rpm\"
 
         let frame = decoder.decode(&[0u8; 4], 1);
 
-        assert!(frame.values.is_empty());
+        assert!(
+            frame.values.is_empty(),
+            "a short block must decode to no values"
+        );
     }
 
     #[test]

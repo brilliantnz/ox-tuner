@@ -13,6 +13,11 @@
 //! no live frame here, so every card is given a demo state from a fixed cycle
 //! and all visual states stay visible while the layout is tuned.
 
+#![expect(
+    clippy::print_stderr,
+    reason = "the example reports why it fell back to the built-in sample"
+)]
+
 use std::path::Path;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -46,7 +51,7 @@ struct Preview {
 }
 
 impl Render for Preview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let style = IndicatorStyle::from_theme(cx.theme());
         let page = cx.theme().background;
         let panel = cx.theme().secondary;

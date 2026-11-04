@@ -92,7 +92,7 @@ impl Wave {
 
 /// Builds deterministic realtime blocks for one definition.
 #[derive(Debug, Clone)]
-pub struct Generator {
+pub(crate) struct Generator {
     block_size: usize,
     sources: Vec<Source>,
     endianness: Endianness,
@@ -101,7 +101,7 @@ pub struct Generator {
 
 impl Generator {
     /// Reads the channels of `definition` and prepares their sources.
-    pub fn new(definition: &Definition, seed: u64) -> Self {
+    pub(crate) fn new(definition: &Definition, seed: u64) -> Self {
         let block_size = definition
             .protocol
             .och_block_size
@@ -132,7 +132,7 @@ impl Generator {
                 continue;
             };
             let offset = usize::try_from(*offset).unwrap_or(usize::MAX);
-            if offset >= block_size || data_type.size() as usize > block_size - offset {
+            if offset >= block_size || type_width(*data_type) > block_size - offset {
                 continue;
             }
             sources.push(Source {
@@ -148,14 +148,14 @@ impl Generator {
             block_size,
             sources,
             endianness: definition.endianness,
-            phase: (seed % 3_600) as f64 * 0.017,
+            phase: phase_offset(seed),
         }
     }
 
     /// Builds the block for request `step`.
-    pub fn block(&self, step: u64) -> Vec<u8> {
+    pub(crate) fn block(&self, step: u64) -> Vec<u8> {
         let mut block = vec![0u8; self.block_size];
-        let t = step as f64 * 0.05 + self.phase;
+        let t = step_time(step) + self.phase;
 
         for source in &self.sources {
             let user = source.wave.value(t);
@@ -177,7 +177,33 @@ impl Generator {
     }
 }
 
+/// A deterministic starting phase for the waveform generator.
+fn phase_offset(seed: u64) -> f64 {
+    let seconds = u16::try_from(seed % 3_600).unwrap_or(0);
+    f64::from(seconds) * 0.017
+}
+
+/// Simulated time for one request step.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "a simulation step stays far below 2^53, where f64 is exact"
+)]
+fn step_time(step: u64) -> f64 {
+    step as f64 * 0.05
+}
+
+fn type_width(data_type: DataType) -> usize {
+    usize::try_from(data_type.size()).unwrap_or(usize::MAX)
+}
+
 /// Writes one numeric value in the definition's storage type.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "each cast is clamped to the storage type's range or is the documented f64 raw representation"
+)]
 fn write_raw(
     block: &mut [u8],
     offset: usize,
@@ -187,7 +213,7 @@ fn write_raw(
 ) {
     let rounded = raw.round();
     let bytes = match data_type {
-        DataType::U08 => [rounded.clamp(0.0, 255.0) as u8, 0, 0, 0, 0, 0, 0, 0],
+        DataType::U08 | DataType::M08 => [rounded.clamp(0.0, 255.0) as u8, 0, 0, 0, 0, 0, 0, 0],
         DataType::S08 => [
             (rounded.clamp(-128.0, 127.0) as i8).to_ne_bytes()[0],
             0,
@@ -198,7 +224,6 @@ fn write_raw(
             0,
             0,
         ],
-        DataType::M08 => [rounded.clamp(0.0, 255.0) as u8, 0, 0, 0, 0, 0, 0, 0],
         DataType::U16 => {
             let mut bytes = [0u8; 8];
             bytes[..2].copy_from_slice(&(rounded.clamp(0.0, 65_535.0) as u16).to_le_bytes());
@@ -242,7 +267,7 @@ fn write_raw(
 
     // On a little-endian definition the bytes above are already wire order; a
     // big-endian definition reverses the significant bytes.
-    let width = data_type.size() as usize;
+    let width = type_width(data_type);
     if endianness == Endianness::Little {
         block[offset..offset + width].copy_from_slice(&bytes[..width]);
     } else {

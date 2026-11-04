@@ -104,6 +104,10 @@ impl SubsystemFilter {
 }
 
 /// The diagnostics category.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "active, paused, follow and follow-pending are independent view states"
+)]
 pub(crate) struct DiagnosticsView {
     active: bool,
     paused: bool,
@@ -113,6 +117,10 @@ pub(crate) struct DiagnosticsView {
     subsystem: Entity<SelectState<Vec<String>>>,
     scroll: VirtualListScrollHandle,
     records: Vec<LogRecord>,
+    #[expect(
+        clippy::rc_buffer,
+        reason = "the virtual list takes a shared Vec of measured row sizes"
+    )]
     row_sizes: Rc<Vec<Size<Pixels>>>,
     last_width: Pixels,
     last_revision: u64,
@@ -128,7 +136,7 @@ pub(crate) struct DiagnosticsView {
 }
 
 impl DiagnosticsView {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("app.diagnostics.filter_placeholder"))
         });
@@ -184,7 +192,7 @@ impl DiagnosticsView {
     }
 
     /// Starts or stops the repaint timer as the tab becomes visible.
-    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<'_, Self>) {
         if self.active == active {
             return;
         }
@@ -199,7 +207,7 @@ impl DiagnosticsView {
         }
     }
 
-    fn start_tick(&mut self, cx: &mut Context<Self>) {
+    fn start_tick(&mut self, cx: &mut Context<'_, Self>) {
         self.tick = None;
         if !self.active || self.paused {
             return;
@@ -227,12 +235,12 @@ impl DiagnosticsView {
         }));
     }
 
-    fn invalidate(&mut self, cx: &mut Context<Self>) {
+    fn invalidate(&mut self, cx: &mut Context<'_, Self>) {
         self.force = true;
         cx.notify();
     }
 
-    fn toggle_paused(&mut self, cx: &mut Context<Self>) {
+    fn toggle_paused(&mut self, cx: &mut Context<'_, Self>) {
         self.paused = !self.paused;
 
         if self.paused {
@@ -247,10 +255,9 @@ impl DiagnosticsView {
         cx.notify();
     }
 
-    fn clear_view(&mut self, cx: &mut Context<Self>) {
+    fn clear_view(&mut self, cx: &mut Context<'_, Self>) {
         let latest = crate::platform::logging::handle(cx)
-            .map(|handle| handle.store().revision())
-            .unwrap_or(self.last_revision);
+            .map_or(self.last_revision, |handle| handle.store().revision());
 
         self.clear_after = Some(latest);
         self.force = true;
@@ -270,7 +277,7 @@ impl DiagnosticsView {
         }
     }
 
-    fn open_file(&self, cx: &App) {
+    fn open_file(cx: &App) {
         let Some(path) = crate::platform::logging::handle(cx).and_then(|handle| handle.path())
         else {
             return;
@@ -295,7 +302,7 @@ impl DiagnosticsView {
         }
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    fn refresh(&mut self, cx: &mut Context<'_, Self>) {
         if !self.active {
             return;
         }
@@ -378,7 +385,7 @@ impl DiagnosticsView {
         self.ring_dropped = dropped;
     }
 
-    fn toolbar_row(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar_row(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let has_file = crate::platform::logging::handle(cx)
             .and_then(|handle| handle.path())
             .is_some();
@@ -459,7 +466,7 @@ impl DiagnosticsView {
                         Button::new("diagnostics-open")
                             .label(t!("app.diagnostics.open"))
                             .disabled(!has_file)
-                            .on_click(cx.listener(|this, _, _, cx| this.open_file(cx))),
+                            .on_click(cx.listener(|_, _, _, cx| Self::open_file(cx))),
                     ),
             )
             .into_any_element()
@@ -542,8 +549,7 @@ impl DiagnosticsView {
             Level::ERROR => theme.danger,
             Level::WARN => theme.warning,
             Level::INFO => theme.foreground,
-            Level::DEBUG => theme.muted_foreground,
-            Level::TRACE => theme.muted_foreground,
+            Level::DEBUG | Level::TRACE => theme.muted_foreground,
         };
         let text = record_body(record);
 
@@ -598,7 +604,7 @@ impl DiagnosticsView {
 }
 
 impl Render for DiagnosticsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self.active {
             let width = self.scroll.base_handle().bounds().size.width;
             if width > px(0.) && width != self.last_width {
@@ -616,7 +622,7 @@ impl Render for DiagnosticsView {
             let list = v_virtual_list(
                 cx.entity(),
                 "diagnostics-list",
-                self.row_sizes.clone(),
+                Rc::clone(&self.row_sizes),
                 move |this, range, _, cx| {
                     range
                         .map(|index| this.row(index, cx))
@@ -787,6 +793,12 @@ fn row_height_for(message: &str, subsystem: &str, thread: &str, viewport: Pixels
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "a positive pixel width divided by the glyph width is a row count"
+)]
 fn content_wraps(message: &str, subsystem: &str, thread: &str, viewport: Pixels) -> bool {
     // A small over-estimate of glyph width keeps a row that actually wraps
     // from being laid out at the one-line height and clipping.
@@ -829,6 +841,7 @@ fn subsystem_label(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::Point;
     use gpui_kit::test::TestWindowExt as _;
 
     #[test]
@@ -899,7 +912,7 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
             div().size_full().child(self.view.clone())
         }
     }
@@ -919,7 +932,7 @@ mod tests {
             let (handle, host) = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        Default::default(),
+                        Point::default(),
                         size(px(900.), px(600.)),
                     ))),
                     ..Default::default()
@@ -967,7 +980,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).expect("create the log directory");
 
-        let handle = oxtuner_log::init(LogConfig::new(&directory).with_file(FilePolicy::Off))
+        let handle = oxtuner_log::init(&LogConfig::new(&directory).with_file(FilePolicy::Off))
             .expect("install logging");
         cx.update(|cx| crate::platform::logging::install(cx, handle));
 

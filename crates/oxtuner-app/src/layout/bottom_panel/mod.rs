@@ -118,7 +118,7 @@ impl BottomPanel {
     }
 
     /// Switches the visible category.
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let tab = BottomTab::from_index(index);
         if tab == self.tab {
             return;
@@ -133,7 +133,7 @@ impl BottomPanel {
 }
 
 impl Render for BottomPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tab = self.tab;
         let diagnostics = self.diagnostics.clone();
         // The theme's own tab-bar tone is almost the same as the active tab
@@ -186,7 +186,10 @@ impl Render for BottomPanel {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .when(tab == BottomTab::Diagnostics, |this| this.overflow_hidden())
+                    .when(
+                        tab == BottomTab::Diagnostics,
+                        gpui_kit::Styled::overflow_hidden,
+                    )
                     .when(tab != BottomTab::Diagnostics, |this| {
                         this.overflow_y_scroll()
                     })
@@ -202,7 +205,7 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext as _, Bounds, Context, IntoElement, Render, TestAppContext, Window,
+        AppContext as _, Bounds, Context, IntoElement, Point, Render, TestAppContext, Window,
         WindowBounds, WindowOptions, px, size,
     };
 
@@ -212,7 +215,7 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
             div()
                 .size_full()
                 .children(self.show.then(|| self.panel.clone()))
@@ -228,7 +231,7 @@ mod tests {
             let (handle, host) = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        Default::default(),
+                        Point::default(),
                         size(px(900.), px(600.)),
                     ))),
                     ..Default::default()

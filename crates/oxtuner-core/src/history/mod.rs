@@ -24,6 +24,11 @@ pub use window::{Sample, TimeWindow};
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::float_cmp,
+        reason = "the history tests compare exact sample values"
+    )]
+
     use super::*;
 
     fn history(capacity: usize) -> ChartHistory {
@@ -40,7 +45,7 @@ mod tests {
     fn a_pushed_frame_is_bounded_and_accounted_for() {
         let history = history(3);
         for step in 0..5 {
-            history.push_aligned(step as f64, vec![1000.0, 50.0, 14.7]);
+            history.push_aligned(f64::from(step), vec![1000.0, 50.0, 14.7]);
         }
 
         let stats = history.stats();
@@ -48,14 +53,17 @@ mod tests {
         assert_eq!(stats.frames, 3);
         assert_eq!(stats.pushed, 5);
         assert_eq!(stats.overruns, 2);
-        assert_eq!(stats.frames as u64 + stats.overruns, stats.pushed);
+        assert_eq!(
+            u64::try_from(stats.frames).unwrap_or(u64::MAX) + stats.overruns,
+            stats.pushed
+        );
     }
 
     #[test]
     fn extraction_returns_the_requested_window_in_order() {
         let history = history(10);
         for step in 0..10 {
-            history.push_aligned(step as f64, vec![step as f64, 0.0, 0.0]);
+            history.push_aligned(f64::from(step), vec![f64::from(step), 0.0, 0.0]);
         }
 
         let window = TimeWindow::new(3.0, 6.0);
@@ -74,7 +82,10 @@ mod tests {
         let series = history.extract(&["nope".to_owned()], TimeWindow::new(0.0, 1.0), 10);
 
         assert_eq!(series.len(), 1);
-        assert!(series[0].points.is_empty());
+        assert!(
+            series[0].points.is_empty(),
+            "an unknown channel must yield no points"
+        );
     }
 
     #[test]
@@ -131,7 +142,7 @@ mod tests {
     fn the_nearest_sample_is_found_across_series() {
         let history = history(10);
         for step in 0..5 {
-            history.push_aligned(step as f64, vec![step as f64 * 10.0, 1.0, 14.0]);
+            history.push_aligned(f64::from(step), vec![f64::from(step) * 10.0, 1.0, 14.0]);
         }
 
         let nearest = history.nearest(&["rpm".to_owned(), "afr".to_owned()], 2.1);
@@ -146,7 +157,7 @@ mod tests {
         let history = history(6_000);
         // 600 s at 100 Hz.
         for step in 0..60_000 {
-            history.push_aligned(step as f64 * 0.01, vec![1.0, 2.0, 3.0]);
+            history.push_aligned(f64::from(step) * 0.01, vec![1.0, 2.0, 3.0]);
         }
 
         let stats = history.stats();

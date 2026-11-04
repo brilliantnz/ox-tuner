@@ -8,6 +8,11 @@
 /// The lookup table, computed by the compiler.
 const TABLE: [u32; 256] = build_table();
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    reason = "the loop index is bounded by the 256-entry table"
+)]
 const fn build_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut index = 0usize;
@@ -28,11 +33,20 @@ const fn build_table() -> [u32; 256] {
     table
 }
 
+/// The CRC table index for the low byte of `value`.
+#[expect(
+    clippy::as_conversions,
+    reason = "the value is masked to 0xFF, so it indexes the 256-entry table"
+)]
+fn table_index(value: u32) -> usize {
+    value as usize
+}
+
 /// The CRC-32 of `bytes`, as the framed protocol sends it.
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in bytes {
-        let index = ((crc ^ u32::from(*byte)) & 0xFF) as usize;
+        let index = table_index((crc ^ u32::from(*byte)) & 0xFF);
         crc = (crc >> 8) ^ TABLE[index];
     }
     crc ^ 0xFFFF_FFFF

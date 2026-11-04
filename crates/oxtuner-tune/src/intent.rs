@@ -11,6 +11,10 @@ use std::fmt;
 use crate::{IniPage, Layout, Tune};
 
 /// Which calibration pages an operation covers.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a page set is either every page or an explicit list"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageSet {
     /// Every page the definition declares.
@@ -43,6 +47,11 @@ impl PageSet {
     }
 
     /// Checks every named page against a layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentError::NoPages`] for an empty explicit set and
+    /// [`IntentError::UnknownPage`] for a page the layout does not declare.
     pub fn validate(&self, layout: &Layout) -> Result<(), IntentError> {
         let Self::Pages(pages) = self else {
             return Ok(());
@@ -63,7 +72,6 @@ impl PageSet {
         match self {
             Self::All => "all pages".to_owned(),
             Self::Pages(pages) => {
-                #[allow(clippy::redundant_closure_for_method_calls)]
                 let numbers: Vec<String> = pages.iter().map(ToString::to_string).collect();
                 if numbers.is_empty() {
                     "no pages".to_owned()
@@ -76,6 +84,10 @@ impl PageSet {
 }
 
 /// What the user asked for.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the set of user-initiated write operations is closed"
+)]
 #[derive(Debug, Clone)]
 pub enum WriteIntent {
     /// Send the working image's pages to ECU RAM (takes effect immediately).
@@ -132,6 +144,11 @@ impl WriteIntent {
     }
 
     /// Validates page numbers against a layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentError`] when an explicit page set is empty or names a
+    /// page the layout does not declare.
     pub fn validate(&self, layout: &Layout) -> Result<(), IntentError> {
         match self.pages() {
             Some(pages) => pages.validate(layout),
@@ -154,6 +171,7 @@ impl WriteIntent {
 }
 
 /// Why an intent cannot be executed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentError {
     /// An explicit page set named no pages.
@@ -175,6 +193,10 @@ impl std::error::Error for IntentError {}
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use oxtuner_ini::{SettingsContext, parse_str};
 
     use super::*;

@@ -44,6 +44,10 @@ use crate::diff::diff_values;
 use crate::{IniPage, Layout, Owner, Tune, TuneDiff, TuneError, Values};
 
 /// The derived state of one cell, one page or the whole tune.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the sync state machine has a closed set of outcomes"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CellState {
     /// Working, RAM and flash agree (or the cell was never connected and the
@@ -86,6 +90,10 @@ impl fmt::Display for CellState {
 }
 
 /// One cell's value, for a conflict report.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a cell value is a user number, a raw number or text"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellValue {
     /// A numeric value in user units.
@@ -185,6 +193,11 @@ enum Overlay {
 
 impl TuneImages {
     /// Combines a baseline and a working image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the images use different
+    /// layouts.
     pub fn new(baseline: Tune, working: Tune) -> Result<Self, TuneError> {
         if !baseline.same_layout(&working) {
             return Err(TuneError::LayoutMismatch);
@@ -218,12 +231,22 @@ impl TuneImages {
     }
 
     /// Attaches a confirmed RAM image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the image uses another
+    /// layout.
     pub fn with_ecu_ram(mut self, ram: Tune) -> Result<Self, TuneError> {
         self.set_ecu_ram(ram)?;
         Ok(self)
     }
 
     /// Attaches a confirmed flash image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the image uses another
+    /// layout.
     pub fn with_ecu_flash(mut self, flash: Tune) -> Result<Self, TuneError> {
         self.set_ecu_flash(flash)?;
         Ok(self)
@@ -265,6 +288,15 @@ impl TuneImages {
     }
 
     /// Records a confirmed RAM image (verified write or a page read).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the image uses another
+    /// layout.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the image by value lets a read-back hand it over without a clone"
+    )]
     pub fn set_ecu_ram(&mut self, ram: Tune) -> Result<(), TuneError> {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
@@ -275,6 +307,15 @@ impl TuneImages {
     }
 
     /// Records a confirmed flash image (a verified burn or a page read).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the image uses another
+    /// layout.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the image by value lets a read-back hand it over without a clone"
+    )]
     pub fn set_ecu_flash(&mut self, flash: Tune) -> Result<(), TuneError> {
         self.check_layout(&flash)?;
         self.ecu_flash = Some(flash.snapshot());
@@ -298,6 +339,15 @@ impl TuneImages {
     /// Every cell where the ECU differs from the working image is marked, for
     /// the conflict dialog (ADR-0010: "on reconnect, compare the ECU with
     /// `working` → conflict dialog; no automatic write").
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the image uses another
+    /// layout.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the image by value lets the reconnect read hand it over without a clone"
+    )]
     pub fn reconnect(&mut self, ram: Tune) -> Result<Vec<Conflict>, TuneError> {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
@@ -339,6 +389,10 @@ impl TuneImages {
     }
 
     /// Marks a cell's last write as failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable or cell does not exist.
     pub fn mark_write_failed(
         &mut self,
         name: &str,
@@ -358,6 +412,10 @@ impl TuneImages {
     }
 
     /// Clears a conflict overlay once the user has decided about the cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable or cell does not exist.
     pub fn clear_conflict(
         &mut self,
         name: &str,
@@ -417,6 +475,15 @@ impl TuneImages {
     /// The imported tune keeps its own layout allocation, so values are adopted
     /// into this project's layout after a name-and-shape check; the session's
     /// `Arc<Layout>` is never replaced under the views holding it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the imported tune's values do not match this
+    /// layout.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the caller hands the imported tune over; only its values are kept"
+    )]
     pub fn import(&mut self, tune: Tune) -> Result<(), TuneError> {
         self.working.adopt_values(&tune)?;
         self.overlays
@@ -425,6 +492,10 @@ impl TuneImages {
     }
 
     /// Derived state of one cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable or cell does not exist.
     pub fn cell_state(
         &self,
         name: &str,
@@ -635,6 +706,11 @@ impl StateTable {
     }
 
     /// The state of one cell.
+    /// Derived state of one cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable or cell does not exist.
     pub fn cell(&self, name: &str, row: usize, column: usize) -> Result<CellState, TuneError> {
         let variable = self
             .layout
@@ -731,6 +807,11 @@ fn diff_writable_values(layout: &Layout, left: &[Values], right: &[Values]) -> T
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        clippy::float_cmp,
+        reason = "unit tests may unwrap and compare model values exactly"
+    )]
     use std::sync::OnceLock;
 
     use oxtuner_ini::{SettingsContext, parse_str};

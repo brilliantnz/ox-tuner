@@ -1,10 +1,15 @@
-//! End-to-end tests for opening, editing and saving a TunerStudio project.
+//! End-to-end tests for opening, editing and saving a `TunerStudio` project.
 //!
 //! The fixture is a real project shape in miniature: `projectCfg/` with an
 //! `#include`, a `CurrentTune.msq` with unknown elements, and a definition with
 //! a scalar, a bit field, text and a table. Every test runs in its own temporary
 //! directory, so the filesystem assertions ("only these files were written")
 //! are meaningful.
+
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap; a failed call is a failed test"
+)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -257,7 +262,11 @@ fn saving_without_edits_leaves_the_tune_byte_identical() {
 
     let outcome = project.save().expect("an unedited project saves");
     assert_eq!(outcome.cells, 0);
-    assert!(outcome.variables.is_empty());
+    assert_eq!(
+        outcome.variables,
+        Vec::<String>::new(),
+        "saving an unchanged tune rewrites no variables"
+    );
     assert_eq!(read_tune(&dir), before);
 
     // A second save after committing the baseline is still a no-op.
@@ -590,7 +599,7 @@ fn a_malformed_tune_is_an_error_not_a_panic() {
 
 /// The reference-project check runs only on the owner's machine.
 ///
-/// Set `OXTUNER_REFERENCE_PROJECT` to a TunerStudio project directory and run
+/// Set `OXTUNER_REFERENCE_PROJECT` to a `TunerStudio` project directory and run
 /// `cargo test -p oxtuner-project -- --ignored`. The project is copied first,
 /// so the original is never written to.
 #[test]

@@ -25,47 +25,46 @@ pub struct Decoded {
 pub fn decode(bytes: &[u8]) -> Decoded {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
 
-    match std::str::from_utf8(bytes) {
-        Ok(text) => Decoded {
-            text: text.to_owned(),
-            diagnostic: None,
-        },
-        Err(_) => {
-            // Latin-1 is a total mapping: every byte is a code point. Mixing it
-            // with valid UTF-8 sequences keeps the ASCII structure (sections,
-            // keys, commands) intact, which is all the parser needs.
-            let mut text = String::with_capacity(bytes.len());
-            let mut rest = bytes;
-            while !rest.is_empty() {
-                match std::str::from_utf8(rest) {
-                    Ok(tail) => {
-                        text.push_str(tail);
-                        break;
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        // Latin-1 is a total mapping: every byte is a code point. Mixing it
+        // with valid UTF-8 sequences keeps the ASCII structure (sections,
+        // keys, commands) intact, which is all the parser needs.
+        let mut text = String::with_capacity(bytes.len());
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            match std::str::from_utf8(rest) {
+                Ok(tail) => {
+                    text.push_str(tail);
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    // SAFETY-free split: `valid` bytes are known UTF-8.
+                    if let Ok(head) = std::str::from_utf8(&rest[..valid]) {
+                        text.push_str(head);
                     }
-                    Err(error) => {
-                        let valid = error.valid_up_to();
-                        // SAFETY-free split: `valid` bytes are known UTF-8.
-                        if let Ok(head) = std::str::from_utf8(&rest[..valid]) {
-                            text.push_str(head);
-                        }
-                        let invalid = error.error_len().unwrap_or(rest.len() - valid);
-                        for byte in &rest[valid..valid + invalid] {
-                            text.push(char::from(*byte));
-                        }
-                        rest = &rest[valid + invalid..];
+                    let invalid = error.error_len().unwrap_or(rest.len() - valid);
+                    for byte in &rest[valid..valid + invalid] {
+                        text.push(char::from(*byte));
                     }
+                    rest = &rest[valid + invalid..];
                 }
             }
-
-            Decoded {
-                text,
-                diagnostic: Some(Diagnostic::whole_file(
-                    Severity::Note,
-                    "non-utf8",
-                    "the file is not valid UTF-8; undecodable bytes were read as Latin-1",
-                )),
-            }
         }
+
+        return Decoded {
+            text,
+            diagnostic: Some(Diagnostic::whole_file(
+                Severity::Note,
+                "non-utf8",
+                "the file is not valid UTF-8; undecodable bytes were read as Latin-1",
+            )),
+        };
+    };
+
+    Decoded {
+        text: text.to_owned(),
+        diagnostic: None,
     }
 }
 

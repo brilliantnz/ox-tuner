@@ -97,8 +97,7 @@ pub(crate) fn remember(path: &Path, cx: &mut App) {
 pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
+        .map_or_else(|| path.display().to_string(), str::to_owned)
 }
 
 /// Whether the remembered project still exists on disk.

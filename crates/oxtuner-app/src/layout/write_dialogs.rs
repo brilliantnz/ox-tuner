@@ -315,7 +315,7 @@ pub(crate) fn show_enable_writes(window: &mut Window, cx: &mut App) {
                                 .label(t!("app.writes.confirm_check"))
                                 .checked(checked)
                                 .on_click({
-                                    let acknowledged = acknowledged.clone();
+                                    let acknowledged = Rc::clone(&acknowledged);
                                     move |checked, _, cx| {
                                         acknowledged.set(*checked);
                                         cx.refresh_windows();

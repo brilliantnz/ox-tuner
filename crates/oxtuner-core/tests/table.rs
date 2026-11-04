@@ -121,7 +121,7 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let parts = start(CoreConfig::default()).expect("the core starts");
+        let parts = start(&CoreConfig::default()).expect("the core starts");
         Self {
             handle: parts.handle,
             _thread: parts.thread,
@@ -147,7 +147,7 @@ impl Harness {
                 op: answered,
                 table,
             } => {
-                assert_eq!(answered, op);
+                assert_eq!(answered, op, "the reply belongs to the queued read");
                 (op, table)
             }
             other => panic!("expected a table read, got {other:?}"),

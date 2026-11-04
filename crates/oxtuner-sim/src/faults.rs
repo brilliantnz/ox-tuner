@@ -9,6 +9,10 @@
 use std::time::Duration;
 
 /// The operation a fault is attached to.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the simulator models a fixed set of protocol operations"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimOp {
     /// The signature query.
@@ -57,6 +61,10 @@ impl SimOp {
 }
 
 /// What goes wrong.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the simulator defines a closed set of injected faults"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// No reply at all; the host sees its timeout.
@@ -134,18 +142,18 @@ impl FaultRule {
 
 /// The armed rules, consumed as operations happen.
 #[derive(Debug, Clone, Default)]
-pub struct Faults {
+pub(crate) struct Faults {
     rules: Vec<FaultRule>,
 }
 
 impl Faults {
     /// No faults.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Adds a rule.
-    pub fn arm(&mut self, rule: FaultRule) {
+    pub(crate) fn arm(&mut self, rule: FaultRule) {
         self.rules.push(rule);
     }
 
@@ -153,7 +161,7 @@ impl Faults {
     ///
     /// `Any` rules are considered after the specific ones, so a test can arm a
     /// general failure and still target one operation precisely.
-    pub fn take(&mut self, operation: SimOp) -> Option<Fault> {
+    pub(crate) fn take(&mut self, operation: SimOp) -> Option<Fault> {
         let index = self
             .rules
             .iter()
@@ -174,7 +182,7 @@ impl Faults {
 
     /// Whether anything is armed.
     #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 }

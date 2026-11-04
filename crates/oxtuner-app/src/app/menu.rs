@@ -41,7 +41,7 @@ fn install(cx: &mut App, menu_bar: &Entity<AppMenuBar>) {
     // The in-window bar reads its own copy, so it stays correct on the
     // platforms where the OS keeps the menus to itself.
     GlobalState::global_mut(cx).set_app_menus(menus().into_iter().map(Menu::owned).collect());
-    menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
+    menu_bar.update(cx, AppMenuBar::reload);
 }
 
 fn menus() -> Vec<Menu> {

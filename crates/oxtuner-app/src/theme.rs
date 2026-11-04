@@ -1,7 +1,7 @@
-//! The OxTuner color themes.
+//! The `OxTuner` color themes.
 //!
 //! The app does not use gpui-kit's built-in Default theme. It ships its own
-//! pair — OxTuner Light and OxTuner Dark — as a theme set in `<config>/themes/oxtuner.json`, next to
+//! pair — `OxTuner` Light and `OxTuner` Dark — as a theme set in `<config>/themes/oxtuner.json`, next to
 //! `settings.json` and `state.json`. The file is user-editable and hot
 //! reloaded, so a user can tune any token and see the change without a
 //! restart.
@@ -10,7 +10,7 @@
 //! context needed) and [`register`] once inside `Application::run`: the
 //! bundled set is installed synchronously so the first frame already uses it,
 //! and the directory is watched so later edits reload. The System / Light /
-//! Dark preference in settings keeps working — it now resolves to the OxTuner
+//! Dark preference in settings keeps working — it now resolves to the `OxTuner`
 //! pair instead of the kit defaults.
 //!
 //! The seeded file is user-owned, so it is not replaced on upgrade. It carries
@@ -316,7 +316,7 @@ fn merge_missing(user: &mut Value, bundled: &Value) {
     }
 }
 
-/// Installs the OxTuner themes and watches the directory for edits.
+/// Installs the `OxTuner` themes and watches the directory for edits.
 ///
 /// The bundled set loads synchronously first so the first frame already uses
 /// it; the watcher then reloads the directory (including the seeded file and
@@ -330,7 +330,7 @@ pub fn register(paths: &AppPaths, cx: &mut App) {
     }
 }
 
-/// Loads the OxTuner pair into the active theme and applies the preference.
+/// Loads the `OxTuner` pair into the active theme and applies the preference.
 ///
 /// The registry keeps every loaded theme; `apply_config` selects which two
 /// are the live light and dark ones. Afterwards the stored System / Light /
@@ -351,24 +351,26 @@ fn install(cx: &mut App) {
         .themes()
         .get(&SharedString::from(DARK_NAME))
         .cloned();
-    match (light, dark) {
-        (Some(light), Some(dark)) => {
-            Theme::update(cx, |theme| {
-                theme.apply_config(&light);
-                theme.apply_config(&dark);
-            });
-        }
-        _ => {
-            tracing::error!("OxTuner themes missing from the registry");
-            return;
-        }
-    }
+    let (Some(light), Some(dark)) = (light, dark) else {
+        tracing::error!("OxTuner themes missing from the registry");
+        return;
+    };
+
+    Theme::update(cx, |theme| {
+        theme.apply_config(&light);
+        theme.apply_config(&dark);
+    });
 
     apply_theme(cx.global::<AppSettings>().theme(), cx);
 }
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "the theme tests may unwrap; a failed read is a failed test"
+    )]
+
     use gpui_kit::component::{Theme, ThemeMode, ThemeSet, try_parse_color};
 
     use super::*;
@@ -543,9 +545,9 @@ mod tests {
     fn relative_luminance(color: &str) -> f64 {
         let hex = color.strip_prefix('#').expect("a hex color");
         let channels = [0, 2, 4].map(|offset| {
-            let value = u8::from_str_radix(&hex[offset..offset + 2], 16).expect("two hex digits")
-                as f64
-                / 255.0;
+            let value = f64::from(
+                u8::from_str_radix(&hex[offset..offset + 2], 16).expect("two hex digits"),
+            ) / 255.0;
             if value <= 0.04045 {
                 value / 12.92
             } else {

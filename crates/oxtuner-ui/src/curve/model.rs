@@ -7,6 +7,15 @@
 //! turns requested edits into events; the core stays the only owner of tune
 //! values (ADR-0020).
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use std::collections::HashMap;
 
 use oxtuner_core::{TableSummary, nice_ticks, padded_range};
@@ -105,13 +114,13 @@ impl CurveSnapshot {
             .collect();
 
         let mut snapshot = Self::new(table.id.clone(), table.title.clone(), points);
-        snapshot.name = table.name.clone();
-        snapshot.units = table.units.clone();
+        snapshot.name.clone_from(&table.name);
+        snapshot.units.clone_from(&table.units);
         snapshot.digits = table.digits;
-        snapshot.x_label = table.x_axis.label.clone();
-        snapshot.x_units = table.x_axis.units.clone();
+        snapshot.x_label.clone_from(&table.x_axis.label);
+        snapshot.x_units.clone_from(&table.x_axis.units);
         snapshot.x_digits = table.x_axis.digits;
-        snapshot.y_label = table.y_axis.label.clone();
+        snapshot.y_label.clone_from(&table.y_axis.label);
         snapshot.writable = table.writable;
 
         if let Some(axes) = table.curve {
@@ -211,6 +220,7 @@ impl CurveSnapshot {
     ///
     /// A host uses this to show a pending axis edit before the core answers,
     /// so the plot and its labels move in the same frame as the table header.
+    #[must_use]
     pub fn with_x_values(mut self, values: impl IntoIterator<Item = f64>) -> Self {
         for (point, x) in self.points.iter_mut().zip(values) {
             point.x = x;
@@ -220,24 +230,28 @@ impl CurveSnapshot {
     }
 
     /// Sets the value array a committed edit writes to.
+    #[must_use]
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
     }
 
     /// Sets the units of the tuned values.
+    #[must_use]
     pub fn with_units(mut self, units: impl Into<String>) -> Self {
         self.units = units.into();
         self
     }
 
     /// Sets the digits the tuned values display with.
+    #[must_use]
     pub fn with_digits(mut self, digits: u8) -> Self {
         self.digits = digits;
         self
     }
 
     /// Sets the X axis label and units.
+    #[must_use]
     pub fn with_x_axis(
         mut self,
         label: impl Into<String>,
@@ -251,30 +265,35 @@ impl CurveSnapshot {
     }
 
     /// Sets the Y axis label.
+    #[must_use]
     pub fn with_y_label(mut self, label: impl Into<String>) -> Self {
         self.y_label = label.into();
         self
     }
 
     /// Sets the exact X range, normally the definition's `xAxis` limits.
+    #[must_use]
     pub fn with_x_range(mut self, minimum: f64, maximum: f64) -> Self {
         self.x_range = Some((minimum, maximum));
         self
     }
 
     /// Sets the exact Y range, normally the definition's `yAxis` limits.
+    #[must_use]
     pub fn with_y_range(mut self, minimum: f64, maximum: f64) -> Self {
         self.y_range = Some((minimum, maximum));
         self
     }
 
     /// Sets how many intervals the Y axis aims for.
+    #[must_use]
     pub fn with_divisions(mut self, divisions: usize) -> Self {
         self.divisions = divisions.max(2);
         self
     }
 
     /// Sets whether the session may store edits.
+    #[must_use]
     pub fn with_writable(mut self, writable: bool) -> Self {
         self.writable = writable;
         self
@@ -297,6 +316,7 @@ struct Drag {
 }
 
 /// The curve's model.
+#[derive(Debug)]
 pub struct CurveModel {
     snapshot: Option<CurveSnapshot>,
     selected: usize,

@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::error::Diagnostic;
@@ -196,6 +197,10 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Ordered<T> {
 }
 
 /// Byte order of multi-byte values.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a number is either little- or big-endian; the set cannot grow"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Endianness {
     /// Low byte first. The dialect's documented default is big, but every
@@ -227,6 +232,10 @@ impl fmt::Display for Endianness {
 }
 
 /// The numeric and string types a constant or channel can use.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines a closed set of wire data types"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
     /// Unsigned 8-bit.
@@ -308,6 +317,10 @@ impl fmt::Display for DataType {
 }
 
 /// A numeric attribute: a literal, or an expression that stays dynamic.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a numeric attribute is either a literal or an expression"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Number {
     /// A value known at parse time.
@@ -364,12 +377,22 @@ impl Number {
     }
 }
 
+/// A whole number in the range the display form treats as an integer.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    reason = "the caller checks fract() == 0 and abs < 1e15 before converting"
+)]
+fn whole_number(value: f64) -> i64 {
+    value as i64
+}
+
 impl fmt::Display for Number {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Literal(value) => {
                 if value.fract() == 0.0 && value.abs() < 1e15 {
-                    write!(formatter, "{}", *value as i64)
+                    write!(formatter, "{}", whole_number(*value))
                 } else {
                     write!(formatter, "{value}")
                 }
@@ -381,6 +404,10 @@ impl fmt::Display for Number {
 
 /// A text attribute: a literal string, or a string function such as
 /// `{ bitStringValue(algorithmUnits, algorithm) }`.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a text attribute is either a literal or an expression"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Text {
     /// Plain text, quotes removed.
@@ -432,12 +459,27 @@ impl fmt::Display for Text {
 }
 
 /// A dimension: fixed, or an expression over constants (resizable arrays).
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a dimension is either fixed or an expression; the set cannot grow"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Dimension {
     /// Known at parse time.
     Fixed(u32),
     /// Resolved at runtime from constant values (iniSpec 3.12/3.22/3.53).
     Expression(Expr),
+}
+
+/// A non-negative dimension expression converted to the model's element count.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "the caller checks the value is non-negative; dimensions are element counts"
+)]
+fn dimension_value(value: f64) -> u32 {
+    value as u32
 }
 
 impl Dimension {
@@ -456,7 +498,7 @@ impl Dimension {
             Self::Expression(expression) => expression
                 .evaluate(lookup)
                 .filter(|value| *value >= 0.0)
-                .map(|value| value as u32),
+                .map(dimension_value),
         }
     }
 }
@@ -473,6 +515,10 @@ impl fmt::Display for Dimension {
 }
 
 /// The declared size of a constant.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines a closed set of storage shapes"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Shape {
     /// One value.
@@ -514,9 +560,8 @@ impl Shape {
                 let width = high.saturating_sub(*low).saturating_add(1);
                 Some(1u32.checked_shl(u32::from(width)).unwrap_or(u32::MAX))
             }
-            Self::List(length) => length.value(),
+            Self::List(length) | Self::Text { length, .. } => length.value(),
             Self::Table { cols, rows } => Some(cols.value()? * rows.value()?),
-            Self::Text { length, .. } => length.value(),
         }
     }
 
@@ -552,6 +597,10 @@ impl fmt::Display for Shape {
 }
 
 /// What kind of entry a constant is.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines a closed set of constant classes"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstantClass {
     /// A bit field with an option list.
@@ -602,6 +651,10 @@ pub struct ConstantFlags {
 }
 
 /// How the offset was written.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines a closed set of offset forms"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Offset {
     /// An explicit address (decimal or hex).
@@ -718,6 +771,10 @@ impl BitRange {
 }
 
 /// How a realtime channel gets its value.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a channel is either measured from the realtime block or computed"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum ChannelKind {
     /// Read from the realtime block at an offset.
@@ -998,6 +1055,10 @@ impl FrontPage {
 }
 
 /// The row kinds the dynamic dialog system defines.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialog grammar has a fixed set of row kinds; unknown text maps to Unknown"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// `field` — label plus constant.
@@ -1105,6 +1166,10 @@ pub struct Dialog {
 }
 
 /// What a menu item points at.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the menu grammar has a fixed set of target kinds"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuTargetKind {
     /// Another dialog / table / curve.
@@ -1278,13 +1343,23 @@ pub struct SectionCoverage {
     pub unsupported: usize,
 }
 
+/// Percentage of entries understood, 100 when there are none.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "entry counts are far below 2^53, so f64 represents them exactly"
+)]
+fn coverage_percent(understood: usize, entries: usize) -> f64 {
+    if entries == 0 {
+        return 100.0;
+    }
+    (understood as f64 / entries as f64) * 100.0
+}
+
 impl SectionCoverage {
     /// Percentage of entries understood, 100 when the section is empty.
     pub fn percent(&self) -> f64 {
-        if self.entries == 0 {
-            return 100.0;
-        }
-        (self.understood as f64 / self.entries as f64) * 100.0
+        coverage_percent(self.understood, self.entries)
     }
 }
 
@@ -1300,10 +1375,7 @@ impl Coverage {
     pub fn percent(&self) -> f64 {
         let entries: usize = self.sections.iter().map(|section| section.entries).sum();
         let understood: usize = self.sections.iter().map(|section| section.understood).sum();
-        if entries == 0 {
-            return 100.0;
-        }
-        (understood as f64 / entries as f64) * 100.0
+        coverage_percent(understood, entries)
     }
 
     /// The coverage row for one section.
@@ -1417,6 +1489,17 @@ pub struct Definition {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// A numeric PC-variable default converted to the byte the command expects.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "PC variables are byte-valued; the cast matches the dialect's truncation"
+)]
+fn variable_byte(value: f64) -> u8 {
+    value as u8
+}
+
 impl Definition {
     /// An empty definition, used as a base by the parser.
     pub fn empty() -> Self {
@@ -1502,7 +1585,7 @@ impl Definition {
             .get_ci(name)
             .and_then(Number::literal)
         {
-            return Some(value as u8);
+            return Some(variable_byte(value));
         }
         match variable.class {
             ConstantClass::Bits => variable
@@ -1527,22 +1610,31 @@ impl Definition {
     /// understands shows up as a reviewable diff rather than a silently
     /// different count. Order is the definition's own order, never a map's.
     pub fn summary(&self) -> String {
-        use std::fmt::Write as _;
-
         let mut out = String::new();
+        self.write_identity(&mut out);
+        self.write_pages(&mut out);
+        self.write_constants(&mut out);
+        self.write_channels(&mut out);
+        self.write_tables(&mut out);
+        self.write_tail(&mut out);
+        out
+    }
+
+    fn write_identity(&self, out: &mut String) {
         let _ = writeln!(out, "signature|{}", self.signature);
         let _ = writeln!(out, "signature_section|{}", self.signature_section);
         let _ = writeln!(out, "spec|{:?}", self.spec_version);
         let _ = writeln!(out, "endianness|{}", self.endianness);
-        let _ = writeln!(
-            out,
-            "flags|{}",
-            self.active_flags
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        let flags = self
+            .active_flags
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(out, "flags|{flags}");
+    }
+
+    fn write_pages(&self, out: &mut String) {
         let _ = writeln!(out, "pages|{}", self.pages.len());
         for page in &self.pages {
             let _ = writeln!(
@@ -1555,6 +1647,9 @@ impl Definition {
                 page.is_writable()
             );
         }
+    }
+
+    fn write_constants(&self, out: &mut String) {
         let _ = writeln!(out, "constants|{}", self.constants.len());
         for (name, constant) in self.constants.iter() {
             let _ = writeln!(
@@ -1579,6 +1674,9 @@ impl Definition {
             );
         }
         let _ = writeln!(out, "pc_variables|{}", self.pc_variables.len());
+    }
+
+    fn write_channels(&self, out: &mut String) {
         let _ = writeln!(out, "channels|{}", self.channels.len());
         for (name, channel) in self.channels.iter() {
             let kind = match &channel.kind {
@@ -1597,25 +1695,23 @@ impl Definition {
             };
             let _ = writeln!(out, "channel|{name}|{kind}|units={}", channel.units);
         }
+    }
+
+    fn write_tables(&self, out: &mut String) {
         let _ = writeln!(out, "tables|{}", self.tables.len());
         for (id, table) in self.tables.iter() {
             let _ = writeln!(
                 out,
                 "table|{id}|x={}|y={}|z={}|title={}",
-                table
-                    .x_bins
-                    .as_ref()
-                    .map(|axis| axis.array.as_str())
-                    .unwrap_or(""),
-                table
-                    .y_bins
-                    .as_ref()
-                    .map(|axis| axis.array.as_str())
-                    .unwrap_or(""),
+                table.x_bins.as_ref().map_or("", |axis| axis.array.as_str()),
+                table.y_bins.as_ref().map_or("", |axis| axis.array.as_str()),
                 table.z_bins.as_deref().unwrap_or(""),
                 table.title
             );
         }
+    }
+
+    fn write_tail(&self, out: &mut String) {
         let _ = writeln!(out, "curves|{}", self.curves.len());
         let _ = writeln!(out, "gauges|{}", self.gauges.len());
         let _ = writeln!(out, "dialogs|{}", self.dialogs.len());
@@ -1639,7 +1735,6 @@ impl Definition {
             .count();
         let _ = writeln!(out, "errors|{errors}");
         let _ = writeln!(out, "warnings|{warnings}");
-        out
     }
 }
 

@@ -130,7 +130,7 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let parts = start(CoreConfig::default()).expect("the core starts");
+        let parts = start(&CoreConfig::default()).expect("the core starts");
         Self {
             handle: parts.handle,
             _thread: parts.thread,
@@ -177,7 +177,11 @@ fn opening_a_project_summarises_the_tune_for_the_ui() {
     assert_eq!(summary.tune_path, dir.path().join(TUNE_FILE));
     assert!(summary.in_project);
     assert!(!summary.read_only, "{:?}", summary.read_only_reasons);
-    assert!(summary.read_only_reasons.is_empty());
+    assert_eq!(
+        summary.read_only_reasons,
+        Vec::<String>::new(),
+        "a writable project has no read-only reasons"
+    );
     assert!(
         summary.read_only_reason.is_none(),
         "a writable project allocates no joined reason"
@@ -241,9 +245,9 @@ fn a_signature_mismatch_opens_read_only_and_refuses_to_save() {
     let event = core.next();
 
     assert_eq!(event.op(), Some(op));
-    let (code, message) = failure(&event);
-    assert_eq!(code, FailureCode::TuneSaveFailed);
-    assert!(!message.is_empty());
+    let (kind, message) = failure(&event);
+    assert_eq!(kind, FailureCode::TuneSaveFailed);
+    assert_ne!(message, "", "the refusal names a reason");
     assert_eq!(dir.tune(), before, "a refused save touches nothing");
 }
 
@@ -260,8 +264,8 @@ fn a_failed_open_keeps_the_previous_project_open() {
     let event = core.next();
 
     assert_eq!(event.op(), Some(op));
-    let (code, message) = failure(&event);
-    assert_eq!(code, FailureCode::ProjectRejected);
+    let (kind, message) = failure(&event);
+    assert_eq!(kind, FailureCode::ProjectRejected);
     assert!(
         message.contains("does-not-exist"),
         "the message names the path: {message}"
@@ -283,9 +287,9 @@ fn saving_without_a_project_says_so() {
     let event = core.next();
 
     assert_eq!(event.op(), Some(op));
-    let (code, message) = failure(&event);
-    assert_eq!(code, FailureCode::NothingToSave);
-    assert!(!message.is_empty());
+    let (kind, message) = failure(&event);
+    assert_eq!(kind, FailureCode::NothingToSave);
+    assert_ne!(message, "", "the refusal names a reason");
 }
 
 #[test]
@@ -303,8 +307,8 @@ fn unloading_closes_the_project() {
     assert_eq!(core.next(), Event::DefinitionUnloaded { op });
 
     core.handle.save_tune().expect("the command is queued");
-    let (code, _) = failure(&core.next());
-    assert_eq!(code, FailureCode::NothingToSave);
+    let (kind, _) = failure(&core.next());
+    assert_eq!(kind, FailureCode::NothingToSave);
 }
 
 #[test]

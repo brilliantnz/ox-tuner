@@ -13,7 +13,7 @@ fn install_writes_a_run_file_and_refuses_a_second_subscriber() {
         .with_file(FilePolicy::On)
         .with_ring_capacity(8);
 
-    let handle = oxtuner_log::init(config).expect("install logging");
+    let handle = oxtuner_log::init(&config).expect("install logging");
     let store = handle.store();
     let path = handle.path().expect("a file was requested").to_path_buf();
     assert_eq!(handle.file_dropped(), 0);
@@ -29,7 +29,7 @@ fn install_writes_a_run_file_and_refuses_a_second_subscriber() {
     assert_eq!(record.op.as_deref(), Some("op-1"));
 
     let second = oxtuner_log::init(
-        LogConfig::new(directory.path())
+        &LogConfig::new(directory.path())
             .with_profile(Profile::Debug)
             .with_file(FilePolicy::Off),
     );
