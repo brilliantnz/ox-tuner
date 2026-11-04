@@ -181,7 +181,7 @@ pub fn restore(window: &mut Window, cx: &mut App) {
         .window
         .bounds_are_maximize_shaped(cx)
     {
-        tracing::info!("window: healing a maximize-shaped record, restoring maximized");
+        tracing::debug!("window: healing a maximize-shaped record, restoring maximized");
         AppState::update_global(cx, |state| {
             state.window.bounds = None;
             state.window.maximized = true;
@@ -190,7 +190,7 @@ pub fn restore(window: &mut Window, cx: &mut App) {
     }
 
     let maximized = cx.global::<AppState>().data().window.maximized;
-    tracing::info!(
+    tracing::debug!(
         maximized,
         width = window.bounds().size.width.as_f32(),
         height = window.bounds().size.height.as_f32(),

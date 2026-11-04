@@ -477,7 +477,7 @@ pub(crate) fn capture_window(window: &Window, cx: &mut App) {
     if maximize_shaped != MAXIMIZE_SHAPED_SEEN.with(Cell::get) {
         MAXIMIZE_SHAPED_SEEN.with(|seen| seen.set(maximize_shaped));
         if maximize_shaped {
-            tracing::info!(
+            tracing::debug!(
                 width = bounds.size.width.as_f32(),
                 height = bounds.size.height.as_f32(),
                 maximized,
