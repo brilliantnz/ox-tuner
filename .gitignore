@@ -33,3 +33,5 @@ rustc-ice-*.txt
 #.idea/
 
 .DS_Store
+# Local package output
+dist/
