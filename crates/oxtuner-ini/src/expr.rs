@@ -17,6 +17,10 @@
 use std::fmt;
 
 /// An expression from a `{ … }` field.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the expression grammar is a closed set defined by the INI dialect"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Expr {
     /// A numeric literal.
@@ -35,6 +39,10 @@ pub enum Expr {
 }
 
 /// Prefix operators.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines exactly these prefix operators"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Arithmetic negation.
@@ -48,6 +56,10 @@ pub enum UnaryOp {
 }
 
 /// Infix operators, loosest binding first in the parser.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines exactly these infix operators"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     /// `||`
@@ -115,6 +127,11 @@ impl fmt::Display for BinaryOp {
 
 impl Expr {
     /// Parses the body of an expression field (without braces).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExprError`] with the offending position when the text is not
+    /// a complete expression.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
         let tokens = tokenize(text)?;
         let mut parser = Parser { tokens, index: 0 };
@@ -142,7 +159,7 @@ impl Expr {
                     UnaryOp::Negate => -operand,
                     UnaryOp::Plus => operand,
                     UnaryOp::Not => f64::from(operand == 0.0),
-                    UnaryOp::BitNot => (!(operand as i64)) as f64,
+                    UnaryOp::BitNot => bit_float(!bit_integer(operand)),
                 }
             }
             Self::Binary(operator, left, right) => {
@@ -151,10 +168,10 @@ impl Expr {
                 apply_binary(*operator, left, right)?
             }
             Self::Ternary(condition, when_true, when_false) => {
-                if condition.evaluate(lookup)? != 0.0 {
-                    when_true.evaluate(lookup)?
-                } else {
+                if condition.evaluate(lookup)? == 0.0 {
                     when_false.evaluate(lookup)?
+                } else {
+                    when_true.evaluate(lookup)?
                 }
             }
             Self::Call(name, arguments) => {
@@ -200,22 +217,52 @@ impl Expr {
     }
 }
 
+/// A value in the 64-bit integer view the bitwise operators work on.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::as_conversions,
+    reason = "the INI expression language defines bitwise operators on a 64-bit integer view"
+)]
+fn bit_integer(value: f64) -> i64 {
+    value as i64
+}
+
+/// A bitwise result back in the expression language's float type.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "the INI expression language stores every value as f64"
+)]
+fn bit_float(value: i64) -> f64 {
+    value as f64
+}
+
+#[expect(
+    clippy::float_cmp,
+    reason = "the INI expression language compares values exactly, as the firmware does"
+)]
 fn apply_binary(operator: BinaryOp, left: f64, right: f64) -> Option<f64> {
     let boolean = |value: bool| Some(f64::from(value));
     match operator {
         BinaryOp::Or => boolean(left != 0.0 || right != 0.0),
         BinaryOp::And => boolean(left != 0.0 && right != 0.0),
-        BinaryOp::BitOr => Some(((left as i64) | (right as i64)) as f64),
-        BinaryOp::BitXor => Some(((left as i64) ^ (right as i64)) as f64),
-        BinaryOp::BitAnd => Some(((left as i64) & (right as i64)) as f64),
+        BinaryOp::BitOr => Some(bit_float(bit_integer(left) | bit_integer(right))),
+        BinaryOp::BitXor => Some(bit_float(bit_integer(left) ^ bit_integer(right))),
+        BinaryOp::BitAnd => Some(bit_float(bit_integer(left) & bit_integer(right))),
         BinaryOp::Equal => boolean(left == right),
         BinaryOp::NotEqual => boolean(left != right),
         BinaryOp::Less => boolean(left < right),
         BinaryOp::LessEqual => boolean(left <= right),
         BinaryOp::Greater => boolean(left > right),
         BinaryOp::GreaterEqual => boolean(left >= right),
-        BinaryOp::ShiftLeft => Some(((left as i64) << (right as u32 & 63)) as f64),
-        BinaryOp::ShiftRight => Some(((left as i64) >> (right as u32 & 63)) as f64),
+        BinaryOp::ShiftLeft => {
+            let amount = u32::try_from(bit_integer(right) & 63).unwrap_or(0);
+            Some(bit_float(bit_integer(left) << amount))
+        }
+        BinaryOp::ShiftRight => {
+            let amount = u32::try_from(bit_integer(right) & 63).unwrap_or(0);
+            Some(bit_float(bit_integer(left) >> amount))
+        }
         BinaryOp::Add => Some(left + right),
         BinaryOp::Subtract => Some(left - right),
         BinaryOp::Multiply => Some(left * right),

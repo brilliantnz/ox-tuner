@@ -25,6 +25,10 @@ use crate::{EntryShape, VariableSpec};
 ///
 /// Scalars and bit fields hold one number; arrays hold their elements in
 /// row-major order; text holds the decoded string.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a stored value is either numeric or text; the set cannot grow"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Values {
     /// Raw numeric values.
@@ -71,6 +75,10 @@ impl Values {
     /// Number of elements that differ from `other`.
     ///
     /// Text values compare whole strings and count as one cell.
+    #[expect(
+        clippy::float_cmp,
+        reason = "a cell is dirty only when its stored float differs exactly"
+    )]
     pub fn changed_cells(&self, other: &Self) -> usize {
         match (self, other) {
             (Self::Numbers(left), Self::Numbers(right)) => left
@@ -86,6 +94,10 @@ impl Values {
     /// Whether the element at `index` equals the same element of `other`.
     ///
     /// Text values compare whole strings; the index is the single text cell.
+    #[expect(
+        clippy::float_cmp,
+        reason = "cell equality is exact; approximate equality would hide edits"
+    )]
     pub fn same_at(&self, other: &Self, index: usize) -> bool {
         match (self, other) {
             (Self::Numbers(left), Self::Numbers(right)) => {
@@ -121,6 +133,7 @@ impl RawConversion {
 }
 
 /// Why a value could not be converted.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributeError {
     /// The definition wrote an expression for `attribute` that this build could
@@ -157,6 +170,11 @@ impl std::error::Error for AttributeError {}
 
 impl VariableSpec {
     /// Converts a raw value to user units.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttributeError::Unresolved`] when `scale` or `translate` is an
+    /// expression this build cannot evaluate.
     pub fn to_user(&self, raw: f64) -> Result<f64, AttributeError> {
         let scale = self.scale.ok_or_else(|| AttributeError::Unresolved {
             name: self.name.clone(),
@@ -173,6 +191,11 @@ impl VariableSpec {
     ///
     /// Integer types round half away from zero. Nothing is clamped: the caller
     /// decides what an out-of-range edit means (ADR-0011 S2 lives in the core).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttributeError::Unresolved`] for an unevaluable attribute and
+    /// [`AttributeError::ZeroScale`] when the scale has no inverse.
     pub fn to_raw(&self, user: f64) -> Result<RawConversion, AttributeError> {
         let scale = self.scale.ok_or_else(|| AttributeError::Unresolved {
             name: self.name.clone(),
@@ -212,8 +235,13 @@ impl VariableSpec {
 
     /// Formats a raw value as the user-unit text a calibration file carries.
     ///
-    /// TunerStudio always writes at least one decimal (`12000.0`), so this does
-    /// too; the definition's digits win when they are larger.
+    /// `TunerStudio` always writes at least one decimal (`12000.0`), so this
+    /// does too; the definition's digits win when they are larger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttributeError`] when the raw value cannot be converted to
+    /// user units.
     pub fn format_file(&self, raw: f64) -> Result<String, AttributeError> {
         let user = self.to_user(raw)?;
         let digits = usize::from(self.digits).max(1);
@@ -255,6 +283,11 @@ pub const fn is_integer(data_type: DataType) -> bool {
 ///
 /// `M08` is unsigned storage that *displays* negatives past its maximum; the
 /// bytes are still 0–255, so that is the range used here.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "the model stores raw values as f64; 64-bit bounds are therefore approximate"
+)]
 pub fn storage_range(data_type: DataType) -> (f64, f64) {
     match data_type {
         DataType::U08 | DataType::M08 | DataType::Ascii => (0.0, 255.0),
@@ -274,6 +307,10 @@ pub fn storage_range(data_type: DataType) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
     use crate::Owner;
 

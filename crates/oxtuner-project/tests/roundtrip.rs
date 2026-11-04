@@ -1,6 +1,12 @@
 //! Property tests for the file boundary: raw values must survive a write/read
 //! round-trip, and hostile bytes must never panic the reader.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    reason = "the property test unwraps fixture setup and compares raw values exactly"
+)]
+
 use std::sync::OnceLock;
 
 use oxtuner_ini::{Definition, SettingsContext, parse_str};

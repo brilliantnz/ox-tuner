@@ -126,8 +126,8 @@ pub fn nice_ticks(minimum: f64, maximum: f64, target: usize) -> Vec<f64> {
         return vec![minimum];
     }
 
-    let target = target.clamp(2, 12);
-    let raw_step = span / target as f64;
+    let target = u8::try_from(target.clamp(2, 12)).unwrap_or(2);
+    let raw_step = span / f64::from(target);
     let magnitude = 10f64.powf(raw_step.log10().floor());
     let residual = raw_step / magnitude;
     let step = magnitude
@@ -161,6 +161,11 @@ pub fn nice_ticks(minimum: f64, maximum: f64, target: usize) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::float_cmp,
+        reason = "the scale tests check that decimation keeps exact peak values"
+    )]
+
     use super::*;
 
     #[test]

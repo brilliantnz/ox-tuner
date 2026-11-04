@@ -25,7 +25,7 @@ fn table() -> TableSummary {
         digits: 0,
         minimum: None,
         maximum: None,
-        values: (0..32).map(|index| index as f64 * 500.0).collect(),
+        values: (0..32).map(|index| f64::from(index) * 500.0).collect(),
     };
 
     TableSummary {

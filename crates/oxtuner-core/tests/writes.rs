@@ -126,7 +126,7 @@ struct Harness {
 
 impl Harness {
     fn start(writes_enabled: bool) -> Self {
-        let parts = start(CoreConfig {
+        let parts = start(&CoreConfig {
             writes_enabled,
             ..CoreConfig::default()
         })
@@ -186,7 +186,9 @@ impl Harness {
     fn read_all(&self) {
         let op = self.handle.read_all().expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
-            Event::PagesRead { summary, .. } => assert_eq!(summary.skipped, 0),
+            Event::PagesRead { summary, .. } => {
+                assert_eq!(summary.skipped, 0, "every constant must be placed");
+            }
             other => panic!("expected a page read, got {other:?}"),
         }
     }
@@ -204,7 +206,9 @@ impl Harness {
             )
             .expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
-            Event::TableEdited { table, .. } => assert_eq!(table.cells[0], value),
+            Event::TableEdited { table, .. } => {
+                assert_eq!(table.cells[0], value, "the edit must reach the table");
+            }
             other => panic!("expected a table edit, got {other:?}"),
         }
     }
@@ -294,8 +298,8 @@ fn a_write_round_trips_and_reads_back_verified() {
     );
 
     // The delta is now in RAM; a second write has nothing to send.
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(message.contains("no values that differ"), "{message}");
 
     let (path, entries) = core.journal();
@@ -367,8 +371,8 @@ fn a_page_that_moved_under_the_writer_is_refused() {
     core.read_all();
     core.edit_cell(77.0);
 
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(
         message.contains("page(s) 1 changed on the ECU since the last read"),
         "{message}"
@@ -438,8 +442,8 @@ fn adopting_without_a_read_is_refused() {
     core.open(dir.path());
 
     let op = core.handle.adopt_ecu_image().expect("queued");
-    let (code, message) = failure(&core.wait(|event| event.op() == Some(op)));
-    assert_eq!(code, FailureCode::AdoptRefused);
+    let (kind, message) = failure(&core.wait(|event| event.op() == Some(op)));
+    assert_eq!(kind, FailureCode::AdoptRefused);
     assert!(message.contains("read the ECU pages"), "{message}");
 
     core.close();
@@ -527,8 +531,8 @@ fn writes_are_off_by_default_and_the_switch_gates_them() {
     core.read_all();
     core.edit_cell(50.0);
 
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(message.contains("disabled"), "{message}");
 
     let op = core.handle.set_writes_enabled(true).expect("queued");
@@ -563,8 +567,8 @@ fn a_signature_mismatch_cannot_be_written_to() {
     core.read_all();
     core.edit_cell(48.0);
 
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(message.contains("S1"), "{message}");
 
     core.close();
@@ -586,8 +590,8 @@ fn a_partial_write_fails_verification_and_halts_the_path() {
     core.edit_cell(90.0);
 
     let event = core.write();
-    let (code, message) = failure(&event);
-    assert_eq!(code, FailureCode::WriteFailed, "{message}");
+    let (kind, message) = failure(&event);
+    assert_eq!(kind, FailureCode::WriteFailed, "{message}");
     assert!(message.contains("read-back"), "{message}");
 
     let table = core.table();
@@ -599,8 +603,8 @@ fn a_partial_write_fails_verification_and_halts_the_path() {
 
     // The halt is a latch: a second write must not reach the wire even though
     // writes are still enabled.
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(message.contains("halted"), "{message}");
 
     let op = core.handle.acknowledge_write_failure().expect("queued");
@@ -621,8 +625,8 @@ fn burning_before_writing_the_edit_is_refused() {
     core.read_all();
     core.edit_cell(55.0);
 
-    let (code, message) = failure(&core.burn());
-    assert_eq!(code, FailureCode::BurnRefused);
+    let (kind, message) = failure(&core.burn());
+    assert_eq!(kind, FailureCode::BurnRefused);
     assert!(message.contains("not in ECU RAM"), "{message}");
 
     // No burn reached the wire, so the journal has no burn entry.
@@ -674,8 +678,8 @@ fn importing_a_different_signature_needs_consent() {
     core.open(dir.path());
 
     let op = core.handle.import_tune(&other, false).expect("queued");
-    let (code, message) = failure(&core.wait(|event| event.op() == Some(op)));
-    assert_eq!(code, FailureCode::ImportNeedsConsent);
+    let (kind, message) = failure(&core.wait(|event| event.op() == Some(op)));
+    assert_eq!(kind, FailureCode::ImportNeedsConsent);
     assert!(message.contains("consent"), "{message}");
 
     let op = core.handle.import_tune(&other, true).expect("queued");
@@ -706,8 +710,8 @@ fn a_bad_import_is_reported_and_leaves_the_tune_alone() {
     core.open(dir.path());
 
     let op = core.handle.import_tune(&other, true).expect("queued");
-    let (code, _) = failure(&core.wait(|event| event.op() == Some(op)));
-    assert_eq!(code, FailureCode::ImportRejected);
+    let (kind, _) = failure(&core.wait(|event| event.op() == Some(op)));
+    assert_eq!(kind, FailureCode::ImportRejected);
 
     let table = core.table();
     assert_eq!(table.cells[0], 10.0);
@@ -763,7 +767,7 @@ fn the_poller_is_held_while_a_write_runs() {
     let write = core.handle.write_to_ram(Vec::new()).expect("queued");
     // A frame published before the write is expected; a newer one would mean a
     // poll ran inside the write conversation.
-    let baseline = core.latest.get().map(|frame| frame.sequence).unwrap_or(0);
+    let baseline = core.latest.get().map_or(0, |frame| frame.sequence);
     // The poll schedule starts while the write transaction is already active.
     // If the scheduler let a poll through, a newer frame would arrive before the
     // write's answer.
@@ -790,7 +794,7 @@ fn the_poller_is_held_while_a_write_runs() {
             return;
         }
         assert_eq!(
-            core.latest.get().map(|frame| frame.sequence).unwrap_or(0),
+            core.latest.get().map_or(0, |frame| frame.sequence),
             baseline,
             "a realtime poll interleaved with the write conversation"
         );
@@ -811,12 +815,12 @@ fn a_link_loss_during_a_write_is_reported_and_halts() {
     core.edit_cell(88.0);
 
     let event = core.write();
-    let (code, _) = failure(&event);
-    assert_eq!(code, FailureCode::WriteFailed);
+    let (kind, _) = failure(&event);
+    assert_eq!(kind, FailureCode::WriteFailed);
 
     // The session keeps its reconnect loop; a later write is still halted.
-    let (code, message) = failure(&core.write());
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
     assert!(message.contains("halted"), "{message}");
 
     core.close();
@@ -837,7 +841,11 @@ fn snapshots_are_listed_through_the_core() {
     let Event::SnapshotsListed { paths, .. } = core.wait(|event| event.op() == Some(op)) else {
         panic!("expected a snapshot list");
     };
-    assert!(!paths.is_empty());
+    assert_ne!(
+        paths,
+        Vec::<PathBuf>::new(),
+        "the project must have a snapshot"
+    );
     assert!(paths.iter().all(|path| path.exists()));
 
     core.close();
@@ -849,8 +857,8 @@ fn burn_without_a_connection_is_refused() {
     let core = Harness::start(true);
     core.open(dir.path());
 
-    let (code, _) = failure(&core.burn());
-    assert_eq!(code, FailureCode::BurnRefused);
+    let (kind, _) = failure(&core.burn());
+    assert_eq!(kind, FailureCode::BurnRefused);
 
     core.close();
 }
@@ -859,8 +867,8 @@ fn burn_without_a_connection_is_refused() {
 fn a_write_without_a_project_is_refused() {
     let core = Harness::start(true);
     let op: OpId = core.handle.write_to_ram(Vec::new()).expect("queued");
-    let (code, _) = failure(&core.wait(|event| event.op() == Some(op)));
-    assert_eq!(code, FailureCode::WriteRefused);
+    let (kind, _) = failure(&core.wait(|event| event.op() == Some(op)));
+    assert_eq!(kind, FailureCode::WriteRefused);
 
     core.close();
 }

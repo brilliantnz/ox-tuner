@@ -24,6 +24,12 @@
 //! selection. [`CurveEvent::PreviewChanged`] carries the in-flight value for a
 //! paired table that wants to show it before the write lands.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::base::{h_flex, v_flex};
@@ -72,6 +78,10 @@ const LABEL_WIDTH: f32 = 52.0;
 const LABEL_OFFSET: f32 = 7.0;
 
 /// What the curve asks its owner to do.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the curve's owner handles a closed set of interactions"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CurveEvent {
     /// The user committed values for `name` (the curve's value array).
@@ -111,6 +121,16 @@ pub struct Curve {
     plot_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
+impl std::fmt::Debug for Curve {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Curve")
+            .field("model", &self.model)
+            .field("title_visible", &self.title_visible)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Focusable for Curve {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -119,7 +139,7 @@ impl Focusable for Curve {
 
 impl Curve {
     /// An empty curve with no snapshot.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<'_, Self>) -> Self {
         Self {
             model: CurveModel::new(),
             focus: cx.focus_handle().tab_stop(true),
@@ -140,7 +160,7 @@ impl Curve {
     ///
     /// The same curve id keeps the selection and clears the optimistic values
     /// the snapshot confirms. A different curve starts at its first point.
-    pub fn set_snapshot(&mut self, snapshot: CurveSnapshot, cx: &mut Context<Self>) {
+    pub fn set_snapshot(&mut self, snapshot: CurveSnapshot, cx: &mut Context<'_, Self>) {
         let dragging = self.model.drag_index();
         self.model.set_snapshot(snapshot);
         self.drop_preview(dragging, cx);
@@ -148,7 +168,7 @@ impl Curve {
     }
 
     /// Drops the curve.
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    pub fn clear(&mut self, cx: &mut Context<'_, Self>) {
         let dragging = self.model.drag_index();
         self.model.clear();
         self.drop_preview(dragging, cx);
@@ -159,14 +179,14 @@ impl Curve {
     ///
     /// The default is visible, which suits a standalone plot. A host whose
     /// toolbar already names the curve turns it off to avoid a second title.
-    pub fn set_title_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+    pub fn set_title_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
         self.title_visible = visible;
         cx.notify();
     }
 
     /// Selects one point without telling the owner, so an owner can mirror a
     /// paired table's selection without echoing the event back.
-    pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if self.model.select(index) {
             self.model.set_hovered(None);
             cx.notify();
@@ -174,7 +194,7 @@ impl Curve {
     }
 
     /// Drops optimistic values after the core rejected an edit.
-    pub fn reject_pending(&mut self, cx: &mut Context<Self>) {
+    pub fn reject_pending(&mut self, cx: &mut Context<'_, Self>) {
         let dragging = self.model.drag_index();
         self.model.reject_pending();
         self.drop_preview(dragging, cx);
@@ -182,7 +202,7 @@ impl Curve {
     }
 
     /// Clears a paired view's preview when the drag it described is gone.
-    fn drop_preview(&mut self, dragging: Option<usize>, cx: &mut Context<Self>) {
+    fn drop_preview(&mut self, dragging: Option<usize>, cx: &mut Context<'_, Self>) {
         if let Some(index) = dragging
             && !self.model.is_dragging()
         {
@@ -192,7 +212,7 @@ impl Curve {
 
     /// The keyboard contract, in one place so tests can drive it through real
     /// events.
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let coarse = event.keystroke.modifiers.shift;
 
@@ -210,7 +230,7 @@ impl Curve {
         }
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
         if self.model.select_relative(delta) {
             self.model.set_hovered(None);
             cx.emit(CurveEvent::SelectionChanged {
@@ -220,7 +240,7 @@ impl Curve {
         }
     }
 
-    fn move_to_edge(&mut self, first: bool, cx: &mut Context<Self>) {
+    fn move_to_edge(&mut self, first: bool, cx: &mut Context<'_, Self>) {
         let count = self.model.point_count();
         if count == 0 {
             return;
@@ -234,21 +254,21 @@ impl Curve {
         }
     }
 
-    fn nudge(&mut self, steps: i32, cx: &mut Context<Self>) {
+    fn nudge(&mut self, steps: i32, cx: &mut Context<'_, Self>) {
         if let Some((index, value)) = self.model.nudge(steps) {
             self.emit_edit(index, value, cx);
             cx.notify();
         }
     }
 
-    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+    fn cancel_drag(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(index) = self.model.cancel_drag() {
             cx.emit(CurveEvent::PreviewChanged { index, value: None });
             cx.notify();
         }
     }
 
-    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+    fn finish_drag(&mut self, cx: &mut Context<'_, Self>) {
         let dragging = self.model.drag_index();
         let finished = self.model.finish_drag();
 
@@ -262,7 +282,7 @@ impl Curve {
         cx.notify();
     }
 
-    fn emit_edit(&mut self, index: usize, value: f64, cx: &mut Context<Self>) {
+    fn emit_edit(&mut self, index: usize, value: f64, cx: &mut Context<'_, Self>) {
         let Some(name) = self
             .model
             .snapshot()
@@ -309,7 +329,7 @@ impl Curve {
         )
     }
 
-    fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_empty(cx: &mut Context<'_, Self>) -> AnyElement {
         v_flex()
             .size_full()
             .items_center()
@@ -395,7 +415,12 @@ impl Curve {
         ))
     }
 
-    fn render_curve(&mut self, snapshot: CurveSnapshot, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::too_many_lines,
+        reason = "the snapshot is consumed by one visual pass that keeps the plot together"
+    )]
+    fn render_curve(&mut self, snapshot: CurveSnapshot, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let count = self.model.point_count();
         let selected = self.model.selected().min(count.saturating_sub(1));
@@ -463,7 +488,7 @@ impl Curve {
         let grid_color = theme.chart_grid;
         let line_color = theme.chart_1;
         let guide_color = theme.chart_1.opacity(0.45);
-        let slot = self.plot_bounds.clone();
+        let slot = Rc::clone(&self.plot_bounds);
 
         let canvas = canvas(
             move |bounds, _, _| {
@@ -636,7 +661,7 @@ impl Curve {
             }))
             .child(canvas)
             .children(dots)
-            .when_some(chip, |this, chip| this.child(chip));
+            .when_some(chip, gpui_kit::ParentElement::child);
 
         let x_caption = caption_of(snapshot.x_label(), snapshot.x_units());
         let y_label = snapshot.y_label();
@@ -737,9 +762,9 @@ impl Curve {
 }
 
 impl Render for Curve {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let Some(snapshot) = self.model.snapshot().cloned() else {
-            return self.render_empty(cx);
+            return Self::render_empty(cx);
         };
 
         self.render_curve(snapshot, cx)

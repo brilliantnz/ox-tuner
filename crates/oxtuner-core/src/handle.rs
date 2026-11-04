@@ -149,7 +149,7 @@ impl Gate {
         let closed = self
             .closed
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *closed {
             return Err(CoreError::Stopped);
         }
@@ -161,7 +161,7 @@ impl Gate {
         let mut closed = self
             .closed
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *closed = true;
     }
 }
@@ -178,11 +178,22 @@ pub struct CoreHandle {
     pub(crate) stop: Arc<StopFlag>,
 }
 
+impl std::fmt::Debug for CoreHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CoreHandle").finish_non_exhaustive()
+    }
+}
+
 impl CoreHandle {
     /// Queues a command, returning the id its reply will carry.
     ///
     /// Never blocks: a full queue is refused rather than waited on, because the
     /// caller is the UI thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn send(&self, command: Command) -> Result<OpId, CoreError> {
         let op = self.next_op();
         self.gate
@@ -205,6 +216,11 @@ impl CoreHandle {
     }
 
     /// Loads a definition file that has already been read into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn load_definition(
         &self,
         label: impl Into<String>,
@@ -213,15 +229,25 @@ impl CoreHandle {
         self.send(Command::load_definition(label, bytes))
     }
 
-    /// Opens a TunerStudio project folder in the core.
+    /// Opens a `TunerStudio` project folder in the core.
     ///
     /// The core reads and owns the definition and the tune; the reply is
     /// [`crate::Event::ProjectOpened`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn open_project(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send(Command::OpenProject { path: path.into() })
     }
 
     /// Writes the open project's changed values back to its tune file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn save_tune(&self) -> Result<OpId, CoreError> {
         self.send(Command::SaveTune)
     }
@@ -229,6 +255,11 @@ impl CoreHandle {
     /// Reads one table from the open project.
     ///
     /// The reply is [`crate::Event::TableRead`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn read_table(&self, name: impl Into<String>) -> Result<OpId, CoreError> {
         self.send(Command::ReadTable { name: name.into() })
     }
@@ -236,6 +267,11 @@ impl CoreHandle {
     /// Applies user-unit cell edits to one table.
     ///
     /// The reply is [`crate::Event::TableEdited`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn edit_table(
         &self,
         name: impl Into<String>,
@@ -250,6 +286,11 @@ impl CoreHandle {
     /// Applies user-unit bin edits to one table axis.
     ///
     /// The reply is [`crate::Event::TableEdited`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn edit_axis(
         &self,
         table: impl Into<String>,
@@ -266,6 +307,11 @@ impl CoreHandle {
     /// Reads one dialog from the open project.
     ///
     /// The reply is [`crate::Event::DialogRead`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn read_dialog(&self, name: impl Into<String>) -> Result<OpId, CoreError> {
         self.send(Command::ReadDialog { name: name.into() })
     }
@@ -273,6 +319,11 @@ impl CoreHandle {
     /// Applies a user-unit scalar edit from one dialog.
     ///
     /// The reply is [`crate::Event::DialogEdited`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn edit_scalar(
         &self,
         dialog: impl Into<String>,
@@ -290,6 +341,11 @@ impl CoreHandle {
     ///
     /// The reply is [`crate::Event::Connected`] or [`crate::Event::Failed`].
     /// `framing` overrides the definition's own choice of protocol envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn connect(
         &self,
         port: crate::PortChoice,
@@ -301,6 +357,11 @@ impl CoreHandle {
     /// Reads a port's signature without opening a session.
     ///
     /// The reply is [`crate::Event::ConnectionTested`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn test_connection(
         &self,
         port: crate::PortChoice,
@@ -310,11 +371,21 @@ impl CoreHandle {
     }
 
     /// Closes the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn disconnect(&self) -> Result<OpId, CoreError> {
         self.send(Command::Disconnect)
     }
 
     /// Reads every declared page into the tune images.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn read_all(&self) -> Result<OpId, CoreError> {
         self.send(Command::ReadAll)
     }
@@ -324,21 +395,41 @@ impl CoreHandle {
     /// The reply is [`crate::Event::EcuAdopted`] or [`crate::Event::Failed`].
     /// Use it after a read when the tune on the controller, not the project
     /// file, is what the next edit and write should start from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn adopt_ecu_image(&self) -> Result<OpId, CoreError> {
         self.send(Command::AdoptEcuImage)
     }
 
     /// Starts periodic realtime polling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn start_realtime(&self, interval_ms: u32) -> Result<OpId, CoreError> {
         self.send(Command::StartRealtime { interval_ms })
     }
 
     /// Stops periodic realtime polling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn stop_realtime(&self) -> Result<OpId, CoreError> {
         self.send(Command::StopRealtime)
     }
 
     /// Saves the session trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn save_trace(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send(Command::SaveTrace { path: path.into() })
     }
@@ -348,6 +439,11 @@ impl CoreHandle {
     /// `pages` restricts the write; an empty list means every page with a
     /// change. The reply is [`crate::Event::TuneWritten`] or
     /// [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn write_to_ram(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
         self.send(Command::WriteToRam { pages })
     }
@@ -356,11 +452,21 @@ impl CoreHandle {
     ///
     /// `pages` restricts the burn; an empty list means every burnable page.
     /// The reply is [`crate::Event::TuneBurned`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn burn_to_flash(&self, pages: Vec<u8>) -> Result<OpId, CoreError> {
         self.send(Command::BurnToFlash { pages })
     }
 
     /// Discards local edits after writing a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn revert_tune(&self) -> Result<OpId, CoreError> {
         self.send(Command::RevertTune)
     }
@@ -368,6 +474,11 @@ impl CoreHandle {
     /// Imports a `.msq` into the working image.
     ///
     /// A different-signature tune needs `consented: true` (S9).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn import_tune(
         &self,
         path: impl Into<PathBuf>,
@@ -380,36 +491,71 @@ impl CoreHandle {
     }
 
     /// Restores one of the project's snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn restore_snapshot(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send(Command::RestoreSnapshot { path: path.into() })
     }
 
     /// Lists the project's snapshots, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn list_snapshots(&self) -> Result<OpId, CoreError> {
         self.send(Command::ListSnapshots)
     }
 
     /// Turns the global write switch on or off (S8).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn set_writes_enabled(&self, enabled: bool) -> Result<OpId, CoreError> {
         self.send(Command::SetWritesEnabled { enabled })
     }
 
     /// Clears the halted write path after the user reviewed a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn acknowledge_write_failure(&self) -> Result<OpId, CoreError> {
         self.send(Command::AcknowledgeWriteFailure)
     }
 
     /// Reads the project's write journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn read_journal(&self) -> Result<OpId, CoreError> {
         self.send(Command::ReadJournal)
     }
 
     /// Refreshes the derived tune status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn refresh_tune_status(&self) -> Result<OpId, CoreError> {
         self.send(Command::RefreshTuneStatus)
     }
 
     /// Starts a CSV session log in `directory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn start_log(&self, directory: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send(Command::StartLog {
             directory: directory.into(),
@@ -417,16 +563,31 @@ impl CoreHandle {
     }
 
     /// Stops the CSV session log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn stop_log(&self) -> Result<OpId, CoreError> {
         self.send(Command::StopLog)
     }
 
     /// Lists the serial ports the connect dialog can offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn list_ports(&self) -> Result<OpId, CoreError> {
         self.send(Command::ListPorts)
     }
 
     /// Drops the loaded definition (and tune, if a project is open).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn unload_definition(&self) -> Result<OpId, CoreError> {
         self.send(Command::UnloadDefinition)
     }
@@ -439,6 +600,11 @@ impl CoreHandle {
     /// that stopped reading can still reach this command; from that point on
     /// delivery is best effort and undelivered events are counted instead of
     /// blocking the thread (ADR-0023).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
     pub fn shutdown(&self) -> Result<OpId, CoreError> {
         let op = self.next_op();
         self.stop.request();
@@ -457,6 +623,14 @@ impl CoreHandle {
 /// Receives core events on an async executor (the UI's foreground task).
 pub struct EventStream {
     pub(crate) events: AsyncRx<spsc::Array<Event>>,
+}
+
+impl std::fmt::Debug for EventStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EventStream")
+            .finish_non_exhaustive()
+    }
 }
 
 impl EventStream {
@@ -493,6 +667,14 @@ impl EventStream {
 /// The blocking counterpart of [`EventStream`], for tests and CLI tools.
 pub struct BlockingEventStream {
     events: Rx<spsc::Array<Event>>,
+}
+
+impl std::fmt::Debug for BlockingEventStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockingEventStream")
+            .finish_non_exhaustive()
+    }
 }
 
 impl BlockingEventStream {

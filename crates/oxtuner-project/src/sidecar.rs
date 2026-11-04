@@ -1,4 +1,4 @@
-//! The `.ox-tuner/` sidecar: state that is ours, never TunerStudio's.
+//! The `.ox-tuner/` sidecar: state that is ours, never `TunerStudio`'s.
 //!
 //! ADR-0007 allows exactly one place inside a project for ox-tuner's own
 //! files: the `.ox-tuner/` directory. So far that is provenance — which INI a
@@ -46,6 +46,10 @@ impl Provenance {
     }
 
     /// Writes the provenance file, creating `.ox-tuner/` when needed.
+    /// # Errors
+    ///
+    /// Returns the I/O error when the sidecar directory or file cannot be
+    /// written.
     pub fn write(&self, project_root: &Path) -> io::Result<PathBuf> {
         let directory = project_root.join(SIDECAR_DIR);
         fs::create_dir_all(&directory)?;
@@ -61,6 +65,9 @@ impl Provenance {
     }
 
     /// Reads the provenance file, or `None` when the sidecar has never been written.
+    /// # Errors
+    ///
+    /// Returns the I/O error when the sidecar exists but cannot be read.
     pub fn read(project_root: &Path) -> io::Result<Option<Self>> {
         let path = project_root.join(SIDECAR_DIR).join(PROVENANCE_FILE);
         let text = match fs::read_to_string(&path) {
@@ -135,12 +142,11 @@ fn unescape(value: &str) -> String {
             Some('t') => out.push('\t'),
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
+            Some('\\') | None => out.push('\\'),
             Some(other) => {
                 out.push('\\');
                 out.push(other);
             }
-            None => out.push('\\'),
         }
     }
     out
@@ -148,6 +154,10 @@ fn unescape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     fn temp_project(name: &str) -> PathBuf {

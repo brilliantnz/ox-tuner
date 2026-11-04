@@ -8,7 +8,6 @@
 
 // The view lives in its own file so this seam stays a table of contents. The
 // same name is deliberate, it keeps the public path `curve::Curve`.
-#[allow(clippy::module_inception)]
 mod curve;
 mod model;
 

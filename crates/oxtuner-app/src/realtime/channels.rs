@@ -31,6 +31,10 @@ struct ChannelRow {
 }
 
 /// Opens the picker for `chart`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the channel picker builds its search, grouped list and actions in one place"
+)]
 pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>) {
     let search =
         cx.new(|cx| InputState::new(window, cx).placeholder(t!("app.realtime.channel_filter")));

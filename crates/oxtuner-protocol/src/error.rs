@@ -8,6 +8,7 @@ use oxtuner_transport::TransportError;
 ///
 /// The variants name what the caller can decide: reconnect, reject the reply,
 /// or refuse the request. They never contain a suggested retry (S6).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     /// The link failed.

@@ -36,6 +36,7 @@ pub struct LoadedTune {
 }
 
 /// Why a tune value cannot be written back to text.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileValueError {
     /// A bit value has no label in the definition.
@@ -199,7 +200,7 @@ fn load_entry(
 ///
 /// A quoted or plain label is looked up in the definition's option list; a
 /// bare number is taken as the field value directly. The option's index is its
-/// value when the dialect did not spell one out, matching TunerStudio's list
+/// value when the dialect did not spell one out, matching `TunerStudio`'s list
 /// semantics.
 fn label_to_raw(
     spec: &VariableSpec,
@@ -237,6 +238,15 @@ fn unquote(value: &str) -> String {
 }
 
 /// Formats a variable's stored values as the text a `.msq` carries.
+///
+/// # Errors
+///
+/// Returns [`FileValueError`] when text is too long or quoted, a bit value has
+/// no label, or the shape and stored values disagree.
+#[expect(
+    clippy::float_cmp,
+    reason = "a bit option matches its exact integer raw value"
+)]
 pub fn format_values(
     spec: &VariableSpec,
     definition: &Definition,
@@ -328,6 +338,10 @@ pub fn format_values(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use std::sync::OnceLock;
 
     use oxtuner_ini::{SettingsContext, parse_str};

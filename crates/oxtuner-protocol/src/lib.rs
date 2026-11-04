@@ -18,7 +18,7 @@
 //!   reply. This is the path verified read-only on the bench NO2C (P4).
 //! - [`LinkMode::Envelope`] — the same command bytes inside Speeduino's
 //!   `msEnvelope_1.0` frame: a two-byte big-endian length, the payload, and a
-//!   CRC-32. TunerStudio 3 negotiates this; it is implemented here and tested
+//!   CRC-32. `TunerStudio` 3 negotiates this; it is implemented here and tested
 //!   against the simulator, but the legacy path stays the default until the
 //!   envelope is verified on hardware (M6).
 //!

@@ -144,8 +144,8 @@ fn bench_history_push(criterion: &mut Criterion) {
 fn bench_decimate(criterion: &mut Criterion) {
     let points: Vec<Sample> = (0..6000)
         .map(|index| Sample {
-            t: index as f64 * 0.01,
-            v: (index as f64).sin() * 1000.0 + 3000.0,
+            t: f64::from(index) * 0.01,
+            v: f64::from(index).sin() * 1000.0 + 3000.0,
         })
         .collect();
 

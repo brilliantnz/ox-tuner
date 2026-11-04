@@ -57,7 +57,7 @@ impl RenderOnce for Indicators {
         v_flex()
             .w_full()
             .gap_2()
-            .when_some(failure, |this, failure| this.child(failure))
+            .when_some(failure, gpui_kit::ParentElement::child)
             .child(content)
     }
 }

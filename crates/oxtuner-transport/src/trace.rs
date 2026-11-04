@@ -28,18 +28,22 @@ use crate::error::TransportError;
 ///
 /// A page chunk is far smaller; the cap keeps one corrupt or hand-written line
 /// from allocating an unbounded vector.
-pub const MAX_FRAME_BYTES: usize = 1 << 20;
+pub(crate) const MAX_FRAME_BYTES: usize = 1 << 20;
 
 /// The largest trace this build loads, in bytes on disk.
-pub const MAX_TRACE_BYTES: usize = 64 << 20;
+pub(crate) const MAX_TRACE_BYTES: usize = 64 << 20;
 
 /// The most frames a trace may hold.
 ///
 /// A 20 Hz session records roughly 18 000 exchanges an hour; 250 000 covers a
 /// long bench run and still bounds memory.
-pub const MAX_TRACE_FRAMES: usize = 250_000;
+pub(crate) const MAX_TRACE_FRAMES: usize = 250_000;
 
 /// Which way a recorded frame travelled.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "TX and RX are the complete set of directions a frame can travel"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     /// Host → ECU.
@@ -121,6 +125,11 @@ impl Trace {
     ///
     /// Comments and blank lines are kept as headers, so `parse` followed by
     /// `to_string` preserves the notes that make a trace useful.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceError`] naming the line when the frame size, byte count
+    /// or frame count limits are exceeded or a line is malformed.
     pub fn parse(text: &str) -> Result<Self, TraceError> {
         if text.len() > MAX_TRACE_BYTES {
             return Err(TraceError {
@@ -264,15 +273,26 @@ impl Trace {
 
     /// Saves the trace with an atomic replace, so a crash cannot leave half a
     /// file where a replayable trace used to be.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Write`] when the temporary file or the final
+    /// rename cannot be written.
     pub fn save(&self, path: &std::path::Path) -> Result<(), TransportError> {
         write(path, &self.headers, &self.frames)
     }
 
     /// Loads a trace from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Read`] when the file cannot be read, exceeds
+    /// the trace size limit, or does not parse.
     pub fn load(path: &std::path::Path) -> Result<Self, TransportError> {
         let metadata = std::fs::metadata(path)
             .map_err(|error| TransportError::Read(format!("{}: {error}", path.display())))?;
-        if metadata.len() > MAX_TRACE_BYTES as u64 {
+        let limit = u64::try_from(MAX_TRACE_BYTES).unwrap_or(u64::MAX);
+        if metadata.len() > limit {
             return Err(TransportError::Read(format!(
                 "{}: the trace is {} bytes, the limit is {MAX_TRACE_BYTES}",
                 path.display(),
@@ -378,12 +398,12 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |duration| duration.as_nanos())
         ));
         let file = std::fs::File::create(&path).expect("creates");
         // Sparse: no 64 MiB of RAM or disk pages are actually written.
-        file.set_len((MAX_TRACE_BYTES + 1) as u64).expect("sizes");
+        let oversized = u64::try_from(MAX_TRACE_BYTES + 1).expect("the trace limit fits in u64");
+        file.set_len(oversized).expect("sizes");
 
         let error = Trace::load(&path).expect_err("the file is too large");
         let _ = std::fs::remove_file(&path);

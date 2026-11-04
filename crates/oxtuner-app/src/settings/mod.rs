@@ -109,13 +109,13 @@ pub(crate) fn open(cx: &mut App) {
 pub(crate) struct SettingsWindow;
 
 impl SettingsWindow {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(_: &mut Context<'_, Self>) -> Self {
         Self
     }
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -378,12 +378,10 @@ fn logging_page() -> SettingPage {
                         t!("app.settings.item.log_file"),
                         SettingField::render(|_, _, cx| {
                             let text = match crate::platform::logging::handle(cx) {
-                                Some(handle) => handle
-                                    .path()
-                                    .map(|path| path.display().to_string())
-                                    .unwrap_or_else(|| {
-                                        t!("app.settings.log_file_console_only").to_string()
-                                    }),
+                                Some(handle) => handle.path().map_or_else(
+                                    || t!("app.settings.log_file_console_only").to_string(),
+                                    |path| path.display().to_string(),
+                                ),
                                 None => t!("app.settings.log_file_unavailable").to_string(),
                             };
 

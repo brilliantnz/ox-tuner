@@ -1,6 +1,6 @@
 //! The `_ON` / `_OFF` suffix convention a `.msq` settings snapshot carries.
 //!
-//! TunerStudio writes `enablehardware_test_OFF` for a disabled boolean and
+//! `TunerStudio` writes `enablehardware_test_OFF` for a disabled boolean and
 //! `CELSIUS` for an enabled choice. The snapshot is read when a project opens
 //! and written back after a save, so both directions share this parser: a
 //! suffix that is recognised on read but not on write would make the file and

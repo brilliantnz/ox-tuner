@@ -1,6 +1,6 @@
 //! ISO-8859-1 (Latin-1) at the `.msq` byte boundary.
 //!
-//! TunerStudio writes `.msq` files as ISO-8859-1, not UTF-8. Decoding each
+//! `TunerStudio` writes `.msq` files as ISO-8859-1, not UTF-8. Decoding each
 //! byte as the code point of the same value is lossless (`byte → U+0000..U+00FF`),
 //! so a value read from a file survives a round-trip unchanged.
 //!
@@ -38,6 +38,10 @@ pub fn decode(bytes: &[u8]) -> String {
 }
 
 /// Encodes text as ISO-8859-1, or reports the first character that does not fit.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] naming the first character above U+00FF.
 pub fn encode(text: &str) -> Result<Vec<u8>, EncodeError> {
     let mut bytes = Vec::with_capacity(text.len());
     for (offset, character) in text.char_indices() {
@@ -49,6 +53,10 @@ pub fn encode(text: &str) -> Result<Vec<u8>, EncodeError> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     #[test]

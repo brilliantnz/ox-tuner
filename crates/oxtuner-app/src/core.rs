@@ -32,6 +32,10 @@ use rust_i18n::t;
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
 /// every frame.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the status tracks independent connection and session flags"
+)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CoreStatus {
     /// A definition loaded on its own (no tune file).
@@ -274,7 +278,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
         definition_cache_dir: Some(paths.definition_cache_dir()),
         ..CoreConfig::default()
     };
-    let service = match oxtuner_core::start(config) {
+    let service = match oxtuner_core::start(&config) {
         Ok(CoreParts {
             handle,
             events,
@@ -337,7 +341,7 @@ fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
     // (ADR-0021). Repainting reads LatestFrame and the chart history.
     cx.spawn(async move |cx| {
         while frames.changed().await {
-            cx.update(|cx| cx.refresh_windows());
+            cx.update(gpui_kit::App::refresh_windows);
         }
         tracing::debug!("the realtime wake watch finished");
     })
@@ -345,6 +349,10 @@ fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
 }
 
 /// Folds one event into the status and repaints.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive match over every core event keeps the status fold in one place"
+)]
 fn apply(event: Event, cx: &mut App) {
     let event_op = event.op();
 
@@ -454,8 +462,9 @@ fn apply(event: Event, cx: &mut App) {
             tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
             (Update::Failed(failure), None)
         }
-        Event::PortsListed { .. } => (Update::Nothing, None),
-        Event::Rejected { .. } | Event::Stopped => (Update::Nothing, None),
+        Event::PortsListed { .. } | Event::Rejected { .. } | Event::Stopped => {
+            (Update::Nothing, None)
+        }
     };
 
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
@@ -607,6 +616,10 @@ enum Update {
 }
 
 impl CoreStatus {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive match folds every core update into the status"
+    )]
     fn apply(&mut self, update: Update) {
         match update {
             Update::Loaded(summary) => {
@@ -1124,11 +1137,10 @@ pub(crate) fn start_log(cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::LogFailed) else {
         return;
     };
-    let directory = CoreService::status(cx)
-        .project
-        .as_ref()
-        .map(|project| project.root.join(".ox-tuner").join("logs"))
-        .unwrap_or_else(|| crate::platform::paths::AppPaths::discover().logs_dir);
+    let directory = CoreService::status(cx).project.as_ref().map_or_else(
+        || crate::platform::paths::AppPaths::discover().logs_dir,
+        |project| project.root.join(".ox-tuner").join("logs"),
+    );
     if let Err(error) = handle.start_log(directory) {
         tracing::warn!(%error, "the core refused the session log");
         report_failure(cx, FailureCode::LogFailed, error.to_string());
@@ -1236,13 +1248,12 @@ pub(crate) fn close_project(cx: &mut App) {
 
 /// The core handle, or a recorded failure when the core never started.
 fn handle_or_report(cx: &mut App, code: FailureCode) -> Option<CoreHandle> {
-    match CoreService::handle(cx) {
-        Some(handle) => Some(handle),
-        None => {
-            tracing::error!("the core is not running");
-            report_failure(cx, code, "the core is not running".to_owned());
-            None
-        }
+    if let Some(handle) = CoreService::handle(cx) {
+        Some(handle)
+    } else {
+        tracing::error!("the core is not running");
+        report_failure(cx, code, "the core is not running".to_owned());
+        None
     }
 }
 
@@ -1287,6 +1298,10 @@ pub(crate) fn choose_definition(cx: &mut App) {
 ///
 /// The read happens here, on the UI thread, because it is user-initiated and one
 /// shot; the parsing it feeds is already off this thread.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the file dialog hands the chosen path over to this one-shot load"
+)]
 fn load(path: std::path::PathBuf, cx: &mut App) {
     let label = path
         .file_name()
@@ -1351,6 +1366,11 @@ pub(crate) fn request_shutdown(cx: &mut App) -> impl Future<Output = ()> + use<>
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
+
     use super::*;
 
     fn summary() -> DefinitionSummary {

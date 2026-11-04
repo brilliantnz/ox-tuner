@@ -70,6 +70,10 @@ const MAX_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Where a definition came from on this open.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a definition was either parsed or loaded from the cache"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefinitionSource {
     /// Preprocessing and parsing ran for this open.
@@ -215,12 +219,9 @@ impl DefinitionCache {
             }
         };
 
-        let (header, payload) = match decode(&bytes) {
-            Some(parts) => parts,
-            None => {
-                tracing::debug!(path = %self.path.display(), "the definition cache is malformed");
-                return None;
-            }
+        let Some((header, payload)) = decode(&bytes) else {
+            tracing::debug!(path = %self.path.display(), "the definition cache is malformed");
+            return None;
         };
 
         if header.key != self.key {
@@ -346,6 +347,15 @@ fn encode(header: &CacheHeader, payload: &[u8]) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The header length field as an index into the cache bytes.
+#[expect(
+    clippy::as_conversions,
+    reason = "a u32 header length fits usize on every supported target"
+)]
+fn header_length(bytes: [u8; 4]) -> usize {
+    u32::from_le_bytes(bytes) as usize
+}
+
 /// Splits a cache file into its header and payload, rejecting bad framing.
 fn decode(bytes: &[u8]) -> Option<(CacheHeader, &[u8])> {
     let length_at = MAGIC.len();
@@ -354,7 +364,7 @@ fn decode(bytes: &[u8]) -> Option<(CacheHeader, &[u8])> {
         return None;
     }
 
-    let length = u32::from_le_bytes(bytes[length_at..header_at].try_into().ok()?) as usize;
+    let length = header_length(bytes[length_at..header_at].try_into().ok()?);
     if length == 0 || length > MAX_HEADER_BYTES {
         return None;
     }
@@ -433,6 +443,10 @@ impl<'a> IncludeRecorder<'a> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -574,7 +588,8 @@ mod tests {
         for index in 0..KEEP_ENTRIES + 4 {
             let path = root.join(format!("{index}.defcache"));
             fs::write(&path, b"x").unwrap();
-            let stamp = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index as u64);
+            let seconds = u64::try_from(index).unwrap_or(u64::MAX);
+            let stamp = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
             fs::File::options()
                 .write(true)
                 .open(&path)

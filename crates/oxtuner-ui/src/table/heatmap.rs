@@ -6,6 +6,15 @@
 //! take their colours as arguments for the same reason: the caller reads the
 //! theme, this module only decides which colour a state means.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::unreadable_literal,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use gpui_kit::{Hsla, rgb};
 
 #[cfg(test)]

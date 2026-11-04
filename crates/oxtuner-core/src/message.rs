@@ -23,6 +23,7 @@ use oxtuner_protocol::LinkMode;
 use oxtuner_tune::{CellState, TuneStatus};
 use serde::{Deserialize, Serialize};
 
+use crate::link::PortChoice;
 use crate::menu::MenuNode;
 
 /// Identifies one accepted command for its whole lifetime.
@@ -65,6 +66,10 @@ pub struct CellEdit {
 }
 
 /// Which axis of a table a bin edit targets.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a table has exactly an X and a Y axis"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AxisKind {
     /// The column bins (`xBins`).
@@ -93,6 +98,10 @@ pub struct AxisEdit {
 }
 
 /// A request from the UI.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
 #[derive(Debug)]
 pub enum Command {
     /// Parse `bytes` and take ownership of the resulting definition.
@@ -109,7 +118,7 @@ pub enum Command {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
-    /// Open a TunerStudio project folder in place (ADR-0007).
+    /// Open a `TunerStudio` project folder in place (ADR-0007).
     ///
     /// The core reads the definition and the tune, owns both, and answers with
     /// [`Event::ProjectOpened`] — or [`Event::Failed`] when the folder is not a
@@ -368,86 +377,190 @@ impl Command {
 }
 
 /// A reply from the core.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI↔core contract enumerates every reply the core can send"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The definition is loaded and owned by the core.
     DefinitionLoaded {
+        /// The command this answers.
         op: OpId,
+        /// What the definition contains.
         summary: DefinitionSummary,
     },
     /// A project is open and owned by the core: definition, tune images and the
     /// load gate's findings.
-    ProjectOpened { op: OpId, summary: ProjectSummary },
+    ProjectOpened {
+        /// The command this answers.
+        op: OpId,
+        /// What the project contains.
+        summary: ProjectSummary,
+    },
     /// The open project's tune file was rewritten.
-    TuneSaved { op: OpId, outcome: SaveSummary },
+    TuneSaved {
+        /// The command this answers.
+        op: OpId,
+        /// What the save rewrote.
+        outcome: SaveSummary,
+    },
     /// A table was read from the open project.
-    TableRead { op: OpId, table: TableSummary },
+    TableRead {
+        /// The command this answers.
+        op: OpId,
+        /// The table as the grid will show it.
+        table: TableSummary,
+    },
     /// A table edit was accepted; `table` is the state after it.
-    TableEdited { op: OpId, table: TableSummary },
+    TableEdited {
+        /// The command this answers.
+        op: OpId,
+        /// The table after the edit.
+        table: TableSummary,
+    },
     /// A dialog was read from the open project.
-    DialogRead { op: OpId, dialog: DialogSummary },
+    DialogRead {
+        /// The command this answers.
+        op: OpId,
+        /// The dialog as the editor will show it.
+        dialog: DialogSummary,
+    },
     /// A scalar edit was accepted; `dialog` is the state after it.
-    DialogEdited { op: OpId, dialog: DialogSummary },
+    DialogEdited {
+        /// The command this answers.
+        op: OpId,
+        /// The dialog after the edit.
+        dialog: DialogSummary,
+    },
     /// The serial ports the connect dialog can offer.
-    PortsListed { op: OpId, ports: Vec<PortSummary> },
+    PortsListed {
+        /// The command this answers.
+        op: OpId,
+        /// The available ports.
+        ports: Vec<PortSummary>,
+    },
     /// A [`Command::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
     /// and read-only rule, without a session or a page read.
     ConnectionTested {
+        /// The command this answers.
         op: OpId,
+        /// What the test found.
         summary: ConnectionSummary,
     },
     /// The ECU answered and the session is up.
     Connected {
+        /// The command this answers.
         op: OpId,
+        /// The live session.
         summary: ConnectionSummary,
     },
     /// The connection was closed on request.
-    Disconnected { op: OpId },
+    Disconnected {
+        /// The command this answers.
+        op: OpId,
+    },
     /// Every declared page was read into the tune images.
-    PagesRead { op: OpId, summary: ReadAllSummary },
+    PagesRead {
+        /// The command this answers.
+        op: OpId,
+        /// What the read covered.
+        summary: ReadAllSummary,
+    },
     /// The ECU image became the working tune, so the editor shows what the
     /// controller holds.
-    EcuAdopted { op: OpId },
+    EcuAdopted {
+        /// The command this answers.
+        op: OpId,
+    },
     /// Periodic polling started or stopped.
-    RealtimeState { op: OpId, running: bool },
+    RealtimeState {
+        /// The command this answers.
+        op: OpId,
+        /// Whether polling is running.
+        running: bool,
+    },
     /// The session trace was written.
     TraceSaved {
+        /// The command this answers.
         op: OpId,
+        /// Where the trace was written.
         path: PathBuf,
+        /// Frames in the trace.
         frames: usize,
     },
     /// Changed values were written to ECU RAM and verified by a read-back.
-    TuneWritten { op: OpId, summary: WriteSummary },
+    TuneWritten {
+        /// The command this answers.
+        op: OpId,
+        /// What was written.
+        summary: WriteSummary,
+    },
     /// RAM was burned to flash and read back.
-    TuneBurned { op: OpId, summary: BurnSummary },
+    TuneBurned {
+        /// The command this answers.
+        op: OpId,
+        /// What was burned.
+        summary: BurnSummary,
+    },
     /// Local edits were discarded, after a snapshot.
-    TuneReverted { op: OpId, summary: RevertSummary },
+    TuneReverted {
+        /// The command this answers.
+        op: OpId,
+        /// What was reverted.
+        summary: RevertSummary,
+    },
     /// Another tune was imported into the working image.
-    TuneImported { op: OpId, summary: ImportSummary },
+    TuneImported {
+        /// The command this answers.
+        op: OpId,
+        /// What was imported.
+        summary: ImportSummary,
+    },
     /// The project's snapshots, oldest first.
-    SnapshotsListed { op: OpId, paths: Vec<PathBuf> },
+    SnapshotsListed {
+        /// The command this answers.
+        op: OpId,
+        /// Snapshot files, oldest first.
+        paths: Vec<PathBuf>,
+    },
     /// The derived write state after a read, edit, write, burn or import.
-    TuneStatusRead { op: OpId, status: TuneStatus },
+    TuneStatusRead {
+        /// The command this answers.
+        op: OpId,
+        /// The derived state.
+        status: TuneStatus,
+    },
     /// The global write switch changed (S8).
     WriteAccessChanged {
+        /// The command this answers.
         op: OpId,
+        /// Whether writes are now enabled.
         writes_enabled: bool,
         /// The live session's summary after the change, when one is open.
         connection: Option<ConnectionSummary>,
     },
     /// A halted write path was cleared after review.
-    WriteFailureAcknowledged { op: OpId },
+    WriteFailureAcknowledged {
+        /// The command this answers.
+        op: OpId,
+    },
     /// The project's write journal, newest last.
     JournalRead {
+        /// The command this answers.
         op: OpId,
+        /// The journal file, when one exists.
         path: Option<PathBuf>,
+        /// The journal entries, newest last.
         entries: Vec<JournalEntry>,
     },
     /// A session log started or stopped.
     LogState {
+        /// The command this answers.
         op: OpId,
+        /// Whether logging is running.
         running: bool,
         /// What a stopped log wrote.
         summary: Option<LogSummary>,
@@ -458,13 +571,29 @@ pub enum Event {
         reason: String,
     },
     /// The link came back and the ECU answered again.
-    Reconnected { summary: ConnectionSummary },
+    Reconnected {
+        /// The live session.
+        summary: ConnectionSummary,
+    },
     /// The loaded definition (and tune, if a project was open) was dropped.
-    DefinitionUnloaded { op: OpId },
+    DefinitionUnloaded {
+        /// The command this answers.
+        op: OpId,
+    },
     /// The command was handled but could not do its work.
-    Failed { op: OpId, failure: Failure },
+    Failed {
+        /// The command this answers.
+        op: OpId,
+        /// What went wrong.
+        failure: Failure,
+    },
     /// The command was accepted, then never executed because the core stopped.
-    Rejected { op: OpId, reason: RejectReason },
+    Rejected {
+        /// The command this answers.
+        op: OpId,
+        /// Why it was not executed.
+        reason: RejectReason,
+    },
     /// The core thread has stopped. Always the last event.
     Stopped,
 }
@@ -501,8 +630,7 @@ impl Event {
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
-            Self::ConnectionLost { .. } | Self::Reconnected { .. } => None,
-            Self::Stopped => None,
+            Self::ConnectionLost { .. } | Self::Reconnected { .. } | Self::Stopped => None,
         }
     }
 }
@@ -541,7 +669,7 @@ pub enum FailureCode {
     /// The bytes are not a definition this build can read (ADR-0006 rule 11:
     /// an unsupported `iniSpecVersion` fails loudly rather than half-parsing).
     DefinitionRejected,
-    /// The folder is not an openable TunerStudio project, or a file in it could
+    /// The folder is not an openable `TunerStudio` project, or a file in it could
     /// not be read or parsed.
     ProjectRejected,
     /// The tune file could not be written, or the session is read-only (S1).
@@ -927,6 +1055,10 @@ pub struct JournalEntry {
 }
 
 /// What a dialog row holds, for the UI to pick a presentation.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a dialog row is a value, a toggle or a note"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogFieldKind {
     /// A scalar value from `field`, `displayOnlyField`, `slider` or a setting.
@@ -941,6 +1073,10 @@ pub enum DialogFieldKind {
 ///
 /// Values are in **user units**. The UI keeps no tune values of its own: it
 /// renders this snapshot and asks for edits by variable.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "changed, display-only, writable and warning are independent row facts"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DialogFieldSummary {
     /// Label from the row, unquoted.
@@ -1203,6 +1339,10 @@ impl TableSummary {
         Err(format!("the definition has no table named `{name}`"))
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "a cell is changed only when its stored raw value differs exactly"
+    )]
     fn from_table(project: &Project, table: &oxtuner_ini::Table) -> Result<Self, String> {
         let cells_name = table
             .z_bins
@@ -1287,6 +1427,10 @@ impl TableSummary {
 
     /// A curve as a one-row table: the first `yBins` series is the row, the
     /// `xBins` are the column axis.
+    #[expect(
+        clippy::float_cmp,
+        reason = "a cell is changed only when its stored raw value differs exactly"
+    )]
     fn from_curve(project: &Project, curve: &oxtuner_ini::Curve) -> Result<Self, String> {
         let bins = curve
             .y_bins
@@ -1399,6 +1543,27 @@ impl TableSummary {
 /// The definition's `xAxis` and `yAxis` are literals in every definition seen
 /// so far. A definition that leaves them out, or writes an expression, still
 /// gets a curve: the frame then hugs the bins and cells themselves.
+/// A declared division count converted to the axis frame's integer count.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "the value is rounded and clamped to 2..=12 before the cast"
+)]
+fn division_count(value: f64) -> usize {
+    value.round().clamp(2.0, 12.0) as usize
+}
+
+/// A synthetic axis position for the element at `index`.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::as_conversions,
+    reason = "axis lengths stay far below 2^53, where f64 is exact"
+)]
+fn axis_position(index: usize) -> f64 {
+    index as f64
+}
+
 fn curve_axes(curve: &oxtuner_ini::Curve, x_values: &[f64], cells: &[f64]) -> CurveAxes {
     let (x_min, x_max) = axis_range(&curve.x_axis, x_values);
     let (y_min, y_max) = axis_range(&curve.y_axis, cells);
@@ -1407,7 +1572,7 @@ fn curve_axes(curve: &oxtuner_ini::Curve, x_values: &[f64], cells: &[f64]) -> Cu
         .get(2)
         .and_then(oxtuner_ini::Number::literal)
         .filter(|value| value.is_finite())
-        .map_or(4, |value| value.round().clamp(2.0, 12.0) as usize);
+        .map_or(4, division_count);
 
     CurveAxes {
         x_min,
@@ -1466,7 +1631,7 @@ fn axis_summary(
             digits: 0,
             minimum: None,
             maximum: None,
-            values: (0..length).map(|index| index as f64).collect(),
+            values: (0..length).map(axis_position).collect(),
         };
     };
 
@@ -1476,7 +1641,7 @@ fn axis_summary(
             project
                 .tune()
                 .user_at(&axis.array, index)
-                .unwrap_or(index as f64)
+                .unwrap_or_else(|_| axis_position(index))
         })
         .collect();
 
@@ -1622,6 +1787,10 @@ fn collect_rows(
 /// The variable is the first field after the label that names a tune constant;
 /// a row with one field and no variable is text the definition shows (a hint or
 /// a warning), not a value.
+#[expect(
+    clippy::float_cmp,
+    reason = "a field is changed only when its stored raw value differs exactly"
+)]
 fn field_row(project: &Project, row: &DialogRow, section: &str) -> Option<DialogFieldSummary> {
     let label = row
         .fields
@@ -1733,12 +1902,6 @@ pub(crate) struct Envelope {
     pub(crate) command: Command,
 }
 
-/// Re-exported here because [`Command`] carries it.
-///
-/// The type lives in [`crate::link`], next to the [`crate::CustomLink`] seam
-/// that lets the application supply a transport the core does not build.
-pub use crate::link::PortChoice;
-
 /// One serial port the connect dialog can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortSummary {
@@ -1750,6 +1913,10 @@ pub struct PortSummary {
 }
 
 /// How the ECU's signature compared with the definition's.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a signature either matches or it does not; there is no third verdict"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureVerdict {
     /// Exactly the definition's signature.

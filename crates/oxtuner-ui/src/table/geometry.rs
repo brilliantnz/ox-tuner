@@ -5,24 +5,31 @@
 //! pixel-perfect at any scale and make the virtualization arithmetic exact, so
 //! the visible-range calculation never drops or duplicates a row.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use gpui_kit::Pixels;
 
 /// Width of one cell, in pixels.
-pub const CELL_WIDTH: f32 = 56.0;
+pub(crate) const CELL_WIDTH: f32 = 56.0;
 /// Height of one cell, in pixels.
-pub const CELL_HEIGHT: f32 = 26.0;
+pub(crate) const CELL_HEIGHT: f32 = 26.0;
 /// Width of the row-header column.
-pub const AXIS_WIDTH: f32 = 56.0;
+pub(crate) const AXIS_WIDTH: f32 = 56.0;
 /// Height of the column-header band.
-pub const AXIS_HEIGHT: f32 = 26.0;
+pub(crate) const AXIS_HEIGHT: f32 = 26.0;
 /// Width of the vertical Y-axis caption band, left of the row headers.
-pub const AXIS_LABEL_WIDTH: f32 = 20.0;
+pub(crate) const AXIS_LABEL_WIDTH: f32 = 20.0;
 /// Height of the horizontal X-axis caption band, outside the column headers.
-pub const AXIS_LABEL_HEIGHT: f32 = 18.0;
+pub(crate) const AXIS_LABEL_HEIGHT: f32 = 18.0;
 /// Space between a caption and the grid box it names.
-pub const AXIS_LABEL_GAP: f32 = 8.0;
+pub(crate) const AXIS_LABEL_GAP: f32 = 8.0;
 /// The grid line between cells, drawn as a gap rather than per-cell borders.
-pub const CELL_GAP: f32 = 1.0;
+pub(crate) const CELL_GAP: f32 = 1.0;
 
 /// The range of cells that can be seen, with one row/column of overscan.
 ///

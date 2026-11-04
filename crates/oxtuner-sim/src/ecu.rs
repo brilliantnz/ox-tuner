@@ -39,7 +39,7 @@ pub(crate) struct RealtimeEcu {
 }
 
 /// A request the bytes turned out to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Request<'a> {
     Signature,
     ReadPage {

@@ -55,10 +55,10 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        Self::start_with(CoreConfig::default())
+        Self::start_with(&CoreConfig::default())
     }
 
-    fn start_with(config: CoreConfig) -> Self {
+    fn start_with(config: &CoreConfig) -> Self {
         let parts = start(config).expect("the core starts");
         Self {
             handle: parts.handle,
@@ -212,7 +212,7 @@ fn unloading_answers_with_the_command_id() {
 fn every_accepted_command_is_answered_exactly_once_under_concurrent_producers() {
     // Two producers and a shutdown racing them: the invariant is not about
     // which commands arrive, only that each accepted id is answered once.
-    let core = Harness::start_with(CoreConfig {
+    let core = Harness::start_with(&CoreConfig {
         command_capacity: 8,
         event_capacity: 4096,
         ..CoreConfig::default()
@@ -285,7 +285,10 @@ fn every_accepted_command_is_answered_exactly_once_under_concurrent_producers() 
         accepted.len(),
         "an id was answered that was never accepted"
     );
-    assert_eq!(report.handled + report.rejected, accepted.len() as u64);
+    assert_eq!(
+        report.handled + report.rejected,
+        u64::try_from(accepted.len()).unwrap_or(u64::MAX)
+    );
     assert!(
         refused > 0 || accepted.len() == 400,
         "a capacity-8 queue under two producers should refuse something \
@@ -354,7 +357,10 @@ fn a_command_racing_the_shutdown_is_refused_or_answered() {
                 "{op} was accepted but never answered"
             );
         }
-        assert_eq!(report.handled + report.rejected, accepted.len() as u64);
+        assert_eq!(
+            report.handled + report.rejected,
+            u64::try_from(accepted.len()).unwrap_or(u64::MAX)
+        );
     }
 }
 
@@ -411,7 +417,7 @@ fn a_slow_consumer_backpressures_the_core_without_losing_answers() {
     // the core still shuts down and joins. This is the app's contract too: the
     // event pump keeps draining until `Stopped`, so the core is never wedged
     // for good.
-    let core = Harness::start_with(CoreConfig {
+    let core = Harness::start_with(&CoreConfig {
         command_capacity: 16,
         event_capacity: 8,
         ..CoreConfig::default()
@@ -449,7 +455,10 @@ fn a_slow_consumer_backpressures_the_core_without_losing_answers() {
         .shutdown()
         .expect("the idle core accepts shutdown");
     let report = core.thread.join();
-    assert_eq!(report.handled as usize, accepted.len());
+    assert_eq!(
+        usize::try_from(report.handled).unwrap_or(usize::MAX),
+        accepted.len()
+    );
     assert_eq!(report.rejected, 0);
 }
 
@@ -470,7 +479,11 @@ fn the_invariants_hold_across_repeated_runs() {
 
         let answered: HashSet<OpId> = collected.iter().filter_map(Event::op).collect();
         assert_eq!(answered.len(), ops.len(), "run {run}");
-        assert_eq!(report.handled, ops.len() as u64, "run {run}");
+        assert_eq!(
+            report.handled,
+            u64::try_from(ops.len()).unwrap_or(u64::MAX),
+            "run {run}"
+        );
         assert_eq!(report.rejected, 0, "run {run}");
     }
 }

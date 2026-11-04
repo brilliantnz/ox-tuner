@@ -67,9 +67,19 @@ pub use trace::{Direction, Trace, TraceError, TraceFrame};
 pub trait Transport: Send {
     /// Opens the link. Opening an already-open transport is a no-op, so a
     /// reconnect can call it unconditionally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Open`] when the device is missing, busy or
+    /// not permitted.
     fn open(&mut self) -> Result<(), TransportError>;
 
     /// Writes every byte. A short write is an error, never silently retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::NotOpen`] before the link is open and
+    /// [`TransportError::Write`] when the device rejects the bytes.
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError>;
 
     /// Fills `buf` completely, or fails.
@@ -77,6 +87,11 @@ pub trait Transport: Send {
     /// [`TransportError::Timeout`] carries how many bytes arrived before the
     /// deadline; callers must treat the buffer as partially filled and discard
     /// the conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Timeout`], [`TransportError::Read`] or
+    /// [`TransportError::Closed`] when the reply cannot be completed.
     fn read_exact_timeout(
         &mut self,
         buf: &mut [u8],
@@ -89,6 +104,11 @@ pub trait Transport: Send {
     /// The quiet period exists for unframed text replies: Speeduino answers the
     /// signature query with a plain string and no terminator, so "no more bytes
     /// for a while" is the only end marker it offers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Timeout`] when not one byte arrives before the
+    /// deadline, and the same read errors as [`Self::read_exact_timeout`].
     fn read_until(
         &mut self,
         sink: &mut Vec<u8>,
@@ -100,6 +120,11 @@ pub trait Transport: Send {
 
     /// Reads what is already buffered, without waiting. Returns `0` when
     /// nothing is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::NotOpen`] before the link is open and
+    /// [`TransportError::Read`] when the device cannot be read.
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
 
     /// Discards anything pending in the input buffer.

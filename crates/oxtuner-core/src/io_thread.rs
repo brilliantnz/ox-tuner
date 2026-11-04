@@ -199,7 +199,7 @@ pub(crate) struct IoThread {
 
 impl IoThread {
     /// Builds the transport and starts the thread.
-    pub(crate) fn start(plan: IoPlan) -> Result<(Self, Rx<spsc::Array<IoReply>>), CoreError> {
+    pub(crate) fn start(plan: &IoPlan) -> Result<(Self, Rx<spsc::Array<IoReply>>), CoreError> {
         let (request_tx, request_rx) = spsc::bounded_blocking(REQUEST_CAPACITY);
         let (reply_tx, reply_rx) = spsc::bounded_blocking(REPLY_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
@@ -268,7 +268,7 @@ pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
 /// A serial device is opened here because that is the core's own capability.
 /// Any other link comes from the application through [`PortChoice::Custom`],
 /// so this module never names a simulator or a replay reader (ADR-0022).
-fn build(plan: IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
+fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
     let label = plan.link.label();
     let transport: Box<dyn Transport> = match &plan.link {
         PortChoice::Serial { port, baud } => Box::new(SerialTransport::new(
@@ -295,6 +295,10 @@ fn build(plan: IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
 }
 
 /// The thread loop.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the thread loop owns its endpoints for the life of the thread"
+)]
 fn run(
     mut transport: RecordingTransport,
     mut protocol: MsProtocol,
@@ -417,7 +421,7 @@ fn read_every_page(
                 page: spec.number,
                 bytes,
             }),
-            Err(error) => return Err((failure(error), false)),
+            Err(error) => return Err((failure(&error), false)),
         }
     }
     Ok(pages)
@@ -433,6 +437,10 @@ fn same_pages(before: &[PageRead], after: &[PageRead]) -> bool {
 }
 
 /// Performs one operation. The flag says whether the thread should stop.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive match over the wire operations reads as a single state machine"
+)]
 fn execute(
     transport: &mut RecordingTransport,
     protocol: &mut MsProtocol,
@@ -446,7 +454,7 @@ fn execute(
         }
         IoOp::Signature => match protocol.signature(transport) {
             Ok(signature) => (IoOutcome::Signature { signature }, false),
-            Err(error) => (failure(error), false),
+            Err(error) => (failure(&error), false),
         },
         IoOp::ReadPages { pages } => {
             let mut read = Vec::with_capacity(pages.len());
@@ -462,7 +470,7 @@ fn execute(
                 }
                 match protocol.read_page_all(transport, page) {
                     Ok(bytes) => read.push(PageRead { page, bytes }),
-                    Err(error) => return (failure(error), false),
+                    Err(error) => return (failure(&error), false),
                 }
             }
             (IoOutcome::Pages { pages: read }, false)
@@ -509,7 +517,7 @@ fn execute(
                 }
                 bytes += page.data.len();
                 if let Err(error) = protocol.write_page(transport, page.page, 0, &page.data) {
-                    return (failure(error), false);
+                    return (failure(&error), false);
                 }
             }
             (
@@ -533,14 +541,14 @@ fn execute(
                     );
                 }
                 if let Err(error) = protocol.burn(transport, page) {
-                    return (failure(error), false);
+                    return (failure(&error), false);
                 }
             }
             (IoOutcome::Burned { pages: count }, false)
         }
         IoOp::ReadRealtime => match protocol.read_realtime(transport) {
             Ok(block) => (IoOutcome::Realtime { block }, false),
-            Err(error) => (failure(error), false),
+            Err(error) => (failure(&error), false),
         },
         IoOp::Reconnect => {
             // A port that failed a read is still open; closing first makes the
@@ -557,7 +565,7 @@ fn execute(
             }
             match protocol.signature(transport) {
                 Ok(signature) => (IoOutcome::Reconnected { signature }, false),
-                Err(error) => (failure(error), false),
+                Err(error) => (failure(&error), false),
             }
         }
         IoOp::SaveTrace { path } => match transport.save(&path) {
@@ -574,9 +582,9 @@ fn execute(
 }
 
 /// Maps a protocol error to the core-facing failure.
-fn failure(error: ProtocolError) -> IoOutcome {
+fn failure(error: &ProtocolError) -> IoOutcome {
     IoOutcome::Failed(IoFailure {
-        kind: failure_kind(&error),
+        kind: failure_kind(error),
         message: error.to_string(),
     })
 }
@@ -591,11 +599,12 @@ fn failure_kind(error: &ProtocolError) -> IoFailureKind {
             | TransportError::NotOpen
             | TransportError::Open(_),
         ) => IoFailureKind::LinkLost,
-        ProtocolError::Transport(TransportError::Unsupported(_)) => IoFailureKind::Unsupported,
-        ProtocolError::Unsupported(_) | ProtocolError::Encoding(_) => IoFailureKind::Unsupported,
-        ProtocolError::UnexpectedReply(_)
-        | ProtocolError::BadFrame(_)
-        | ProtocolError::ReturnCode { .. } => IoFailureKind::Protocol,
+        ProtocolError::Transport(TransportError::Unsupported(_))
+        | ProtocolError::Unsupported(_)
+        | ProtocolError::Encoding(_) => IoFailureKind::Unsupported,
+        // Both error enums are non-exhaustive, so a variant added later must
+        // still map to a core-facing failure instead of breaking the build.
+        _ => IoFailureKind::Protocol,
     }
 }
 
@@ -632,13 +641,16 @@ mod tests {
     struct TestSim(SimConfig);
 
     impl crate::link::CustomLink for TestSim {
-        fn label(&self) -> &str {
+        fn label(&self) -> &'static str {
             "simulator"
         }
 
         fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String> {
             SimTransport::new(definition, self.0.clone())
-                .map(|sim| Box::new(sim) as Box<dyn Transport>)
+                .map(|sim| {
+                    let transport: Box<dyn Transport> = Box::new(sim);
+                    transport
+                })
                 .map_err(|error| error.to_string())
         }
     }
@@ -673,7 +685,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
             link_mode: None,
             link: PortChoice::custom(TestSim(SimConfig::default())),
         };
-        let (thread, replies) = IoThread::start(plan).expect("starts");
+        let (thread, replies) = IoThread::start(&plan).expect("starts");
         thread.submit(1, IoOp::Signature).expect("queued");
 
         let reply = replies

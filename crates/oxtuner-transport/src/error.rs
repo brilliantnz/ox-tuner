@@ -6,6 +6,7 @@ use std::fmt;
 ///
 /// These map to user text one layer up: the I/O thread turns them into a
 /// connection state, and the UI never sees a raw OS error.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// The transport was used before [`crate::Transport::open`].

@@ -46,6 +46,7 @@ impl From<RawConversion> for EditOutcome {
 }
 
 /// Why a tune operation could not be performed.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TuneError {
     /// No variable of that name exists in the layout.
@@ -188,6 +189,11 @@ impl Tune {
     /// checked adoption: every variable must exist with the same element count;
     /// only then are the values replaced. Edit timestamps do not survive, which
     /// is right for a tune that arrived from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the value vectors do not
+    /// match and [`TuneError::UnknownVariable`] when a variable is missing.
     pub fn adopt_values(&mut self, other: &Self) -> Result<(), TuneError> {
         if self.layout.variables().len() != other.layout.variables().len() {
             return Err(TuneError::LayoutMismatch);
@@ -211,6 +217,7 @@ impl Tune {
     ///
     /// This is what becomes the baseline image: "as persisted" is about values,
     /// not about when a cell was last typed into.
+    #[must_use]
     pub fn snapshot(&self) -> Self {
         Self {
             layout: Arc::clone(&self.layout),
@@ -231,6 +238,11 @@ impl Tune {
     }
 
     /// The raw value of a scalar or bit field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, is not a scalar, or
+    /// is not numeric.
     pub fn scalar_raw(&self, name: &str) -> Result<f64, TuneError> {
         let variable = self.variable(name)?;
         if !variable.shape.is_scalar() {
@@ -243,14 +255,23 @@ impl Tune {
     }
 
     /// The user value of a scalar or bit field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, is not a scalar, or
+    /// has an attribute that cannot be evaluated.
     pub fn scalar_user(&self, name: &str) -> Result<f64, TuneError> {
         let raw = self.scalar_raw(name)?;
         Ok(self.variable(name)?.to_user(raw)?)
     }
 
     /// The raw value at a flat index (arrays included).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, not numeric, or the
+    /// index is outside the value.
     pub fn raw_at(&self, name: &str, index: usize) -> Result<f64, TuneError> {
-        let variable = self.variable(name)?;
         let values = self.value_at(name)?;
         match values {
             Values::Numbers(numbers) => {
@@ -262,35 +283,51 @@ impl Tune {
                         index,
                     })
             }
-            Values::Text(_) => {
-                let _ = variable;
-                Err(TuneError::WrongKind {
-                    name: name.to_owned(),
-                    expected: "number",
-                })
-            }
+            Values::Text(_) => Err(TuneError::WrongKind {
+                name: name.to_owned(),
+                expected: "number",
+            }),
         }
     }
 
     /// The user value at a flat index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, not numeric, the
+    /// index is out of range, or a conversion attribute is unresolved.
     pub fn user_at(&self, name: &str, index: usize) -> Result<f64, TuneError> {
         let raw = self.raw_at(name, index)?;
         Ok(self.variable(name)?.to_user(raw)?)
     }
 
     /// The raw value at a table cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, the cell is outside
+    /// the shape, or the value is not numeric.
     pub fn cell_raw(&self, name: &str, row: usize, column: usize) -> Result<f64, TuneError> {
         let index = self.offset(name, row, column)?;
         self.raw_at(name, index)
     }
 
     /// The user value at a table cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, the cell is outside
+    /// the shape, or a conversion attribute is unresolved.
     pub fn cell_user(&self, name: &str, row: usize, column: usize) -> Result<f64, TuneError> {
         let index = self.offset(name, row, column)?;
         self.user_at(name, index)
     }
 
     /// The text of a string variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown or stores numbers.
     pub fn text(&self, name: &str) -> Result<&str, TuneError> {
         let variable = self.variable(name)?;
         if variable.shape.is_numeric() {
@@ -306,6 +343,11 @@ impl Tune {
     }
 
     /// Stores a raw value at a flat index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, not numeric, or the
+    /// index is outside the value.
     pub fn set_raw_at(&mut self, name: &str, index: usize, raw: f64) -> Result<(), TuneError> {
         self.set_raw_at_time(name, index, raw, SystemTime::now())
     }
@@ -345,6 +387,11 @@ impl Tune {
     /// Image loads (an ECU read-back, a snapshot restored from a file) are not
     /// user edits: marking them would make the whole tune look typed into.
     /// Only [`crate::decode_page`] and the image layers call this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, not numeric, or the
+    /// index is outside the value.
     pub fn set_image_raw(&mut self, name: &str, index: usize, raw: f64) -> Result<(), TuneError> {
         let variable = self.index_of(name)?;
         let len = self.values[variable].len();
@@ -367,6 +414,11 @@ impl Tune {
     }
 
     /// Converts a user value and stores its raw form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, the index is out of
+    /// range, or a conversion attribute is unresolved.
     pub fn set_user_at(
         &mut self,
         name: &str,
@@ -380,6 +432,11 @@ impl Tune {
     ///
     /// Timestamps are caller-supplied so tests are deterministic; the UI-facing
     /// [`Self::set_user_at`] uses the system clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, the index is out of
+    /// range, or a conversion attribute is unresolved.
     pub fn set_user_at_time(
         &mut self,
         name: &str,
@@ -394,6 +451,11 @@ impl Tune {
     }
 
     /// Stores a user value in a scalar or bit field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, not a scalar, or a
+    /// conversion attribute is unresolved.
     pub fn set_user(&mut self, name: &str, user: f64) -> Result<EditOutcome, TuneError> {
         let variable = self.variable(name)?;
         if !variable.shape.is_scalar() {
@@ -406,6 +468,11 @@ impl Tune {
     }
 
     /// Stores a user value in a table cell.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown, the cell is outside
+    /// the shape, or a conversion attribute is unresolved.
     pub fn set_cell_user(
         &mut self,
         name: &str,
@@ -418,11 +485,15 @@ impl Tune {
     }
 
     /// Replaces a string variable's text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown or stores numbers.
     pub fn set_text(&mut self, name: &str, text: &str) -> Result<(), TuneError> {
         let index = self.index_of(name)?;
         match &mut self.values[index] {
             Values::Text(current) => {
-                *current = text.to_owned();
+                text.clone_into(current);
             }
             Values::Numbers(_) => {
                 return Err(TuneError::WrongKind {
@@ -458,6 +529,11 @@ impl Tune {
     }
 
     /// One variable by name, with the normalised error for a miss.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::UnknownVariable`] when the layout has no variable
+    /// with this name.
     pub fn variable(&self, name: &str) -> Result<&VariableSpec, TuneError> {
         self.layout
             .variable(name)
@@ -499,6 +575,10 @@ fn default_values(variable: &VariableSpec) -> Values {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use std::time::{Duration, UNIX_EPOCH};
 
     use oxtuner_ini::{SettingsContext, parse_str};

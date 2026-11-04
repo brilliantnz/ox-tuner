@@ -39,6 +39,11 @@ pub const MAX_SPEC_VERSION: f64 = 3.80;
 pub const PARSER_VERSION: u32 = 1;
 
 /// Parses bytes into a frozen definition.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when the definition has a structural problem, such as a
+/// missing signature or an unbalanced conditional block.
 pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Definition, IniError> {
     let decoded = source::decode(bytes);
     assemble(
@@ -50,11 +55,21 @@ pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Definitio
 }
 
 /// Parses text into a frozen definition.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when the definition has a structural problem, such as a
+/// missing signature or an unbalanced conditional block.
 pub fn parse_str(text: &str, settings: &SettingsContext) -> Result<Definition, IniError> {
     assemble(text, settings, None, Vec::new())
 }
 
 /// Parses text, inlining `#include` files through `resolver`.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when the definition has a structural problem, or when
+/// an included file cannot be preprocessed.
 pub fn parse_str_with_includes(
     text: &str,
     settings: &SettingsContext,
@@ -76,7 +91,9 @@ fn assemble(
 
     let mut definition = Definition::empty();
     definition.defines = preprocessed.defines.clone();
-    definition.tested_flags = preprocessed.settings.tested_flags().clone();
+    definition
+        .tested_flags
+        .clone_from(preprocessed.settings.tested_flags());
     definition.active_flags = preprocessed.settings.active_flags();
     definition.diagnostics.extend(extra_diagnostics);
     definition
@@ -343,12 +360,11 @@ pub(crate) fn entry_line(
     text: &str,
 ) -> Option<(String, String)> {
     section.count_entry();
-    match crate::fields::split_assignment(text) {
-        Some((key, value)) => Some((key.trim().to_owned(), value.trim().to_owned())),
-        None => {
-            section.unrecognized_line(line, text);
-            None
-        }
+    if let Some((key, value)) = crate::fields::split_assignment(text) {
+        Some((key.trim().to_owned(), value.trim().to_owned()))
+    } else {
+        section.unrecognized_line(line, text);
+        None
     }
 }
 

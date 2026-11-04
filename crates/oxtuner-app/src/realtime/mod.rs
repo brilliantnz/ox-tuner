@@ -60,7 +60,7 @@ impl RealtimeView {
     /// Builds the chart over the core's shared history. One instance for the
     /// lifetime of the window keeps pause, legend and window selection across
     /// workspace switches.
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
         let history = CoreService::history(cx);
         let chart = cx.new(move |cx| {
             let mut chart =
@@ -72,7 +72,11 @@ impl RealtimeView {
     }
 
     /// The realtime toolbar: window buttons, channel picker and recording.
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the realtime toolbar groups every chart control in one row"
+    )]
+    fn render_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let status = CoreService::status(cx);
         let log = CoreService::log(cx);
         let connected = status.connection.is_some();
@@ -180,7 +184,7 @@ impl RealtimeView {
 }
 
 impl Render for RealtimeView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let style = chart_style(cx.theme());
         self.chart
             .update(cx, |chart, cx| chart.set_style(style, cx));

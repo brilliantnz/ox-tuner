@@ -113,23 +113,7 @@ fn parse_channel(
 
     // Derived channel: `name = { ego1 / 10.0 }, "AFR"`.
     if crate::fields::is_expression_field(&first) {
-        let source = crate::fields::expression_body(&first).unwrap_or("");
-        let expression = crate::expr::Expr::parse(source)
-            .map_err(|error| format!("expression {source:?}: {error}"))?;
-        let units = fields
-            .get(1)
-            .map(|field| Text::parse(field))
-            .unwrap_or(Text::Literal(String::new()));
-        return Ok(Channel {
-            name: name.to_owned(),
-            kind: ChannelKind::Computed(expression),
-            units,
-            scale: Number::Literal(1.0),
-            translate: Number::Literal(0.0),
-            hidden: false,
-            line,
-            raw: raw.to_owned(),
-        });
+        return parse_computed_channel(name, raw, fields, line, &first);
     }
 
     let lowered = first.to_ascii_lowercase();
@@ -140,7 +124,7 @@ fn parse_channel(
             if DataType::parse(&first).is_some() {
                 0usize
             } else {
-                return Err(format!("{:?} is not a channel class", first));
+                return Err(format!("{first:?} is not a channel class"));
             }
         }
     };
@@ -151,7 +135,7 @@ fn parse_channel(
         .ok_or_else(|| {
             format!(
                 "data type {:?}",
-                fields.get(index).map(|field| field.as_ref()).unwrap_or("")
+                fields.get(index).map_or("", AsRef::as_ref)
             )
         })?;
     index += 1;
@@ -190,12 +174,10 @@ fn parse_channel(
 
     let scale = fields
         .get(index)
-        .map(|field| Number::parse(field))
-        .unwrap_or(Number::Literal(1.0));
+        .map_or(Number::Literal(1.0), |field| Number::parse(field));
     let translate = fields
         .get(index + 1)
-        .map(|field| Number::parse(field))
-        .unwrap_or(Number::Literal(0.0));
+        .map_or(Number::Literal(0.0), |field| Number::parse(field));
 
     let kind = if lowered == "bits" {
         ChannelKind::Measured {
@@ -219,6 +201,32 @@ fn parse_channel(
         units,
         scale,
         translate,
+        hidden: false,
+        line,
+        raw: raw.to_owned(),
+    })
+}
+
+fn parse_computed_channel(
+    name: &str,
+    raw: &str,
+    fields: &[Cow<'_, str>],
+    line: u32,
+    field: &str,
+) -> Result<Channel, String> {
+    let source = crate::fields::expression_body(field).unwrap_or("");
+    let expression = crate::expr::Expr::parse(source)
+        .map_err(|error| format!("expression {source:?}: {error}"))?;
+    let units = fields
+        .get(1)
+        .map_or(Text::Literal(String::new()), |field| Text::parse(field));
+
+    Ok(Channel {
+        name: name.to_owned(),
+        kind: ChannelKind::Computed(expression),
+        units,
+        scale: Number::Literal(1.0),
+        translate: Number::Literal(0.0),
         hidden: false,
         line,
         raw: raw.to_owned(),

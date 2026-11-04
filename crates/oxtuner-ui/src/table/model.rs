@@ -9,6 +9,16 @@
 //! draws them in reverse, and every cursor/pointer move is translated through
 //! [`TableModel::data_row`] and [`TableModel::display_row`].
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -105,6 +115,10 @@ pub struct AxisEditing {
 }
 
 /// Why an edit could not be accepted.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the model reports a closed set of edit failures"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditError {
     /// The text is empty.
@@ -130,6 +144,10 @@ pub enum EditError {
 }
 
 /// What the last command did, for a localized status line.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the grid reports a closed set of completed actions"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GridAction {
     /// The selection was copied.
@@ -194,6 +212,10 @@ pub enum GridAction {
 }
 
 /// A bulk operation over the selection.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the grid supports a closed set of bulk edits"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulkOp {
     /// Draw a straight line across each selected row.
@@ -211,6 +233,10 @@ pub enum BulkOp {
 }
 
 /// How a typed number applies to the selected cells.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an edit is a set, add, multiply, divide or percentage"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditOp {
     /// Replace with the typed value.
@@ -226,7 +252,11 @@ pub enum EditOp {
 }
 
 /// One recorded command, as the values on each side of it.
-#[derive(Clone)]
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an undo step changes cell values or axis bins"
+)]
+#[derive(Clone, Debug)]
 pub enum HistoryStep {
     /// Cell values.
     Cells(Vec<CellEdit>),
@@ -272,6 +302,17 @@ pub struct TableModel {
     aria: Vec<Arc<str>>,
 }
 
+impl std::fmt::Debug for TableModel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TableModel")
+            .field("table", &self.table)
+            .field("selection", &self.selection)
+            .field("flip_y", &self.flip_y)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for TableModel {
     fn default() -> Self {
         Self::new()
@@ -303,17 +344,7 @@ impl TableModel {
     /// drops only the optimistic values the core has confirmed.
     pub fn set_table(&mut self, table: TableSummary) {
         let same_table = self.table.as_ref().map(|current| &current.id) == Some(&table.id);
-        if !same_table {
-            // Start at the first definition bin on both axes. Display
-            // orientation changes which side owns that bin, not its index.
-            self.selection = Selection::single(CellPos { row: 0, column: 0 });
-            self.editing = None;
-            self.axis_editing = None;
-            self.pending.clear();
-            self.pending_axis.clear();
-            self.undo.clear();
-            self.redo.clear();
-        } else {
+        if same_table {
             self.pending.retain(|(row, column), pending| {
                 table
                     .cell(*row, *column)
@@ -325,6 +356,16 @@ impl TableModel {
                     .get(*index)
                     .is_none_or(|current| *current != *pending)
             });
+        } else {
+            // Start at the first definition bin on both axes. Display
+            // orientation changes which side owns that bin, not its index.
+            self.selection = Selection::single(CellPos { row: 0, column: 0 });
+            self.editing = None;
+            self.axis_editing = None;
+            self.pending.clear();
+            self.pending_axis.clear();
+            self.undo.clear();
+            self.redo.clear();
         }
         self.table = Some(table);
         self.clamp();
@@ -657,7 +698,7 @@ impl TableModel {
 
     /// Whether the axis bins are strictly increasing.
     ///
-    /// TunerStudio lets a bin hold any value, but a flat or falling bin makes
+    /// `TunerStudio` lets a bin hold any value, but a flat or falling bin makes
     /// the ECU interpolate backwards. The grid warns rather than refuses.
     pub fn axis_monotonic(&self, axis: AxisKind) -> bool {
         use std::cmp::Ordering;
@@ -763,6 +804,11 @@ impl TableModel {
     }
 
     /// Parses and stages the header edit as one bin write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] when the text is not a finite number or the table
+    /// is read-only.
     pub fn commit_axis_edit(&mut self) -> Result<Vec<AxisEdit>, EditError> {
         let Some(editing) = self.axis_editing.as_ref() else {
             return Ok(Vec::new());
@@ -1012,6 +1058,11 @@ impl TableModel {
     /// `+`/`-` apply a relative change, `*` multiplies and `/` divides; a bare
     /// number replaces the value. `=` forces an absolute value, which is how a
     /// negative number is typed without meaning "minus this much".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] when the text cannot be parsed, the table is
+    /// read-only, or the edit does not fit the selection.
     pub fn commit_edit(&mut self) -> Result<Vec<CellEdit>, EditError> {
         let Some(editing) = self.editing.as_ref() else {
             return Ok(Vec::new());
@@ -1038,6 +1089,15 @@ impl TableModel {
     /// Every operation reads the values as they are before the command and
     /// writes the whole result at once, so smoothing never sees its own
     /// intermediate values. Values are rounded to the table's digits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] when no table is loaded, the table is read-only,
+    /// or the selection is too small for the operation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the bulk operations share one selection and rounding pass"
+    )]
     pub fn bulk_edit(&mut self, op: BulkOp) -> Result<Vec<CellEdit>, EditError> {
         if self.table.is_none() {
             return Err(EditError::NoTable);
@@ -1219,6 +1279,11 @@ impl TableModel {
     /// The endpoints keep their values, so the table still covers the same
     /// range; only the breakpoints between them move. This is how a hand-edited
     /// axis is straightened without touching the cells.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] when no table is loaded, the table is read-only,
+    /// or the axis has too few bins.
     pub fn rebin_axis(&mut self, axis: AxisKind) -> Result<Vec<AxisEdit>, EditError> {
         let Some(table) = &self.table else {
             return Err(EditError::NoTable);
@@ -1303,6 +1368,11 @@ impl TableModel {
     }
 
     /// Parses a pasted block at the selection's top-left corner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EditError`] when the block is ragged, does not fit, or the
+    /// table is read-only.
     pub fn paste_edits(&mut self, text: &str) -> Result<Vec<CellEdit>, EditError> {
         if !self.is_writable() {
             self.action = Some(GridAction::PasteRejected);
@@ -1637,6 +1707,11 @@ fn parse_axis_edit(text: &str) -> Result<Option<f64>, EditError> {
 /// Parses one edit expression into its operation and number.
 ///
 /// Returns `Ok(None)` for an empty text, which means "nothing to do".
+///
+/// # Errors
+///
+/// Returns [`EditError`] when the text is not a finite number, a percentage
+/// uses an unsupported operation, or a division uses zero.
 pub fn parse_edit(text: &str) -> Result<Option<(EditOp, f64)>, EditError> {
     let text = text.trim();
     if text.is_empty() {
@@ -1658,8 +1733,7 @@ pub fn parse_edit(text: &str) -> Result<Option<(EditOp, f64)>, EditError> {
     }
 
     let (mut operation, rest) = match body.as_bytes()[0] {
-        b'+' => (EditOp::Add, &body[1..]),
-        b'-' => (EditOp::Add, &body[1..]),
+        b'+' | b'-' => (EditOp::Add, &body[1..]),
         b'*' => (EditOp::Multiply, &body[1..]),
         b'/' => (EditOp::Divide, &body[1..]),
         b'=' => (EditOp::Set, &body[1..]),

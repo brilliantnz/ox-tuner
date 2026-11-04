@@ -1,8 +1,8 @@
 use super::*;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, IntoElement, Render, TestAppContext, Window, WindowBounds,
-    WindowOptions, div, px, size,
+    AppContext as _, Bounds, Context, IntoElement, Point, Render, TestAppContext, Window,
+    WindowBounds, WindowOptions, div, px, size,
 };
 
 fn sample() -> Vec<IndicatorView> {
@@ -22,7 +22,7 @@ fn sample() -> Vec<IndicatorView> {
 struct Host;
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         let style = IndicatorStyle::default();
 
         div()
@@ -47,7 +47,7 @@ fn the_strip_renders_every_state(cx: &mut TestAppContext) {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    Default::default(),
+                    Point::default(),
                     size(px(800.), px(600.)),
                 ))),
                 ..Default::default()

@@ -78,6 +78,11 @@ impl Memory {
     }
 
     /// Replaces a page's RAM, for tests and scenario preload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] when the definition has no such page or the bytes
+    /// do not fit it.
     pub fn set_ram(&mut self, number: u8, bytes: &[u8]) -> Result<(), SimError> {
         let page = self.page_mut(number).ok_or_else(|| SimError {
             message: format!("the definition has no page {number}"),

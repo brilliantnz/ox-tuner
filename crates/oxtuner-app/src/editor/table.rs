@@ -59,16 +59,20 @@ pub(crate) struct TableEditor {
 
 impl TableEditor {
     /// An editor with no table loaded yet.
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the underscore marks subscriptions kept only for their lifetime"
+    )]
+    pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
         let table = cx.new(Table::new);
         let curve = cx.new(Curve::new);
         curve.update(cx, |curve, cx| curve.set_title_visible(false, cx));
         let _table = cx.subscribe(&table, |this, _, event, cx| this.on_table(event, cx));
         let _curve = cx.subscribe(&curve, |this, _, event, cx| this.on_curve(event, cx));
-        let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
+        let _core = cx.observe_global::<CoreService>(TableEditor::sync);
         // The Settings page edits a global, so a table that is already open
         // picks a new header preference up without being reopened.
-        let _settings = cx.observe_global::<AppSettings>(|this, cx| this.sync_header_wash(cx));
+        let _settings = cx.observe_global::<AppSettings>(TableEditor::sync_header_wash);
         let flip_y = cx
             .try_global::<AppState>()
             .is_some_and(|state| state.data().layout.table_low_at_top);
@@ -105,7 +109,7 @@ impl TableEditor {
         &mut self,
         label: SharedString,
         target: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.label = label;
         let Some(name) = target else {
@@ -152,7 +156,7 @@ impl TableEditor {
 
     /// Follows core events: a new snapshot, a failure, or a save that makes the
     /// changed marks stale.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    fn sync(&mut self, cx: &mut Context<'_, Self>) {
         let mut snapshot = None;
         let mut failure = None;
         let mut edit_failed = false;
@@ -205,10 +209,10 @@ impl TableEditor {
                 failure = Some(failure_now.clone());
             }
             if status.last_save != self.last_save {
-                self.last_save = status.last_save.clone();
+                self.last_save.clone_from(&status.last_save);
                 if self.last_save.is_some() {
                     saved = true;
-                    reload = self.requested.clone();
+                    reload.clone_from(&self.requested);
                 }
             }
         }
@@ -244,7 +248,7 @@ impl TableEditor {
         cx.notify();
     }
 
-    fn on_table(&mut self, event: &TableEvent, cx: &mut Context<Self>) {
+    fn on_table(&mut self, event: &TableEvent, cx: &mut Context<'_, Self>) {
         match event {
             TableEvent::EditRequested { name, edits } => {
                 edit_table(name, edits.clone(), cx);
@@ -269,7 +273,7 @@ impl TableEditor {
 
     /// Follows the curve above the grid: writes its edits, mirrors its
     /// selection, and shows a dragged value in the paired row before the echo.
-    fn on_curve(&mut self, event: &CurveEvent, cx: &mut Context<Self>) {
+    fn on_curve(&mut self, event: &CurveEvent, cx: &mut Context<'_, Self>) {
         match event {
             CurveEvent::EditRequested { name, edits } => {
                 // The preview event just before this one cleared the row;
@@ -296,14 +300,14 @@ impl TableEditor {
         }
     }
 
-    fn preview_cell(&self, column: usize, value: Option<f64>, cx: &mut Context<Self>) {
+    fn preview_cell(&self, column: usize, value: Option<f64>, cx: &mut Context<'_, Self>) {
         self.table.update(cx, |table, cx| {
             table.preview_cell(CellPos { row: 0, column }, value, cx);
         });
     }
 
     /// Whether the open snapshot is a curve.
-    fn is_curve(&self, cx: &Context<Self>) -> bool {
+    fn is_curve(&self, cx: &Context<'_, Self>) -> bool {
         self.table
             .read(cx)
             .model()
@@ -313,7 +317,7 @@ impl TableEditor {
 
     /// The grid column the curve selection should mirror, when the open
     /// snapshot is a curve.
-    fn curve_column(&self, cx: &Context<Self>) -> Option<usize> {
+    fn curve_column(&self, cx: &Context<'_, Self>) -> Option<usize> {
         let model = self.table.read(cx).model();
         let table = model.table()?;
 
@@ -325,13 +329,13 @@ impl TableEditor {
 
     /// Sets the grid and the curve from one snapshot, so the two views cannot
     /// disagree about which curve is open.
-    fn apply_table(&self, table: TableSummary, cx: &mut Context<Self>) {
+    fn apply_table(&self, table: TableSummary, cx: &mut Context<'_, Self>) {
         self.sync_curve(&table, cx);
         self.table.update(cx, |grid, cx| grid.set_table(table, cx));
     }
 
     /// Feeds the curve from the table model, including a pending bin edit.
-    fn sync_curve_from_model(&self, cx: &mut Context<Self>) {
+    fn sync_curve_from_model(&self, cx: &mut Context<'_, Self>) {
         let model = self.table.read(cx).model();
         let Some(table) = model.table() else {
             return;
@@ -354,7 +358,7 @@ impl TableEditor {
 
     /// Feeds one snapshot to the curve, or clears it when the open snapshot is
     /// an ordinary table.
-    fn sync_curve(&self, table: &TableSummary, cx: &mut Context<Self>) {
+    fn sync_curve(&self, table: &TableSummary, cx: &mut Context<'_, Self>) {
         let snapshot = table
             .curve
             .is_some()
@@ -367,11 +371,11 @@ impl TableEditor {
         });
     }
 
-    fn clear_curve(&self, cx: &mut Context<Self>) {
+    fn clear_curve(&self, cx: &mut Context<'_, Self>) {
         self.curve.update(cx, Curve::clear);
     }
 
-    fn toggle_flip_y(&mut self, cx: &mut Context<Self>) {
+    fn toggle_flip_y(&mut self, cx: &mut Context<'_, Self>) {
         self.flip_y = !self.flip_y;
         self.table
             .update(cx, |grid, cx| grid.set_flip_y(self.flip_y, cx));
@@ -383,21 +387,29 @@ impl TableEditor {
     }
 
     /// Follows Settings › Editor: the header wash reaches an open table at once.
-    fn sync_header_wash(&mut self, cx: &mut Context<Self>) {
+    fn sync_header_wash(&mut self, cx: &mut Context<'_, Self>) {
         let wash = AppSettings::table_header_wash_for_ranges(cx);
 
         self.table
             .update(cx, |table, cx| table.set_header_wash_for_ranges(wash, cx));
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
+    fn retry(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(name) = self.requested.clone() {
             read_table(&name, cx);
             cx.notify();
         }
     }
 
-    fn render_header(&self, table: Option<&TableSummary>, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one header render lays out the axes, corner and controls together"
+    )]
+    fn render_header(
+        &self,
+        table: Option<&TableSummary>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let title: SharedString =
             table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
@@ -444,7 +456,7 @@ impl TableEditor {
         ] = bulk;
         let [rebin_x, rebin_y] = rebin;
 
-        let changed = table.map_or(0, |table| table.changed_cells());
+        let changed = table.map_or(0, oxtuner_core::TableSummary::changed_cells);
         let operations_button = Button::new("table-operations")
             .label(t!("app.table.operations"))
             .compact()
@@ -511,7 +523,7 @@ impl TableEditor {
                     .disabled(!can_undo)
                     .on_click(move |_, window, cx| {
                         let focus = undo.read(cx).focus_handle(cx);
-                        undo.update(cx, |grid, cx| grid.undo(cx));
+                        undo.update(cx, oxtuner_ui::Table::undo);
                         window.focus(&focus, cx);
                     }),
             )
@@ -523,7 +535,7 @@ impl TableEditor {
                     .disabled(!can_redo)
                     .on_click(move |_, window, cx| {
                         let focus = redo.read(cx).focus_handle(cx);
-                        redo.update(cx, |grid, cx| grid.redo(cx));
+                        redo.update(cx, oxtuner_ui::Table::redo);
                         window.focus(&focus, cx);
                     }),
             )
@@ -536,7 +548,7 @@ impl TableEditor {
                     .disabled(!has_table)
                     .on_click(move |_, window, cx| {
                         let focus = copy.read(cx).focus_handle(cx);
-                        copy.update(cx, |grid, cx| grid.copy_selection(cx));
+                        copy.update(cx, oxtuner_ui::Table::copy_selection);
                         window.focus(&focus, cx);
                     }),
             )
@@ -547,7 +559,7 @@ impl TableEditor {
                     .disabled(!has_table || read_only)
                     .on_click(move |_, window, cx| {
                         let focus = paste.read(cx).focus_handle(cx);
-                        paste.update(cx, |grid, cx| grid.paste_clipboard(cx));
+                        paste.update(cx, oxtuner_ui::Table::paste_clipboard);
                         window.focus(&focus, cx);
                     }),
             )
@@ -631,7 +643,7 @@ impl TableEditor {
         &self,
         has_table: bool,
         failure: Option<&Failure>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if has_table {
@@ -648,7 +660,7 @@ impl TableEditor {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                            this.table.update(cx, |table, cx| table.dismiss_focus(cx));
+                            this.table.update(cx, oxtuner_ui::Table::dismiss_focus);
                         }),
                     )
                     .child(div().flex_1().min_h_0().w_full().child(self.curve.clone()))
@@ -678,7 +690,7 @@ impl TableEditor {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.table.update(cx, |table, cx| table.dismiss_focus(cx));
+                        this.table.update(cx, oxtuner_ui::Table::dismiss_focus);
                     }),
                 )
                 .child(
@@ -730,7 +742,11 @@ impl TableEditor {
         }
     }
 
-    fn render_status(&self, table: &TableSummary, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the status line combines cursor, selection, change and failure facts"
+    )]
+    fn render_status(&self, table: &TableSummary, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let model = self.table.read(cx).model();
         let cursor = model.selection().cursor;
@@ -833,7 +849,7 @@ impl TableEditor {
                         "app.table.selection",
                         count = model.selection().cell_count().to_string()
                     ))
-                    .child(t!("app.table.cursor_value", value = value_text.clone()))
+                    .child(t!("app.table.cursor_value", value = value_text))
                     .when(changed > 0, |this| {
                         this.child(
                             div()
@@ -844,14 +860,14 @@ impl TableEditor {
                     .when_some(axis_warning, |this, warning| {
                         this.child(div().text_color(theme.danger).child(warning))
                     })
-                    .when_some(action, |this, action| this.child(action)),
+                    .when_some(action, gpui_kit::ParentElement::child),
             )
             .into_any_element()
     }
 }
 
 impl Render for TableEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         // One small snapshot clone per frame keeps the borrow of the table out
         // of the render helpers, which need `cx` mutably for their buttons.
@@ -869,7 +885,7 @@ impl Render for TableEditor {
             .text_color(theme.foreground)
             .child(header)
             .child(content)
-            .when_some(status, |this, status| this.child(status))
+            .when_some(status, gpui_kit::ParentElement::child)
     }
 }
 

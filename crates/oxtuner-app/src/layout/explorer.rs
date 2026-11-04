@@ -48,7 +48,7 @@ pub(crate) struct Explorer {
 
 impl Explorer {
     /// Builds the tree from the definition the core already owns, if any.
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
         let menu = current_menu(cx);
         let revision = CoreService::status(cx).definition_revision;
         let expanded = HashSet::new();
@@ -64,7 +64,7 @@ impl Explorer {
 
         // `global_mut` pushes a notify effect, so this runs after the status
         // has the new definition.
-        let core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
+        let core = cx.observe_global::<CoreService>(Explorer::sync);
 
         Self {
             tree,
@@ -81,7 +81,7 @@ impl Explorer {
 
     /// Builds an explorer from a menu without touching the core, for UI tests.
     #[cfg(test)]
-    pub(crate) fn for_test(menu: Vec<MenuNode>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn for_test(menu: Vec<MenuNode>, cx: &mut Context<'_, Self>) -> Self {
         let expanded = HashSet::new();
         let (items, nodes) = build(&menu, &expanded);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
@@ -108,7 +108,7 @@ impl Explorer {
 
     /// Every node by id, for row icons and details.
     pub(crate) fn nodes(&self) -> Rc<HashMap<String, MenuNode>> {
-        self.nodes.clone()
+        Rc::clone(&self.nodes)
     }
 
     /// The node the user selected, if any.
@@ -122,7 +122,7 @@ impl Explorer {
     }
 
     /// Rebuilds the tree when the core publishes a different menu.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    fn sync(&mut self, cx: &mut Context<'_, Self>) {
         // Every core status change notifies this observer. The revision is the
         // cheap gate: cloning the menu to compare it on a table read or a save
         // was work with no possible outcome.
@@ -151,7 +151,7 @@ impl Explorer {
     ///
     /// Folder rows are disabled in the tree component, so its own click handler
     /// cannot select them; this is the one place their expansion changes.
-    pub(crate) fn toggle_expanded(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_expanded(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         if !self.expanded.remove(id) {
             self.expanded.insert(id.to_owned());
         }
@@ -172,7 +172,7 @@ impl Explorer {
 
     /// Opens a leaf from a row click. Folders are handled by
     /// [`Self::toggle_expanded`] instead.
-    pub(crate) fn select_node(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn select_node(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         let Some(node) = self.nodes.get(id).cloned() else {
             return;
         };
@@ -189,7 +189,7 @@ impl Explorer {
     }
 
     /// Mirrors keyboard expansion from the tree into [`Self::expanded`].
-    fn on_tree_event(&mut self, event: &TreeEvent, _: &mut Context<Self>) {
+    fn on_tree_event(&mut self, event: &TreeEvent, _: &mut Context<'_, Self>) {
         match event {
             TreeEvent::Expanded(id) => {
                 self.expanded.insert(id.to_string());
@@ -201,7 +201,7 @@ impl Explorer {
     }
 
     /// Mirrors the tree's selection into the node the editor shows.
-    fn follow_selection(&mut self, tree: &Entity<TreeState>, cx: &mut Context<Self>) {
+    fn follow_selection(&mut self, tree: &Entity<TreeState>, cx: &mut Context<'_, Self>) {
         let selected = tree
             .read(cx)
             .selected_item()

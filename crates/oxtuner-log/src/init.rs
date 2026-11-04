@@ -34,6 +34,17 @@ pub struct LogHandle {
     control: LogControl,
 }
 
+impl std::fmt::Debug for LogHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LogHandle")
+            .field("store", &self.store)
+            .field("path", &self.path)
+            .field("file_dropped", &self.file_dropped)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LogHandle {
     /// A handle to the in-memory ring for a view or a test.
     pub fn store(&self) -> LogStore {
@@ -50,9 +61,9 @@ impl LogHandle {
     /// The file writer is lossy on purpose: a slow disk must not block the
     /// thread that logged. The count is zero when no file is written.
     pub fn file_dropped(&self) -> u64 {
-        self.file_dropped
-            .as_ref()
-            .map_or(0, |counter| counter.dropped_lines() as u64)
+        self.file_dropped.as_ref().map_or(0, |counter| {
+            u64::try_from(counter.dropped_lines()).unwrap_or(u64::MAX)
+        })
     }
 
     /// A cloneable control for changing the filter from a view.
@@ -63,6 +74,11 @@ impl LogHandle {
     /// Raises or lowers the workspace level while the process runs.
     ///
     /// `RUST_LOG` has the final say; when it set the filter this is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::Filter`] when the reloadable filter rejects the new
+    /// value.
     pub fn set_verbose(&self, verbose: bool) -> Result<(), LogError> {
         self.control.set_verbose(verbose)
     }
@@ -81,12 +97,27 @@ pub struct LogControl {
     env_override: bool,
 }
 
+impl std::fmt::Debug for LogControl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LogControl")
+            .field("profile", &self.profile)
+            .field("env_override", &self.env_override)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LogControl {
     /// Raises or lowers the workspace level while the process runs.
     ///
     /// `RUST_LOG` wins over the persisted setting, so this does nothing when
     /// the environment set the filter. The result is still `Ok(())` because
     /// the request is not an error, only overridden.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::Filter`] when the reloadable filter rejects the new
+    /// value.
     pub fn set_verbose(&self, verbose: bool) -> Result<(), LogError> {
         if self.env_override {
             return Ok(());
@@ -108,14 +139,26 @@ impl LogControl {
 ///
 /// This is called once by the binary, before the first window. A second call
 /// returns [`LogError::Init`] instead of installing a second subscriber.
-pub fn init(config: LogConfig) -> Result<LogHandle, LogError> {
+///
+/// # Errors
+///
+/// Returns [`LogError::Directory`] or [`LogError::File`] when the log paths
+/// cannot be prepared, and [`LogError::Init`] when a subscriber is already
+/// installed.
+pub fn init(config: &LogConfig) -> Result<LogHandle, LogError> {
     fs::create_dir_all(config.directory()).map_err(LogError::Directory)?;
 
     let now = OffsetDateTime::now_utc();
     if let Err(error) = file::prune(config.directory(), now) {
         // The subscriber does not exist yet, so stderr is the only place this
         // can go. A failed prune must not stop the application from starting.
-        eprintln!("ox-tuner: could not prune old log files: {error}");
+        #[expect(
+            clippy::print_stderr,
+            reason = "the logging subscriber is not installed yet, so tracing cannot report this"
+        )]
+        {
+            eprintln!("ox-tuner: could not prune old log files: {error}");
+        }
     }
 
     let file_enabled = config.file_enabled();

@@ -20,6 +20,7 @@
 //! The fixtures are synthetic. Never commit a real vendor INI here; the
 //! clean-room rule applies to benchmarks too.
 
+use std::fmt::Write as _;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -40,13 +41,14 @@ pageSize = 288, 288
     );
 
     for page in 1..=2 {
-        text.push_str(&format!("page = {page}\n"));
+        let _ = writeln!(text, "page = {page}");
 
         for index in 0..200 {
-            text.push_str(&format!(
-                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0\n",
+            let _ = writeln!(
+                text,
+                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0",
                 index % 240
-            ));
+            );
         }
     }
 
@@ -100,21 +102,23 @@ nPages = 15
     }
 
     for page in 1..=PAGES {
-        text.push_str(&format!("page = {page}\n"));
+        let _ = writeln!(text, "page = {page}");
 
         for index in 0..scalars_per_page {
-            text.push_str(&format!(
-                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0\n",
+            let _ = writeln!(
+                text,
+                "scalar_{page}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0",
                 index % 240
-            ));
+            );
         }
 
         if page <= TABLES {
             // The largest grid the editor draws; the other seven are 16x16.
             let shape = if page == 1 { "[32x32]" } else { "[16x16]" };
-            text.push_str(&format!(
-                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0\n"
-            ));
+            let _ = writeln!(
+                text,
+                "table_{page} = array, U08, 256, {shape}, \"\", 1, 0, 0, 255, 0"
+            );
         }
     }
 
@@ -146,7 +150,7 @@ fn defines_fixture() -> String {
         if index > 0 {
             addresses.push_str(", ");
         }
-        addresses.push_str(&format!("\"0x{index:x}\""));
+        let _ = write!(addresses, "\"0x{index:x}\"");
     }
 
     format!(

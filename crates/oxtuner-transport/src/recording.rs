@@ -21,6 +21,19 @@ pub struct RecordingTransport {
     truncated: bool,
 }
 
+impl std::fmt::Debug for RecordingTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RecordingTransport")
+            .field("inner", &"<dyn Transport>")
+            .field("started", &self.started)
+            .field("frames", &self.frames)
+            .field("headers", &self.headers)
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
 impl RecordingTransport {
     /// Wraps `inner` and starts the clock.
     pub fn new(inner: Box<dyn Transport>) -> Self {
@@ -70,6 +83,11 @@ impl RecordingTransport {
     ///
     /// The frames are borrowed, not cloned: a session trace can hold tens of
     /// thousands of frames and saving should not double that.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::Write`] when the parent directory or the
+    /// trace file cannot be written.
     pub fn save(&self, path: &std::path::Path) -> Result<usize, TransportError> {
         crate::trace::write(path, &self.headers(), &self.frames)?;
         Ok(self.frames.len())
@@ -169,9 +187,9 @@ mod tests {
     #[test]
     fn a_recorded_conversation_replays_byte_for_byte() {
         let trace = Trace::parse("TX 0 51\nRX 0 73 70 65 65 64\n").expect("a trace");
-        let replay = ReplayTransport::new(trace.clone());
+        let source = ReplayTransport::new(trace);
 
-        let mut recorder = RecordingTransport::new(Box::new(replay));
+        let mut recorder = RecordingTransport::new(Box::new(source));
         recorder.open().expect("opens");
         recorder.write_all(&[0x51]).expect("writes");
         let mut reply = Vec::new();
@@ -185,9 +203,9 @@ mod tests {
             )
             .expect("reads");
 
-        let recorded = recorder.trace();
-        assert_eq!(recorded.frames().len(), 2);
-        assert_eq!(recorded.frames()[0].bytes, vec![0x51]);
-        assert_eq!(recorded.frames()[1].bytes, b"speed");
+        let saved = recorder.trace();
+        assert_eq!(saved.frames().len(), 2);
+        assert_eq!(saved.frames()[0].bytes, vec![0x51]);
+        assert_eq!(saved.frames()[1].bytes, b"speed");
     }
 }

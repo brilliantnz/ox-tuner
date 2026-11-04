@@ -109,7 +109,7 @@ impl Harness {
             history,
             log,
             thread,
-        } = start(CoreConfig::default()).expect("core starts");
+        } = start(&CoreConfig::default()).expect("core starts");
         Self {
             handle,
             thread,
@@ -181,7 +181,10 @@ fn realtime_frames_fill_the_shared_history() {
 
     let stats = core.history.stats();
     assert!(stats.frames >= 5, "{stats:?}");
-    assert_eq!(stats.pushed, stats.frames as u64 + stats.overruns);
+    assert_eq!(
+        stats.pushed,
+        u64::try_from(stats.frames).unwrap_or(u64::MAX) + stats.overruns
+    );
     assert_eq!(stats.overruns, 0);
 
     let names: Vec<String> = core

@@ -19,16 +19,18 @@ fn trace_text(frames: usize) -> String {
     trace.note("signature: bench 1");
 
     for index in 0..frames {
-        let payload = vec![0x51, (index % 251) as u8, 0x00, 0x01];
+        let byte = u8::try_from(index % 251).unwrap_or(0);
+        let at = u64::try_from(index).unwrap_or(u64::MAX);
+        let payload = vec![0x51, byte, 0x00, 0x01];
         trace.push(TraceFrame::new(
             Direction::Tx,
             payload,
-            Duration::from_millis(index as u64),
+            Duration::from_millis(at),
         ));
         trace.push(TraceFrame::new(
             Direction::Rx,
             vec![0xAA; 8],
-            Duration::from_millis(index as u64 + 1),
+            Duration::from_millis(at.saturating_add(1)),
         ));
     }
 

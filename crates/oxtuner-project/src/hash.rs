@@ -84,9 +84,15 @@ const ROUND: [u32; 64] = [
 ];
 
 /// The 32-byte SHA-256 digest of `data`.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "a through h are the standard SHA-256 state names"
+)]
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut state = INITIAL;
-    let bit_length = (data.len() as u64).wrapping_mul(8);
+    let bit_length = u64::try_from(data.len())
+        .unwrap_or(u64::MAX)
+        .wrapping_mul(8);
 
     let mut message = Vec::with_capacity(data.len() + 72);
     message.extend_from_slice(data);
@@ -150,9 +156,11 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// The digest as lowercase hexadecimal.
 pub fn hex(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+
     let mut text = String::with_capacity(64);
     for byte in digest {
-        text.push_str(&format!("{byte:02x}"));
+        let _ = write!(text, "{byte:02x}");
     }
     text
 }

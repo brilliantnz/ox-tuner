@@ -21,6 +21,10 @@ use crate::i18n::t;
 pub(super) struct Activity;
 
 impl RenderOnce for Activity {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the activity feed renders its grouped journal entries in one pass"
+    )]
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let status = CoreService::status(cx);
         let log = CoreService::log(cx);
@@ -235,7 +239,7 @@ impl RenderOnce for Activity {
                     })
                     .children(activity),
             )
-            .when_some(journal, |this, journal| this.child(journal))
+            .when_some(journal, gpui_kit::ParentElement::child)
     }
 }
 

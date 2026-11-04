@@ -66,8 +66,12 @@ pub(crate) struct DialogEditor {
 
 impl DialogEditor {
     /// An editor with no dialog loaded yet.
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let _core = cx.observe_global::<CoreService>(|this, cx| this.sync(cx));
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the underscore marks a subscription kept only for its lifetime"
+    )]
+    pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
+        let _core = cx.observe_global::<CoreService>(DialogEditor::sync);
         Self {
             focus: cx.focus_handle(),
             label: SharedString::default(),
@@ -89,7 +93,7 @@ impl DialogEditor {
         &mut self,
         label: SharedString,
         target: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.label = label;
         let Some(name) = target else {
@@ -126,7 +130,7 @@ impl DialogEditor {
 
     /// Follows core events: a new snapshot, a failure, or a save that makes the
     /// changed marks stale.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    fn sync(&mut self, cx: &mut Context<'_, Self>) {
         let mut snapshot = None;
         let mut failure = None;
         let mut edit_failed = false;
@@ -182,10 +186,10 @@ impl DialogEditor {
                 failure = Some(failure_now.clone());
             }
             if status.last_save != self.last_save {
-                self.last_save = status.last_save.clone();
+                self.last_save.clone_from(&status.last_save);
                 if self.last_save.is_some() {
                     saved = true;
-                    reload = self.requested.clone();
+                    reload.clone_from(&self.requested);
                 }
             }
         }
@@ -232,7 +236,7 @@ impl DialogEditor {
     }
 
     /// Starts editing a row, seeded with its current value.
-    fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
         let writable = self
             .dialog
             .as_ref()
@@ -267,7 +271,7 @@ impl DialogEditor {
     ///
     /// A toggle has two states, so a click is the whole edit; there is no text
     /// to type and no reason to open an input for it.
-    fn toggle_field(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn toggle_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.dialog.as_ref() else {
             return;
         };
@@ -287,7 +291,7 @@ impl DialogEditor {
     }
 
     /// Commits the in-progress edit; empty text skips the row.
-    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+    fn commit_edit(&mut self, cx: &mut Context<'_, Self>) {
         let Some(editing) = self.editing.as_ref() else {
             return;
         };
@@ -312,7 +316,7 @@ impl DialogEditor {
                 return;
             }
         };
-        let (dialog_id, variable, current) = match self.dialog.as_ref().and_then(|dialog| {
+        let Some((dialog_id, variable, current)) = self.dialog.as_ref().and_then(|dialog| {
             dialog.fields.get(index).map(|field| {
                 (
                     dialog.id.clone(),
@@ -320,13 +324,10 @@ impl DialogEditor {
                     self.value(dialog, index),
                 )
             })
-        }) {
-            Some(found) => found,
-            None => {
-                self.editing = None;
-                cx.notify();
-                return;
-            }
+        }) else {
+            self.editing = None;
+            cx.notify();
+            return;
         };
         let Some(current) = current else {
             self.editing = None;
@@ -358,7 +359,7 @@ impl DialogEditor {
     }
 
     /// Moves the edit to the next writable row, if there is one.
-    fn edit_next(&mut self, from: usize, cx: &mut Context<Self>) {
+    fn edit_next(&mut self, from: usize, cx: &mut Context<'_, Self>) {
         let next = self.dialog.as_ref().and_then(|dialog| {
             dialog
                 .fields
@@ -392,7 +393,7 @@ impl DialogEditor {
     }
 
     /// Moves the edit one writable row up or down, committing first.
-    fn commit_and_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn commit_and_move(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
         let from = self.editing.as_ref().map(|editing| editing.index);
         self.commit_edit(cx);
         // `commit_edit` already advanced forward; step back when going up.
@@ -436,7 +437,7 @@ impl DialogEditor {
     }
 
     /// The keyboard contract: Enter commits and advances, Escape cancels.
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         if self.editing.is_none() {
             return;
         }
@@ -471,14 +472,18 @@ impl DialogEditor {
         }
     }
 
-    fn retry(&mut self, cx: &mut Context<Self>) {
+    fn retry(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(name) = self.requested.clone() {
             crate::core::read_dialog(&name, cx);
             cx.notify();
         }
     }
 
-    fn render_header(&self, dialog: Option<&DialogSummary>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(
+        &self,
+        dialog: Option<&DialogSummary>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let title: SharedString =
             dialog.map_or_else(|| self.label.clone(), |dialog| dialog.title.clone().into());
@@ -528,7 +533,11 @@ impl DialogEditor {
             .into_any_element()
     }
 
-    fn render_rows(&self, dialog: &DialogSummary, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dialog render walks every row kind in document order"
+    )]
+    fn render_rows(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut rows = Vec::new();
         let mut section = "";
@@ -688,7 +697,7 @@ impl DialogEditor {
         &self,
         dialog: Option<&DialogSummary>,
         failure: Option<&Failure>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(dialog) = dialog {
@@ -748,7 +757,7 @@ impl DialogEditor {
         }
     }
 
-    fn render_status(&self, dialog: &DialogSummary, cx: &mut Context<Self>) -> AnyElement {
+    fn render_status(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let changed = dialog.changed + self.pending.len();
 
@@ -796,7 +805,7 @@ impl Focusable for DialogEditor {
 }
 
 impl Render for DialogEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let dialog = self.dialog.clone();
         let failure = self.failure.clone();
@@ -815,7 +824,7 @@ impl Render for DialogEditor {
             )
             .child(header)
             .child(content)
-            .when_some(status, |this, status| this.child(status))
+            .when_some(status, gpui_kit::ParentElement::child)
     }
 }
 

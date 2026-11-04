@@ -4,6 +4,15 @@
 //! the real view through pointer and keyboard events, the same way a person
 //! edits a point.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "UI tests may unwrap; a failed call is a failed test"
+)]
 use std::{cell::RefCell, rc::Rc};
 
 use gpui_kit::test::TestWindowExt;
@@ -23,7 +32,7 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         div().size_full().child(self.curve.clone())
     }
 }
@@ -60,7 +69,7 @@ fn open(
     let events = Rc::new(RefCell::new(Vec::new()));
     let (handle, curve) = cx.update(|cx| {
         let curve = cx.new(Curve::new);
-        let sink = events.clone();
+        let sink = Rc::clone(&events);
         let subscription = cx.subscribe(&curve, move |_, event: &CurveEvent, _| {
             sink.borrow_mut().push(event.clone());
         });
@@ -71,7 +80,7 @@ fn open(
         let (handle, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    Default::default(),
+                    Point::default(),
                     size(px(900.), px(600.)),
                 ))),
                 ..Default::default()
@@ -414,6 +423,10 @@ fn tick_labels_carry_the_step_precision() {
     assert_eq!(format_tick(2.5, 0.25), "2.50");
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the helper builds a fresh snapshot and may take the old one over"
+)]
 fn with_value(snapshot: CurveSnapshot, index: usize, value: f64) -> CurveSnapshot {
     let mut points = snapshot.points().to_vec();
     points[index] = CurvePoint::new(points[index].x, value);

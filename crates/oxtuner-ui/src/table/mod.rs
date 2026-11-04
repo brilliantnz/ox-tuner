@@ -13,7 +13,6 @@ mod heatmap;
 mod model;
 // The entity lives in its own file so this seam stays a table of contents;
 // the same name is deliberate, it keeps the public path `table::Table`.
-#[allow(clippy::module_inception)]
 mod table;
 
 #[cfg(test)]

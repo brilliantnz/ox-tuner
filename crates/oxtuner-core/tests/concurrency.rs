@@ -55,7 +55,7 @@ struct StalledUi {
 
 impl StalledUi {
     fn start() -> Self {
-        let parts = start(CoreConfig::default()).expect("the core starts");
+        let parts = start(&CoreConfig::default()).expect("the core starts");
         let mut harness = Self {
             handle: parts.handle,
             thread: parts.thread,
@@ -88,22 +88,34 @@ impl StalledUi {
             .handle
             .load_definition("speeduino.ini", FIXTURE.as_bytes())
             .expect("queued");
-        assert!(matches!(self.wait_for(op), Event::DefinitionLoaded { .. }));
+        assert!(
+            matches!(self.wait_for(op), Event::DefinitionLoaded { .. }),
+            "the definition must load"
+        );
 
         let op = self
             .handle
             .connect(support::simulator(), None)
             .expect("queued");
-        assert!(matches!(self.wait_for(op), Event::Connected { .. }));
+        assert!(
+            matches!(self.wait_for(op), Event::Connected { .. }),
+            "the simulator must connect"
+        );
 
         let op = self.handle.read_all().expect("queued");
-        assert!(matches!(self.wait_for(op), Event::PagesRead { .. }));
+        assert!(
+            matches!(self.wait_for(op), Event::PagesRead { .. }),
+            "every page must be read"
+        );
 
         let op = self.handle.start_realtime(10).expect("queued");
-        assert!(matches!(
-            self.wait_for(op),
-            Event::RealtimeState { running: true, .. }
-        ));
+        assert!(
+            matches!(
+                self.wait_for(op),
+                Event::RealtimeState { running: true, .. }
+            ),
+            "polling must start"
+        );
     }
 
     fn close(self) {
@@ -165,7 +177,7 @@ fn a_stalled_ui_keeps_acquiring_frames() {
 fn a_command_arriving_during_a_reconnect_is_answered_first() {
     // The link dies, the core backs off for 500 ms. A command must not wait
     // behind that backoff: it is answered while the link is still down.
-    let parts = start(CoreConfig::default()).expect("the core starts");
+    let parts = start(&CoreConfig::default()).expect("the core starts");
     let events = parts.events.into_blocking();
 
     let op = parts
@@ -255,7 +267,7 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
     // and the core blocks handing one back. Before ADR-0023 that blocked the
     // join forever; the stop flag now makes the wait finite and the lost
     // events are counted.
-    let parts = start(CoreConfig {
+    let parts = start(&CoreConfig {
         command_capacity: 4,
         event_capacity: 1,
         ..CoreConfig::default()
@@ -312,7 +324,7 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
     // without being counted.
     assert_eq!(
         report.handled + report.rejected,
-        accepted.len() as u64,
+        u64::try_from(accepted.len()).unwrap_or(u64::MAX),
         "every accepted command must be handled or rejected: {report:?}"
     );
 
@@ -334,7 +346,7 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
     // Every accepted command produced exactly one event (its answer or a
     // `Rejected`), plus the single final `Stopped`; each of those either
     // reached the UI or was counted as dropped.
-    let expected = accepted.len() as u64 + 1;
+    let expected = u64::try_from(accepted.len()).unwrap_or(u64::MAX) + 1;
     assert_eq!(
         delivered + report.dropped_events,
         expected,

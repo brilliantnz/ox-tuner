@@ -80,6 +80,11 @@ impl Definition {
     /// Parses a definition from text with the given settings context.
     ///
     /// Shorthand for [`parse_str`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IniError`] when the text has a structural problem, such as a
+    /// missing signature or an unbalanced conditional block.
     pub fn parse(text: &str, settings: &SettingsContext) -> Result<Self, IniError> {
         parse_str(text, settings)
     }
@@ -87,6 +92,11 @@ impl Definition {
     /// Parses a definition from raw bytes, decoding lossily.
     ///
     /// Shorthand for [`parse_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IniError`] when the decoded text has a structural problem,
+    /// such as a missing signature or an unbalanced conditional block.
     pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Self, IniError> {
         parse_bytes(bytes, settings)
     }

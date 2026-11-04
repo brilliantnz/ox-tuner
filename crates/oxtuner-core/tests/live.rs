@@ -59,7 +59,7 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let parts = oxtuner_core::start(CoreConfig::default()).expect("the core starts");
+        let parts = oxtuner_core::start(&CoreConfig::default()).expect("the core starts");
         Self {
             handle: parts.handle,
             thread: parts.thread,
@@ -220,7 +220,10 @@ fn realtime_values_arrive_through_the_latest_frame() {
     }
     let frame = frame.expect("a realtime frame arrived");
     assert!(frame.value("rpm").is_some());
-    assert!(frame.value("rpm").unwrap().value >= 900.0);
+    assert!(
+        frame.value("rpm").expect("rpm is decoded").value >= 900.0,
+        "the simulator's rpm must move"
+    );
 
     harness.thread.join();
 }
@@ -370,7 +373,7 @@ fn the_port_list_answers_without_hardware() {
     // The list is machine-dependent; what must hold is that every entry names
     // a path and that the command answered instead of hanging.
     for port in ports {
-        assert!(!port.name.is_empty());
+        assert_ne!(port.name, "", "every listed port must have a path");
     }
 
     harness.thread.join();

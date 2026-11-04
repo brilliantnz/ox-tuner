@@ -301,17 +301,17 @@ fn every_page_and_realtime_block_round_trips_at_the_declared_size() {
     let mut protocol = protocol(&definition, LinkMode::Envelope);
     transport.open().expect("opens");
 
-    for page in definition.pages.iter() {
+    for page in &definition.pages {
         let bytes = protocol
             .read_page_all(&mut transport, page.number)
             .expect("reads");
-        assert_eq!(bytes.len(), page.size as usize);
+        assert_eq!(bytes.len(), usize::try_from(page.size).unwrap_or(0));
     }
 
     let block = protocol.read_realtime(&mut transport).expect("realtime");
     assert_eq!(
         block.len(),
-        definition.protocol.och_block_size.expect("declared") as usize
+        usize::try_from(definition.protocol.och_block_size.expect("declared")).unwrap_or(0)
     );
 }
 

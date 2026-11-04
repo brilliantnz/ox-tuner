@@ -4,6 +4,11 @@
 //! in `menu.rs`. A view that triggers one (a menu item, a toolbar button)
 //! emits the same action, so the keyboard and pointer paths cannot drift apart.
 
+#![expect(
+    missing_docs,
+    reason = "the actions macro generates the namespace type for documented actions"
+)]
+
 gpui_kit::actions!(
     oxtuner,
     [

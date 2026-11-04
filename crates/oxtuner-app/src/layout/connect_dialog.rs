@@ -102,6 +102,10 @@ impl DialogModel {
 }
 
 /// Opens the connect dialog and starts a port scan.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the connect dialog builds its mode, port, test and status sections in one place"
+)]
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
     let defaults = cx.global::<AppSettings>().connection().clone();
     let last_port = defaults.last_port.clone();
@@ -160,8 +164,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         let framing = match framing_state
             .read(cx)
             .selected_index(cx)
-            .map(|index| index.row)
-            .unwrap_or(0)
+            .map_or(0, |index| index.row)
         {
             1 => Framing::Legacy,
             2 => Framing::Envelope,
@@ -186,7 +189,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                     .label(t!("app.connect.mode_serial"))
                     .checked(mode == Mode::Serial)
                     .on_change({
-                        let model = model.clone();
+                        let model = Rc::clone(&model);
                         move |checked, _, cx| {
                             // One mode is always chosen: unchecking the active
                             // one does nothing, checking the other switches.
@@ -202,7 +205,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                     .label(t!("app.connect.mode_simulator"))
                     .checked(mode == Mode::Simulator)
                     .on_change({
-                        let model = model.clone();
+                        let model = Rc::clone(&model);
                         move |checked, _, cx| {
                             if *checked {
                                 model.borrow_mut().mode = Mode::Simulator;
@@ -231,7 +234,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                                 .label(port.label.clone())
                                 .checked(checked)
                                 .on_change({
-                                    let model = model.clone();
+                                    let model = Rc::clone(&model);
                                     move |checked, _, cx| {
                                         if *checked {
                                             model.borrow_mut().selected_port = Some(name.clone());
@@ -507,7 +510,10 @@ fn section(title: String, body: AnyElement, muted: gpui_kit::Hsla) -> AnyElement
 }
 
 /// The session/test block at the bottom of the dialog.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the status block renders the connection, link and test facts together"
+)]
 fn session_status(
     cx: &App,
     connection: Option<&ConnectionSummary>,

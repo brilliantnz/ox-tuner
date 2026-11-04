@@ -108,9 +108,10 @@ pub(crate) fn timestamp() -> String {
     time::OffsetDateTime::from(now)
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| {
-            now.duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| format!("unix:{}", elapsed.as_secs()))
-                .unwrap_or_else(|_| "unix:unknown".to_owned())
+            now.duration_since(std::time::UNIX_EPOCH).map_or_else(
+                |_| "unix:unknown".to_owned(),
+                |elapsed| format!("unix:{}", elapsed.as_secs()),
+            )
         })
 }
 
@@ -200,7 +201,10 @@ mod tests {
         let directory = temp_dir();
         let journal = Journal::new(directory.join("none.log"));
 
-        assert!(journal.read(10).expect("read").is_empty());
+        assert!(
+            journal.read(10).expect("read").is_empty(),
+            "a missing journal must read as empty"
+        );
 
         let _ = fs::remove_dir_all(&directory);
     }

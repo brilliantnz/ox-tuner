@@ -27,6 +27,14 @@
 //! Interaction: click a legend chip to hide/show a series, drag to pan, wheel or
 //! `+`/`-` to zoom, space to pause, `0` to follow live again.
 
+#![expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless,
+    reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
+)]
+
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -66,6 +74,10 @@ pub const PREFERRED_CHANNELS: [&str; 14] = [
 ];
 
 /// How the visible series are laid out.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the chart has exactly two layouts: stacked lanes and one overlay"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChartMode {
     /// One lane per series, each with its own value scale.
@@ -116,24 +128,28 @@ impl ChartConfig {
     }
 
     /// The initial layout.
+    #[must_use]
     pub fn with_mode(mut self, mode: ChartMode) -> Self {
         self.mode = mode;
         self
     }
 
     /// The initial history window in seconds.
+    #[must_use]
     pub fn with_window(mut self, seconds: f64) -> Self {
         self.window_secs = seconds.clamp(self.minimum_window_secs, self.maximum_window_secs);
         self
     }
 
     /// The point cap per series per frame.
+    #[must_use]
     pub fn with_max_points(mut self, points: usize) -> Self {
         self.max_points = points.max(64);
         self
     }
 
     /// The minimum height of one stacked lane.
+    #[must_use]
     pub fn with_lane_min_height(mut self, height: f32) -> Self {
         self.lane_min_height = height.max(32.0);
         self
@@ -187,6 +203,10 @@ pub struct ChartStyle {
 }
 
 impl Default for ChartStyle {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the default palette is a literal list of colours"
+    )]
     fn default() -> Self {
         let series = vec![
             Hsla {
@@ -320,6 +340,10 @@ pub struct ChartSeries {
 }
 
 /// What the chart asks its owner to do or know.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the chart's owner handles a closed set of interactions"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChartEvent {
     /// A legend chip was clicked.
@@ -373,14 +397,29 @@ pub struct ChartState {
     focus: FocusHandle,
 }
 
+impl std::fmt::Debug for ChartState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChartState")
+            .field("selected", &self.selected)
+            .field("paused", &self.paused)
+            .field("autoscale", &self.autoscale)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ChartState {
     /// A chart over `history` with the default five-series selection.
-    pub fn new(history: ChartHistory, cx: &mut Context<Self>) -> Self {
+    pub fn new(history: ChartHistory, cx: &mut Context<'_, Self>) -> Self {
         Self::with_config(history, ChartConfig::default(), cx)
     }
 
     /// A chart with explicit sizing and an initial layout.
-    pub fn with_config(history: ChartHistory, config: ChartConfig, cx: &mut Context<Self>) -> Self {
+    pub fn with_config(
+        history: ChartHistory,
+        config: ChartConfig,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         Self {
             history,
             config,
@@ -408,7 +447,7 @@ impl ChartState {
     }
 
     /// Replaces the shared history (a new source, e.g. switching to a dyno run).
-    pub fn set_history(&mut self, history: ChartHistory, cx: &mut Context<Self>) {
+    pub fn set_history(&mut self, history: ChartHistory, cx: &mut Context<'_, Self>) {
         self.history = history;
         self.locked_ranges.clear();
         cx.notify();
@@ -426,7 +465,7 @@ impl ChartState {
 
     /// Replaces the visual tokens. The host normally calls this after a theme
     /// change; identical values do not repaint.
-    pub fn set_style(&mut self, style: ChartStyle, cx: &mut Context<Self>) {
+    pub fn set_style(&mut self, style: ChartStyle, cx: &mut Context<'_, Self>) {
         if self.style != style {
             self.style = style;
             cx.notify();
@@ -440,7 +479,7 @@ impl ChartState {
 
     /// Selects the series to show. Unknown names are ignored at render time and
     /// kept, so a definition reload can bring a channel back.
-    pub fn set_selected(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+    pub fn set_selected(&mut self, ids: Vec<String>, cx: &mut Context<'_, Self>) {
         self.selected = ids;
         cx.notify();
     }
@@ -450,7 +489,7 @@ impl ChartState {
     /// An empty selection means "the default five"; the first toggle
     /// materialises those defaults so the user's change starts from what is on
     /// screen, not from an empty set.
-    pub fn toggle_selected(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_selected(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         if self.selected.is_empty() {
             self.selected = self.selected_ids();
         }
@@ -491,7 +530,7 @@ impl ChartState {
     }
 
     /// Hides or shows one series.
-    pub fn set_visible(&mut self, id: &str, visible: bool, cx: &mut Context<Self>) {
+    pub fn set_visible(&mut self, id: &str, visible: bool, cx: &mut Context<'_, Self>) {
         if visible {
             self.hidden
                 .retain(|hidden| !hidden.eq_ignore_ascii_case(id));
@@ -506,7 +545,7 @@ impl ChartState {
     }
 
     /// Toggles one series in the legend.
-    pub fn toggle_visible(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_visible(&mut self, id: &str, cx: &mut Context<'_, Self>) {
         self.set_visible(id, !self.is_visible(id), cx);
     }
 
@@ -516,7 +555,7 @@ impl ChartState {
     }
 
     /// Switches between stacked lanes and one overlaid plot.
-    pub fn set_mode(&mut self, mode: ChartMode, cx: &mut Context<Self>) {
+    pub fn set_mode(&mut self, mode: ChartMode, cx: &mut Context<'_, Self>) {
         if self.config.mode == mode {
             return;
         }
@@ -531,7 +570,7 @@ impl ChartState {
     }
 
     /// Sets the window length, clamped to the configured range.
-    pub fn set_window_secs(&mut self, seconds: f64, cx: &mut Context<Self>) {
+    pub fn set_window_secs(&mut self, seconds: f64, cx: &mut Context<'_, Self>) {
         let seconds = seconds.clamp(
             self.config.minimum_window_secs,
             self.config.maximum_window_secs,
@@ -550,7 +589,7 @@ impl ChartState {
     }
 
     /// Freezes or resumes the view. Acquisition continues either way.
-    pub fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+    pub fn set_paused(&mut self, paused: bool, cx: &mut Context<'_, Self>) {
         if self.paused == paused {
             return;
         }
@@ -566,7 +605,7 @@ impl ChartState {
     }
 
     /// Toggles pause.
-    pub fn toggle_paused(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_paused(&mut self, cx: &mut Context<'_, Self>) {
         self.set_paused(!self.paused, cx);
     }
 
@@ -576,7 +615,7 @@ impl ChartState {
     }
 
     /// Returns to the newest sample.
-    pub fn follow(&mut self, cx: &mut Context<Self>) {
+    pub fn follow(&mut self, cx: &mut Context<'_, Self>) {
         self.paused = false;
         self.paused_at = None;
         self.pan_secs = 0.0;
@@ -590,7 +629,7 @@ impl ChartState {
     }
 
     /// Switches auto-scaling. Turning it off snapshots the visible ranges.
-    pub fn set_autoscale(&mut self, autoscale: bool, cx: &mut Context<Self>) {
+    pub fn set_autoscale(&mut self, autoscale: bool, cx: &mut Context<'_, Self>) {
         if self.autoscale == autoscale {
             return;
         }
@@ -614,7 +653,7 @@ impl ChartState {
     }
 
     /// Switches the overlay between a shared scale and per-series scaling.
-    pub fn set_normalize_overlay(&mut self, normalize: bool, cx: &mut Context<Self>) {
+    pub fn set_normalize_overlay(&mut self, normalize: bool, cx: &mut Context<'_, Self>) {
         if self.normalize_overlay != normalize {
             self.normalize_overlay = normalize;
             cx.notify();
@@ -635,7 +674,7 @@ impl ChartState {
     }
 
     /// Pans the window by `seconds` (positive moves back in time).
-    pub fn pan_by(&mut self, seconds: f64, cx: &mut Context<Self>) {
+    pub fn pan_by(&mut self, seconds: f64, cx: &mut Context<'_, Self>) {
         if self.paused {
             if let Some(at) = &mut self.paused_at {
                 *at -= seconds;
@@ -650,13 +689,13 @@ impl ChartState {
     }
 
     /// Multiplies the window length by `factor` (`< 1` zooms in).
-    pub fn zoom_by(&mut self, factor: f64, cx: &mut Context<Self>) {
+    pub fn zoom_by(&mut self, factor: f64, cx: &mut Context<'_, Self>) {
         let seconds = self.config.window_secs * factor;
         self.set_window_secs(seconds, cx);
     }
 
     /// Resumes live following and restores the default window.
-    pub fn reset_view(&mut self, cx: &mut Context<Self>) {
+    pub fn reset_view(&mut self, cx: &mut Context<'_, Self>) {
         self.paused = false;
         self.paused_at = None;
         self.pan_secs = 0.0;
@@ -780,7 +819,7 @@ impl ChartState {
         Some(point(hover.x - bounds.origin.x, hover.y - bounds.origin.y))
     }
 
-    fn render_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_controls(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let stacked = self.config.mode == ChartMode::Stacked;
 
         h_flex()
@@ -803,14 +842,14 @@ impl ChartState {
                 if self.paused { "Resume" } else { "Pause" },
                 self.paused,
                 cx,
-                |this, cx| this.toggle_paused(cx),
+                Self::toggle_paused,
             ))
             .child(self.control(
                 "chart-follow",
                 "Follow",
                 self.is_following(),
                 cx,
-                |this, cx| this.follow(cx),
+                Self::follow,
             ))
             .child(
                 self.control("chart-auto", "Auto", self.autoscale, cx, |this, cx| {
@@ -849,8 +888,8 @@ impl ChartState {
         id: &'static str,
         label: &'static str,
         selected: bool,
-        cx: &mut Context<Self>,
-        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+        action: impl Fn(&mut Self, &mut Context<'_, Self>) + 'static,
     ) -> AnyElement {
         let (background, foreground, border) = if selected {
             (
@@ -887,7 +926,7 @@ impl ChartState {
             .into_any_element()
     }
 
-    fn render_legend(&self, series: &[ChartSeries], cx: &mut Context<Self>) -> AnyElement {
+    fn render_legend(&self, series: &[ChartSeries], cx: &mut Context<'_, Self>) -> AnyElement {
         let muted = self.style.muted;
         h_flex()
             .gap_2()
@@ -1031,10 +1070,10 @@ impl ChartState {
             .child(
                 canvas(
                     {
-                        let slot = self.body_bounds.clone();
+                        let slot = Rc::clone(&self.body_bounds);
                         move |bounds, _, _| slot.set(bounds)
                     },
-                    |_, _, _, _| {},
+                    |_, (), _, _| {},
                 )
                 .absolute()
                 .top(px(0.))
@@ -1047,7 +1086,10 @@ impl ChartState {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a lane keeps its series, data, range, window and interaction state in one pass"
+    )]
     fn render_lane(
         &self,
         series: &ChartSeries,
@@ -1170,7 +1212,7 @@ impl ChartState {
                             .children(tick_labels),
                     )
                     .child(div().relative().flex_1().min_w_0().h_full().child({
-                        let slot = self.plot_bounds.clone();
+                        let slot = Rc::clone(&self.plot_bounds);
                         canvas(
                             move |bounds, _, _| {
                                 slot.set(bounds);
@@ -1219,6 +1261,10 @@ impl ChartState {
             .into_any_element()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the overlay render keeps its axes, grid, traces and tooltip in one visual pass"
+    )]
     fn render_overlay(
         &self,
         series: &[&ChartSeries],
@@ -1360,7 +1406,7 @@ impl ChartState {
                             .children(tick_labels),
                     )
                     .child(div().relative().flex_1().min_w_0().h_full().child({
-                        let slot = self.plot_bounds.clone();
+                        let slot = Rc::clone(&self.plot_bounds);
                         canvas(
                             move |bounds, _, _| {
                                 slot.set(bounds);
@@ -1507,7 +1553,11 @@ impl Focusable for ChartState {
 }
 
 impl Render for ChartState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the chart composes legend, controls, body and focus in one retained render"
+    )]
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let series = self.resolve_series(cx);
         let window_range = self.window();
         let legend = self.render_legend(&series, cx);
@@ -1762,7 +1812,10 @@ fn paint_grid(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the painter needs the window, metrics, samples, range, ticks and colour"
+)]
 fn paint_lane(
     window: &mut Window,
     metrics: CanvasMetrics,

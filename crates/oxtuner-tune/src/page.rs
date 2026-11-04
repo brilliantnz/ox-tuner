@@ -39,6 +39,10 @@ impl IniPage {
     }
 
     /// The `.msq` page number carrying this INI page's constants.
+    #[expect(
+        clippy::as_conversions,
+        reason = "u8 to u16 is lossless, and From is not const-stable yet"
+    )]
     pub const fn to_msq(self) -> MsqPage {
         // `u8 → u16` is lossless; `u16::from` is not const-stable yet.
         MsqPage(self.0 as u16 - 1)
@@ -88,6 +92,10 @@ impl fmt::Display for MsqPage {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests may unwrap; a failed call is a failed test"
+    )]
     use super::*;
 
     /// The reference project has fifteen pages; every one must map both ways.

@@ -16,6 +16,11 @@
 //! Run the bench tests serially (`--test-threads=1`): two sessions on one tty
 //! interleave their bytes and both time out.
 
+#![expect(
+    clippy::print_stdout,
+    reason = "the ignored hardware test prints a readable bench report"
+)]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -34,7 +39,7 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
-        let parts = oxtuner_core::start(CoreConfig::default()).expect("the core starts");
+        let parts = oxtuner_core::start(&CoreConfig::default()).expect("the core starts");
         Self {
             handle: parts.handle,
             thread: parts.thread,
@@ -66,12 +71,17 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 #[ignore = "needs the bench ECU; see the module docs for the environment"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the bench check is one ordered read-only session and reads best in sequence"
+)]
 fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
     let port = std::env::var("OX_TUNER_SERIAL_PORT")
         .unwrap_or_else(|_| "/dev/cu.usbmodem21201".to_owned());
-    let ini = std::env::var("OX_TUNER_INI")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"));
+    let ini = std::env::var("OX_TUNER_INI").map_or_else(
+        |_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"),
+        PathBuf::from,
+    );
     let bytes = std::fs::read(&ini).unwrap_or_else(|error| {
         panic!("could not read {}: {error}", ini.display());
     });
@@ -92,7 +102,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
 
     harness
         .handle
-        .connect(PortChoice::serial(port.clone(), 115_200), framing)
+        .connect(PortChoice::serial(port, 115_200), framing)
         .expect("queued");
     let Event::Connected { summary, .. } =
         harness.wait(|event| matches!(event, Event::Connected { .. }))
@@ -136,7 +146,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
         if let Some(latest) = harness.latest.get()
             && let Some(rpm) = latest.value("rpm")
         {
-            frame = Some(latest.clone());
+            frame = Some(std::sync::Arc::clone(&latest));
             if frame.as_ref().is_some_and(|frame| !frame.values.is_empty()) {
                 let _ = rpm;
                 break;
@@ -163,9 +173,10 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
     harness.handle.stop_realtime().expect("queued");
     harness.wait(|event| matches!(event, Event::RealtimeState { running: false, .. }));
 
-    let trace_path = std::env::var("OX_TUNER_TRACE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("oxtuner-no2c.trace"));
+    let trace_path = std::env::var("OX_TUNER_TRACE").map_or_else(
+        |_| std::env::temp_dir().join("oxtuner-no2c.trace"),
+        PathBuf::from,
+    );
     harness.handle.save_trace(&trace_path).expect("queued");
     let Event::TraceSaved { frames, .. } =
         harness.wait(|event| matches!(event, Event::TraceSaved { .. }))
@@ -229,11 +240,10 @@ fn the_bench_test_connection_reads_only_the_signature() {
         .handle
         .load_definition(
             "speeduino.ini",
-            std::fs::read(
-                std::env::var("OX_TUNER_INI")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| workspace_root().join("docs/tmp/local/ini/speeduino.ini")),
-            )
+            std::fs::read(std::env::var("OX_TUNER_INI").map_or_else(
+                |_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"),
+                PathBuf::from,
+            ))
             .expect("the reference definition is present"),
         )
         .expect("queued");
@@ -271,11 +281,10 @@ fn the_bench_test_connection_reads_only_the_signature() {
 #[ignore = "needs the bench ECU; keeps the compile-time shape of the harness honest"]
 fn the_bench_harness_reports_a_clean_failure_for_a_bad_port() {
     let harness = Harness::start();
-    let bytes = std::fs::read(
-        std::env::var("OX_TUNER_INI")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| workspace_root().join("docs/tmp/local/ini/speeduino.ini")),
-    )
+    let bytes = std::fs::read(std::env::var("OX_TUNER_INI").map_or_else(
+        |_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"),
+        PathBuf::from,
+    ))
     .expect("the reference definition is present");
     harness
         .handle
@@ -337,9 +346,10 @@ fn the_bench_page_crc_matches_the_page_it_read() {
 }
 
 fn read_definition() -> oxtuner_ini::Definition {
-    let path = std::env::var("OX_TUNER_INI")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"));
+    let path = std::env::var("OX_TUNER_INI").map_or_else(
+        |_| workspace_root().join("docs/tmp/local/ini/speeduino.ini"),
+        PathBuf::from,
+    );
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
     oxtuner_ini::parse_bytes(&bytes, &SettingsContext::new()).expect("the reference definition")

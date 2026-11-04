@@ -10,6 +10,20 @@
 
 use std::fmt;
 
+/// One command character as a byte.
+#[expect(
+    clippy::as_conversions,
+    reason = "command strings are byte-oriented; a character keeps its low byte"
+)]
+fn command_byte(character: char) -> u8 {
+    character as u8
+}
+
+/// Two hexadecimal digits as one byte.
+fn hex_byte(high: u32, low: u32) -> u8 {
+    u8::try_from(high * 16 + low).expect("two hexadecimal digits fit in one byte")
+}
+
 /// Removes a trailing `;` comment, respecting quoted strings.
 pub fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
@@ -180,6 +194,10 @@ pub struct Command {
 }
 
 /// One piece of a command string.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the command grammar has a fixed set of segment kinds"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
     /// One byte with a known value.
@@ -193,6 +211,10 @@ pub enum Segment {
 }
 
 /// The parameter placeholders the dialect defines.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the INI dialect defines exactly these parameter placeholders"
+)]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placeholder {
     /// `%2i` — page identifier, two bytes: the `[canId][page]` pair, written
@@ -210,7 +232,7 @@ pub enum Placeholder {
     ///
     /// The dialect describes it as one value; in practice the same keyword is
     /// used for single-byte and word writes (`M%2i%2o%2c%v` writes two bytes at
-    /// a time in the MegaSquirt corpus), so the encoder emits every payload
+    /// a time in the `MegaSquirt` corpus), so the encoder emits every payload
     /// byte and lets `%2c` state the count.
     Value,
 }
@@ -242,25 +264,22 @@ impl Command {
                     // `\xHH` is an escape; `\$` is an escaped `$` that still
                     // means a substitution (Speeduino writes `\$tsCanId`).
                     match characters.get(index + 1) {
-                        Some('x') | Some('X') => {
+                        Some('x' | 'X') => {
                             let high = characters.get(index + 2).and_then(|c| c.to_digit(16));
                             let low = characters.get(index + 3).and_then(|c| c.to_digit(16));
-                            match (high, low) {
-                                (Some(high), Some(low)) => {
-                                    segments.push(Segment::Byte((high * 16 + low) as u8));
-                                    index += 4;
-                                }
-                                _ => {
-                                    segments.push(Segment::Unparsed("\\x".to_owned()));
-                                    index += 2;
-                                }
+                            if let (Some(high), Some(low)) = (high, low) {
+                                segments.push(Segment::Byte(hex_byte(high, low)));
+                                index += 4;
+                            } else {
+                                segments.push(Segment::Unparsed("\\x".to_owned()));
+                                index += 2;
                             }
                         }
                         Some('$') => {
                             index += 1;
                         }
                         Some(other) => {
-                            segments.push(Segment::Byte(*other as u8));
+                            segments.push(Segment::Byte(command_byte(*other)));
                             index += 2;
                         }
                         None => {
@@ -296,19 +315,16 @@ impl Command {
                         _ if lowered.starts_with("%v") => Some((Placeholder::Value, 2)),
                         _ => None,
                     };
-                    match placeholder {
-                        Some((placeholder, length)) => {
-                            segments.push(Segment::Placeholder(placeholder));
-                            index += length;
-                        }
-                        None => {
-                            segments.push(Segment::Unparsed("%".to_owned()));
-                            index += 1;
-                        }
+                    if let Some((placeholder, length)) = placeholder {
+                        segments.push(Segment::Placeholder(placeholder));
+                        index += length;
+                    } else {
+                        segments.push(Segment::Unparsed("%".to_owned()));
+                        index += 1;
                     }
                 }
                 other if other.is_ascii() => {
-                    segments.push(Segment::Byte(other as u8));
+                    segments.push(Segment::Byte(command_byte(other)));
                     index += 1;
                 }
                 other => {
@@ -331,6 +347,11 @@ impl Command {
     ///
     /// `variables` resolves a `$name` to one byte; `None` means the variable is
     /// unknown, which is an error rather than a silent zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when a variable is unknown, a `%v` placeholder has no
+    /// payload, or the command contains text this build cannot encode.
     pub fn encode(
         &self,
         arguments: &CommandArguments<'_>,

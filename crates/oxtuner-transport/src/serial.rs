@@ -71,6 +71,7 @@ impl SerialSettings {
     }
 
     /// The same port at another speed.
+    #[must_use]
     pub fn with_baud(mut self, baud: u32) -> Self {
         self.baud = baud;
         self
@@ -81,6 +82,16 @@ impl SerialSettings {
 pub struct SerialTransport {
     settings: SerialSettings,
     port: Option<SerialPort>,
+}
+
+impl std::fmt::Debug for SerialTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SerialTransport")
+            .field("settings", &self.settings)
+            .field("open", &self.port.is_some())
+            .finish()
+    }
 }
 
 impl SerialTransport {
@@ -283,6 +294,10 @@ impl Transport for SerialTransport {
 ///
 /// The one platform rule is macOS's duplicate `/dev/tty.*` entries: the callout
 /// `/dev/cu.*` device is the one to open (P5 finding 2).
+///
+/// # Errors
+///
+/// Returns [`TransportError::Open`] when the device list cannot be enumerated.
 pub fn ports() -> Result<Vec<PortInfo>, TransportError> {
     let available = SerialPort::available_ports()
         .map_err(|error| TransportError::Open(format!("could not enumerate ports: {error}")))?;
@@ -329,7 +344,7 @@ mod tests {
         // with no serial devices reports an empty list, not an error or panic.
         if let Ok(ports) = ports() {
             for port in ports {
-                assert!(!port.name.is_empty());
+                assert_ne!(port.name, "");
             }
         }
     }

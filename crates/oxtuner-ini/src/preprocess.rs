@@ -70,11 +70,8 @@ impl Preprocessed {
     /// [`Preprocessed::expand_fields`], also returning undefined references.
     pub fn expand_reporting(&self, fields: &[String]) -> (Vec<String>, Vec<String>) {
         let expander = self.expander();
-        let (expanded, undefined) = expander.expand_reporting(fields);
-        (
-            expanded.into_iter().map(Cow::into_owned).collect(),
-            undefined,
-        )
+        let (values, undefined) = expander.expand_reporting(fields);
+        (values.into_iter().map(Cow::into_owned).collect(), undefined)
     }
 }
 
@@ -140,36 +137,32 @@ impl<'a> Expander<'a> {
                 continue;
             }
 
-            match lookup(&self.resolved, name).map(|(_, values)| values) {
-                Some(values) => {
-                    // Per-index overrides follow the reference:
-                    // `$PINLIST, 1="INVALID", 2="STEPPER"`.
-                    if fields
-                        .get(index)
-                        .and_then(|field| parse_index_override(field))
-                        .is_some()
-                    {
-                        let mut values: Vec<Cow<'s, str>> =
-                            values.iter().copied().map(Cow::Borrowed).collect();
-                        while let Some(override_field) = fields.get(index) {
-                            let Some((position, text)) = parse_index_override(override_field)
-                            else {
-                                break;
-                            };
-                            if let Some(slot) = values.get_mut(position) {
-                                *slot = Cow::Owned(text);
-                            }
-                            index += 1;
+            if let Some(values) = lookup(&self.resolved, name).map(|(_, values)| values) {
+                // Per-index overrides follow the reference:
+                // `$PINLIST, 1="INVALID", 2="STEPPER"`.
+                if fields
+                    .get(index)
+                    .and_then(|field| parse_index_override(field))
+                    .is_some()
+                {
+                    let mut values: Vec<Cow<'s, str>> =
+                        values.iter().copied().map(Cow::Borrowed).collect();
+                    while let Some(override_field) = fields.get(index) {
+                        let Some((position, text)) = parse_index_override(override_field) else {
+                            break;
+                        };
+                        if let Some(slot) = values.get_mut(position) {
+                            *slot = Cow::Owned(text);
                         }
-                        expanded.extend(values);
-                    } else {
-                        expanded.extend(values.iter().copied().map(Cow::Borrowed));
+                        index += 1;
                     }
+                    expanded.extend(values);
+                } else {
+                    expanded.extend(values.iter().copied().map(Cow::Borrowed));
                 }
-                None => {
-                    undefined.push(name.to_owned());
-                    expanded.push(Cow::Owned(field.clone()));
-                }
+            } else {
+                undefined.push(name.to_owned());
+                expanded.push(Cow::Owned(field.clone()));
             }
         }
 
@@ -270,6 +263,11 @@ fn strip_line_comments(raw: &str) -> String {
 }
 
 /// Runs pass 1.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when a conditional block is left open or closed
+/// without a matching `#if`.
 pub fn preprocess(
     text: &str,
     settings: &SettingsContext,
@@ -397,9 +395,40 @@ fn handle_directive(
         None => (directive, ""),
     };
     let name = name.to_ascii_lowercase();
-    let enclosing_active = conditionals.iter().all(|frame| frame.active);
 
     match name.as_str() {
+        "if" | "elif" | "else" | "endif" => handle_conditional_directive(
+            &name,
+            rest,
+            line_number,
+            preprocessed,
+            conditionals,
+            fatal,
+        ),
+        "define" | "set" | "unset" | "include" => {
+            if conditionals.iter().all(|frame| frame.active) {
+                handle_active_directive(&name, rest, line_number, preprocessed, includes);
+            }
+        }
+        _ => {
+            // rusEFI writes prose comments as `# Digital outputs`. A hash line
+            // that names no directive is a comment, not a broken directive.
+            preprocessed.hash_comments = preprocessed.hash_comments.saturating_add(1);
+        }
+    }
+}
+
+fn handle_conditional_directive(
+    name: &str,
+    rest: &str,
+    line_number: u32,
+    preprocessed: &mut Preprocessed,
+    conditionals: &mut Vec<Conditional>,
+    fatal: &mut Vec<Diagnostic>,
+) {
+    let enclosing_active = conditionals.iter().all(|frame| frame.active);
+
+    match name {
         "if" => {
             let result = evaluate_condition(rest, &mut preprocessed.settings);
             let taken = match result {
@@ -462,21 +491,28 @@ fn handle_directive(
                 "Preprocessor",
             )),
         },
-        "endif" => {
-            if conditionals.pop().is_none() {
-                fatal.push(Diagnostic::new(
-                    Severity::Error,
-                    "stray-endif",
-                    "`#endif` without an open `#if`",
-                    line_number,
-                    "Preprocessor",
-                ));
-            }
+        "endif" if conditionals.pop().is_none() => {
+            fatal.push(Diagnostic::new(
+                Severity::Error,
+                "stray-endif",
+                "`#endif` without an open `#if`",
+                line_number,
+                "Preprocessor",
+            ));
         }
+        _ => {}
+    }
+}
+
+fn handle_active_directive(
+    name: &str,
+    rest: &str,
+    line_number: u32,
+    preprocessed: &mut Preprocessed,
+    includes: Option<IncludeResolver<'_>>,
+) {
+    match name {
         "define" => {
-            if !enclosing_active {
-                return;
-            }
             let (define_name, value) = match rest.split_once('=') {
                 Some((define_name, value)) => (define_name.trim(), value.trim()),
                 None => (rest.trim(), ""),
@@ -496,26 +532,20 @@ fn handle_directive(
                 .insert(define_name.to_ascii_lowercase(), split_fields(value));
         }
         "set" | "unset" => {
-            if !enclosing_active {
-                return;
-            }
             for flag in rest.split_whitespace() {
                 preprocessed.settings.declare(flag, name == "set");
             }
         }
         "include" => {
-            if !enclosing_active {
-                return;
-            }
             let path = crate::fields::unquote(rest);
             let resolved = includes.and_then(|resolver| resolver(path));
             match resolved {
-                Some(included) => {
+                Some(nested_text) => {
                     // Included text is preprocessed in the same context. A
                     // second-level include is deliberately not resolved: the
                     // dialect allows it, but the first implementation keeps the
                     // include graph shallow and reports the rest.
-                    if let Ok(nested) = preprocess(&included, &preprocessed.settings, None) {
+                    if let Ok(nested) = preprocess(&nested_text, &preprocessed.settings, None) {
                         preprocessed.lines.extend(nested.lines);
                         for (key, values) in nested.defines {
                             preprocessed.defines.entry(key).or_insert(values);
@@ -533,11 +563,7 @@ fn handle_directive(
                 )),
             }
         }
-        _ => {
-            // rusEFI writes prose comments as `# Digital outputs`. A hash line
-            // that names no directive is a comment, not a broken directive.
-            preprocessed.hash_comments = preprocessed.hash_comments.saturating_add(1);
-        }
+        _ => {}
     }
 }
 
@@ -703,7 +729,11 @@ mod tests {
         let output = run("[Constants]\n   value = 1\n   ;#if CONN_SLOW\n");
 
         assert_eq!(output.lines.len(), 2);
-        assert!(output.diagnostics.is_empty());
+        assert!(
+            output.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
         assert!(!output.settings.tested_flags().contains("conn_slow"));
     }
 

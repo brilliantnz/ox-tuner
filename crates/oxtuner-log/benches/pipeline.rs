@@ -26,13 +26,15 @@ fn store() -> LogStore {
     static HANDLE: OnceLock<Mutex<Option<LogHandle>>> = OnceLock::new();
 
     let slot = HANDLE.get_or_init(|| Mutex::new(None));
-    let mut slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut slot = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let handle = slot.get_or_insert_with(|| {
         let directory =
             std::env::temp_dir().join(format!("oxtuner-bench-log-{}", std::process::id()));
 
-        init(LogConfig::new(directory).with_file(FilePolicy::Off))
+        init(&LogConfig::new(directory).with_file(FilePolicy::Off))
             .expect("installs the logging pipeline")
     });
 

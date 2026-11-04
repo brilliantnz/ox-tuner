@@ -15,6 +15,7 @@ use crate::trace::{Direction, Trace};
 /// Frames are consumed in order. The transport ignores wall-clock timing by
 /// default, so a CI replay is fast and deterministic; [`Self::with_timing`]
 /// spaces replies by their recorded offsets when a test needs the real cadence.
+#[derive(Debug)]
 pub struct ReplayTransport {
     trace: Trace,
     cursor: usize,
@@ -38,6 +39,7 @@ impl ReplayTransport {
     }
 
     /// Spaces replies by their recorded offsets.
+    #[must_use]
     pub fn with_timing(mut self) -> Self {
         self.timing = true;
         self
@@ -77,7 +79,7 @@ impl ReplayTransport {
                 // already delivered it when the caller wrote the same bytes.
                 // Skipping it keeps the parser tolerant of an out-of-order
                 // recording without inventing a reply.
-                Direction::Tx => continue,
+                Direction::Tx => {}
             }
         }
     }
@@ -107,19 +109,16 @@ impl Transport for ReplayTransport {
         self.fill();
         let mut filled = 0;
         while filled < buf.len() {
-            match self.pending.pop_front() {
-                Some(byte) => {
-                    buf[filled] = byte;
-                    filled += 1;
-                }
-                None => {
-                    self.fill();
-                    if self.pending.is_empty() {
-                        return Err(TransportError::Timeout {
-                            got: filled,
-                            expected: buf.len(),
-                        });
-                    }
+            if let Some(byte) = self.pending.pop_front() {
+                buf[filled] = byte;
+                filled += 1;
+            } else {
+                self.fill();
+                if self.pending.is_empty() {
+                    return Err(TransportError::Timeout {
+                        got: filled,
+                        expected: buf.len(),
+                    });
                 }
             }
         }

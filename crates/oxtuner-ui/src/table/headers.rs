@@ -87,7 +87,7 @@ impl RenderOnce for ColumnHeader {
             .role(Role::ColumnHeader)
             .aria_label(aria)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                (on_press)(event, window, cx)
+                (on_press)(event, window, cx);
             });
 
         // Painted under the text so the bin keeps its full contrast, and
@@ -177,7 +177,7 @@ impl RenderOnce for RowHeader {
             .role(Role::RowHeader)
             .aria_label(aria)
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                (on_press)(event, window, cx)
+                (on_press)(event, window, cx);
             });
 
         // Painted under the text so the bin keeps its full contrast, and

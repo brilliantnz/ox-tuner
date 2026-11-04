@@ -35,10 +35,10 @@ pub(crate) fn parse_setting_groups(
                     section.warn("bad-setting-group", "`settingGroup =` needs a name", *line);
                     continue;
                 };
-                let label = fields
-                    .get(1)
-                    .map(|field| crate::fields::unquote(field).to_owned())
-                    .unwrap_or_else(|| name.clone());
+                let label = fields.get(1).map_or_else(
+                    || name.clone(),
+                    |field| crate::fields::unquote(field).to_owned(),
+                );
                 definition.setting_groups.insert(
                     name,
                     SettingGroup {
@@ -59,10 +59,10 @@ pub(crate) fn parse_setting_groups(
                     );
                     continue;
                 };
-                let label = fields
-                    .get(1)
-                    .map(|field| crate::fields::unquote(field).to_owned())
-                    .unwrap_or_else(|| name.clone());
+                let label = fields.get(1).map_or_else(
+                    || name.clone(),
+                    |field| crate::fields::unquote(field).to_owned(),
+                );
                 let Some(group_name) = current.as_deref() else {
                     section.warn(
                         "orphan-setting-option",
@@ -232,25 +232,7 @@ pub(crate) fn parse_menu(
                 section.understand(*line);
             }
             "menu" => {
-                let title = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned())
-                    .unwrap_or_default();
-                let existing = definition
-                    .menus
-                    .iter()
-                    .position(|menu| menu.title.eq_ignore_ascii_case(&title));
-                index = Some(match existing {
-                    Some(position) => position,
-                    None => {
-                        definition.menus.push(Menu {
-                            title,
-                            items: Vec::new(),
-                            dialog: dialog.clone(),
-                        });
-                        definition.menus.len() - 1
-                    }
-                });
+                index = Some(open_menu(definition, &fields, dialog.as_ref()));
                 group = None;
                 section.understand(*line);
             }
@@ -261,10 +243,10 @@ pub(crate) fn parse_menu(
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
                     _ => MenuTargetKind::Panel,
                 };
-                let owner = match lowered.as_str() {
-                    "groupmenu" => None,
-                    "groupchildmenu" => group,
-                    _ => None,
+                let owner = if lowered == "groupchildmenu" {
+                    group
+                } else {
+                    None
                 };
                 let Some(menu) = index.and_then(|index| definition.menus.get_mut(index)) else {
                     section.warn(
@@ -304,6 +286,30 @@ pub(crate) fn parse_menu(
             _ => section.unrecognized_key(key, *line),
         }
     }
+}
+
+/// Selects the menu with this title, creating it when it is new.
+fn open_menu(definition: &mut Definition, fields: &[String], dialog: Option<&String>) -> usize {
+    let title = fields
+        .first()
+        .map(|field| crate::fields::unquote(field).to_owned())
+        .unwrap_or_default();
+
+    if let Some(position) = definition
+        .menus
+        .iter()
+        .position(|menu| menu.title.eq_ignore_ascii_case(&title))
+    {
+        return position;
+    }
+
+    definition.menus.push(Menu {
+        title,
+        items: Vec::new(),
+        dialog: dialog.cloned(),
+    });
+
+    definition.menus.len() - 1
 }
 
 /// `subMenu = target, "Label"[, cond…]`, tolerating the space-separated form
@@ -471,7 +477,10 @@ mod tests {
 
         assert_eq!(target, "veTable1Tbl");
         assert_eq!(label, "VE Table");
-        assert!(conditions.is_empty());
+        assert!(
+            conditions.is_empty(),
+            "unexpected conditions: {conditions:?}"
+        );
     }
 
     #[test]

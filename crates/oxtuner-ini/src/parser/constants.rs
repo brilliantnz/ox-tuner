@@ -49,8 +49,8 @@ pub(crate) fn parse_identification(
 
         match key.to_ascii_lowercase().as_str() {
             "signature" => {
-                definition.signature = crate::fields::unquote(&value).to_owned();
-                definition.signature_section = section.name.clone();
+                crate::fields::unquote(&value).clone_into(&mut definition.signature);
+                definition.signature_section.clone_from(&section.name);
                 section.understand(*line);
             }
             "querycommand" => {
@@ -189,19 +189,14 @@ impl PageTable {
 
     fn build(self, highest_page: u8, section: &mut SectionParser) -> Vec<Page> {
         let declared = self.n_pages.unwrap_or(0);
-        let highest_override = self
-            .overrides
-            .keys()
-            .copied()
-            .max()
-            .map(u32::from)
-            .unwrap_or(0);
+        let highest_override = self.overrides.keys().copied().max().map_or(0, u32::from);
+        let listed = u32::try_from(self.sizes.len()).unwrap_or(u32::MAX);
         let count = declared
             .max(u32::from(highest_page))
-            .max(self.sizes.len() as u32)
+            .max(listed)
             .max(highest_override);
 
-        if declared != 0 && self.sizes.len() as u32 != declared {
+        if declared != 0 && listed != declared {
             section.note(
                 "page-size-count",
                 format!(
@@ -380,7 +375,7 @@ fn parse_protocol_key(
         "writeblocks" | "tswriteblocks" => protocol.write_blocks = is_on(value),
         "blockreadtimeout" => protocol.block_read_timeout_ms = crate::fields::parse_u32(value),
         "pageactivationdelay" => {
-            protocol.page_activation_delay_ms = crate::fields::parse_u32(value)
+            protocol.page_activation_delay_ms = crate::fields::parse_u32(value);
         }
         "delayafterportopen" => protocol.delay_after_port_open_ms = crate::fields::parse_u32(value),
         "nocommreaddelay" => protocol.no_comm_read_delay = is_on(value),
@@ -479,7 +474,7 @@ fn parse_constant(
 
     // A `string` entry may omit its offset entirely (`string, ASCII, 20`), so
     // the offset decision is made per class.
-    let (offset, mut index) = if class == ConstantClass::String && fields.len() == 3 {
+    let (offset, index) = if class == ConstantClass::String && fields.len() == 3 {
         (Offset::Next, 2usize)
     } else {
         match fields.get(2) {
@@ -490,92 +485,29 @@ fn parse_constant(
         }
     };
 
-    let mut flags = ConstantFlags::default();
-    let (shape, options, units, scale, translate, minimum, maximum, digits) = match class {
-        ConstantClass::Bits => {
-            let Some(raw_shape) = fields.get(index) else {
-                section.warn("missing-shape", format!("`{key}` has no bit range"), line);
-                return false;
-            };
-            index += 1;
-            let Some(shape) = parse_bit_shape(raw_shape) else {
-                section.warn(
-                    "bad-bit-range",
-                    format!("`{key}` has bit range {raw_shape:?}"),
-                    line,
-                );
-                return false;
-            };
-            (
-                shape,
-                option_tables.table(shared_define(raw_fields, index), &fields[index..]),
-                Text::Literal(String::new()),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        ConstantClass::Array | ConstantClass::OddArray => {
-            let Some(raw_shape) = fields.get(index) else {
-                section.warn("missing-shape", format!("`{key}` has no array shape"), line);
-                return false;
-            };
-            index += 1;
-            let Some(shape) = parse_array_shape(raw_shape) else {
-                section.warn(
-                    "bad-shape",
-                    format!("`{key}` has array shape {raw_shape:?}"),
-                    line,
-                );
-                return false;
-            };
-            let (units, numbers) = split_numbers(&fields[index..], &mut flags);
-            (
-                shape,
-                Arc::from([]),
-                units,
-                numbers.first().cloned(),
-                numbers.get(1).cloned(),
-                numbers.get(2).cloned(),
-                numbers.get(3).cloned(),
-                numbers.get(4).cloned(),
-            )
-        }
-        ConstantClass::String => {
-            let tail = &fields[index..];
-            let (shape, _) = parse_string_shape(tail);
-            for field in tail {
-                if is_keyword(field) {
-                    apply_keyword(&mut flags, field);
-                }
-            }
-            (
-                shape,
-                Arc::from([]),
-                Text::Literal(String::new()),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        ConstantClass::Scalar => {
-            let (units, numbers) = split_numbers(&fields[index..], &mut flags);
-            (
-                Shape::Scalar,
-                Arc::from([]),
-                units,
-                numbers.first().cloned(),
-                numbers.get(1).cloned(),
-                numbers.get(2).cloned(),
-                numbers.get(3).cloned(),
-                numbers.get(4).cloned(),
-            )
-        }
+    let mut context = AttributeContext {
+        fields: &fields,
+        raw_fields,
+        key,
+        line,
+        index,
+        flags: ConstantFlags::default(),
     };
+    let Some(attributes) = parse_entry_attributes(class, &mut context, option_tables, section)
+    else {
+        return false;
+    };
+    let EntryAttributes {
+        shape,
+        options,
+        units,
+        scale,
+        translate,
+        minimum,
+        maximum,
+        digits,
+        flags,
+    } = attributes;
 
     let address = match &offset {
         Offset::Fixed(value) => Some(*value),
@@ -626,6 +558,127 @@ fn parse_constant(
         );
     }
     true
+}
+
+/// The class-specific attributes of one calibration entry.
+struct EntryAttributes {
+    shape: Shape,
+    options: Arc<[BitOption]>,
+    units: Text,
+    scale: Option<Number>,
+    translate: Option<Number>,
+    minimum: Option<Number>,
+    maximum: Option<Number>,
+    digits: Option<Number>,
+    flags: ConstantFlags,
+}
+
+/// The fields and cursor shared while reading one entry's attributes.
+struct AttributeContext<'a, 'b> {
+    fields: &'a [Cow<'b, str>],
+    raw_fields: &'a [String],
+    key: &'a str,
+    line: u32,
+    index: usize,
+    flags: ConstantFlags,
+}
+
+/// Reads the shape, units and numeric attributes for one entry class.
+fn parse_entry_attributes(
+    class: ConstantClass,
+    context: &mut AttributeContext<'_, '_>,
+    option_tables: &mut OptionTables,
+    section: &mut SectionParser,
+) -> Option<EntryAttributes> {
+    let mut attributes = EntryAttributes {
+        shape: Shape::Scalar,
+        options: Arc::from([]),
+        units: Text::Literal(String::new()),
+        scale: None,
+        translate: None,
+        minimum: None,
+        maximum: None,
+        digits: None,
+        flags: ConstantFlags::default(),
+    };
+
+    match class {
+        ConstantClass::Bits => {
+            let Some(raw_shape) = context.fields.get(context.index) else {
+                section.warn(
+                    "missing-shape",
+                    format!("`{}` has no bit range", context.key),
+                    context.line,
+                );
+                return None;
+            };
+            context.index += 1;
+            let Some(shape) = parse_bit_shape(raw_shape) else {
+                section.warn(
+                    "bad-bit-range",
+                    format!("`{}` has bit range {raw_shape:?}", context.key),
+                    context.line,
+                );
+                return None;
+            };
+            attributes.shape = shape;
+            attributes.options = option_tables.table(
+                shared_define(context.raw_fields, context.index),
+                &context.fields[context.index..],
+            );
+        }
+        ConstantClass::Array | ConstantClass::OddArray => {
+            let Some(raw_shape) = context.fields.get(context.index) else {
+                section.warn(
+                    "missing-shape",
+                    format!("`{}` has no array shape", context.key),
+                    context.line,
+                );
+                return None;
+            };
+            context.index += 1;
+            let Some(shape) = parse_array_shape(raw_shape) else {
+                section.warn(
+                    "bad-shape",
+                    format!("`{}` has array shape {raw_shape:?}", context.key),
+                    context.line,
+                );
+                return None;
+            };
+            let (units, numbers) =
+                split_numbers(&context.fields[context.index..], &mut context.flags);
+            attributes.shape = shape;
+            attributes.units = units;
+            attributes.scale = numbers.first().cloned();
+            attributes.translate = numbers.get(1).cloned();
+            attributes.minimum = numbers.get(2).cloned();
+            attributes.maximum = numbers.get(3).cloned();
+            attributes.digits = numbers.get(4).cloned();
+        }
+        ConstantClass::String => {
+            let tail = &context.fields[context.index..];
+            let (shape, _) = parse_string_shape(tail);
+            for field in tail {
+                if is_keyword(field) {
+                    apply_keyword(&mut context.flags, field);
+                }
+            }
+            attributes.shape = shape;
+        }
+        ConstantClass::Scalar => {
+            let (units, numbers) =
+                split_numbers(&context.fields[context.index..], &mut context.flags);
+            attributes.units = units;
+            attributes.scale = numbers.first().cloned();
+            attributes.translate = numbers.get(1).cloned();
+            attributes.minimum = numbers.get(2).cloned();
+            attributes.maximum = numbers.get(3).cloned();
+            attributes.digits = numbers.get(4).cloned();
+        }
+    }
+
+    attributes.flags = context.flags;
+    Some(attributes)
 }
 
 /// Splits the trailing fields of a scalar/array entry into units and the numeric
@@ -870,7 +923,7 @@ pub(crate) fn parse_pc_variables(
                 "unknown-type",
                 format!(
                     "`{key}` has data type {:?}",
-                    fields.get(1).map(|field| field.as_ref()).unwrap_or("")
+                    fields.get(1).map_or("", AsRef::as_ref)
                 ),
                 *line,
             );
@@ -902,8 +955,7 @@ pub(crate) fn parse_pc_variables(
         } else {
             fields
                 .get(index)
-                .map(|field| Text::parse(field))
-                .unwrap_or(Text::Literal(String::new()))
+                .map_or(Text::Literal(String::new()), |field| Text::parse(field))
         };
 
         let variable = PcVariable {

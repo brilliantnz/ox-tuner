@@ -21,6 +21,10 @@ use oxtuner_tune::IniPage;
 use crate::msq::Msq;
 
 /// What a load check found.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "load issues are a closed set of validation failures"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueKind {
     /// The file has no `<versionInfo>`.
@@ -121,13 +125,15 @@ impl LoadReport {
 
     /// A one-line summary for the status bar.
     pub fn summary(&self) -> String {
+        use std::fmt::Write as _;
+
         let mut summary = if self.is_read_only() {
             format!("read-only ({} problems)", self.blockers.len())
         } else {
             format!("loaded {} values", self.loaded)
         };
         if !self.warnings.is_empty() {
-            summary.push_str(&format!(", {} warnings", self.warnings.len()));
+            let _ = write!(summary, ", {} warnings", self.warnings.len());
         }
         summary
     }
@@ -147,7 +153,10 @@ impl LoadReport {
 
     /// Records a warning.
     pub fn warn(&mut self, kind: IssueKind, message: impl Into<String>) {
-        debug_assert!(!kind.is_blocker());
+        debug_assert!(
+            !kind.is_blocker(),
+            "a warning must not be recorded with a blocker kind"
+        );
         self.warnings.push(LoadIssue {
             kind,
             message: message.into(),
@@ -156,7 +165,10 @@ impl LoadReport {
 
     /// Records a blocker.
     pub fn block(&mut self, kind: IssueKind, message: impl Into<String>) {
-        debug_assert!(kind.is_blocker());
+        debug_assert!(
+            kind.is_blocker(),
+            "a blocker must be recorded with a blocker kind"
+        );
         self.blockers.push(LoadIssue {
             kind,
             message: message.into(),

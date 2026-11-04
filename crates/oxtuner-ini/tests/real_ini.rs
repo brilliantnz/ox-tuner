@@ -9,25 +9,32 @@
 //! missing fixture into a hard failure; pinned fixture versions are recorded in
 //! `docs/development/ini/real-ini-fixtures.md`.
 
+#![expect(
+    clippy::print_stdout,
+    reason = "the integration test prints a readable report for the developer running it"
+)]
+
 use std::path::PathBuf;
 
 use oxtuner_ini::{SettingsContext, parse_bytes};
 
 fn load(variable: &str, fallback: &str) -> Option<(String, Vec<u8>)> {
-    let path = std::env::var(variable)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fallback));
+    let path = std::env::var(variable).map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fallback),
+        PathBuf::from,
+    );
 
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+    let Ok(bytes) = std::fs::read(&path) else {
         // Integration mode: a missing fixture is a failure, not a skip, so a
         // compatibility run can never silently pass by parsing nothing.
-        Err(_) if std::env::var_os("OXTUNER_INI_REQUIRED").is_some_and(|v| v == "1") => panic!(
-            "OXTUNER_INI_REQUIRED=1 but `{}` is unreadable — provide the reference INIs \
+        let required = std::env::var_os("OXTUNER_INI_REQUIRED").is_some_and(|value| value == "1");
+        assert!(
+            !required,
+            "OXTUNER_INI_REQUIRED=1 but `{}` is unreadable: provide the reference INIs \
              (see docs/development/ini/real-ini-fixtures.md) or unset the variable",
             path.display()
-        ),
-        Err(_) => return None,
+        );
+        return None;
     };
     Some((path.display().to_string(), bytes))
 }
@@ -230,7 +237,11 @@ fn the_reference_rusefi_ini_parses() {
     assert_eq!(definition.pages.len(), 5);
 
     // Pages 2 and 3 declare an empty burn command: they cannot be burned.
-    assert!(definition.page(1).is_some_and(|page| page.is_burnable()));
+    assert!(
+        definition
+            .page(1)
+            .is_some_and(oxtuner_ini::Page::is_burnable)
+    );
     assert!(definition.page(2).is_some_and(|page| !page.is_burnable()));
 
     // The `.ini` is not valid UTF-8 (a raw 0xB1 in a help string).

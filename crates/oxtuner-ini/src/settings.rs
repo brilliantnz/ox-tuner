@@ -38,6 +38,7 @@ impl SettingsContext {
     ///
     /// Keys are compared case-insensitively, the way the dialect treats
     /// directive names; the caller may pass them in either case.
+    #[must_use]
     pub fn with_overrides(
         mut self,
         overrides: impl IntoIterator<Item = (impl Into<String>, bool)>,

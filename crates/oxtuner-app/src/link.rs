@@ -13,7 +13,7 @@ pub(crate) struct SimulatorLink {
 }
 
 impl CustomLink for SimulatorLink {
-    fn label(&self) -> &str {
+    fn label(&self) -> &'static str {
         "simulator"
     }
 

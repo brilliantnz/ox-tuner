@@ -60,7 +60,7 @@ const MAXIMIZE_EPSILON_PX: f32 = 1.;
 /// How much room a stored **windowed** rectangle must leave around itself.
 ///
 /// Zoom is not the only way to end up with a frame the size of the display.
-/// AppKit's `zoom:` on a window that already fills the usable area *shrinks* it to
+/// `AppKit`'s `zoom:` on a window that already fills the usable area *shrinks* it to
 /// the "standard frame" — measured at 1780×1110 on a 1800×1130 display, i.e.
 /// exactly 20 pt of margin on the trailing edges. That frame is maximized in
 /// everything but name: it cannot be told apart from a maximized window by the
@@ -68,7 +68,7 @@ const MAXIMIZE_EPSILON_PX: f32 = 1.;
 /// smaller.
 ///
 /// So a rectangle that leaves less than this around the display is never kept as
-/// the windowed size. 24 pt covers AppKit's 20 pt with room for a different
+/// the windowed size. 24 pt covers `AppKit`'s 20 pt with room for a different
 /// display scale, while staying far below any window a person would actually
 /// choose to work in.
 const WINDOWED_MIN_MARGIN_PX: f32 = 24.;
@@ -99,11 +99,10 @@ impl AppStateData {
         let version = value
             .get("schema_version")
             .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
+            .map_or(0, |version| u32::try_from(version).unwrap_or(u32::MAX));
 
         match version {
-            STATE_SCHEMA_VERSION => {}
-            0 => {
+            STATE_SCHEMA_VERSION | 0 => {
                 // A file written before the field existed picks the current
                 // default through serde; nothing needs rewriting here.
             }
@@ -199,7 +198,7 @@ impl WindowState {
 /// [`WINDOWED_MIN_MARGIN_PX`] of the display uncovered in both axes.
 ///
 /// This is the storage rule, not a maximize test. It catches every frame a
-/// maximize can leave behind — the zoomed frame itself, and AppKit's "standard
+/// maximize can leave behind — the zoomed frame itself, and `AppKit`'s "standard
 /// frame" (usable area minus 20 pt, what a window that already fills the display
 /// becomes when zoomed) — without ever deciding from geometry that a window *is*
 /// maximized.
@@ -266,6 +265,10 @@ impl WindowRect {
 /// absorbs whatever space is left.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each panel visibility is an independent layout fact"
+)]
 pub(crate) struct LayoutState {
     pub(crate) primary_width: f32,
     pub(crate) secondary_width: f32,
@@ -284,7 +287,7 @@ pub(crate) struct LayoutState {
     /// Whether the table grid draws its Y axis downward: low bins at the top.
     ///
     /// The default draws it upward like a chart, so the low bin is at the
-    /// bottom and the column header sits under the table, the way TunerStudio
+    /// bottom and the column header sits under the table, the way `TunerStudio`
     /// opens a table.
     #[serde(default)]
     pub(crate) table_low_at_top: bool,
@@ -369,6 +372,7 @@ fn clamp(value: f32, range: std::ops::Range<f32>) -> f32 {
 }
 
 /// The parsed session document plus the file it came from.
+#[derive(Debug)]
 pub struct AppState {
     path: PathBuf,
     data: AppStateData,

@@ -5,6 +5,12 @@
 //! edits across scalars and a table, including edits applied to the ECU images
 //! out of order.
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    reason = "the property test unwraps fixture setup and compares model values exactly"
+)]
+
 use std::sync::Arc;
 
 use oxtuner_ini::{SettingsContext, parse_str};

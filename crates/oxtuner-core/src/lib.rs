@@ -56,7 +56,7 @@
 //! use oxtuner_core::{CoreConfig, Event, start};
 //! use std::time::Duration;
 //!
-//! let core = start(CoreConfig::default()).expect("the core starts");
+//! let core = start(&CoreConfig::default()).expect("the core starts");
 //! let events = core.events.into_blocking();
 //!
 //! let text = "[MegaTune]\nsignature = \"speeduino 202501\"\nqueryCommand = \"Q\"\n";
