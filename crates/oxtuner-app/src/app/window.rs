@@ -133,7 +133,7 @@ pub fn options(cx: &App) -> WindowOptions {
         // Always windowed: [`restore`] applies the last session's maximize once
         // the window exists.
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(880.), px(560.))),
+        window_min_size: Some(size(px(1600.), px(980.))),
         app_id: Some(APP_NAME.into()),
         ..Default::default()
     }
