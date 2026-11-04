@@ -343,10 +343,10 @@ pub(crate) fn icon(kind: MenuNodeKind) -> IconName {
     match kind {
         // A menu is a folder in the tree; the editor header shows the same.
         MenuNodeKind::Menu | MenuNodeKind::Group => IconName::Folder,
-        MenuNodeKind::Table => IconName::LayoutDashboard,
-        MenuNodeKind::Curve => IconName::ChartPie,
+        MenuNodeKind::Table => IconName::Table,
+        MenuNodeKind::Curve => IconName::ChartLine,
         MenuNodeKind::Dialog => IconName::Frame,
-        MenuNodeKind::Help => IconName::BookOpen,
+        MenuNodeKind::Help => IconName::BookOpenText,
         MenuNodeKind::Standard => IconName::Settings2,
         MenuNodeKind::Missing => IconName::TriangleAlert,
     }
