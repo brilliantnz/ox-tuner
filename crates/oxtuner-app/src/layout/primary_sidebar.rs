@@ -120,7 +120,8 @@ fn tree_row(
     cx: &App,
 ) -> ListItem {
     let node = nodes.get(entry.item().id.as_ref());
-    let icon = if entry.is_folder() {
+    let is_folder = entry.is_folder();
+    let icon = if is_folder {
         if entry.is_expanded() {
             IconName::ChevronDown
         } else {
@@ -163,6 +164,7 @@ fn tree_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .when(is_folder, |this| this.font_weight(FontWeight::SEMIBOLD))
                 .when(missing, |this| this.text_color(muted))
                 .child(entry.item().label.clone()),
         )
@@ -176,7 +178,7 @@ fn tree_row(
             )
         });
 
-    if entry.is_folder() {
+    if is_folder {
         let explorer = explorer.clone();
         let id = entry.item().id.to_string();
         surface = surface.on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
