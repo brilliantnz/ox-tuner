@@ -467,9 +467,10 @@ impl TuneImages {
     ///
     /// This is the one-document discard: a table's cells or a dialog's
     /// constants go back to the saved tune, and every other variable keeps its
-    /// edits. Returns how many cells moved. A variable the layout does not
-    /// know, or one whose images disagree about its shape, is skipped — there
-    /// is nothing safe to copy for it.
+    /// edits. Conflict marks for the reverted variables go with their values.
+    /// Returns how many cells moved. A variable the layout does not know, or
+    /// one whose images disagree about its shape, is skipped — there is nothing
+    /// safe to copy for it.
     #[expect(
         clippy::float_cmp,
         reason = "a cell is skipped only when its stored raw value is identical"
@@ -503,6 +504,15 @@ impl TuneImages {
                 }
 
                 reverted += 1;
+            }
+
+            // A conflict mark asks the reader to review a cell. The values are
+            // at the file baseline now, so the mark belongs to the discard
+            // too, the way a whole-tune revert drops every conflict.
+            if let Some(variable) = self.layout.index(name) {
+                self.overlays.retain(|key, overlay| {
+                    key.variable != variable || *overlay != Overlay::Conflict
+                });
             }
         }
 
@@ -1061,6 +1071,25 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
             0.0,
             "the variable the caller did not name keeps its edit"
         );
+    }
+
+    #[test]
+    fn reverting_one_variable_clears_its_conflict_mark() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconnect(ram).unwrap();
+        images.working_mut().set_user("a", 5.0).unwrap();
+
+        images.revert_variables(&["a".to_owned()]);
+
+        assert!(
+            images.conflicts().is_empty(),
+            "the reverted variable carries no conflict mark"
+        );
+        // The cell still reads Conflict: the ECU's value really does differ
+        // from the file. That is the value-based state, not a stale overlay.
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
     }
 
     #[test]
