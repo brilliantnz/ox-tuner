@@ -1,0 +1,13 @@
+oxtuner-ui vendors the dock skin and the tab bar from gpui-component.
+
+  Source: gpui-component 0.9.0 (https://github.com/longbridge/gpui-kit)
+  Files:  src/dock/{mod,panel,tab_panel,dock,invalid_panel}.rs
+          src/tabs/{mod,tab,tab_bar}.rs
+  License: Apache License 2.0, see LICENSE-APACHE beside this file.
+
+The files were adapted to this crate: imports point at the `gpui_kit`
+re-exports instead of the gpui-component crate root, the crate's own module
+paths (`crate::dock`, `crate::tabs`), the tab strip reads its variant and its
+pick callback from the skin, and the chrome labels are plain strings because
+the application owns translation. Everything else keeps its upstream shape so a
+later upgrade can be compared against the release it came from.

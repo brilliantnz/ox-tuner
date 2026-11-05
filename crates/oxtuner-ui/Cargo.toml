@@ -20,6 +20,7 @@ harness = false
 [dependencies]
 gpui-kit = { workspace = true, default-features = false, features = ["assets", "component"] }
 oxtuner-core.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
