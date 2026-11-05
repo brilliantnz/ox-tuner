@@ -34,7 +34,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{FailureCode, MenuNode, SaveSummary};
+use oxtuner_core::{MenuNode, SaveSummary};
 use oxtuner_ui::dock::{
     BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
     PanelId, PanelStyle, panel_handle,
@@ -80,9 +80,9 @@ pub(crate) struct Workspace {
     /// behind each tab and the subscription that follows it, and it is pruned
     /// when the dock reports a close.
     editors: Vec<OpenDocument>,
-    /// A tab that closes when its save lands. Saving is a core command, so the
+    /// Tabs that close when their save lands. Saving is a core command, so the
     /// answer arrives later; a refused save keeps the tab and its edits.
-    pending_close: Option<PendingClose>,
+    pending_closes: Vec<PendingClose>,
     /// Keeps the core observer alive so a project or definition change repaints
     /// the tab strip.
     _core: Subscription,
@@ -105,6 +105,9 @@ struct PendingClose {
     /// The save already seen when the button was clicked. A different
     /// [`CoreService`] save means this one finished.
     saved: Option<SaveSummary>,
+    /// The failure serial seen when the button was clicked. A different value
+    /// means a command failed after the save was asked for.
+    failure_serial: u64,
 }
 
 impl EventEmitter<ActiveDocument> for Workspace {}
@@ -161,7 +164,7 @@ impl Workspace {
         // The dock is a child entity, so the tab strip needs its own nudge to
         // pick up a modified flag that moved.
         let core = cx.observe_global::<CoreService>(|this, cx| {
-            this.finish_pending_close(cx);
+            this.finish_pending_closes(cx);
             this.area.update(cx, |_, cx| cx.notify());
             cx.notify();
         });
@@ -186,7 +189,7 @@ impl Workspace {
             cluster,
             realtime,
             editors: Vec::new(),
-            pending_close: None,
+            pending_closes: Vec::new(),
             _core: core,
             _layout: layout,
             _pinned: vec![cluster_active, realtime_active],
@@ -283,16 +286,26 @@ impl Workspace {
                                 .primary()
                                 .w_full()
                                 .on_click(move |_, window, cx| {
+                                    // Snapshot before the command goes out, so
+                                    // a refusal that never reaches the core
+                                    // still counts as this save's answer.
+                                    let (saved, failure_serial) = {
+                                        let status = CoreService::status(cx);
+                                        (status.last_save.clone(), status.failure_serial)
+                                    };
+
                                     crate::core::save_tune(cx);
                                     window.close_dialog(cx);
 
                                     // The tab waits for the core's answer, so a
                                     // refused save leaves it open to retry.
                                     if has_target {
-                                        let saved = CoreService::status(cx).last_save.clone();
                                         save.update(cx, |workspace, _| {
-                                            workspace.pending_close =
-                                                Some(PendingClose { panel, saved });
+                                            workspace.pending_closes.push(PendingClose {
+                                                panel,
+                                                saved,
+                                                failure_serial,
+                                            });
                                         })
                                         .ok();
                                     } else {
@@ -355,43 +368,50 @@ impl Workspace {
         area.update(cx, |area, cx| area.remove_panel(document, window, cx));
     }
 
-    /// Closes a tab whose save finished, or drops the request when it failed.
+    /// Closes the tabs whose saves finished, and drops the requests that a
+    /// failure answered.
     ///
-    /// The save is a core command, so the button cannot close the tab itself:
-    /// a new `last_save` means the write landed and the tab may go; a
-    /// `TuneSaveFailed` means the edits are still unsaved, so the tab stays and
-    /// the reader can retry.
-    fn finish_pending_close(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(pending) = self.pending_close.take() else {
-            return;
-        };
-
-        let saved = {
-            let status = CoreService::status(cx);
-            if status.last_save.as_ref() == pending.saved.as_ref() {
-                let failed = status
-                    .failure
-                    .as_ref()
-                    .is_some_and(|failure| failure.code == FailureCode::TuneSaveFailed);
-                if !failed {
-                    self.pending_close = Some(pending);
-                    return;
-                }
-
-                false
-            } else {
-                true
-            }
-        };
-
-        if !saved {
+    /// The save is a core command, so the button cannot close the tab itself.
+    /// A new `last_save` means the write landed and the tab may go; a new
+    /// failure serial means a command failed after the save was asked for, so
+    /// the tab stays and the reader can retry. New failures are compared by
+    /// serial rather than code, because a save can be refused with more than
+    /// `TuneSaveFailed` and the failure on screen may predate this request.
+    fn finish_pending_closes(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pending_closes.is_empty() {
             return;
         }
 
+        let mut closed = Vec::new();
+        let mut waiting = Vec::new();
+
+        {
+            let status = CoreService::status(cx);
+            for pending in self.pending_closes.drain(..) {
+                if status.last_save.as_ref() != pending.saved.as_ref() {
+                    closed.push(pending.panel);
+                } else if status.failure_serial != pending.failure_serial {
+                    // The save (or a command just before it) failed. Keep the
+                    // tab and its edits; the reader can ask again.
+                } else {
+                    waiting.push(pending);
+                }
+            }
+        }
+
+        self.pending_closes = waiting;
+
+        for panel in closed {
+            self.close_saved_panel(panel, cx);
+        }
+    }
+
+    /// Removes one saved document through the window the workspace stores.
+    fn close_saved_panel(&mut self, panel: PanelId, cx: &mut Context<'_, Self>) {
         let Some(document) = self
             .editors
             .iter()
-            .find(|document| PanelId::from(document.panel.entity_id()) == pending.panel)
+            .find(|document| PanelId::from(document.panel.entity_id()) == panel)
             .map(|document| document.panel.clone())
         else {
             return;
@@ -549,7 +569,7 @@ mod tests {
         AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Point, Render, TestAppContext,
         Window, WindowBounds, WindowOptions, div, px, size,
     };
-    use oxtuner_core::{MenuNode, MenuNodeKind};
+    use oxtuner_core::{FailureCode, MenuNode, MenuNodeKind};
     use oxtuner_ui::dock::{BasePanel as _, PaneRef};
 
     use super::*;
@@ -775,6 +795,72 @@ mod tests {
             .unwrap();
 
         assert!(proceed, "a tab with nothing to lose closes at once");
+    }
+
+    /// Opens one document and arms a close that waits for its save.
+    fn open_and_arm_save(cx: &mut TestAppContext, workspace: &Entity<Workspace>) {
+        cx.update(|cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_node(node("menu:0/0", "VE Table"), cx);
+            });
+        });
+
+        let panel = cx.update(|cx| PanelId::from(workspace.read(cx).editors[0].panel.entity_id()));
+        let (saved, failure_serial) = cx.update(|cx| {
+            let status = CoreService::status(cx);
+            (status.last_save.clone(), status.failure_serial)
+        });
+
+        cx.update(|cx| {
+            workspace.update(cx, |workspace, _| {
+                workspace.pending_closes.push(PendingClose {
+                    panel,
+                    saved,
+                    failure_serial,
+                });
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_successful_save_closes_the_tab_that_asked(cx: &mut TestAppContext) {
+        let (_handle, workspace, _) = open(cx);
+        open_and_arm_save(cx, &workspace);
+
+        cx.update(CoreService::save_for_test);
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| workspace.read(cx).editors.len()),
+            0,
+            "a landed save closes the tab that asked for it"
+        );
+        assert_eq!(
+            cx.update(|cx| tabs(&workspace, cx)),
+            cx.update(|cx| pinned(&workspace, cx))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_save_keeps_the_tab_open(cx: &mut TestAppContext) {
+        let (_handle, workspace, _) = open(cx);
+        open_and_arm_save(cx, &workspace);
+
+        // A save can fail with more than one code: no project, a read-only
+        // tune, or a write that never reached the core. Any new failure keeps
+        // the tab rather than leaving the request armed forever.
+        cx.update(|cx| CoreService::fail_for_test(cx, FailureCode::NothingToSave));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| workspace.read(cx).editors.len()),
+            1,
+            "a refused save leaves its document open to retry"
+        );
+        assert!(
+            cx.update(|cx| workspace.read(cx).pending_closes.is_empty()),
+            "the answered request is dropped"
+        );
     }
 
     #[gpui_kit::test]

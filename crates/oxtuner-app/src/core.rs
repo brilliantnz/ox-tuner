@@ -69,6 +69,10 @@ pub(crate) struct CoreStatus {
     pub(crate) dirty: BTreeSet<String>,
     /// The last command failure, kept until a command succeeds.
     pub(crate) failure: Option<Failure>,
+    /// Bumped whenever a failure is stored. A view that is waiting for an
+    /// answer can compare this to the value it saw when it asked, so an old
+    /// failure still on screen is not mistaken for the new one.
+    pub(crate) failure_serial: u64,
     /// Bumped whenever an edit or a save may have moved tune values, so a view
     /// can tell that copies it kept are no longer trustworthy.
     pub(crate) tune_revision: u64,
@@ -300,6 +304,26 @@ impl CoreService {
         status.definition_revision = status.definition_revision.wrapping_add(1);
         status.table = None;
         status.dialog = None;
+    }
+
+    /// Records a landed save, for view tests.
+    pub(crate) fn save_for_test(cx: &mut App) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.last_save = Some(SaveSummary {
+            path: "/projects/test/CurrentTune.msq".into(),
+            cells: 1,
+        });
+        status.tune_revision = status.tune_revision.wrapping_add(1);
+    }
+
+    /// Records a failed command, for view tests.
+    pub(crate) fn fail_for_test(cx: &mut App, code: FailureCode) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.failure_serial = status.failure_serial.wrapping_add(1);
+        status.failure = Some(Failure {
+            code,
+            message: "the test command failed".to_owned(),
+        });
     }
 
     /// Installs a service with no core behind it, for view tests.
@@ -897,6 +921,7 @@ impl CoreStatus {
                     // its states instead of showing the pre-write snapshot.
                     self.tune_revision = self.tune_revision.wrapping_add(1);
                 }
+                self.failure_serial = self.failure_serial.wrapping_add(1);
                 self.failure = Some(failure);
             }
             Update::Nothing => {}
@@ -1356,7 +1381,9 @@ pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
         return;
     }
 
-    cx.global_mut::<CoreService>().status.failure = Some(Failure { code, message });
+    let status = &mut cx.global_mut::<CoreService>().status;
+    status.failure_serial = status.failure_serial.wrapping_add(1);
+    status.failure = Some(Failure { code, message });
     cx.refresh_windows();
 }
 
