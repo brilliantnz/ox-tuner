@@ -2345,14 +2345,22 @@ fn revert_target(
 /// The variables one table, curve or dialog owns.
 ///
 /// A table owns its cells and both axis bins. A dialog owns its constant
-/// variables, plus the table it embeds when it has one. The list is sorted and
-/// deduplicated so a variable shared by two rows is reverted once.
+/// variables, plus the table it embeds when it has one. The two lookups are not
+/// alternatives: [`TableSummary::from_project`] resolves a dialog name to the
+/// map inside it, so a dialog that embeds a table matches both and must give up
+/// both sets of variables.
+///
+/// The list is sorted and deduplicated so a variable shared by two rows is
+/// reverted once. A name that matches nothing, or one that owns no variables,
+/// is an error rather than an empty revert.
 fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String> {
     let mut variables = Vec::new();
 
     if let Ok(table) = TableSummary::from_project(project, name) {
         variables.extend(table_variables(&table));
-    } else if let Ok(dialog) = DialogSummary::from_project(project, name) {
+    }
+
+    if let Ok(dialog) = DialogSummary::from_project(project, name) {
         variables.extend(
             dialog
                 .fields
@@ -2367,9 +2375,11 @@ fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String
         {
             variables.extend(table_variables(&table));
         }
-    } else {
+    }
+
+    if variables.is_empty() {
         return Err(format!(
-            "the definition has no table, curve or dialog named `{name}`"
+            "the definition has no table, curve or dialog named `{name}` with variables to discard"
         ));
     }
 
