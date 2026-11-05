@@ -9,8 +9,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, px,
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Window, div, px,
 };
 use oxtuner_ui::chart::{ChartConfig, ChartState, ChartStyle};
 
@@ -72,10 +72,6 @@ impl RealtimeView {
     }
 
     /// The realtime toolbar: window buttons, channel picker and recording.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the realtime toolbar groups every chart control in one row"
-    )]
     fn render_toolbar(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let status = CoreService::status(cx);
         let log = CoreService::log(cx);
@@ -98,12 +94,6 @@ impl RealtimeView {
             .px_3()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(t!("app.realtime.title")),
-            )
             .child(
                 div()
                     .text_xs()

@@ -6,7 +6,7 @@
 //! | --- | --- | --- |
 //! | **Primary sidebar** | left | section labels only; no header row |
 //! | **Secondary sidebar** | right | header row with its close button |
-//! | **Bottom panel** | under the editor only | header row with its close button |
+//! | **Bottom panel** | under the workspace only | header row with its close button |
 //!
 //! The bar spans the whole window: menus, title, the three panel toggles and (off
 //! macOS) the window controls. Because of that no column reaches the window's top
@@ -14,6 +14,11 @@
 //! drag strip per column — is still in `titlebar.rs` ([`titlebar::DragTop`]) and
 //! is what the Settings window uses. A status bar closes the window's bottom
 //! edge.
+//!
+//! The middle column is the [`Workspace`]: a dock whose tabs hold the cluster,
+//! the realtime charts and every open document. Selecting a node in the project
+//! tree opens its tab, and whichever tab is in front is what the tree
+//! highlights.
 //!
 //! Sizes, widths and open state live in `state.json`; the view reads them when it
 //! renders and writes them back on a drag or a toggle.
@@ -25,14 +30,13 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::v_flex;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, Theme, ThemeMode,
-    menu::AppMenuBar,
+    ActiveTheme as _, Disableable as _, Sizable as _, Theme, ThemeMode, menu::AppMenuBar,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -42,29 +46,29 @@ use gpui_kit::{
 
 pub mod bottom_panel;
 pub mod connect_dialog;
-mod explorer;
-pub mod primary_sidebar;
+pub(crate) mod primary_sidebar;
 pub mod project_dialog;
 pub mod secondary_sidebar;
 pub mod status_bar;
 pub mod titlebar;
+pub(crate) mod workspace;
 pub mod write_dialogs;
 
-use oxtuner_core::MenuNodeKind;
-
 use self::{
-    bottom_panel::BottomPanel, explorer::Explorer, primary_sidebar::PrimarySidebar,
-    secondary_sidebar::SecondarySidebar, status_bar::StatusBarView, titlebar::MainBar,
+    bottom_panel::BottomPanel,
+    primary_sidebar::{Explorer, PrimarySidebar},
+    secondary_sidebar::SecondarySidebar,
+    status_bar::StatusBarView,
+    titlebar::MainBar,
+    workspace::{ActiveDocument, Workspace},
 };
 use crate::{
     app::{self, menu},
-    editor::{dialog::DialogEditor, table::TableEditor},
     i18n::t,
-    realtime::RealtimeView,
     settings::preferences::AppSettings,
     state::session::{
-        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, WorkView,
-        capture_window, schedule_save,
+        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, capture_window,
+        schedule_save,
     },
 };
 
@@ -79,40 +83,24 @@ pub(crate) struct AppLayout {
     _activation: Subscription,
     /// The in-window menu bar. Rendered only where the OS has no global menu.
     menu_bar: Entity<AppMenuBar>,
-    /// The definition-driven navigation tree. The sidebar renders it; the
-    /// editor column shows what is selected.
+    /// The definition-driven navigation tree. The sidebar renders it; picking a
+    /// leaf opens its tab in the workspace.
     explorer: Entity<Explorer>,
-    /// The table editor; one instance so the Y-axis preference and cursor
-    /// survive switching between nodes.
-    table_editor: Entity<TableEditor>,
-    /// The dialog editor; one instance so the edit-in-progress survives a
-    /// core echo.
-    dialog_editor: Entity<DialogEditor>,
-    /// The live charts workspace, kept alive so its view state survives a
-    /// switch back to the tune.
-    realtime: Entity<RealtimeView>,
+    /// The dock of open documents, with the cluster and the charts pinned
+    /// first.
+    workspace: Entity<Workspace>,
+    /// The last selection the workspace was told about.
+    ///
+    /// The explorer notifies on expansion as well as selection, and a core
+    /// status change can rebuild it; only a new pick should raise a tab.
+    selection_serial: u64,
     /// The output panel; one instance so its selected category survives a
     /// hide and show.
     bottom_panel: Entity<BottomPanel>,
-    /// Which view a dialog-backed node shows: its grid or its constants.
-    tab: EditorTab,
-    /// The node the tab belongs to, so a new selection starts on the grid.
-    tab_node: Option<String>,
-    /// Keeps the selection observer alive so the editor repaints on a click.
+    /// Keeps the selection observer alive so a click opens its tab.
     _explorer: Subscription,
-}
-
-/// The two views a dialog that wraps a table offers.
-///
-/// `Tuning ▸ VE Table` is a dialog, not a table: its north panel holds the
-/// 16×16 map and its south panel holds a few options. The grid is what the
-/// reader came for, so it opens first; the constants are one click away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorTab {
-    /// The grid of the table or curve the dialog embeds.
-    Table,
-    /// The dialog's own rows.
-    Constants,
+    /// Keeps the workspace observer alive so the tree follows the front tab.
+    _workspace: Subscription,
 }
 
 impl AppLayout {
@@ -162,16 +150,35 @@ impl AppLayout {
 
         // The tree is its own entity: it observes the core, owns the gpui-kit
         // tree state and keeps the selection. The layout watches it only to
-        // repaint the editor column when the selection changes.
+        // open the picked node's tab.
         let explorer = cx.new(Explorer::new);
-        let table_editor = cx.new(TableEditor::new);
-        let dialog_editor = cx.new(DialogEditor::new);
-        let realtime = cx.new(RealtimeView::new);
+        let workspace = cx.new(|cx| Workspace::new(window, cx));
         let diagnostics = cx.new(|cx| bottom_panel::DiagnosticsView::new(window, cx));
         let bottom_panel = cx.new(|_| BottomPanel::new(diagnostics));
-        let _explorer = cx.observe(&explorer, |this, _, cx| {
-            this.sync_editors(cx);
-            cx.notify();
+        let _explorer = cx.observe(&explorer, |this, explorer, cx| {
+            let (selected, serial) = {
+                let explorer = explorer.read(cx);
+                (explorer.selected().cloned(), explorer.selection_serial())
+            };
+            if serial == this.selection_serial {
+                return;
+            }
+            this.selection_serial = serial;
+
+            let Some(node) = selected else {
+                return;
+            };
+
+            this.workspace
+                .update(cx, |workspace, cx| workspace.open_node(node, cx));
+        });
+
+        // The dock is the authority on which document is in front. Clicking a
+        // tab, or arriving at one by any other route, moves the tree there.
+        let _workspace = cx.subscribe(&workspace, |this, _, event: &ActiveDocument, cx| {
+            this.explorer.update(cx, |explorer, cx| {
+                explorer.follow_active(event.0.as_deref(), cx);
+            });
         });
 
         Self {
@@ -180,272 +187,12 @@ impl AppLayout {
             _activation,
             menu_bar,
             explorer,
-            table_editor,
-            dialog_editor,
-            realtime,
+            workspace,
+            selection_serial: 0,
             bottom_panel,
-            tab: EditorTab::Table,
-            tab_node: None,
             _explorer,
+            _workspace,
         }
-    }
-
-    /// Shows the selected node's editor. Tables and curves share the grid: a
-    /// curve resolves as a one-row table, so its bins and values edit the same
-    /// way. Dialogs get the grid they embed, with their constants behind a tab,
-    /// or the constants alone. Every other kind keeps the placeholder.
-    fn sync_editors(&mut self, cx: &mut Context<'_, Self>) {
-        let selected = self.explorer.read(cx).selected().cloned();
-        let node_id = selected.as_ref().map(|node| node.id.clone());
-        if node_id != self.tab_node {
-            self.tab_node = node_id;
-            self.tab = EditorTab::Table;
-            if cx.global::<AppState>().data().layout.work_view == WorkView::Charts {
-                set_work_view(WorkView::Tune, cx);
-            }
-        }
-
-        let (table_target, dialog_target, label) = match selected {
-            Some(node) => {
-                let open_table =
-                    node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve;
-                let dialog_has_grid = node.kind == MenuNodeKind::Dialog && node.embedded.is_some();
-                let table_target = if open_table {
-                    node.target.clone()
-                } else if dialog_has_grid && self.tab == EditorTab::Table {
-                    node.embedded.clone()
-                } else {
-                    None
-                };
-                let dialog_target = if node.kind == MenuNodeKind::Dialog
-                    && !(dialog_has_grid && self.tab == EditorTab::Table)
-                {
-                    node.target.clone()
-                } else {
-                    None
-                };
-                (
-                    table_target,
-                    dialog_target,
-                    gpui_kit::SharedString::from(node.label),
-                )
-            }
-            None => (None, None, t!("app.editor.nothing_selected")),
-        };
-
-        self.table_editor.update(cx, |editor, cx| {
-            editor.show(label.clone(), table_target.as_deref(), cx);
-        });
-        self.dialog_editor.update(cx, |editor, cx| {
-            editor.show(label, dialog_target.as_deref(), cx);
-        });
-    }
-
-    /// The editor column: the node selected in the navigation tree (or an
-    /// honest empty workspace).
-    ///
-    /// Project identity lives in the title bar and the Projects dialog; the
-    /// editor shows only the selected node, plus a read-only banner when the
-    /// workspace itself is read-only.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the editor column composes its tabs, toolbar and active editor together"
-    )]
-    fn render_editor_column(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        // The editor names what the core owns. `AppState::last_project` only
-        // remembers the path between launches.
-        let status = crate::core::CoreService::status(cx);
-
-        // The opening splash covers the workspace. Leave a blank surface
-        // underneath it rather than the empty-project call to action, which
-        // would be the wrong thing to show for the half-frame before the
-        // overlay paints.
-        if status.pending_project.is_some() {
-            return div()
-                .size_full()
-                .bg(cx.theme().background)
-                .into_any_element();
-        }
-
-        if cx.global::<AppState>().data().layout.work_view == WorkView::Charts {
-            return div()
-                .size_full()
-                .min_h_0()
-                .child(self.realtime.clone())
-                .into_any_element();
-        }
-
-        let has_definition = status.definition().is_some();
-        let has_project = status.project.is_some();
-        // Built once here rather than joined in the banner closure: the
-        // reasons are already joined in the project summary at open time, and
-        // a writable project allocates nothing at all.
-        let read_only_banner = status
-            .project
-            .as_ref()
-            .filter(|project| project.read_only)
-            .and_then(|project| project.read_only_reason.as_deref())
-            .map(|reason| {
-                div()
-                    .flex_shrink_0()
-                    .px_4()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(t!("app.editor.read_only", reason = reason))
-                    .into_any_element()
-            });
-        // `project_missing` is refreshed on window activation and project
-        // open, never by a filesystem call in this render.
-        let available = !status.project_missing;
-        let selected = self.explorer.read(cx).selected().cloned();
-        let has_selection = selected.is_some();
-        let is_table = selected.as_ref().is_some_and(|node| {
-            node.kind == MenuNodeKind::Table || node.kind == MenuNodeKind::Curve
-        });
-        let is_dialog = selected
-            .as_ref()
-            .is_some_and(|node| node.kind == MenuNodeKind::Dialog);
-        let dialog_has_grid = is_dialog
-            && selected
-                .as_ref()
-                .is_some_and(|node| node.embedded.is_some());
-        let show_table = is_table || (dialog_has_grid && self.tab == EditorTab::Table);
-        let show_dialog = is_dialog && !show_table;
-
-        let heading = if has_definition {
-            t!("app.editor.nothing_selected")
-        } else {
-            t!("app.editor.no_tune")
-        };
-        let empty_hint = if has_project && !available {
-            t!("app.editor.project_missing")
-        } else if has_definition {
-            t!("app.editor.select_hint")
-        } else {
-            t!("app.editor.empty_hint")
-        };
-
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            // A read-only tune is a property of the workspace, not of the
-            // selected node, so it stays visible above the editor body.
-            .when_some(read_only_banner, gpui_kit::ParentElement::child)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .when(dialog_has_grid, |this| this.child(self.render_tabs(cx)))
-                    .when(show_table, |this| {
-                        this.child(div().flex_1().min_h_0().child(self.table_editor.clone()))
-                    })
-                    .when(show_dialog, |this| {
-                        this.child(div().flex_1().min_h_0().child(self.dialog_editor.clone()))
-                    })
-                    .when(!show_table && !show_dialog, |this| {
-                        this.items_center()
-                            .justify_center()
-                            .gap_3()
-                            .px_6()
-                            .when_some(selected, |this, node| {
-                                this.child(
-                                    Icon::new(explorer::icon(node.kind))
-                                        .large()
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(node.label.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(explorer::summary(&node)),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(px(440.))
-                                        .text_sm()
-                                        .text_center()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(explorer::hint(node.kind)),
-                                )
-                            })
-                            .when(!has_selection, |this| {
-                                this.child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(heading),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(px(440.))
-                                        .text_sm()
-                                        .text_center()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(empty_hint),
-                                )
-                                .when(!has_definition, |this| {
-                                    this.child(
-                                        Button::new("open-project")
-                                            .label(t!("app.editor.open_project"))
-                                            .primary()
-                                            .on_click(|_, window, cx| {
-                                                project_dialog::show(window, cx);
-                                            }),
-                                    )
-                                })
-                            })
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// The grid/constants switch above a dialog that wraps a table.
-    fn render_tabs(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        h_flex()
-            .h_9()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                Button::new("editor-tab-table")
-                    .label(t!("app.editor.tab_table"))
-                    .small()
-                    .ghost()
-                    .selected(self.tab == EditorTab::Table)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Table, cx))),
-            )
-            .child(
-                Button::new("editor-tab-constants")
-                    .label(t!("app.editor.tab_constants"))
-                    .small()
-                    .ghost()
-                    .selected(self.tab == EditorTab::Constants)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(EditorTab::Constants, cx))),
-            )
-    }
-
-    /// Switches which view a dialog-backed node shows.
-    fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<'_, Self>) {
-        if self.tab == tab {
-            return;
-        }
-        self.tab = tab;
-        self.sync_editors(cx);
-        cx.notify();
     }
 
     /// The panel toggles at the trailing edge of the main bar.
@@ -458,41 +205,11 @@ impl AppLayout {
             layout.secondary_visible,
             layout.bottom_visible,
         );
-        let work_view = layout.work_view;
         let pending = crate::core::CoreService::status(cx)
             .pending_project
             .is_some();
 
         vec![
-            Button::new("show-tune")
-                .label(t!("app.view.tune"))
-                .small()
-                .ghost()
-                .selected(work_view == WorkView::Tune)
-                .disabled(pending)
-                .tooltip(tooltip("show-tune", t!("app.view.tune_tooltip")))
-                .on_click(|_, _, cx| {
-                    cx.stop_propagation();
-                    show_tune(cx);
-                })
-                .into_any_element(),
-            Button::new("show-charts")
-                .label(t!("app.view.charts"))
-                .small()
-                .ghost()
-                .selected(work_view == WorkView::Charts)
-                .disabled(pending)
-                .tooltip(tooltip("show-charts", t!("app.view.charts_tooltip")))
-                .on_click(|_, _, cx| {
-                    cx.stop_propagation();
-                    show_charts(cx);
-                })
-                .into_any_element(),
-            div()
-                .w(px(1.))
-                .h_4()
-                .bg(cx.theme().border)
-                .into_any_element(),
             Button::new("toggle-primary-sidebar")
                 .icon(if primary {
                     IconName::PanelLeftClose
@@ -557,14 +274,10 @@ impl AppLayout {
     }
 }
 
-/// The editor column while a project is being opened.
-///
-/// The shape follows the real editor — header, toolbar row, grid — so the
-/// switch to the tune does not move the frame around. Only the official
 /// The opening splash over the workspace.
 ///
 /// It sits between the title bar and the status bar, covers the sidebars, the
-/// editor and the bottom panel, and blocks mouse interaction with everything
+/// workspace and the bottom panel, and blocks mouse interaction with everything
 /// underneath. The window chrome stays visible: the title bar names the folder
 /// and the status bar says what is happening, while their controls are
 /// disabled until the open finishes.
@@ -711,7 +424,7 @@ impl Render for AppLayout {
                                                     })
                                                     .child(
                                                         resizable_panel()
-                                                            .child(self.render_editor_column(cx)),
+                                                            .child(self.workspace.clone()),
                                                     )
                                                     // The editor keeps the space it
                                                     // has when the panel opens or
@@ -821,26 +534,6 @@ pub fn toggle_bottom_panel(cx: &mut App) {
     toggle_panel(cx, |layout| {
         layout.bottom_visible = !layout.bottom_visible;
     });
-}
-
-/// Switches the editor column to the tune.
-pub fn show_tune(cx: &mut App) {
-    set_work_view(WorkView::Tune, cx);
-}
-
-/// Switches the editor column to the live charts.
-pub fn show_charts(cx: &mut App) {
-    set_work_view(WorkView::Charts, cx);
-}
-
-fn set_work_view(view: WorkView, cx: &mut App) {
-    let current = cx.global::<AppState>().data().layout.work_view;
-    if current == view {
-        return;
-    }
-    AppState::update_global(cx, |data| data.layout.work_view = view);
-    schedule_save(cx);
-    app::window::notify_main(cx);
 }
 
 /// Flips one panel's visibility, saves, and repaints.

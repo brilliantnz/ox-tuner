@@ -73,8 +73,6 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &actions::ConnectEcu, cx| core::request_connect(cx));
     cx.on_action(|_: &actions::DisconnectEcu, cx| core::disconnect(cx));
     cx.on_action(|_: &actions::SaveSessionTrace, cx| core::save_trace(cx));
-    cx.on_action(|_: &actions::ShowTune, cx| layout::show_tune(cx));
-    cx.on_action(|_: &actions::ShowCharts, cx| layout::show_charts(cx));
     cx.on_action(|_: &actions::WriteToRam, cx| {
         with_main_window(cx, layout::write_dialogs::show_write);
     });

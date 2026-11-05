@@ -291,20 +291,6 @@ pub(crate) struct LayoutState {
     /// opens a table.
     #[serde(default)]
     pub(crate) table_low_at_top: bool,
-    /// The workspace the editor column shows.
-    #[serde(default)]
-    pub(crate) work_view: WorkView,
-}
-
-/// The two workspaces the editor column can show.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum WorkView {
-    /// The definition-driven table/dialog editor.
-    #[default]
-    Tune,
-    /// The realtime charts.
-    Charts,
 }
 
 const fn default_true() -> bool {
@@ -321,7 +307,6 @@ impl Default for LayoutState {
             secondary_visible: true,
             bottom_visible: true,
             table_low_at_top: false,
-            work_view: WorkView::Tune,
         }
     }
 }
@@ -619,7 +604,6 @@ mod tests {
                 secondary_visible: false,
                 bottom_visible: false,
                 table_low_at_top: true,
-                work_view: WorkView::Charts,
             },
             last_project: Some(PathBuf::from("/projects/roadster")),
         };

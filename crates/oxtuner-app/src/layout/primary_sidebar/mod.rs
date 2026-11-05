@@ -1,18 +1,24 @@
-//! The primary sidebar: navigation.
+//! The primary sidebar: the definition's menu, as the navigation column.
 //!
 //! It starts **below** the main bar — the bar spans the whole window and carries
 //! the traffic lights, the menus and the panel toggles — so this column draws no
 //! title strip of its own. The panel toggle in the bar is the one control it
 //! needs.
 //!
-//! The navigation tree is built by [`super::explorer`] from the definition the
-//! core owns; this view only lays it out and decorates its rows. A definition
-//! that declares no `[Menu]` sections says so instead of showing an empty tree.
+//! [`explorer`] holds the menu tree and the selection, [`menu_node`] names and
+//! pictures one node, and this module lays the rows out. The three live
+//! together because the tree has no other home: a row click is a sidebar
+//! gesture, and the document it opens is the workspace's business.
 //!
-//! Project handling (current project, recent folders, choosing another folder)
-//! lives in the Projects dialog, not here: the sidebar is for navigation.
+//! A definition that declares no `[Menu]` sections says so instead of showing an
+//! empty tree. Project handling (current project, recent folders, choosing
+//! another folder) lives in the Projects dialog, not here: the sidebar is for
+//! navigation.
 
-use std::collections::HashMap;
+mod explorer;
+pub(crate) mod menu_node;
+
+use std::collections::{BTreeSet, HashMap};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
@@ -26,7 +32,7 @@ use gpui_kit::{
 };
 use oxtuner_core::{MenuNode, MenuNodeKind};
 
-use super::explorer::{self, Explorer};
+pub(crate) use self::explorer::Explorer;
 use crate::{core::CoreService, i18n::t};
 
 /// The navigation column.
@@ -83,6 +89,35 @@ impl RenderOnce for PrimarySidebar {
     }
 }
 
+/// Whether `node` or anything under it has a target that differs from the
+/// file baseline.
+///
+/// A folder has no target of its own, so it lights up when one of the documents
+/// inside it does, the way a source-control tree rolls status up.
+fn touched(node: &MenuNode, dirty: &BTreeSet<String>) -> bool {
+    if node.children.is_empty() {
+        return node
+            .target
+            .as_deref()
+            .is_some_and(|target| dirty.contains(target))
+            || node
+                .embedded
+                .as_deref()
+                .is_some_and(|target| dirty.contains(target));
+    }
+
+    node.children.iter().any(|child| touched(child, dirty))
+}
+
+/// The unsaved mark on a navigation row.
+fn unsaved_dot(cx: &App) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .size(px(7.))
+        .rounded_full()
+        .bg(cx.theme().warning)
+}
+
 fn section_label(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     div()
         .px_3()
@@ -133,11 +168,17 @@ fn tree_row(
             IconName::ChevronRight
         }
     } else {
-        node.map_or(IconName::File, |node| explorer::icon(node.kind))
+        node.map_or(IconName::File, |node| menu_node::icon(node.kind))
     };
     let missing = node.is_some_and(|node| node.kind == MenuNodeKind::Missing);
-    let detail = node.and_then(explorer::detail_label);
+    let touched = node.is_some_and(|node| touched(node, CoreService::dirty(cx)));
     let muted = cx.theme().muted_foreground;
+    // A folder's icon is its disclosure state, not a kind, so only leaves take
+    // the kind's colour.
+    let icon_color = match node {
+        Some(node) if !is_folder => menu_node::icon_color(node.kind, cx),
+        _ => muted,
+    };
 
     let row_id: ElementId = SharedString::from(format!("tree-row-{}", entry.item().id)).into();
     let mut surface = h_flex()
@@ -163,7 +204,7 @@ fn tree_row(
                     .text_color(cx.theme().sidebar_accent_foreground)
             })
         })
-        .child(Icon::new(icon).small().text_color(muted))
+        .child(Icon::new(icon).small().text_color(icon_color))
         .child(
             div()
                 .flex_1()
@@ -173,15 +214,7 @@ fn tree_row(
                 .when(missing, |this| this.text_color(muted))
                 .child(entry.item().label.clone()),
         )
-        .when_some(detail, |this, detail| {
-            this.child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(detail),
-            )
-        });
+        .when(touched, |this| this.child(unsaved_dot(cx)));
 
     if is_folder {
         let explorer = explorer.clone();
@@ -269,6 +302,9 @@ mod tests {
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Explorer>) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
+            // Rows read the core's unsaved set; a view test needs the global.
+            crate::core::CoreService::install_without_core(cx);
+
             let explorer = cx.new(|cx| Explorer::for_test(menu(), cx));
             let host = cx.new(|_| Host {
                 explorer: explorer.clone(),
@@ -298,6 +334,48 @@ mod tests {
                 .entry(0)
                 .is_some_and(TreeEntry::is_expanded)
         })
+    }
+
+    #[test]
+    fn a_folder_is_touched_through_its_documents() {
+        let table = MenuNode {
+            id: "menu:0/0".to_owned(),
+            label: "VE Table".to_owned(),
+            kind: MenuNodeKind::Table,
+            detail: None,
+            target: Some("veTableTbl".to_owned()),
+            embedded: None,
+            children: Vec::new(),
+        };
+        let folder = MenuNode {
+            id: "menu:0".to_owned(),
+            label: "Tuning".to_owned(),
+            kind: MenuNodeKind::Menu,
+            detail: None,
+            target: None,
+            embedded: None,
+            children: vec![table.clone()],
+        };
+        let dialog = MenuNode {
+            id: "menu:0/1".to_owned(),
+            label: "Idle".to_owned(),
+            kind: MenuNodeKind::Dialog,
+            detail: None,
+            target: Some("idleDialog".to_owned()),
+            embedded: Some("veTableTbl".to_owned()),
+            children: Vec::new(),
+        };
+
+        let mut dirty = BTreeSet::new();
+        dirty.insert("veTableTbl".to_owned());
+
+        assert!(touched(&table, &dirty), "the table itself is marked");
+        assert!(touched(&dialog, &dirty), "a wrapped table counts too");
+        assert!(
+            touched(&folder, &dirty),
+            "a folder lights up through its documents"
+        );
+        assert!(!touched(&dialog, &BTreeSet::new()));
     }
 
     #[gpui_kit::test]
