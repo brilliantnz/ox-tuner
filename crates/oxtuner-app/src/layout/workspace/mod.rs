@@ -377,6 +377,12 @@ impl Workspace {
     /// the tab stays and the reader can retry. New failures are compared by
     /// serial rather than code, because a save can be refused with more than
     /// `TuneSaveFailed` and the failure on screen may predate this request.
+    ///
+    /// A failure from a command unrelated to the save therefore cancels the
+    /// close too. The tab stays open: if its save then lands it is clean and
+    /// closes without a prompt, and if the save failed the edits are still
+    /// there to retry. That is the safe direction, because an unanswered save
+    /// is never assumed to have landed.
     fn finish_pending_closes(&mut self, cx: &mut Context<'_, Self>) {
         if self.pending_closes.is_empty() {
             return;
