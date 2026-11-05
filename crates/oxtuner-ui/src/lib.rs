@@ -14,7 +14,7 @@
 //! it into paint calls.
 //!
 //! [`dock`] and [`tabs`] are the dock skin and the tab bar, taken from
-//! gpui-component (Apache-2.0, see `LICENSE-Apache-2.0` beside this crate) so
+//! gpui-component (Apache-2.0, see `LICENSE-APACHE` beside this crate) so
 //! the workspace owns its chrome: the tab shape, the tab strip, the panel
 //! frames, the drag preview and the drop targets. The dock's behavior — the
 //! layout tree, splits, drag geometry and persistence — stays in
