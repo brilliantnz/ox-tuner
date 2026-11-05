@@ -54,6 +54,10 @@ pub(crate) struct DialogEditor {
     cache: HashMap<String, DialogSummary>,
     /// The project the cache belongs to, so another folder starts clean.
     project_root: Option<PathBuf>,
+    /// The definition revision the open rows were read under. A project switch
+    /// or a reloaded definition invalidates the values on screen, not only the
+    /// cache behind them.
+    definition_revision: u64,
     /// The tune revision the cache was filled at. An edit or a save elsewhere
     /// can move a value another dialog shows, so the cache drops then too.
     cache_revision: u64,
@@ -72,6 +76,13 @@ impl DialogEditor {
     )]
     pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
         let _core = cx.observe_global::<CoreService>(DialogEditor::sync);
+        let (project_root, definition_revision) = {
+            let status = CoreService::status(cx);
+            (
+                status.project.as_ref().map(|project| project.root.clone()),
+                status.definition_revision,
+            )
+        };
         Self {
             focus: cx.focus_handle(),
             label: SharedString::default(),
@@ -80,7 +91,8 @@ impl DialogEditor {
             last_save: None,
             failure: None,
             cache: HashMap::new(),
-            project_root: None,
+            project_root,
+            definition_revision,
             cache_revision: 0,
             editing: None,
             pending: HashMap::new(),
@@ -128,6 +140,26 @@ impl DialogEditor {
         cx.notify();
     }
 
+    /// Drops the rows a different project or definition invalidates.
+    ///
+    /// The tab keeps its target name: the definition may still declare it, in
+    /// which case the next read draws the new tune's values. A target the new
+    /// definition does not declare comes back as a failure, which is the honest
+    /// answer for a document that no longer exists.
+    fn reload(&mut self, cx: &mut Context<'_, Self>) {
+        self.cache.clear();
+        self.failure = None;
+        self.dialog = None;
+        self.editing = None;
+        self.pending.clear();
+
+        let Some(name) = self.requested.clone() else {
+            return;
+        };
+
+        crate::core::read_dialog(&name, cx);
+    }
+
     /// Follows core events: a new snapshot, a failure, or a save that makes the
     /// changed marks stale.
     fn sync(&mut self, cx: &mut Context<'_, Self>) {
@@ -140,13 +172,25 @@ impl DialogEditor {
         let mut dialog_matches = false;
 
         // A different project invalidates every snapshot: the values and the
-        // changed marks belong to the folder that produced them. An edit or a
-        // save moves the tune itself, so cached rows elsewhere are stale too.
-        let status = CoreService::status(cx);
-        let root = status.project.as_ref().map(|project| project.root.clone());
-        let revision = status.tune_revision;
-        if root != self.project_root || revision != self.cache_revision {
+        // changed marks belong to the folder that produced them. The rows on
+        // screen are part of that snapshot, so they are cleared and read again
+        // rather than left showing the previous tune. An edit or a save moves
+        // the tune itself, so cached rows elsewhere are stale too.
+        let (root, revision, definition_revision) = {
+            let status = CoreService::status(cx);
+            (
+                status.project.as_ref().map(|project| project.root.clone()),
+                status.tune_revision,
+                status.definition_revision,
+            )
+        };
+
+        if root != self.project_root || definition_revision != self.definition_revision {
             self.project_root = root;
+            self.definition_revision = definition_revision;
+            self.cache_revision = revision;
+            self.reload(cx);
+        } else if revision != self.cache_revision {
             self.cache_revision = revision;
             self.cache.clear();
         }

@@ -34,7 +34,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::MenuNode;
+use oxtuner_core::{FailureCode, MenuNode, SaveSummary};
 use oxtuner_ui::dock::{
     BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
     PanelId, PanelStyle, panel_handle,
@@ -80,6 +80,9 @@ pub(crate) struct Workspace {
     /// behind each tab and the subscription that follows it, and it is pruned
     /// when the dock reports a close.
     editors: Vec<OpenDocument>,
+    /// A tab that closes when its save lands. Saving is a core command, so the
+    /// answer arrives later; a refused save keeps the tab and its edits.
+    pending_close: Option<PendingClose>,
     /// Keeps the core observer alive so a project or definition change repaints
     /// the tab strip.
     _core: Subscription,
@@ -94,6 +97,14 @@ struct OpenDocument {
     panel: Entity<EditorPanel>,
     /// Kept alive so the workspace hears when this tab takes the front.
     _active: Subscription,
+}
+
+/// A tab whose Save was answered.
+struct PendingClose {
+    panel: PanelId,
+    /// The save already seen when the button was clicked. A different
+    /// [`CoreService`] save means this one finished.
+    saved: Option<SaveSummary>,
 }
 
 impl EventEmitter<ActiveDocument> for Workspace {}
@@ -150,6 +161,7 @@ impl Workspace {
         // The dock is a child entity, so the tab strip needs its own nudge to
         // pick up a modified flag that moved.
         let core = cx.observe_global::<CoreService>(|this, cx| {
+            this.finish_pending_close(cx);
             this.area.update(cx, |_, cx| cx.notify());
             cx.notify();
         });
@@ -174,6 +186,7 @@ impl Workspace {
             cluster,
             realtime,
             editors: Vec::new(),
+            pending_close: None,
             _core: core,
             _layout: layout,
             _pinned: vec![cluster_active, realtime_active],
@@ -240,6 +253,7 @@ impl Workspace {
             let save = workspace.clone();
             let discard = workspace.clone();
             let target = target.clone();
+            let has_target = target.is_some();
 
             dialog
                 .title(t!("app.close_unsaved.title"))
@@ -271,10 +285,22 @@ impl Workspace {
                                 .on_click(move |_, window, cx| {
                                     crate::core::save_tune(cx);
                                     window.close_dialog(cx);
-                                    save.update(cx, |workspace, cx| {
-                                        workspace.close_panel(panel, window, cx);
-                                    })
-                                    .ok();
+
+                                    // The tab waits for the core's answer, so a
+                                    // refused save leaves it open to retry.
+                                    if has_target {
+                                        let saved = CoreService::status(cx).last_save.clone();
+                                        save.update(cx, |workspace, _| {
+                                            workspace.pending_close =
+                                                Some(PendingClose { panel, saved });
+                                        })
+                                        .ok();
+                                    } else {
+                                        save.update(cx, |workspace, cx| {
+                                            workspace.close_panel(panel, window, cx);
+                                        })
+                                        .ok();
+                                    }
                                 }),
                         )
                         .child(
@@ -283,9 +309,11 @@ impl Workspace {
                                 .secondary()
                                 .w_full()
                                 .on_click(move |_, window, cx| {
-                                    match &target {
-                                        Some(target) => crate::core::revert_target(target, cx),
-                                        None => crate::core::revert_tune(cx),
+                                    // A modified tab always has a target; when
+                                    // it does not, closing discards nothing
+                                    // rather than reverting the whole tune.
+                                    if let Some(target) = target.as_deref() {
+                                        crate::core::revert_target(target, cx);
                                     }
                                     window.close_dialog(cx);
                                     discard
@@ -325,6 +353,56 @@ impl Workspace {
         let area = self.area.clone();
 
         area.update(cx, |area, cx| area.remove_panel(document, window, cx));
+    }
+
+    /// Closes a tab whose save finished, or drops the request when it failed.
+    ///
+    /// The save is a core command, so the button cannot close the tab itself:
+    /// a new `last_save` means the write landed and the tab may go; a
+    /// `TuneSaveFailed` means the edits are still unsaved, so the tab stays and
+    /// the reader can retry.
+    fn finish_pending_close(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(pending) = self.pending_close.take() else {
+            return;
+        };
+
+        let saved = {
+            let status = CoreService::status(cx);
+            if status.last_save.as_ref() == pending.saved.as_ref() {
+                let failed = status
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.code == FailureCode::TuneSaveFailed);
+                if !failed {
+                    self.pending_close = Some(pending);
+                    return;
+                }
+
+                false
+            } else {
+                true
+            }
+        };
+
+        if !saved {
+            return;
+        }
+
+        let Some(document) = self
+            .editors
+            .iter()
+            .find(|document| PanelId::from(document.panel.entity_id()) == pending.panel)
+            .map(|document| document.panel.clone())
+        else {
+            return;
+        };
+
+        let area = self.area.clone();
+        let window = self.window;
+
+        let _ = window.update(cx, |_, window, cx| {
+            area.update(cx, |area, cx| area.remove_panel(document, window, cx));
+        });
     }
 
     /// Reports the document behind `panel` as the one in front.

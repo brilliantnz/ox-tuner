@@ -288,6 +288,20 @@ impl CoreService {
             .insert(target.to_owned());
     }
 
+    /// Installs a table snapshot, for editor tests.
+    pub(crate) fn show_table(cx: &mut App, table: TableSummary) {
+        cx.global_mut::<Self>().status.table = Some(table);
+    }
+
+    /// Moves to another definition and drops the open snapshot, the way a
+    /// project switch does, for editor tests.
+    pub(crate) fn next_definition(cx: &mut App) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.definition_revision = status.definition_revision.wrapping_add(1);
+        status.table = None;
+        status.dialog = None;
+    }
+
     /// Installs a service with no core behind it, for view tests.
     ///
     /// A view reads the status and the newest frame on every render, so a test
@@ -1104,7 +1118,6 @@ pub(crate) fn burn_to_flash(cx: &mut App) {
     }
 }
 
-/// Discards local edits after the core snapshots the working image.
 /// Discards the unsaved cells one document owns.
 pub(crate) fn revert_target(target: &str, cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
@@ -1116,6 +1129,7 @@ pub(crate) fn revert_target(target: &str, cx: &mut App) {
     }
 }
 
+/// Discards local edits after the core snapshots the working image.
 pub(crate) fn revert_tune(cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
         return;

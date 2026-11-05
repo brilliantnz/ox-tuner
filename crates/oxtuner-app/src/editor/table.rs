@@ -47,6 +47,10 @@ pub(crate) struct TableEditor {
     cache: HashMap<String, TableSummary>,
     /// The project the cache belongs to, so another folder starts clean.
     project_root: Option<PathBuf>,
+    /// The definition revision the open grid was read under. A project switch
+    /// or a reloaded definition invalidates the numbers on screen, not only
+    /// the cache behind them.
+    definition_revision: u64,
     /// The tune revision the cache was filled at. An edit or a save elsewhere
     /// can move a value another dialog shows, so the cache drops then too.
     cache_revision: u64,
@@ -77,6 +81,13 @@ impl TableEditor {
             .try_global::<AppState>()
             .is_some_and(|state| state.data().layout.table_low_at_top);
         let header_wash = AppSettings::table_header_wash_for_ranges(cx);
+        let (project_root, definition_revision) = {
+            let status = CoreService::status(cx);
+            (
+                status.project.as_ref().map(|project| project.root.clone()),
+                status.definition_revision,
+            )
+        };
 
         let editor = Self {
             table,
@@ -86,7 +97,8 @@ impl TableEditor {
             last_save: None,
             failure: None,
             cache: HashMap::new(),
-            project_root: None,
+            project_root,
+            definition_revision,
             cache_revision: 0,
             flip_y,
             _core,
@@ -154,6 +166,25 @@ impl TableEditor {
         cx.notify();
     }
 
+    /// Drops the grid a different project or definition invalidates.
+    ///
+    /// The tab keeps its target name: the definition may still declare it, in
+    /// which case the next read draws the new tune's values. A target the new
+    /// definition does not declare comes back as a failure, which is the honest
+    /// answer for a document that no longer exists.
+    fn reload(&mut self, cx: &mut Context<'_, Self>) {
+        self.cache.clear();
+        self.failure = None;
+        self.table.update(cx, Table::clear_table);
+        self.clear_curve(cx);
+
+        let Some(name) = self.requested.clone() else {
+            return;
+        };
+
+        read_table(&name, cx);
+    }
+
     /// Follows core events: a new snapshot, a failure, or a save that makes the
     /// changed marks stale.
     fn sync(&mut self, cx: &mut Context<'_, Self>) {
@@ -166,13 +197,25 @@ impl TableEditor {
         let mut table_matches = false;
 
         // A different project invalidates every snapshot: the values and the
-        // changed marks belong to the folder that produced them. An edit or a
-        // save moves the tune itself, so cached rows elsewhere are stale too.
-        let status = CoreService::status(cx);
-        let root = status.project.as_ref().map(|project| project.root.clone());
-        let revision = status.tune_revision;
-        if root != self.project_root || revision != self.cache_revision {
+        // changed marks belong to the folder that produced them. The grid on
+        // screen is part of that snapshot, so it is cleared and read again
+        // rather than left showing the previous tune. An edit or a save moves
+        // the tune itself, so cached rows elsewhere are stale too.
+        let (root, revision, definition_revision) = {
+            let status = CoreService::status(cx);
+            (
+                status.project.as_ref().map(|project| project.root.clone()),
+                status.tune_revision,
+                status.definition_revision,
+            )
+        };
+
+        if root != self.project_root || definition_revision != self.definition_revision {
             self.project_root = root;
+            self.definition_revision = definition_revision;
+            self.cache_revision = revision;
+            self.reload(cx);
+        } else if revision != self.cache_revision {
             self.cache_revision = revision;
             self.cache.clear();
         }
@@ -921,4 +964,91 @@ fn rebin_item(
 
 fn format_value(value: f64, digits: u8) -> String {
     format!("{value:.digits$}", digits = usize::from(digits))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::TestAppContext;
+    use oxtuner_core::{AxisSummary, CellState, TableSummary};
+
+    use super::*;
+
+    fn summary() -> TableSummary {
+        TableSummary {
+            id: "veTableTbl".to_owned(),
+            name: "veTable".to_owned(),
+            title: "VE Table".to_owned(),
+            cols: 2,
+            rows: 2,
+            digits: 0,
+            units: "%".to_owned(),
+            cells: vec![10.0, 20.0, 30.0, 40.0],
+            states: vec![CellState::Unknown; 4],
+            changed: vec![false; 4],
+            x_axis: AxisSummary {
+                name: "rpmBins".to_owned(),
+                label: "RPM".to_owned(),
+                units: "rpm".to_owned(),
+                channel: None,
+                digits: 0,
+                minimum: Some(0.0),
+                maximum: Some(10_000.0),
+                values: vec![1000.0, 2000.0],
+            },
+            y_axis: AxisSummary {
+                name: "mapBins".to_owned(),
+                label: "MAP".to_owned(),
+                units: "kPa".to_owned(),
+                channel: None,
+                digits: 0,
+                minimum: Some(0.0),
+                maximum: Some(255.0),
+                values: vec![50.0, 100.0],
+            },
+            minimum: 10.0,
+            maximum: 40.0,
+            cell_minimum: Some(0.0),
+            cell_maximum: Some(255.0),
+            writable: true,
+            curve: None,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_new_definition_drops_the_previous_grid(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+            CoreService::show_table(cx, summary());
+        });
+
+        let editor = cx.update(|cx| cx.new(TableEditor::new));
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.show(SharedString::from("VE Table"), Some("veTableTbl"), cx);
+            });
+        });
+
+        assert_eq!(
+            cx.update(|cx| {
+                editor
+                    .read(cx)
+                    .table
+                    .read(cx)
+                    .model()
+                    .table()
+                    .map(|table| table.cells.clone())
+            }),
+            Some(vec![10.0, 20.0, 30.0, 40.0]),
+            "the grid starts on the snapshot it was opened with"
+        );
+
+        cx.update(CoreService::next_definition);
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|cx| editor.read(cx).table.read(cx).model().table().is_none()),
+            "another definition must not leave the previous tune on screen"
+        );
+    }
 }
