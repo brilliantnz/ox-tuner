@@ -19,11 +19,12 @@ mod explorer;
 pub(crate) mod menu_node;
 
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::tree::{TreeEntry, tree};
+use gpui_kit::component::tree::{TreeEntry, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -68,7 +69,6 @@ impl RenderOnce for PrimarySidebar {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_2()
                     .pt_1()
                     .when(!has_definition && pending, |this| {
                         this.child(empty_state(t!("app.editor.opening_project"), cx))
@@ -80,13 +80,29 @@ impl RenderOnce for PrimarySidebar {
                         this.child(empty_state(t!("app.primary_sidebar.no_menu"), cx))
                     })
                     .when(has_menu, |this| {
-                        let explorer = self.explorer.clone();
-                        this.child(tree(&state, move |_ix, entry, selected, _window, cx| {
-                            tree_row(entry, selected, &nodes, &explorer, cx)
-                        }))
+                        this.child(navigation_tree(&state, nodes, self.explorer.clone()))
                     }),
             )
     }
+}
+
+/// The scrolling tree, spanning the column so its scrollbar sits at the edge.
+///
+/// The rows carry their own horizontal inset. Padding here would inset the
+/// scrollbar too, because the component paints it inside the scroll area's
+/// bounds, which is the difference between this and the editor's scrollbars.
+fn navigation_tree(
+    state: &Entity<TreeState>,
+    nodes: Rc<HashMap<String, MenuNode>>,
+    explorer: Entity<Explorer>,
+) -> impl IntoElement {
+    div()
+        .debug_selector(|| "primary-sidebar-tree-area".to_string())
+        .size_full()
+        .min_h_0()
+        .child(tree(state, move |_ix, entry, selected, _window, cx| {
+            tree_row(entry, selected, &nodes, &explorer, cx)
+        }))
 }
 
 /// Whether `node` or anything under it has a target that differs from the
@@ -239,8 +255,8 @@ fn tree_row(
         .child(
             div()
                 .w_full()
-                .pl(px(entry.depth() as f32 * 14.0))
-                .pr_1()
+                .pl(px(8.0 + entry.depth() as f32 * 14.0))
+                .pr_3()
                 .child(surface),
         )
 }
@@ -429,6 +445,83 @@ mod tests {
             selected.map(|node| node.label),
             Some("VE Table".to_owned()),
             "collapsing the parent must not close the table"
+        );
+    }
+
+    struct TreeAreaHost {
+        explorer: Entity<Explorer>,
+    }
+
+    impl Render for TreeAreaHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            let explorer = self.explorer.read(cx);
+            let state = explorer.tree().clone();
+            let nodes = explorer.nodes();
+            // Mirrors the sidebar's parent: a plain block container with a
+            // definite height, not a flex column.
+            div()
+                .size_full()
+                .child(navigation_tree(&state, nodes, self.explorer.clone()))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_scroll_area_reaches_the_column_edge(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let leaves: Vec<MenuNode> = (0..40)
+            .map(|ix| MenuNode {
+                id: format!("menu:0/{ix}"),
+                label: format!("Table {ix}"),
+                kind: MenuNodeKind::Table,
+                detail: None,
+                target: Some(format!("table{ix}")),
+                embedded: None,
+                children: Vec::new(),
+            })
+            .collect();
+
+        let (handle, _) = cx.update(|cx| {
+            crate::core::CoreService::install_without_core(cx);
+            let explorer = cx.new(|cx| Explorer::for_test(leaves, cx));
+            let host = cx.new(|_| TreeAreaHost { explorer });
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(320.), px(400.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                move |_, _| host,
+            )
+            .expect("open test window")
+        });
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+        let area = visual
+            .debug_bounds("primary-sidebar-tree-area")
+            .expect("the tree area is drawn");
+        let bar = visual
+            .debug_bounds("scrollbar-overlay")
+            .expect("the tree draws its scrollbar layer");
+
+        assert!(
+            (area.right().as_f32() - 320.0).abs() < 1.0,
+            "the tree must span the column, scrollbar included: {}",
+            area.right().as_f32()
+        );
+        assert!(
+            (area.bottom().as_f32() - 400.0).abs() < 1.0,
+            "the tree must fill the column's height: {}",
+            area.bottom().as_f32()
+        );
+        assert!(
+            (bar.right().as_f32() - area.right().as_f32()).abs() < 1.0,
+            "the scrollbar layer must sit at the tree's right edge"
         );
     }
 }
