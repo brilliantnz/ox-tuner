@@ -465,6 +465,11 @@ mod tests {
         }
     }
 
+    /// The selector gpui-component puts on a scroll area's bar layer
+    /// (`render_scrollbar`). The bar is the only way to measure its edge
+    /// without owning the scroll area, so a rename shows up here first.
+    const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
+
     #[gpui_kit::test]
     fn the_scroll_area_reaches_the_column_edge(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -505,9 +510,10 @@ mod tests {
         let area = visual
             .debug_bounds("primary-sidebar-tree-area")
             .expect("the tree area is drawn");
-        let bar = visual
-            .debug_bounds("scrollbar-overlay")
-            .expect("the tree draws its scrollbar layer");
+        let bar = visual.debug_bounds(SCROLLBAR_LAYER).expect(
+            "the tree draws its scrollbar layer; if gpui-kit renamed that layer, \
+                 update SCROLLBAR_LAYER and the tree finding",
+        );
 
         assert!(
             (area.right().as_f32() - 320.0).abs() < 1.0,
