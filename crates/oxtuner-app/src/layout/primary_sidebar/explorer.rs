@@ -1,4 +1,4 @@
-//! The definition-driven navigation tree in the primary sidebar.
+//! The definition-driven menu tree behind the primary sidebar.
 //!
 //! The core publishes the menu tree with every definition ([`MenuNode`]); this
 //! entity turns it into gpui-kit's [`TreeState`] and keeps the selection. It
@@ -15,12 +15,11 @@ use std::{
     rc::Rc,
 };
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState};
 use gpui_kit::{App, AppContext as _, Context, Entity, SharedString, Subscription};
-use oxtuner_core::{MenuDetail, MenuNode, MenuNodeKind};
+use oxtuner_core::MenuNode;
 
-use crate::{core::CoreService, i18n::t};
+use crate::core::CoreService;
 
 /// The navigation tree and what the user picked in it.
 pub(crate) struct Explorer {
@@ -38,6 +37,12 @@ pub(crate) struct Explorer {
     /// The selected node, cloned so the editor can render it without holding a
     /// borrow on this entity.
     selected: Option<MenuNode>,
+    /// Bumped every time the user picks a leaf.
+    ///
+    /// The tree notifies for expansion and for a menu rebuild too, and the
+    /// workspace should raise a tab only on a real pick. A repeated click on the
+    /// same leaf still counts: it is a request to show that tab.
+    selection_serial: u64,
     /// Keeps the core observer alive.
     _core: Option<Subscription>,
     /// Keeps the selection observer alive.
@@ -73,6 +78,7 @@ impl Explorer {
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
+            selection_serial: 0,
             _core: Some(core),
             _selection: selection,
             _expansion: expansion,
@@ -95,6 +101,7 @@ impl Explorer {
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
+            selection_serial: 0,
             _core: None,
             _selection: selection,
             _expansion: expansion,
@@ -116,6 +123,14 @@ impl Explorer {
         self.selected.as_ref()
     }
 
+    /// How many times the user has picked a leaf.
+    ///
+    /// The workspace compares this to the value it last acted on, so a repaint
+    /// caused by expansion or a menu rebuild does not steal the front tab.
+    pub(crate) fn selection_serial(&self) -> u64 {
+        self.selection_serial
+    }
+
     /// Whether the definition declares any menus at all.
     pub(crate) fn has_menu(&self) -> bool {
         !self.menu.is_empty()
@@ -123,6 +138,10 @@ impl Explorer {
 
     /// Rebuilds the tree when the core publishes a different menu.
     fn sync(&mut self, cx: &mut Context<'_, Self>) {
+        // Rows paint unsaved marks from the core's dirty set, which moves
+        // without the menu changing, so every status change repaints the tree.
+        cx.notify();
+
         // Every core status change notifies this observer. The revision is the
         // cheap gate: cloning the menu to compare it on a table read or a save
         // was work with no possible outcome.
@@ -181,11 +200,93 @@ impl Explorer {
         }
 
         self.selected = Some(node);
+        self.selection_serial = self.selection_serial.wrapping_add(1);
         let id = SharedString::from(id.to_owned());
         let index = self.tree.read(cx).index_of(&id);
         self.tree
             .update(cx, |tree, cx| tree.set_selected_index(index, cx));
         cx.notify();
+    }
+
+    /// Points the highlight at the document the workspace put in front.
+    ///
+    /// This is the reverse of a click: the dock decides which tab is showing,
+    /// and the tree follows. It bumps no selection serial, because nobody
+    /// picked a row: the tab was already raised, and opening it again would
+    /// only ask the dock to show what it is already showing.
+    pub(crate) fn follow_active(&mut self, id: Option<&str>, cx: &mut Context<'_, Self>) {
+        let node = id.and_then(|id| self.nodes.get(id)).cloned();
+
+        // A tab can outlive the definition it was opened from. Its node is not
+        // in this menu, so there is nothing to point at and the last highlight
+        // stays as it is.
+        if id.is_some() && node.is_none() {
+            return;
+        }
+
+        if node.as_ref().is_some_and(|node| !node.children.is_empty()) {
+            return;
+        }
+
+        if node.is_none() && self.selected.is_none() {
+            return;
+        }
+
+        let unchanged = node == self.selected;
+        self.selected = node;
+
+        let mut index = self.selected.as_ref().and_then(|node| {
+            let id = SharedString::from(node.id.clone());
+            self.tree.read(cx).index_of(&id)
+        });
+        // A click inside the document already in front repeats what the tree
+        // says; only a highlight the reader cannot see needs work.
+        if unchanged && index.is_some() {
+            return;
+        }
+
+        // A document inside a closed folder has no row to highlight. Open the
+        // folders that hold it, so the tree shows the document the tab shows.
+        if index.is_none() {
+            let active = self.selected.as_ref().map(|node| node.id.clone());
+            if let Some(id) = active {
+                index = self.reveal_folders(&id, cx);
+            }
+        }
+
+        self.tree
+            .update(cx, |tree, cx| tree.set_selected_index(index, cx));
+        cx.notify();
+    }
+
+    /// Rebuilds the tree with the folders that hold `id` open.
+    ///
+    /// Returns the row index of `id` once the rebuild is done, or `None` when
+    /// the node is not in the menu at all.
+    fn reveal_folders(&mut self, id: &str, cx: &mut Context<'_, Self>) -> Option<usize> {
+        let mut path = Vec::new();
+        if !find_path(&self.menu, id, &mut path) {
+            return None;
+        }
+
+        // The last entry is the node itself; only its parents are folders.
+        path.pop();
+        let closed: Vec<String> = path
+            .into_iter()
+            .filter(|folder| !self.expanded.contains(folder))
+            .collect();
+        if closed.is_empty() {
+            return None;
+        }
+
+        self.expanded.extend(closed);
+
+        let (items, nodes) = build(&self.menu, &self.expanded);
+        self.nodes = Rc::new(nodes);
+        self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+
+        let selected = SharedString::from(id.to_owned());
+        self.tree.read(cx).index_of(&selected)
     }
 
     /// Mirrors keyboard expansion from the tree into [`Self::expanded`].
@@ -228,6 +329,21 @@ impl Explorer {
         self.selected = selected;
         cx.notify();
     }
+}
+
+/// The ids from the root to `id`, or `false` when the menu does not hold it.
+fn find_path(menu: &[MenuNode], id: &str, path: &mut Vec<String>) -> bool {
+    for node in menu {
+        path.push(node.id.clone());
+
+        if node.id == id || find_path(&node.children, id, path) {
+            return true;
+        }
+
+        path.pop();
+    }
+
+    false
 }
 
 /// The menu the core currently publishes.
@@ -278,84 +394,12 @@ fn tree_item(
     }
 }
 
-/// The kind word shown next to a node.
-pub(crate) fn kind_label(kind: MenuNodeKind) -> SharedString {
-    match kind {
-        MenuNodeKind::Menu => t!("app.explorer.kind_menu"),
-        MenuNodeKind::Group => t!("app.explorer.kind_group"),
-        MenuNodeKind::Table => t!("app.explorer.kind_table"),
-        MenuNodeKind::Curve => t!("app.explorer.kind_curve"),
-        MenuNodeKind::Dialog => t!("app.explorer.kind_dialog"),
-        MenuNodeKind::Help => t!("app.explorer.kind_help"),
-        MenuNodeKind::Standard => t!("app.explorer.kind_standard"),
-        MenuNodeKind::Missing => t!("app.explorer.kind_missing"),
-    }
-}
-
-/// The size or child count shown at the trailing edge of a row.
-pub(crate) fn detail_label(node: &MenuNode) -> Option<SharedString> {
-    if let Some(detail) = node.detail {
-        return Some(match detail {
-            MenuDetail::Table { cols, rows } => {
-                t!("app.explorer.detail_table", cols = cols, rows = rows)
-            }
-            MenuDetail::Curve { points } => t!("app.explorer.detail_curve", points = points),
-            MenuDetail::Dialog { rows } => t!("app.explorer.detail_dialog", rows = rows),
-        });
-    }
-
-    (!node.children.is_empty()).then(|| {
-        let count = node.children.len();
-        if count == 1 {
-            t!("app.explorer.one_item")
-        } else {
-            t!("app.explorer.items", count = count)
-        }
-    })
-}
-
-/// `Table · 16 × 16`, or just the kind when the definition gives no size.
-pub(crate) fn summary(node: &MenuNode) -> SharedString {
-    match detail_label(node) {
-        Some(detail) => format!("{} · {detail}", kind_label(node.kind)).into(),
-        None => kind_label(node.kind),
-    }
-}
-
-/// The line under a selected node, saying what can happen next.
-pub(crate) fn hint(kind: MenuNodeKind) -> SharedString {
-    match kind {
-        MenuNodeKind::Menu | MenuNodeKind::Group => t!("app.editor.folder_hint"),
-        MenuNodeKind::Missing => t!("app.editor.missing_hint"),
-        MenuNodeKind::Table | MenuNodeKind::Curve | MenuNodeKind::Dialog => {
-            t!("app.editor.unbuilt_hint")
-        }
-        MenuNodeKind::Standard => t!("app.editor.standard_hint"),
-        MenuNodeKind::Help => t!("app.editor.help_hint"),
-    }
-}
-
-/// The icon for a node that is not drawn as an open/closed folder.
-///
-/// Only names in gpui-kit's default bundle are used: `Assets` embeds that
-/// subset, and a name outside it fails to load at render time.
-pub(crate) fn icon(kind: MenuNodeKind) -> IconName {
-    match kind {
-        // A menu is a folder in the tree; the editor header shows the same.
-        MenuNodeKind::Menu | MenuNodeKind::Group => IconName::Folder,
-        MenuNodeKind::Table => IconName::Table,
-        MenuNodeKind::Curve => IconName::ChartLine,
-        MenuNodeKind::Dialog => IconName::Frame,
-        MenuNodeKind::Help => IconName::BookOpenText,
-        MenuNodeKind::Standard => IconName::Settings2,
-        MenuNodeKind::Missing => IconName::TriangleAlert,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use gpui_kit::TestAppContext;
     use oxtuner_core::MenuNodeKind;
+
+    use super::*;
 
     fn node(id: &str, label: &str, children: Vec<MenuNode>) -> MenuNode {
         MenuNode {
@@ -415,5 +459,83 @@ mod tests {
         let expanded = HashSet::from(["menu:0".to_owned()]);
         let (items, _) = build(&menu, &expanded);
         assert!(items[0].is_expanded());
+    }
+
+    #[gpui_kit::test]
+    fn the_highlight_follows_the_document_in_front(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let explorer = cx.update(|cx| {
+            cx.new(|cx| {
+                Explorer::for_test(
+                    vec![node(
+                        "menu:0",
+                        "Tuning",
+                        vec![node("menu:0/0", "VE Table", Vec::new())],
+                    )],
+                    cx,
+                )
+            })
+        });
+
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| {
+                explorer.follow_active(Some("menu:0/0"), cx);
+            });
+        });
+
+        let selected = cx.update(|cx| explorer.read(cx).selected().cloned());
+        assert_eq!(selected.map(|node| node.label), Some("VE Table".to_owned()));
+        assert_eq!(
+            cx.update(|cx| explorer.read(cx).selection_serial()),
+            0,
+            "the dock moved the highlight, so no reader pick happened"
+        );
+
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| explorer.follow_active(None, cx));
+        });
+        assert!(
+            cx.update(|cx| explorer.read(cx).selected().is_none()),
+            "the charts tab is not a document, so nothing is highlighted"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_document_in_a_closed_folder_opens_its_folder(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let explorer = cx.update(|cx| {
+            cx.new(|cx| {
+                Explorer::for_test(
+                    vec![node(
+                        "menu:0",
+                        "Tuning",
+                        vec![node("menu:0/0", "VE Table", Vec::new())],
+                    )],
+                    cx,
+                )
+            })
+        });
+
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| {
+                explorer.follow_active(Some("menu:0/0"), cx);
+            });
+        });
+
+        assert!(
+            cx.update(|cx| explorer.read(cx).expanded.contains("menu:0")),
+            "the folder holding the active document has to be open"
+        );
+        assert!(
+            cx.update(|cx| explorer
+                .read(cx)
+                .tree()
+                .read(cx)
+                .index_of(&"menu:0/0".into())
+                .is_some()),
+            "the highlighted row must exist in the tree"
+        );
     }
 }

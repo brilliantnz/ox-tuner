@@ -42,12 +42,12 @@ dist/Ox Tuner.app/
 
 ## Identity
 
-| Key | Value |
-| --- | --- |
-| `CFBundleIdentifier` | `com.oxtuner.OxTuner` |
-| `CFBundleName` | `Ox Tuner` |
+| Key                          | Value                               |
+| ---------------------------- | ----------------------------------- |
+| `CFBundleIdentifier`         | `com.oxtuner.OxTuner`               |
+| `CFBundleName`               | `Ox Tuner`                          |
 | `CFBundleShortVersionString` | workspace version from `Cargo.toml` |
-| `CFBundleVersion` | commit count |
+| `CFBundleVersion`            | commit count                        |
 
 The identifier matches `app_identity()` in `crates/oxtuner-app/src/app/mod.rs`.
 Changing one without the other splits window state and notification identity.

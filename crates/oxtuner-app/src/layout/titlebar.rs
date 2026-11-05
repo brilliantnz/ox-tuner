@@ -79,8 +79,8 @@ pub(crate) fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOption
 /// The centred title: `{project} - Ox Tuner`, or just `Ox Tuner`.
 ///
 /// A leading `•` marks unsaved table or dialog edits, the way document windows
-/// do: the mark reads the core's snapshot (`changed` flags), not view state,
-/// so it clears on save and survives switching between nodes.
+/// do: the mark reads the core's unsaved set, not the last snapshot on screen,
+/// so it stays while any document holds unsaved cells and clears on save.
 pub(crate) fn window_title(cx: &App) -> SharedString {
     let status = crate::core::CoreService::status(cx);
 
@@ -90,14 +90,7 @@ pub(crate) fn window_title(cx: &App) -> SharedString {
         return format!("{} - {APP_NAME}", pending.name).into();
     }
 
-    let dirty = status
-        .table
-        .as_ref()
-        .is_some_and(|table| table.changed.iter().any(|changed| *changed))
-        || status
-            .dialog
-            .as_ref()
-            .is_some_and(|dialog| dialog.changed > 0);
+    let dirty = !status.dirty.is_empty();
     match status.project.as_ref() {
         Some(project) => {
             let name = crate::project::display_name(&project.root);

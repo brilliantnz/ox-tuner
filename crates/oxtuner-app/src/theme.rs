@@ -468,6 +468,14 @@ mod tests {
                 .as_object()
                 .expect("theme colors must be an object");
 
+            // A translucent state colour is measured over the surface the
+            // button sits on, not as its raw channels: `#00000012` is a faint
+            // wash over the window, not black.
+            let surface = colors
+                .get("background")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{name} needs background"));
+
             for (prefix, foreground_key) in families {
                 let foreground = colors
                     .get(foreground_key)
@@ -480,7 +488,7 @@ mod tests {
                         .get(&key)
                         .and_then(Value::as_str)
                         .unwrap_or_else(|| panic!("{name} needs {key}"));
-                    let ratio = contrast_ratio(background, foreground);
+                    let ratio = contrast_ratio(background, foreground, surface);
 
                     assert!(
                         ratio >= 4.5,
@@ -531,9 +539,10 @@ mod tests {
         }
     }
 
-    fn contrast_ratio(first: &str, second: &str) -> f64 {
-        let first = relative_luminance(first);
-        let second = relative_luminance(second);
+    /// Contrast between two colors as they end up painted over `surface`.
+    fn contrast_ratio(first: &str, second: &str, surface: &str) -> f64 {
+        let first = relative_luminance(over(first, surface));
+        let second = relative_luminance(over(second, surface));
         let (lighter, darker) = if first > second {
             (first, second)
         } else {
@@ -542,12 +551,32 @@ mod tests {
         (lighter + 0.05) / (darker + 0.05)
     }
 
-    fn relative_luminance(color: &str) -> f64 {
+    /// A hex color's channels in 0..=1, alpha defaulting to opaque.
+    fn channels(color: &str) -> [f64; 4] {
         let hex = color.strip_prefix('#').expect("a hex color");
-        let channels = [0, 2, 4].map(|offset| {
-            let value = f64::from(
-                u8::from_str_radix(&hex[offset..offset + 2], 16).expect("two hex digits"),
-            ) / 255.0;
+        let channel = |offset: usize| {
+            f64::from(u8::from_str_radix(&hex[offset..offset + 2], 16).expect("two hex digits"))
+                / 255.0
+        };
+        let alpha = if hex.len() == 8 { channel(6) } else { 1.0 };
+
+        [channel(0), channel(2), channel(4), alpha]
+    }
+
+    /// Paints `color` over an opaque `surface`, the way the window does.
+    fn over(color: &str, surface: &str) -> [f64; 3] {
+        let [r, g, b, alpha] = channels(color);
+        let [sr, sg, sb, _] = channels(surface);
+
+        [
+            r * alpha + sr * (1. - alpha),
+            g * alpha + sg * (1. - alpha),
+            b * alpha + sb * (1. - alpha),
+        ]
+    }
+
+    fn relative_luminance(color: [f64; 3]) -> f64 {
+        let channels = color.map(|value| {
             if value <= 0.04045 {
                 value / 12.92
             } else {
@@ -819,7 +848,7 @@ mod tests {
         });
 
         for (mode, background, foreground, button, primary) in [
-            (ThemeMode::Dark, "#121314", "#bfbfbf", "#202122", "#297AA0"),
+            (ThemeMode::Dark, "#121314", "#bfbfbf", "#1E5874", "#297AA0"),
             (ThemeMode::Light, "#FFFFFF", "#202020", "#F2F3F4", "#0069CC"),
         ] {
             cx.update(|cx| {

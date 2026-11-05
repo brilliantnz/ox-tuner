@@ -462,6 +462,63 @@ impl TuneImages {
         self.baseline = self.working.snapshot();
     }
 
+    /// Discards local edits for the named variables, returning each value to
+    /// the file baseline.
+    ///
+    /// This is the one-document discard: a table's cells or a dialog's
+    /// constants go back to the saved tune, and every other variable keeps its
+    /// edits. Conflict marks for the reverted variables go with their values.
+    /// Returns how many cells moved. A variable the layout does not know, or
+    /// one whose images disagree about its shape, is skipped — there is nothing
+    /// safe to copy for it.
+    #[expect(
+        clippy::float_cmp,
+        reason = "a cell is skipped only when its stored raw value is identical"
+    )]
+    pub fn revert_variables(&mut self, names: &[String]) -> usize {
+        let mut reverted = 0;
+
+        for name in names {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            let count = spec
+                .shape
+                .dimensions()
+                .map_or(1, |(columns, rows)| columns.saturating_mul(rows))
+                .max(1);
+
+            for index in 0..count {
+                let (Ok(saved), Ok(current)) = (
+                    self.baseline.raw_at(name, index),
+                    self.working.raw_at(name, index),
+                ) else {
+                    continue;
+                };
+                if saved == current {
+                    continue;
+                }
+
+                if self.working.set_raw_at(name, index, saved).is_err() {
+                    continue;
+                }
+
+                reverted += 1;
+            }
+
+            // A conflict mark asks the reader to review a cell. The values are
+            // at the file baseline now, so the mark belongs to the discard
+            // too, the way a whole-tune revert drops every conflict.
+            if let Some(variable) = self.layout.index(name) {
+                self.overlays.retain(|key, overlay| {
+                    key.variable != variable || *overlay != Overlay::Conflict
+                });
+            }
+        }
+
+        reverted
+    }
+
     /// Discards every local edit.
     pub fn revert_to_baseline(&mut self) {
         self.working = self.baseline.snapshot();
@@ -997,6 +1054,42 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
             CellState::Conflict,
             "the underlying images still differ; only an overlay was cleared"
         );
+    }
+
+    #[test]
+    fn reverting_one_variable_leaves_the_others_edited() {
+        let mut images = images();
+        images.working_mut().set_user("a", 3.0).unwrap();
+        images.working_mut().set_user("b", 4.0).unwrap();
+
+        let reverted = images.revert_variables(&["a".to_owned()]);
+
+        assert_eq!(reverted, 1);
+        assert_eq!(images.working().scalar_raw("a").unwrap(), 0.0);
+        assert_ne!(
+            images.working().scalar_raw("b").unwrap(),
+            0.0,
+            "the variable the caller did not name keeps its edit"
+        );
+    }
+
+    #[test]
+    fn reverting_one_variable_clears_its_conflict_mark() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconnect(ram).unwrap();
+        images.working_mut().set_user("a", 5.0).unwrap();
+
+        images.revert_variables(&["a".to_owned()]);
+
+        assert!(
+            images.conflicts().is_empty(),
+            "the reverted variable carries no conflict mark"
+        );
+        // The cell still reads Conflict: the ECU's value really does differ
+        // from the file. That is the value-based state, not a stale overlay.
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
     }
 
     #[test]

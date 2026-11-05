@@ -961,6 +961,9 @@ fn handle(
             pages,
         ),
         Command::RevertTune => revert_tune(op, session, journal_dir, events, report),
+        Command::RevertTarget { name } => {
+            revert_target(op, session, journal_dir, events, report, &name)
+        }
         Command::ImportTune { path, consented } => import_tune(
             op,
             session,
@@ -2271,6 +2274,127 @@ fn revert_tune(
         &snapshot_detail,
     );
     Outcome::Continue
+}
+
+/// Discards the edits one table, curve or dialog owns (S4).
+fn revert_target(
+    op: OpId,
+    session: &mut Session,
+    journal_dir: Option<&std::path::Path>,
+    events: &EventTx,
+    report: &mut CoreReport,
+    name: &str,
+) -> Outcome {
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "no tune is open",
+        );
+    };
+
+    let variables = match target_variables(project, name) {
+        Ok(variables) => variables,
+        Err(message) => {
+            return refuse(events, report, op, FailureCode::WriteRefused, &message);
+        }
+    };
+
+    // Discarding is irreversible from the tune's side, so the working image is
+    // snapshotted first, exactly as a whole-tune revert does (S4).
+    let snapshot = match snapshot::write(project, "revert") {
+        Ok(path) => path,
+        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+    };
+
+    let reverted = project.images_mut().revert_variables(&variables);
+    tracing::info!(
+        %op,
+        target = %name,
+        variables = variables.len(),
+        cells = reverted,
+        "target reverted to the file baseline"
+    );
+
+    // Echo every face the name has, so an open editor and the unsaved marks
+    // both see the baseline again: a dialog carries its constants and the map
+    // it embeds, and each is reported separately.
+    if let Ok(table) = TableSummary::from_project(project, name) {
+        send(events, Event::TableEdited { op, table });
+    }
+    if let Ok(dialog) = DialogSummary::from_project(project, name) {
+        send(events, Event::DialogEdited { op, dialog });
+    }
+    send_status(events, op, project);
+
+    let detail = format!("snapshot {}", snapshot.display());
+    record_local_journal(
+        session,
+        journal_dir,
+        "revert-target",
+        reverted,
+        variables.len(),
+        "ok",
+        &detail,
+    );
+    Outcome::Continue
+}
+
+/// The variables one table, curve or dialog owns.
+///
+/// A table owns its cells and both axis bins. A dialog owns its constant
+/// variables, plus the table it embeds when it has one. The two lookups are not
+/// alternatives: [`TableSummary::from_project`] resolves a dialog name to the
+/// map inside it, so a dialog that embeds a table matches both and must give up
+/// both sets of variables.
+///
+/// The list is sorted and deduplicated so a variable shared by two rows is
+/// reverted once. A name that matches nothing, or one that owns no variables,
+/// is an error rather than an empty revert.
+fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String> {
+    let mut variables = Vec::new();
+
+    if let Ok(table) = TableSummary::from_project(project, name) {
+        variables.extend(table_variables(&table));
+    }
+
+    if let Ok(dialog) = DialogSummary::from_project(project, name) {
+        variables.extend(
+            dialog
+                .fields
+                .iter()
+                .map(|field| field.variable.clone())
+                .filter(|variable| !variable.is_empty()),
+        );
+
+        if let Some(embedded) =
+            crate::menu::embedded_target(&dialog.id, project.definition(), &mut HashSet::new())
+            && let Ok(table) = TableSummary::from_project(project, &embedded.id)
+        {
+            variables.extend(table_variables(&table));
+        }
+    }
+
+    if variables.is_empty() {
+        return Err(format!(
+            "the definition has no table, curve or dialog named `{name}` with variables to discard"
+        ));
+    }
+
+    variables.sort_unstable();
+    variables.dedup();
+    Ok(variables)
+}
+
+/// The cell variable and axis bins one table summary reads from.
+fn table_variables(table: &TableSummary) -> Vec<String> {
+    [&table.name, &table.x_axis.name, &table.y_axis.name]
+        .into_iter()
+        .filter(|variable| !variable.is_empty())
+        .cloned()
+        .collect()
 }
 
 /// Imports one `.msq` into the working image (S4, S9).

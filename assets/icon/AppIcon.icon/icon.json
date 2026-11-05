@@ -1,67 +1,64 @@
 {
-  "fill" : "system-dark",
-  "groups" : [
+  "fill": "system-dark",
+  "groups": [
     {
-      "layers" : [
+      "layers": [
         {
-          "blend-mode-specializations" : [
+          "blend-mode-specializations": [
             {
-              "value" : "normal"
+              "value": "normal"
             },
             {
-              "appearance" : "dark",
-              "value" : "normal"
+              "appearance": "dark",
+              "value": "normal"
             },
             {
-              "appearance" : "tinted",
-              "value" : "normal"
+              "appearance": "tinted",
+              "value": "normal"
             }
           ],
-          "fill-specializations" : [
+          "fill-specializations": [
             {
-              "value" : "none"
+              "value": "none"
             },
             {
-              "appearance" : "dark",
-              "value" : "none"
+              "appearance": "dark",
+              "value": "none"
             },
             {
-              "appearance" : "tinted",
-              "value" : "none"
+              "appearance": "tinted",
+              "value": "none"
             }
           ],
-          "glass-specializations" : [
+          "glass-specializations": [
             {
-              "value" : true
+              "value": true
             },
             {
-              "appearance" : "tinted",
-              "value" : true
+              "appearance": "tinted",
+              "value": true
             }
           ],
-          "hidden" : false,
-          "image-name" : "graphite-tri 2.svg",
-          "name" : "graphite-tri 2",
-          "position" : {
-            "scale" : 1.2,
-            "translation-in-points" : [
-              -1.9999999999999432,
-              0
-            ]
+          "hidden": false,
+          "image-name": "graphite-tri 2.svg",
+          "name": "graphite-tri 2",
+          "position": {
+            "scale": 1.2,
+            "translation-in-points": [-1.9999999999999432, 0]
           }
         }
       ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
       },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.3
+      "translucency": {
+        "enabled": true,
+        "value": 0.3
       }
     }
   ],
-  "supported-platforms" : {
-    "squares" : "shared"
+  "supported-platforms": {
+    "squares": "shared"
   }
 }

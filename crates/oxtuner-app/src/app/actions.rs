@@ -31,8 +31,6 @@ gpui_kit::actions!(
         ConnectEcu,
         DisconnectEcu,
         SaveSessionTrace,
-        ShowTune,
-        ShowCharts,
         WriteToRam,
         BurnToFlash,
         AdoptEcuTune,

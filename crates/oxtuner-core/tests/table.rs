@@ -235,6 +235,208 @@ fn an_edit_is_echoed_as_the_next_snapshot() {
 }
 
 #[test]
+fn reverting_one_target_keeps_the_other_edits() {
+    let dir = TempDir::new("revert-target");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_table(
+            "veTable",
+            vec![CellEdit {
+                row: 0,
+                column: 1,
+                value: 25.0,
+            }],
+        )
+        .expect("the table edit is queued");
+    let Event::TableEdited { .. } = core.next() else {
+        panic!("expected the table echo");
+    };
+
+    let _ = core
+        .handle
+        .edit_table(
+            "curveVals",
+            vec![CellEdit {
+                row: 0,
+                column: 0,
+                value: 42.0,
+            }],
+        )
+        .expect("the curve edit is queued");
+    let Event::TableEdited { .. } = core.next() else {
+        panic!("expected the curve echo");
+    };
+
+    let op = core
+        .handle
+        .revert_target("veTableTbl")
+        .expect("the revert is queued");
+
+    let Event::TableEdited {
+        op: answered,
+        table,
+    } = core.next()
+    else {
+        panic!("expected the table after the revert");
+    };
+    assert_eq!(answered, op);
+    assert_eq!(table.cells, vec![10.0, 20.0, 30.0, 40.0]);
+    assert!(
+        table.changed.iter().all(|changed| !changed),
+        "the table matches the file baseline again"
+    );
+    let Event::TuneStatusRead { .. } = core.next() else {
+        panic!("expected the status after the revert");
+    };
+
+    let (_, curve) = core.read("idleCurve");
+    assert_eq!(
+        curve.cells[0], 42.0,
+        "a revert of one target leaves every other target alone"
+    );
+    assert!(curve.changed[0]);
+}
+
+#[test]
+fn reverting_a_dialog_returns_only_its_constants() {
+    let dir = TempDir::new("revert-dialog");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_scalar("engineDialog", "reqFuel", 30.0)
+        .expect("the scalar edit is queued");
+    let Event::DialogEdited { dialog, .. } = core.next() else {
+        panic!("expected the dialog echo");
+    };
+    assert_eq!(dialog.changed, 1);
+
+    let op = core
+        .handle
+        .revert_target("engineDialog")
+        .expect("the revert is queued");
+    let Event::DialogEdited {
+        op: answered,
+        dialog,
+    } = core.next()
+    else {
+        panic!("expected the dialog after the revert");
+    };
+    assert_eq!(answered, op);
+    assert_eq!(dialog.changed, 0);
+    assert_eq!(
+        dialog
+            .fields
+            .iter()
+            .find(|field| field.variable == "reqFuel")
+            .and_then(|field| field.value),
+        Some(12.0),
+        "the dialog's row is back to the file baseline"
+    );
+}
+
+#[test]
+fn reverting_a_dialog_also_reverts_the_map_it_embeds() {
+    let dir = TempDir::new("revert-board");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_table(
+            "veTable",
+            vec![CellEdit {
+                row: 0,
+                column: 0,
+                value: 66.0,
+            }],
+        )
+        .expect("the table edit is queued");
+    let Event::TableEdited { .. } = core.next() else {
+        panic!("expected the table echo");
+    };
+
+    let _ = core
+        .handle
+        .revert_target("boardDialog")
+        .expect("the revert is queued");
+
+    let Event::TableEdited { table, .. } = core.next() else {
+        panic!("expected the map after the revert");
+    };
+    assert_eq!(table.cells[0], 10.0, "the embedded map is back");
+    assert!(table.changed.iter().all(|changed| !changed));
+}
+
+#[test]
+fn reverting_a_dialog_reverts_its_constants_and_its_map() {
+    let dir = TempDir::new("revert-board-both");
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_scalar("boardDialog", "reqFuel", 30.0)
+        .expect("the scalar edit is queued");
+    let Event::DialogEdited { dialog, .. } = core.next() else {
+        panic!("expected the dialog echo");
+    };
+    assert_eq!(dialog.changed, 1);
+
+    let _ = core
+        .handle
+        .edit_table(
+            "veTable",
+            vec![CellEdit {
+                row: 0,
+                column: 0,
+                value: 66.0,
+            }],
+        )
+        .expect("the table edit is queued");
+    let Event::TableEdited { .. } = core.next() else {
+        panic!("expected the table echo");
+    };
+
+    let _ = core
+        .handle
+        .revert_target("boardDialog")
+        .expect("the revert is queued");
+
+    let mut table = None;
+    let mut dialog = None;
+    loop {
+        match core.next() {
+            Event::TableEdited { table: echo, .. } => table = Some(echo),
+            Event::DialogEdited { dialog: echo, .. } => dialog = Some(echo),
+            Event::TuneStatusRead { .. } if table.is_some() && dialog.is_some() => break,
+            Event::TuneStatusRead { .. } => {}
+            event => panic!("unexpected event {event:?}"),
+        }
+    }
+
+    let table = table.expect("the embedded map is echoed");
+    assert_eq!(table.cells[0], 10.0, "the embedded map is back");
+    assert!(table.changed.iter().all(|changed| !changed));
+
+    let dialog = dialog.expect("the dialog is echoed");
+    assert_eq!(dialog.changed, 0, "the constants are back");
+    assert_eq!(
+        dialog
+            .fields
+            .iter()
+            .find(|field| field.variable == "reqFuel")
+            .and_then(|field| field.value),
+        Some(12.0),
+        "the constant row is back to the file baseline"
+    );
+}
+
+#[test]
 fn an_out_of_range_edit_rejects_the_whole_request() {
     let dir = TempDir::new("range");
     let core = Harness::start();

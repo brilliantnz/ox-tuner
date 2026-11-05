@@ -17,14 +17,14 @@ mod telemetry;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Colorize as _, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div,
 };
+use oxtuner_ui::tabs::{Tab, TabBar};
 
 pub(crate) use self::diagnostics::DiagnosticsView;
 use self::{activity::Activity, indicators::Indicators, telemetry::Telemetry};
@@ -136,17 +136,6 @@ impl Render for BottomPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tab = self.tab;
         let diagnostics = self.diagnostics.clone();
-        // The theme's own tab-bar tone is almost the same as the active tab
-        // and the content below it, and a folder tab's hover fill is
-        // `secondary`. Move the strip a little past that fill in either mode,
-        // brighter in the dark theme and deeper in the light one, so the
-        // selected tab, the strip and the hover fill all stay distinct
-        // without editing the theme.
-        let tab_bar = cx
-            .theme()
-            .tokens
-            .tab_bar
-            .mix_oklab(cx.theme().foreground, 0.88);
 
         v_flex()
             .size_full()
@@ -157,7 +146,7 @@ impl Render for BottomPanel {
             .child(
                 TabBar::new("bottom-panel-tabs")
                     .folder()
-                    .bg(tab_bar)
+                    .bg(cx.theme().tab_bar)
                     .small()
                     .selected_index(tab.index())
                     .on_click(cx.listener(|this, index, _, cx| this.select(*index, cx)))

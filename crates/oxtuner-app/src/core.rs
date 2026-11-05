@@ -16,6 +16,7 @@
 //! the task (ADR-0005). The `gpui*` → core direction is a plain channel send,
 //! so nothing core-side knows a UI exists.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -58,8 +59,20 @@ pub(crate) struct CoreStatus {
     pub(crate) table: Option<TableSummary>,
     /// The dialog the UI last read, kept until another dialog replaces it.
     pub(crate) dialog: Option<DialogSummary>,
+    /// Definition targets (table or dialog ids) whose last snapshot reported
+    /// cells that differ from the file baseline.
+    ///
+    /// Every read of a target refreshes its entry, so a target edited once and
+    /// then left alone keeps its mark while another target is on screen. The
+    /// set is cleared by anything that rebases the whole tune: opening a
+    /// project, saving, reverting, importing or adopting the ECU image.
+    pub(crate) dirty: BTreeSet<String>,
     /// The last command failure, kept until a command succeeds.
     pub(crate) failure: Option<Failure>,
+    /// Bumped whenever a failure is stored. A view that is waiting for an
+    /// answer can compare this to the value it saw when it asked, so an old
+    /// failure still on screen is not mistaken for the new one.
+    pub(crate) failure_serial: u64,
     /// Bumped whenever an edit or a save may have moved tune values, so a view
     /// can tell that copies it kept are no longer trustworthy.
     pub(crate) tune_revision: u64,
@@ -258,9 +271,77 @@ impl CoreService {
         cx.global::<Self>().history.clone()
     }
 
+    /// The definition targets whose snapshot reports unsaved cells.
+    pub(crate) fn dirty(cx: &App) -> &BTreeSet<String> {
+        &cx.global::<Self>().status.dirty
+    }
+
     /// The live session log counters.
     pub(crate) fn log(cx: &App) -> LogSnapshot {
         cx.global::<Self>().log_status.snapshot()
+    }
+}
+
+#[cfg(test)]
+impl CoreService {
+    /// Marks `target` as holding unsaved cells, for view tests.
+    pub(crate) fn mark_dirty(cx: &mut App, target: &str) {
+        cx.global_mut::<Self>()
+            .status
+            .dirty
+            .insert(target.to_owned());
+    }
+
+    /// Installs a table snapshot, for editor tests.
+    pub(crate) fn show_table(cx: &mut App, table: TableSummary) {
+        cx.global_mut::<Self>().status.table = Some(table);
+    }
+
+    /// Moves to another definition and drops the open snapshot, the way a
+    /// project switch does, for editor tests.
+    pub(crate) fn next_definition(cx: &mut App) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.definition_revision = status.definition_revision.wrapping_add(1);
+        status.table = None;
+        status.dialog = None;
+    }
+
+    /// Records a landed save, for view tests.
+    pub(crate) fn save_for_test(cx: &mut App) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.last_save = Some(SaveSummary {
+            path: "/projects/test/CurrentTune.msq".into(),
+            cells: 1,
+        });
+        status.tune_revision = status.tune_revision.wrapping_add(1);
+    }
+
+    /// Records a failed command, for view tests.
+    pub(crate) fn fail_for_test(cx: &mut App, code: FailureCode) {
+        let status = &mut cx.global_mut::<Self>().status;
+        status.failure_serial = status.failure_serial.wrapping_add(1);
+        status.failure = Some(Failure {
+            code,
+            message: "the test command failed".to_owned(),
+        });
+    }
+
+    /// Installs a service with no core behind it, for view tests.
+    ///
+    /// A view reads the status and the newest frame on every render, so a test
+    /// that draws a window needs the global even when it never talks to a core.
+    /// Without it the first frame would panic instead of showing empty state.
+    pub(crate) fn install_without_core(cx: &mut App) {
+        cx.set_global(Self {
+            handle: None,
+            thread: None,
+            status: CoreStatus::default(),
+            latest: LatestFrame::default(),
+            history: ChartHistory::default(),
+            log_status: LogStatus::new(),
+            pending_import: None,
+            auto_sim: false,
+        });
     }
 }
 
@@ -628,6 +709,7 @@ impl CoreStatus {
                 self.last_save = None;
                 self.table = None;
                 self.dialog = None;
+                self.dirty.clear();
                 self.failure = None;
                 self.tune_status = None;
                 self.definition_revision = self.definition_revision.wrapping_add(1);
@@ -639,6 +721,7 @@ impl CoreStatus {
                 self.last_save = None;
                 self.table = None;
                 self.dialog = None;
+                self.dirty.clear();
                 self.failure = None;
                 self.tune_status = None;
                 self.journal = None;
@@ -647,10 +730,17 @@ impl CoreStatus {
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
+                self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Table { table, edited } => {
+                if table.changed.iter().any(|changed| *changed) {
+                    self.dirty.insert(table.id.clone());
+                } else {
+                    self.dirty.remove(&table.id);
+                }
+
                 self.table = Some(*table);
                 // A successful table operation also proves the earlier failure
                 // is stale.
@@ -660,6 +750,12 @@ impl CoreStatus {
                 }
             }
             Update::Dialog { dialog, edited } => {
+                if dialog.changed > 0 {
+                    self.dirty.insert(dialog.id.clone());
+                } else {
+                    self.dirty.remove(&dialog.id);
+                }
+
                 self.dialog = Some(dialog);
                 self.failure = None;
                 if edited {
@@ -713,6 +809,9 @@ impl CoreStatus {
             }
             Update::EcuAdopted => {
                 self.failure = None;
+                // The adopted image is the new starting point for targets the
+                // core has not re-read; anything still marked is stale.
+                self.dirty.clear();
                 // The working tune changed under every open table and dialog.
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
@@ -736,11 +835,13 @@ impl CoreStatus {
             Update::Imported(summary) => {
                 self.last_import = Some(summary);
                 self.import_consent = None;
+                self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Reverted(summary) => {
                 self.last_revert = Some(summary);
+                self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
@@ -820,6 +921,7 @@ impl CoreStatus {
                     // its states instead of showing the pre-write snapshot.
                     self.tune_revision = self.tune_revision.wrapping_add(1);
                 }
+                self.failure_serial = self.failure_serial.wrapping_add(1);
                 self.failure = Some(failure);
             }
             Update::Nothing => {}
@@ -1038,6 +1140,17 @@ pub(crate) fn burn_to_flash(cx: &mut App) {
     if let Err(error) = handle.burn_to_flash(Vec::new()) {
         tracing::warn!(%error, "the core refused the burn");
         report_failure(cx, FailureCode::BurnRefused, error.to_string());
+    }
+}
+
+/// Discards the unsaved cells one document owns.
+pub(crate) fn revert_target(target: &str, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::WriteRefused) else {
+        return;
+    };
+    if let Err(error) = handle.revert_target(target.to_owned()) {
+        tracing::warn!(%error, "the core refused the target revert");
+        report_failure(cx, FailureCode::WriteRefused, error.to_string());
     }
 }
 
@@ -1268,7 +1381,9 @@ pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
         return;
     }
 
-    cx.global_mut::<CoreService>().status.failure = Some(Failure { code, message });
+    let status = &mut cx.global_mut::<CoreService>().status;
+    status.failure_serial = status.failure_serial.wrapping_add(1);
+    status.failure = Some(Failure { code, message });
     cx.refresh_windows();
 }
 
@@ -1452,6 +1567,45 @@ mod tests {
             cells: 3,
         }));
         assert_eq!(status.tune_revision, 2);
+    }
+
+    #[test]
+    fn a_snapshot_marks_and_clears_its_target() {
+        let mut status = CoreStatus::default();
+        let mut changed = dialog();
+        changed.changed = 3;
+
+        status.apply(Update::Dialog {
+            dialog: changed,
+            edited: true,
+        });
+        assert!(status.dirty.contains("engine"));
+
+        // Reading the same target again with no changes clears its mark: the
+        // file baseline now matches what the definition shows.
+        status.apply(Update::Dialog {
+            dialog: dialog(),
+            edited: true,
+        });
+        assert!(!status.dirty.contains("engine"));
+
+        status.apply(Update::Dialog {
+            dialog: {
+                let mut other = dialog();
+                other.id = "startup".to_owned();
+                other.changed = 1;
+                other
+            },
+            edited: true,
+        });
+        assert_eq!(status.dirty.len(), 1);
+
+        // Saving rebases the whole tune, so every mark goes.
+        status.apply(Update::Saved(SaveSummary {
+            path: "/projects/roadster/CurrentTune.msq".into(),
+            cells: 4,
+        }));
+        assert!(status.dirty.is_empty());
     }
 
     #[test]

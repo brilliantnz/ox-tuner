@@ -25,7 +25,7 @@ use gpui_kit::{
 
 use super::actions::{
     CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenProject, Quit, SaveTune, Settings,
-    ShowCharts, ShowTune, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
+    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::i18n::t;
 
@@ -102,7 +102,7 @@ macro_rules! shortcut {
 /// The panel toggles the primary sidebar on the main modifier
 /// plus `B`, the bottom panel plus `J`, and the secondary sidebar on the
 /// neighbouring `Alt+B` so the three read as a family.
-pub static SHORTCUTS: [Shortcut; 13] = [
+pub static SHORTCUTS: [Shortcut; 11] = [
     shortcut!(
         "open-settings",
         "app.shortcut.open_settings",
@@ -174,24 +174,6 @@ pub static SHORTCUTS: [Shortcut; 13] = [
         "cmd-q",
         "ctrl-q",
         Quit
-    ),
-    shortcut!(
-        "show-tune",
-        "app.shortcut.show_tune",
-        View,
-        &[],
-        "cmd-1",
-        "ctrl-1",
-        ShowTune
-    ),
-    shortcut!(
-        "show-charts",
-        "app.shortcut.show_charts",
-        View,
-        &[],
-        "cmd-2",
-        "ctrl-2",
-        ShowCharts
     ),
     shortcut!(
         "toggle-primary-sidebar",

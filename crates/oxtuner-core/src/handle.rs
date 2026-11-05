@@ -471,6 +471,20 @@ impl CoreHandle {
         self.send(Command::RevertTune)
     }
 
+    /// Discards the local edits one table, curve or dialog owns.
+    ///
+    /// The reply is [`crate::Event::TableEdited`] and/or
+    /// [`crate::Event::DialogEdited`], plus [`crate::Event::TuneStatusRead`].
+    /// Every other target keeps its edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn revert_target(&self, name: impl Into<String>) -> Result<OpId, CoreError> {
+        self.send(Command::RevertTarget { name: name.into() })
+    }
+
     /// Imports a `.msq` into the working image.
     ///
     /// A different-signature tune needs `consented: true` (S9).

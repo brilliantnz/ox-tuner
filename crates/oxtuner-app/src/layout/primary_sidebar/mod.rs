@@ -1,23 +1,30 @@
-//! The primary sidebar: navigation.
+//! The primary sidebar: the definition's menu, as the navigation column.
 //!
 //! It starts **below** the main bar — the bar spans the whole window and carries
 //! the traffic lights, the menus and the panel toggles — so this column draws no
 //! title strip of its own. The panel toggle in the bar is the one control it
 //! needs.
 //!
-//! The navigation tree is built by [`super::explorer`] from the definition the
-//! core owns; this view only lays it out and decorates its rows. A definition
-//! that declares no `[Menu]` sections says so instead of showing an empty tree.
+//! [`explorer`] holds the menu tree and the selection, [`menu_node`] names and
+//! pictures one node, and this module lays the rows out. The three live
+//! together because the tree has no other home: a row click is a sidebar
+//! gesture, and the document it opens is the workspace's business.
 //!
-//! Project handling (current project, recent folders, choosing another folder)
-//! lives in the Projects dialog, not here: the sidebar is for navigation.
+//! A definition that declares no `[Menu]` sections says so instead of showing an
+//! empty tree. Project handling (current project, recent folders, choosing
+//! another folder) lives in the Projects dialog, not here: the sidebar is for
+//! navigation.
 
-use std::collections::HashMap;
+mod explorer;
+pub(crate) mod menu_node;
+
+use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::tree::{TreeEntry, tree};
+use gpui_kit::component::tree::{TreeEntry, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -26,7 +33,7 @@ use gpui_kit::{
 };
 use oxtuner_core::{MenuNode, MenuNodeKind};
 
-use super::explorer::{self, Explorer};
+pub(crate) use self::explorer::Explorer;
 use crate::{core::CoreService, i18n::t};
 
 /// The navigation column.
@@ -62,7 +69,6 @@ impl RenderOnce for PrimarySidebar {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_2()
                     .pt_1()
                     .when(!has_definition && pending, |this| {
                         this.child(empty_state(t!("app.editor.opening_project"), cx))
@@ -74,13 +80,58 @@ impl RenderOnce for PrimarySidebar {
                         this.child(empty_state(t!("app.primary_sidebar.no_menu"), cx))
                     })
                     .when(has_menu, |this| {
-                        let explorer = self.explorer.clone();
-                        this.child(tree(&state, move |_ix, entry, selected, _window, cx| {
-                            tree_row(entry, selected, &nodes, &explorer, cx)
-                        }))
+                        this.child(navigation_tree(&state, nodes, self.explorer.clone()))
                     }),
             )
     }
+}
+
+/// The scrolling tree, spanning the column so its scrollbar sits at the edge.
+///
+/// The rows carry their own horizontal inset. Padding here would inset the
+/// scrollbar too, because the component paints it inside the scroll area's
+/// bounds, which is the difference between this and the editor's scrollbars.
+fn navigation_tree(
+    state: &Entity<TreeState>,
+    nodes: Rc<HashMap<String, MenuNode>>,
+    explorer: Entity<Explorer>,
+) -> impl IntoElement {
+    div()
+        .debug_selector(|| "primary-sidebar-tree-area".to_string())
+        .size_full()
+        .min_h_0()
+        .child(tree(state, move |_ix, entry, selected, _window, cx| {
+            tree_row(entry, selected, &nodes, &explorer, cx)
+        }))
+}
+
+/// Whether `node` or anything under it has a target that differs from the
+/// file baseline.
+///
+/// A folder has no target of its own, so it lights up when one of the documents
+/// inside it does, the way a source-control tree rolls status up.
+fn touched(node: &MenuNode, dirty: &BTreeSet<String>) -> bool {
+    if node.children.is_empty() {
+        return node
+            .target
+            .as_deref()
+            .is_some_and(|target| dirty.contains(target))
+            || node
+                .embedded
+                .as_deref()
+                .is_some_and(|target| dirty.contains(target));
+    }
+
+    node.children.iter().any(|child| touched(child, dirty))
+}
+
+/// The unsaved mark on a navigation row.
+fn unsaved_dot(cx: &App) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .size(px(7.))
+        .rounded_full()
+        .bg(cx.theme().warning)
 }
 
 fn section_label(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
@@ -133,11 +184,17 @@ fn tree_row(
             IconName::ChevronRight
         }
     } else {
-        node.map_or(IconName::File, |node| explorer::icon(node.kind))
+        node.map_or(IconName::File, |node| menu_node::icon(node.kind))
     };
     let missing = node.is_some_and(|node| node.kind == MenuNodeKind::Missing);
-    let detail = node.and_then(explorer::detail_label);
+    let touched = node.is_some_and(|node| touched(node, CoreService::dirty(cx)));
     let muted = cx.theme().muted_foreground;
+    // A folder's icon is its disclosure state, not a kind, so only leaves take
+    // the kind's colour.
+    let icon_color = match node {
+        Some(node) if !is_folder => menu_node::icon_color(node.kind, cx),
+        _ => muted,
+    };
 
     let row_id: ElementId = SharedString::from(format!("tree-row-{}", entry.item().id)).into();
     let mut surface = h_flex()
@@ -163,7 +220,7 @@ fn tree_row(
                     .text_color(cx.theme().sidebar_accent_foreground)
             })
         })
-        .child(Icon::new(icon).small().text_color(muted))
+        .child(Icon::new(icon).small().text_color(icon_color))
         .child(
             div()
                 .flex_1()
@@ -173,15 +230,7 @@ fn tree_row(
                 .when(missing, |this| this.text_color(muted))
                 .child(entry.item().label.clone()),
         )
-        .when_some(detail, |this, detail| {
-            this.child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(detail),
-            )
-        });
+        .when(touched, |this| this.child(unsaved_dot(cx)));
 
     if is_folder {
         let explorer = explorer.clone();
@@ -206,8 +255,8 @@ fn tree_row(
         .child(
             div()
                 .w_full()
-                .pl(px(entry.depth() as f32 * 14.0))
-                .pr_1()
+                .pl(px(8.0 + entry.depth() as f32 * 14.0))
+                .pr_3()
                 .child(surface),
         )
 }
@@ -269,6 +318,9 @@ mod tests {
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Explorer>) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
+            // Rows read the core's unsaved set; a view test needs the global.
+            crate::core::CoreService::install_without_core(cx);
+
             let explorer = cx.new(|cx| Explorer::for_test(menu(), cx));
             let host = cx.new(|_| Host {
                 explorer: explorer.clone(),
@@ -298,6 +350,48 @@ mod tests {
                 .entry(0)
                 .is_some_and(TreeEntry::is_expanded)
         })
+    }
+
+    #[test]
+    fn a_folder_is_touched_through_its_documents() {
+        let table = MenuNode {
+            id: "menu:0/0".to_owned(),
+            label: "VE Table".to_owned(),
+            kind: MenuNodeKind::Table,
+            detail: None,
+            target: Some("veTableTbl".to_owned()),
+            embedded: None,
+            children: Vec::new(),
+        };
+        let folder = MenuNode {
+            id: "menu:0".to_owned(),
+            label: "Tuning".to_owned(),
+            kind: MenuNodeKind::Menu,
+            detail: None,
+            target: None,
+            embedded: None,
+            children: vec![table.clone()],
+        };
+        let dialog = MenuNode {
+            id: "menu:0/1".to_owned(),
+            label: "Idle".to_owned(),
+            kind: MenuNodeKind::Dialog,
+            detail: None,
+            target: Some("idleDialog".to_owned()),
+            embedded: Some("veTableTbl".to_owned()),
+            children: Vec::new(),
+        };
+
+        let mut dirty = BTreeSet::new();
+        dirty.insert("veTableTbl".to_owned());
+
+        assert!(touched(&table, &dirty), "the table itself is marked");
+        assert!(touched(&dialog, &dirty), "a wrapped table counts too");
+        assert!(
+            touched(&folder, &dirty),
+            "a folder lights up through its documents"
+        );
+        assert!(!touched(&dialog, &BTreeSet::new()));
     }
 
     #[gpui_kit::test]
@@ -351,6 +445,89 @@ mod tests {
             selected.map(|node| node.label),
             Some("VE Table".to_owned()),
             "collapsing the parent must not close the table"
+        );
+    }
+
+    struct TreeAreaHost {
+        explorer: Entity<Explorer>,
+    }
+
+    impl Render for TreeAreaHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            let explorer = self.explorer.read(cx);
+            let state = explorer.tree().clone();
+            let nodes = explorer.nodes();
+            // Mirrors the sidebar's parent: a plain block container with a
+            // definite height, not a flex column.
+            div()
+                .size_full()
+                .child(navigation_tree(&state, nodes, self.explorer.clone()))
+        }
+    }
+
+    /// The selector gpui-component puts on a scroll area's bar layer
+    /// (`render_scrollbar`). The bar is the only way to measure its edge
+    /// without owning the scroll area, so a rename shows up here first.
+    const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
+
+    #[gpui_kit::test]
+    fn the_scroll_area_reaches_the_column_edge(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let leaves: Vec<MenuNode> = (0..40)
+            .map(|ix| MenuNode {
+                id: format!("menu:0/{ix}"),
+                label: format!("Table {ix}"),
+                kind: MenuNodeKind::Table,
+                detail: None,
+                target: Some(format!("table{ix}")),
+                embedded: None,
+                children: Vec::new(),
+            })
+            .collect();
+
+        let (handle, _) = cx.update(|cx| {
+            crate::core::CoreService::install_without_core(cx);
+            let explorer = cx.new(|cx| Explorer::for_test(leaves, cx));
+            let host = cx.new(|_| TreeAreaHost { explorer });
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(320.), px(400.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                move |_, _| host,
+            )
+            .expect("open test window")
+        });
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+        let area = visual
+            .debug_bounds("primary-sidebar-tree-area")
+            .expect("the tree area is drawn");
+        let bar = visual.debug_bounds(SCROLLBAR_LAYER).expect(
+            "the tree draws its scrollbar layer; if gpui-kit renamed that layer, \
+                 update SCROLLBAR_LAYER and the tree finding",
+        );
+
+        assert!(
+            (area.right().as_f32() - 320.0).abs() < 1.0,
+            "the tree must span the column, scrollbar included: {}",
+            area.right().as_f32()
+        );
+        assert!(
+            (area.bottom().as_f32() - 400.0).abs() < 1.0,
+            "the tree must fill the column's height: {}",
+            area.bottom().as_f32()
+        );
+        assert!(
+            (bar.right().as_f32() - area.right().as_f32()).abs() < 1.0,
+            "the scrollbar layer must sit at the tree's right edge"
         );
     }
 }

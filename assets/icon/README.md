@@ -9,11 +9,11 @@ system expects.
 The document name becomes the asset name, and that name has to match in three
 places:
 
-| Place | Value |
-| --- | --- |
-| Icon Composer document | `AppIcon.icon` |
-| `actool --app-icon` | `AppIcon` |
-| `Info.plist` `CFBundleIconName` | `AppIcon` |
+| Place                           | Value                                  |
+| ------------------------------- | -------------------------------------- |
+| Icon Composer document          | `AppIcon.icon`                         |
+| `actool --app-icon`             | `AppIcon`                              |
+| `Info.plist` `CFBundleIconName` | `AppIcon`                              |
 | `Info.plist` `CFBundleIconFile` | `AppIcon` (resolves to `AppIcon.icns`) |
 
 `AppIcon` is what Xcode uses by default for an app icon set, so anyone who opens
@@ -23,14 +23,14 @@ macOS silently falls back to the generic app icon.
 
 ## Files
 
-| Target | File | Consumed as |
-| --- | --- | --- |
-| macOS 26 and later | `AppIcon.icon` | Layered icon with Light, Dark and Tinted built in |
-| macOS 26 and later | `Assets.car` | The same document, already compiled by `actool` |
-| macOS 15 and earlier | `AppIcon.icns` | Flat 16 to 1024 bitmap with the classic margin and shadow |
-| Windows | `oxtuner.ico` | Multi-size icon, 16 to 256 |
-| Linux | `oxtuner.png` | One 512 image for packagers that take a single file |
-| Linux | `hicolor/<size>/apps/oxtuner.png` | Freedesktop icon theme, 16 to 512 |
+| Target               | File                              | Consumed as                                               |
+| -------------------- | --------------------------------- | --------------------------------------------------------- |
+| macOS 26 and later   | `AppIcon.icon`                    | Layered icon with Light, Dark and Tinted built in         |
+| macOS 26 and later   | `Assets.car`                      | The same document, already compiled by `actool`           |
+| macOS 15 and earlier | `AppIcon.icns`                    | Flat 16 to 1024 bitmap with the classic margin and shadow |
+| Windows              | `oxtuner.ico`                     | Multi-size icon, 16 to 256                                |
+| Linux                | `oxtuner.png`                     | One 512 image for packagers that take a single file       |
+| Linux                | `hicolor/<size>/apps/oxtuner.png` | Freedesktop icon theme, 16 to 512                         |
 
 `source/` holds the two Icon Composer exports the script needs. `square-1024.png`
 is the square art with the rounded background baked in, used for Windows and

@@ -20,9 +20,8 @@ use rust_i18n::t;
 use super::actions::{
     About, AdoptEcuTune, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites, Hide,
     HideOthers, ImportTune, ManageProjects, OpenDefinition, OpenHomepage, OpenProject,
-    OpenSnapshots, Quit, RevertTune, SaveSessionTrace, SaveTune, Settings, ShowAll, ShowCharts,
-    ShowDisclaimer, ShowTune, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
-    WriteJournal, WriteToRam,
+    OpenSnapshots, Quit, RevertTune, SaveSessionTrace, SaveTune, Settings, ShowAll, ShowDisclaimer,
+    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
 };
 use crate::constants::APP_NAME;
 
@@ -67,9 +66,6 @@ fn menus() -> Vec<Menu> {
         // The panel commands, so a panel closed by mistake can be found again
         // without knowing the shortcut. Each carries its key from the keymap.
         Menu::new(t!("app.menu.view")).items([
-            MenuItem::action(t!("app.menu.show_tune"), ShowTune),
-            MenuItem::action(t!("app.menu.show_charts"), ShowCharts),
-            MenuItem::separator(),
             MenuItem::action(t!("app.menu.toggle_primary_sidebar"), TogglePrimarySidebar),
             MenuItem::action(
                 t!("app.menu.toggle_secondary_sidebar"),
