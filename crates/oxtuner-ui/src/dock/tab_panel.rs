@@ -91,7 +91,12 @@ impl Render for DragPanelPreview {
 /// the pair reads as one unit instead of leaving the button floating at the
 /// trailing edge. It is a real button, so it keeps the role and the keyboard
 /// affordances a close action needs.
-fn close_button(ix: usize, group: TabGroupContext, panel: PanelId) -> impl IntoElement {
+fn close_button(
+    ix: usize,
+    group: TabGroupContext,
+    panel: PanelId,
+    shared: Rc<SkinShared>,
+) -> impl IntoElement {
     Button::new(("close-tab", ix))
         .icon(IconName::Close)
         .xsmall()
@@ -100,7 +105,11 @@ fn close_button(ix: usize, group: TabGroupContext, panel: PanelId) -> impl IntoE
         .debug_selector(|| CLOSE_BUTTON_SELECTOR.to_string())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            group.close(panel, window, cx);
+            // The host may need to ask first (unsaved work); only close when
+            // it says the tab can go.
+            if shared.request_close(panel, window, cx) {
+                group.close(panel, window, cx);
+            }
         })
 }
 
@@ -523,9 +532,11 @@ impl TabGroupSkin {
                     .map(|ix| {
                         let panel = &group.panels()[ix];
                         let handle = PanelHandle::of(panel);
+                        let modified = handle.is_some_and(|handle| handle.modified(cx));
                         let drag = tab_drag(group, ix, cx);
 
                         Tab::new()
+                            .modified(modified)
                             .ix(ix)
                             .debug_selector(move || format!("{TAB_SELECTOR}-{ix}"))
                             .tab_bar_prefix(has_leading)
@@ -547,6 +558,7 @@ impl TabGroupSkin {
                                         ix,
                                         group.clone(),
                                         panel.panel_id(cx),
+                                        Rc::clone(&self.shared),
                                     ))
                                 },
                             )
@@ -725,12 +737,15 @@ impl TabGroupRenderer for TabGroupSkin {
                 })
                 .on_action({
                     let group = group.clone();
+                    let shared = Rc::clone(&self.shared);
                     move |_: &ClosePanel, window, cx| {
                         let Some(panel) = group.active_panel() else {
                             return;
                         };
                         let panel = panel.panel_id(cx);
-                        group.close(panel, window, cx);
+                        if shared.request_close(panel, window, cx) {
+                            group.close(panel, window, cx);
+                        }
                     }
                 })
             })

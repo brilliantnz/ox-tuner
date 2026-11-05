@@ -91,6 +91,16 @@ pub trait Panel: gpui_kit::base::dock::Panel {
         "Unnamed"
     }
 
+    /// Whether the panel holds unsaved work.
+    ///
+    /// The tab strip marks a modified tab with a dot where its close button
+    /// would be, and swaps the dot back to the button while the pointer is over
+    /// the tab. The answer is read from wherever the work lives; the skin keeps
+    /// no copy of it.
+    fn modified(&self, cx: &App) -> bool {
+        false
+    }
+
     /// Colors for the title, for a panel that wants its tab to stand out.
     fn title_style(&self, cx: &App) -> Option<TitleStyle> {
         None
@@ -161,6 +171,7 @@ pub trait Panel: gpui_kit::base::dock::Panel {
 pub trait PanelView: gpui_kit::base::dock::PanelView {
     fn tab_name(&self, cx: &App) -> Option<SharedString>;
     fn title(&self, window: &mut Window, cx: &mut App) -> AnyElement;
+    fn modified(&self, cx: &App) -> bool;
     fn title_style(&self, cx: &App) -> Option<TitleStyle>;
     fn title_suffix(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement>;
     fn toolbar_buttons(&self, window: &mut Window, cx: &mut App) -> Option<Vec<Button>>;
@@ -173,6 +184,10 @@ pub trait PanelView: gpui_kit::base::dock::PanelView {
 impl<T: Panel> PanelView for Entity<T> {
     fn tab_name(&self, cx: &App) -> Option<SharedString> {
         self.read(cx).tab_name(cx)
+    }
+
+    fn modified(&self, cx: &App) -> bool {
+        self.read(cx).modified(cx)
     }
 
     fn title(&self, window: &mut Window, cx: &mut App) -> AnyElement {

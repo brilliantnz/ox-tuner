@@ -505,6 +505,22 @@ fn folder_tab_shape(metrics: FolderTabMetrics, bg: Background) -> impl IntoEleme
 }
 
 /// Adds a quarter circle from `from` to `to`, whose tangents meet at `corner`.
+/// The unsaved marker a modified tab draws in place of its close button.
+fn dirty_dot(selected: bool, cx: &App) -> AnyElement {
+    let color = if selected {
+        cx.theme().foreground
+    } else {
+        cx.theme().muted_foreground
+    };
+
+    div()
+        .debug_selector(|| "oxtuner-tab-dirty".to_string())
+        .size(px(7.))
+        .rounded_full()
+        .bg(color)
+        .into_any_element()
+}
+
 fn quarter_circle_to(
     path: &mut PathBuilder,
     from: Point<Pixels>,
@@ -552,6 +568,9 @@ pub struct Tab {
     /// Whether the suffix is an action on this tab (a close button) and should
     /// only be drawn for the tab in front or under the pointer.
     suffix_on_hover: bool,
+    /// Whether the panel behind the tab holds unsaved work. A modified tab
+    /// shows a dot in place of its close button until it is hovered.
+    modified: bool,
     children: Vec<AnyElement>,
     variant: TabVariant,
     size: Size,
@@ -622,6 +641,7 @@ impl Default for Tab {
             prefix: None,
             suffix: None,
             suffix_on_hover: false,
+            modified: false,
             variant: TabVariant::default(),
             size: Size::default(),
             max_width: None,
@@ -712,6 +732,15 @@ impl Tab {
     /// move the tabs after it.
     pub fn suffix_on_hover(mut self) -> Self {
         self.suffix_on_hover = true;
+        self
+    }
+
+    /// Mark the tab as holding unsaved work.
+    ///
+    /// A modified tab draws a dot where its close button would be, and swaps
+    /// back to the button while the pointer is over the tab.
+    pub fn modified(mut self, modified: bool) -> Self {
+        self.modified = modified;
         self
     }
 
@@ -1081,13 +1110,28 @@ impl RenderOnce for Tab {
             })
             .child(inner_element)
             .when_some(self.suffix, |this, suffix| {
-                let hidden = self.suffix_on_hover && !self.selected && !self.hovered;
+                // The dot and the close button share one slot, so a modified
+                // tab never moves the tabs after it while the pointer crosses.
+                let dot = self.modified && !self.hovered;
+                let close = match self.suffix_on_hover {
+                    true => !dot && (self.selected || self.hovered),
+                    false => true,
+                };
+                let marker = if dot {
+                    dirty_dot(self.selected, cx)
+                } else if close {
+                    suffix
+                } else {
+                    div().into_any_element()
+                };
 
                 this.child(
                     div()
                         .when_some(max_width, |this, _| this.flex_shrink_0())
-                        .when(hidden, |this| this.opacity(0.))
-                        .child(suffix),
+                        .when(self.suffix_on_hover, |this| {
+                            this.size(px(20.)).flex().items_center().justify_center()
+                        })
+                        .child(marker),
                 )
             })
             .when_some(self.on_click.clone(), |this, on_click| {

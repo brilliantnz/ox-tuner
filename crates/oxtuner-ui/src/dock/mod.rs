@@ -137,6 +137,13 @@ pub(crate) fn report_user_toggle(
 /// navigation tree, a status line — needs the pick itself.
 pub type TabPicked = Rc<dyn Fn(PanelId, &mut App)>;
 
+/// Asked before a panel closes.
+///
+/// Return `true` to let the dock close it, `false` when the host took over —
+/// a confirmation, for instance. The host is the only side that knows whether
+/// the panel holds unsaved work.
+pub type CloseRequest = Rc<dyn Fn(PanelId, &mut Window, &mut App) -> bool>;
+
 /// What every part of the skin reads, and the dock area it belongs to.
 ///
 /// The renderer is the only skin-owned object in the picture, so the settings
@@ -159,6 +166,8 @@ pub(crate) struct SkinShared {
     resize_started_open: Cell<bool>,
     /// What to tell when the reader picks a tab or a tab body.
     tab_picked: RefCell<Option<TabPicked>>,
+    /// Asked before a panel closes.
+    close_request: RefCell<Option<CloseRequest>>,
 }
 
 impl SkinShared {
@@ -184,6 +193,15 @@ impl SkinShared {
 
     pub(crate) fn resize_started_open(&self) -> &Cell<bool> {
         &self.resize_started_open
+    }
+
+    /// Whether the host allows this panel to close. No host answer means yes.
+    pub(crate) fn request_close(&self, panel: PanelId, window: &mut Window, cx: &mut App) -> bool {
+        let Some(request) = self.close_request.borrow().clone() else {
+            return true;
+        };
+
+        request(panel, window, cx)
     }
 
     /// Reports a pick, when a host asked for one.
@@ -254,6 +272,7 @@ impl DockSkin {
                 resizing_dock: Cell::new(None),
                 resize_started_open: Cell::new(false),
                 tab_picked: RefCell::new(None),
+                close_request: RefCell::new(None),
             }),
         })
     }
@@ -276,6 +295,14 @@ impl DockSkin {
     /// or by clicking inside it.
     pub fn set_tab_picked(&self, picked: TabPicked) {
         *self.shared.tab_picked.borrow_mut() = Some(picked);
+    }
+
+    /// Asks `request` before a panel closes.
+    ///
+    /// A host that answers `false` keeps the panel open and owns what happens
+    /// next; the dock does not remember the request.
+    pub fn set_close_request(&self, request: CloseRequest) {
+        *self.shared.close_request.borrow_mut() = Some(request);
     }
 
     /// Sets the shape every tab strip in the area draws.
