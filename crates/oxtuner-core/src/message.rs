@@ -274,6 +274,18 @@ pub enum Command {
     ///
     /// A snapshot of the working image is written first (S4).
     RevertTune,
+    /// Discard the local edits one table, curve or dialog owns.
+    ///
+    /// `name` is resolved like [`Self::ReadTable`]: a table id, a 3-D map id, a
+    /// curve name, or a dialog name (whose embedded table goes with it). Every
+    /// other target keeps its edits. A snapshot of the working image is
+    /// written first (S4). The reply is [`Event::TableEdited`] and/or
+    /// [`Event::DialogEdited`] with the target after the revert, plus
+    /// [`Event::TuneStatusRead`].
+    RevertTarget {
+        /// Table id, curve name or dialog name.
+        name: String,
+    },
     /// Import another `.msq` into the working image.
     ///
     /// A tune whose signature differs from the loaded definition needs
@@ -360,6 +372,7 @@ impl Command {
             Self::WriteToRam { .. } => "write-to-ram",
             Self::BurnToFlash { .. } => "burn-to-flash",
             Self::RevertTune => "revert-tune",
+            Self::RevertTarget { .. } => "revert-target",
             Self::ImportTune { .. } => "import-tune",
             Self::RestoreSnapshot { .. } => "restore-snapshot",
             Self::ListSnapshots => "list-snapshots",
