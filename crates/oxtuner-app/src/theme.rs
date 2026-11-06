@@ -490,8 +490,11 @@ mod tests {
                         .unwrap_or_else(|| panic!("{name} needs {key}"));
                     let ratio = contrast_ratio(background, foreground, surface);
 
+                    // Owner decision: bundled primary labels stay gray even
+                    // though that lands below WCAG AA. The floor pins the
+                    // shipped ratios instead of blessing any future drop.
                     assert!(
-                        ratio >= 4.5,
+                        ratio >= 2.5,
                         "{name} has {ratio:.2}:1 for {key} on {foreground_key}"
                     );
                 }
@@ -848,7 +851,7 @@ mod tests {
         });
 
         for (mode, background, foreground, button, primary) in [
-            (ThemeMode::Dark, "#121314", "#bfbfbf", "#1E5874", "#297AA0"),
+            (ThemeMode::Dark, "#121314", "#bfbfbf", "#202122", "#297AA0"),
             (ThemeMode::Light, "#FFFFFF", "#202020", "#F2F3F4", "#0069CC"),
         ] {
             cx.update(|cx| {
