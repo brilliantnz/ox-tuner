@@ -23,8 +23,8 @@ use gpui_kit::base::{
 };
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Colorize as _, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
 };
 use gpui_kit::{
@@ -92,25 +92,47 @@ impl Render for DragPanelPreview {
 /// trailing edge. It is a real button, so it keeps the role and the keyboard
 /// affordances a close action needs.
 fn close_button(
+    cx: &App,
     ix: usize,
     group: TabGroupContext,
     panel: PanelId,
     shared: Rc<SkinShared>,
 ) -> impl IntoElement {
-    Button::new(("close-tab", ix))
+    let button = Button::new(("close-tab", ix))
         .icon(IconName::Close)
         .xsmall()
-        .ghost()
         .tab_stop(false)
-        .debug_selector(|| CLOSE_BUTTON_SELECTOR.to_string())
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            // The host may need to ask first (unsaved work); only close when
-            // it says the tab can go.
-            if shared.request_close(panel, window, cx) {
-                group.close(panel, window, cx);
-            }
-        })
+        .debug_selector(|| CLOSE_BUTTON_SELECTOR.to_string());
+
+    // The ghost hover fill disappears into the tab on both modes (dark
+    // swallows it, light only hints at it), so each mode carries its own
+    // lifted variant: a stronger lift on dark, a gentler one on light.
+    let button = if cx.theme().mode.is_dark() {
+        let style = ButtonCustomVariant::new(cx)
+            .color(cx.theme().transparent)
+            .foreground(cx.theme().tab_active_foreground)
+            .hover(cx.theme().tab_active.mix_oklab(cx.theme().foreground, 0.75))
+            .active(cx.theme().tab_active.mix_oklab(cx.theme().foreground, 0.65));
+
+        button.custom(style)
+    } else {
+        let style = ButtonCustomVariant::new(cx)
+            .color(cx.theme().transparent)
+            .foreground(cx.theme().tab_active_foreground)
+            .hover(cx.theme().tab_active.mix_oklab(cx.theme().foreground, 0.88))
+            .active(cx.theme().tab_active.mix_oklab(cx.theme().foreground, 0.83));
+
+        button.custom(style)
+    };
+
+    button.on_click(move |_, window, cx| {
+        cx.stop_propagation();
+        // The host may need to ask first (unsaved work); only close when
+        // it says the tab can go.
+        if shared.request_close(panel, window, cx) {
+            group.close(panel, window, cx);
+        }
+    })
 }
 
 /// A panel's title, or its registered name when it reached base without this
@@ -555,6 +577,7 @@ impl TabGroupSkin {
                                     && group.is_panel_closable(panel.panel_id(cx), cx),
                                 |this| {
                                     this.suffix_on_hover().suffix(close_button(
+                                        cx,
                                         ix,
                                         group.clone(),
                                         panel.panel_id(cx),
