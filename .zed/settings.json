@@ -1,0 +1,91 @@
+{
+  // Line endings
+  "line_ending": "prefer_lf",
+
+  // Editor
+  "tab_size": 2,
+  "auto_indent_on_paste": true,
+
+  // Global formatter
+  "formatter": "language_server",
+  "format_on_save": "on",
+
+  "languages": {
+    // JSON
+    "JSON": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "JSONC": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "JSON5": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+
+    // Markdown
+    "Markdown": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "MDX": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+
+    // YAML & TOML
+    "YAML": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+    "TOML": {
+      "formatter": {
+        "language_server": {
+          "name": "oxfmt"
+        }
+      }
+    },
+
+    // Rust
+    "Rust": {
+      "tab_size": 4,
+      "formatter": "language_server"
+    },
+
+    // INI
+    "ini": {
+      "tab_size": 4
+    }
+  },
+
+  // Language servers
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": {
+          "command": "clippy"
+        }
+      }
+    }
+  }
+}
