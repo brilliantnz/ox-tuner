@@ -87,7 +87,7 @@
         "muted.background": "#242526",
         "muted.foreground": "#8C8C8C",
         "overlay": "#00000066",
-        "popover.background": "#202122",
+        "popover.background": "#242526",
         "popover.foreground": "#BFBFBF",
         "primary.active.background": "#1F5B77",
         "primary.background": "#297AA0",
