@@ -87,5 +87,6 @@ impl RenderOnce for StatusBarView {
                 )
             })
             .right(concat!("v", env!("CARGO_PKG_VERSION")))
+            .right(crate::notifications::bell::NotificationBell)
     }
 }
