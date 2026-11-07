@@ -11,6 +11,7 @@ use std::{rc::Rc, time::Duration};
 use gpui_kit::base::{VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _,
@@ -19,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollEvent, Size, Styled as _, Subscription, Task, Window, div, px, size,
+    ScrollEvent, ScrollStrategy, Size, Styled as _, Subscription, Task, Window, div, px, size,
 };
 use oxtuner_log::{LogRecord, LogSnapshot};
 use tracing::Level;
@@ -296,8 +297,8 @@ impl DiagnosticsView {
 
         let handle = self.scroll.base_handle();
         let offset = handle.offset().y;
-        let max = handle.max_offset().y;
-        if offset > max + px(1.0) {
+        let bottom = -handle.max_offset().y;
+        if offset > bottom + px(1.0) {
             self.follow = false;
         }
     }
@@ -633,7 +634,13 @@ impl Render for DiagnosticsView {
             .size_full();
 
             if self.follow && self.follow_pending {
-                self.scroll.scroll_to_bottom();
+                // `scroll_to_bottom` uses the item count from the previous
+                // layout. With a record just added that count is one short, so
+                // the newest row stops just below the viewport. Naming the
+                // newest row directly makes the deferred scroll use this
+                // frame's sizes.
+                self.scroll
+                    .scroll_to_item(self.records.len().saturating_sub(1), ScrollStrategy::Top);
                 self.follow_pending = false;
             }
 
@@ -650,9 +657,11 @@ impl Render for DiagnosticsView {
             .child(
                 div()
                     .id("diagnostics-list-scroll")
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .pr_1()
                     .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                         let upward = match event.delta {
                             ScrollDelta::Pixels(delta) => delta.y > px(0.),
@@ -664,7 +673,24 @@ impl Render for DiagnosticsView {
                             cx.notify();
                         }
                     }))
-                    .child(body),
+                    .child(body)
+                    // A virtual list owns its scroll and virtualization, so
+                    // it takes the scrollbar directly instead of the
+                    // `Scrollable` wrapper.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(6.))
+                            .child(
+                                Scrollbar::vertical(&self.scroll)
+                                    .id("diagnostics-list-scrollbar")
+                                    .mode(ScrollbarMode::Scrolling)
+                                    .viewport_from_layout(),
+                            ),
+                    ),
             )
     }
 }
@@ -1004,6 +1030,30 @@ mod tests {
 
         let count = view.read_with(cx, |view, _| view.records.len());
         assert!(count >= 100, "expected at least 100 records, got {count}");
+
+        let (offset, max) = view.read_with(cx, |view, _| {
+            let handle = view.scroll.base_handle();
+            (handle.offset().y, handle.max_offset().y)
+        });
+        assert_eq!(
+            offset, -max,
+            "follow must start pinned to the newest record"
+        );
+
+        tracing::info!(target: "oxtuner_core", "record after follow");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .expect("render the new record");
+        let (offset, max) = view.read_with(cx, |view, _| {
+            let handle = view.scroll.base_handle();
+            (handle.offset().y, handle.max_offset().y)
+        });
+        assert_eq!(
+            offset, -max,
+            "follow must stay pinned while the diagnostics tab stays open"
+        );
 
         let (before, position) = view.read_with(cx, |view, _| {
             let handle = view.scroll.base_handle();
