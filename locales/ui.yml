@@ -238,22 +238,8 @@ app:
       en: No ECU definition loaded.
     no_indicators:
       en: This definition declares no front-page indicators.
-    definition_failed:
-      en: The definition could not be loaded.
-    project_failed:
-      en: The project could not be opened.
-    save_failed:
-      en: The tune could not be saved.
-    nothing_to_save:
-      en: There is no open tune to save.
-    command_failed:
-      en: The command failed.
     saved:
       en: 'Saved %{cells} values to %{tune}.'
-    table_failed:
-      en: The table could not be read or changed.
-    dialog_failed:
-      en: The dialog could not be read or changed.
     trace_saved:
       en: 'Trace saved (%{frames} frames) to %{path}'
     no_live_values:
