@@ -208,6 +208,43 @@ impl DiagnosticsView {
         }
     }
 
+    /// Shows the records around one filter, with every other filter cleared.
+    ///
+    /// The caller has already made the tab visible. Follow and pause are reset
+    /// so the target is at the live end of the list, and the level and
+    /// subsystem pickers go back to All so a filter from an earlier search
+    /// cannot hide the record the notification points at.
+    pub(crate) fn reveal(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.paused = false;
+        self.paused_snapshot = None;
+        self.follow = true;
+        self.follow_pending = true;
+        self.clear_after = None;
+        self.force = true;
+        self.last_revision = 0;
+
+        self.query.update(cx, |query, cx| {
+            query.set_value(filter.unwrap_or_default(), window, cx);
+        });
+        self.level.update(cx, |level, cx| {
+            level.set_selected_index(Some(IndexPath::new(0)), window, cx);
+        });
+        self.subsystem.update(cx, |subsystem, cx| {
+            subsystem.set_selected_index(Some(IndexPath::new(0)), window, cx);
+        });
+
+        if self.active {
+            self.start_tick(cx);
+        }
+
+        cx.notify();
+    }
+
     fn start_tick(&mut self, cx: &mut Context<'_, Self>) {
         self.tick = None;
         if !self.active || self.paused {
@@ -769,9 +806,20 @@ fn record_matches(record: &LogRecord, query: &str) -> bool {
         return true;
     }
 
-    record.fields.iter().any(|(name, value)| {
-        name.to_lowercase().contains(query) || value.to_lowercase().contains(query)
-    })
+    record
+        .fields
+        .iter()
+        .any(|(name, value)| field_matches(name, value, query))
+}
+
+fn field_matches(name: &str, value: &str, query: &str) -> bool {
+    // A notification links to a record with `op=op-42`. The field is stored
+    // as a name and a value, so matching them separately would never see the
+    // pair the user searched for.
+    let name = name.to_lowercase();
+    let value = value.to_lowercase();
+
+    name.contains(query) || value.contains(query) || format!("{name}={value}").contains(query)
 }
 
 fn record_text(record: &LogRecord) -> String {
@@ -874,6 +922,13 @@ mod tests {
     fn time_labels_keep_the_clock_part() {
         assert_eq!(time_label("2026-11-01T05:20:55.123456Z"), "05:20:55.123");
         assert_eq!(time_label("2026-11-01T13:20:55+08:00"), "13:20:55");
+    }
+
+    #[test]
+    fn a_filter_can_match_a_whole_field_pair() {
+        assert!(field_matches("op", "op-42", "op=op-42"));
+        assert!(field_matches("op", "op-42", "op"));
+        assert!(!field_matches("op", "op-42", "op=op-7"));
     }
 
     #[test]

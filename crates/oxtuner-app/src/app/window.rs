@@ -30,6 +30,12 @@ pub fn main(cx: &App) -> Option<AnyWindowHandle> {
     cx.try_global::<MainWindow>().map(|window| window.handle)
 }
 
+/// The main layout, when the window is still open.
+pub(crate) fn main_view(cx: &App) -> Option<gpui_kit::Entity<AppLayout>> {
+    cx.try_global::<MainWindow>()
+        .and_then(|window| window.view.upgrade())
+}
+
 /// Records the window the app just opened.
 pub(crate) fn set(cx: &mut App, handle: AnyWindowHandle, view: &gpui_kit::Entity<AppLayout>) {
     cx.set_global(MainWindow {

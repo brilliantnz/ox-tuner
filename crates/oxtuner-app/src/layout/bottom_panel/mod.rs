@@ -117,6 +117,25 @@ impl BottomPanel {
         }
     }
 
+    /// Shows Diagnostics with one filter, for a notification's details action.
+    ///
+    /// This bypasses the tab click path on purpose: the panel is already open
+    /// or opening, and the filter must be applied even when Diagnostics was
+    /// the active tab.
+    pub(crate) fn show_diagnostics(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tab = BottomTab::Diagnostics;
+        self.diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.set_active(true, cx);
+            diagnostics.reveal(filter, window, cx);
+        });
+        cx.notify();
+    }
+
     /// Switches the visible category.
     fn select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let tab = BottomTab::from_index(index);
