@@ -31,6 +31,9 @@ pub fn app_identity() -> &'static str {
 pub fn init(cx: &mut App) {
     // gpui-kit first: it registers the components' own actions and bindings.
     gpui_kit::init(cx);
+    // The notification inbox and the toast placement both need gpui-kit's
+    // theme and window layers to exist.
+    crate::notifications::init(cx);
 
     // Before ours, so a rebuild starts from gpui-kit's copy rather than an
     // empty keymap.

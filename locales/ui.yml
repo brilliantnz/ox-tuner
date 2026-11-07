@@ -238,22 +238,8 @@ app:
       en: No ECU definition loaded.
     no_indicators:
       en: This definition declares no front-page indicators.
-    definition_failed:
-      en: The definition could not be loaded.
-    project_failed:
-      en: The project could not be opened.
-    save_failed:
-      en: The tune could not be saved.
-    nothing_to_save:
-      en: There is no open tune to save.
-    command_failed:
-      en: The command failed.
     saved:
       en: 'Saved %{cells} values to %{tune}.'
-    table_failed:
-      en: The table could not be read or changed.
-    dialog_failed:
-      en: The dialog could not be read or changed.
     trace_saved:
       en: 'Trace saved (%{frames} frames) to %{path}'
     no_live_values:
@@ -327,6 +313,107 @@ app:
       en: Thread
     column_message:
       en: Message
+  notifications:
+    bell_tooltip:
+      en: Notifications
+    bell_unread:
+      en: '%{count} unread'
+    title:
+      en: Notifications
+    clear:
+      en: Clear
+    close:
+      en: Close
+    empty:
+      en: No notifications for this session.
+    empty_hint:
+      en: Outcomes that need attention appear here.
+    repeat:
+      en: '×%{count}'
+    show_details:
+      en: Show details
+    dismiss:
+      en: Dismiss
+    time_now:
+      en: Just now
+    time_minutes:
+      en: '%{count} min ago'
+    time_hours:
+      en: '%{count} h ago'
+    link_lost_title:
+      en: ECU link lost
+    link_restored_title:
+      en: ECU link restored
+    link_restored_body:
+      en: 'Connected to %{port} · %{signature}'
+    write_done_title:
+      en: Write verified
+    write_done_body:
+      en: '%{pages} pages · %{cells} cells'
+    burn_done_title:
+      en: Burn complete
+    burn_done_body:
+      en: '%{pages} pages verified'
+    rejected_title:
+      en: Command not run
+    rejected_body:
+      en: The core was shutting down, so the command did not run.
+    read_only_title:
+      en: Opened read-only
+    read_only_body:
+      en: Writes are disabled for this session.
+    failed_definition:
+      en: ECU definition rejected
+    failed_project:
+      en: Project could not be opened
+    failed_save:
+      en: Tune could not be saved
+    failed_nothing_to_save:
+      en: There is no tune to save
+    failed_table:
+      en: Table could not be read
+    failed_table_edit:
+      en: Table edit was refused
+    failed_dialog:
+      en: Dialog could not be read
+    failed_dialog_edit:
+      en: Dialog edit was refused
+    failed_connect:
+      en: Connection failed
+    failed_test:
+      en: Connection test failed
+    failed_not_connected:
+      en: The ECU is not connected
+    failed_read:
+      en: Page read failed
+    failed_adopt:
+      en: ECU tune could not be used
+    failed_trace:
+      en: Session trace could not be saved
+    failed_realtime:
+      en: Realtime polling was refused
+    failed_write_refused:
+      en: Write refused
+    failed_write:
+      en: Write verification failed
+    failed_burn_refused:
+      en: Burn refused
+    failed_burn:
+      en: Burn verification failed
+    failed_import:
+      en: Tune could not be imported
+    failed_import_consent:
+      en: Import needs your approval
+    failed_snapshot:
+      en: Snapshot could not be written
+    failed_journal:
+      en: Write journal could not be written
+    failed_log:
+      en: Session log failed
+    failed_busy:
+      en: The ECU is busy
+    failed_generic:
+      en: Command failed
   table:
     copy:
       en: Copy

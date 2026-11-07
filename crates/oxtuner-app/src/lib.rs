@@ -29,6 +29,7 @@ mod editor;
 pub mod i18n;
 pub mod layout;
 pub mod link;
+mod notifications;
 pub mod platform;
 pub mod project;
 pub mod realtime;

@@ -133,6 +133,12 @@ impl TabBar {
         self
     }
 
+    /// Set the Tab variant to Panel, all children will inherit the variant.
+    pub fn panel(mut self) -> Self {
+        self.variant = TabVariant::Panel;
+        self
+    }
+
     /// Set whether to show the menu button when tabs overflow, default is false.
     pub fn menu(mut self, menu: bool) -> Self {
         self.menu = menu;
@@ -437,6 +443,9 @@ impl RenderOnce for TabBar {
                 Edges::all(px(0.)),
                 FOLDER_TAB_GAP,
             ),
+            // The bar shares the content surface, so a small gap separates the
+            // tabs rather than the bar's background.
+            TabVariant::Panel => (cx.theme().tokens.tab.into(), Edges::all(px(0.)), px(4.)),
         };
         let overhang = self.variant.overhang(self.size, cx);
         // Inside the tabs rather than on the bar, so the bar's prefix and

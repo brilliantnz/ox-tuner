@@ -429,6 +429,54 @@ fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
     .detach();
 }
 
+/// Writes the diagnostic anchor for the outcomes that carry a details action.
+///
+/// A notification's "Show details" opens Diagnostics filtered by `op`. That
+/// only works when a record for the command exists with an `op` field, so the
+/// event boundary always writes one. The core's own records keep the technical
+/// cause; this one guarantees the link the UI offers can be followed.
+fn log_outcome(event: &Event, op: Option<OpId>) {
+    match event {
+        Event::Failed { failure, .. } => {
+            // `message` is tracing's own field; the failure text goes in
+            // `detail` so the record keeps its event message and the field.
+            // One line is enough here: the core keeps the full diagnostic.
+            let detail = failure
+                .message
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default();
+
+            if let Some(op) = op {
+                tracing::warn!(
+                    %op,
+                    code = failure.code.as_str(),
+                    %detail,
+                    "the core reported a failure"
+                );
+            } else {
+                tracing::warn!(
+                    code = failure.code.as_str(),
+                    %detail,
+                    "the core reported a failure"
+                );
+            }
+        }
+        Event::Rejected { reason, .. } => {
+            if let Some(op) = op {
+                tracing::warn!(
+                    %op,
+                    reason = reason.as_str(),
+                    "the core rejected the command"
+                );
+            } else {
+                tracing::warn!(reason = reason.as_str(), "the core rejected the command");
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Folds one event into the status and repaints.
 #[expect(
     clippy::too_many_lines,
@@ -436,6 +484,18 @@ fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
 )]
 fn apply(event: Event, cx: &mut App) {
     let event_op = event.op();
+
+    // Every failure and rejection gets one record with the op field that
+    // Diagnostics filters on. The core logs its own technical detail, but not
+    // every failure path there carries the op; this app-side boundary is the
+    // one place every answered command passes through.
+    log_outcome(&event, event_op);
+
+    // The notification policy runs before the status is folded, so a reconnect
+    // can tell that the link had visibly been lost. Publishing now also means
+    // the toast arrives with the same event that changed the status.
+    let link_was_lost = cx.global::<CoreService>().status.link_lost.clone();
+    crate::notifications::publish_event(&event, link_was_lost.as_deref(), cx);
 
     // The port list is stored for the dialog, which stays open while it scans:
     // closing and reopening would lose the user's selection and scroll.
@@ -539,10 +599,7 @@ fn apply(event: Event, cx: &mut App) {
             running, summary, ..
         } => (Update::Log { running, summary }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
-        Event::Failed { failure, .. } => {
-            tracing::warn!(code = failure.code.as_str(), "the core reported a failure");
-            (Update::Failed(failure), None)
-        }
+        Event::Failed { failure, .. } => (Update::Failed(failure), None),
         Event::PortsListed { .. } | Event::Rejected { .. } | Event::Stopped => {
             (Update::Nothing, None)
         }

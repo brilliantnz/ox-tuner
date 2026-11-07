@@ -66,6 +66,10 @@ pub enum TabVariant {
     /// selected tab rises from the bar with rounded top corners and curves out
     /// into the content below it.
     Folder,
+    /// Flat tabs in one row, as in an editor's panel header: the bar shares
+    /// the content surface and the selected tab is a filled rectangle whose
+    /// label is the strongest text in the row.
+    Panel,
 }
 
 impl TabVariant {
@@ -93,22 +97,28 @@ impl TabVariant {
     pub(super) fn inner_height(&self, size: Size) -> Pixels {
         match size {
             Size::XSmall => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(18.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill | TabVariant::Panel => {
+                    px(18.)
+                }
                 TabVariant::Segmented | TabVariant::Folder => px(16.),
                 TabVariant::Underline => px(20.),
             },
             Size::Small => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(22.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill | TabVariant::Panel => {
+                    px(22.)
+                }
                 TabVariant::Segmented | TabVariant::Folder => px(18.),
                 TabVariant::Underline => px(22.),
             },
             Size::Large => match self {
-                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill => px(36.),
+                TabVariant::Tab | TabVariant::Outline | TabVariant::Pill | TabVariant::Panel => {
+                    px(36.)
+                }
                 TabVariant::Segmented | TabVariant::Folder => px(28.),
                 TabVariant::Underline => px(32.),
             },
             _ => match self {
-                TabVariant::Tab => px(30.),
+                TabVariant::Tab | TabVariant::Panel => px(30.),
                 TabVariant::Outline | TabVariant::Pill => px(26.),
                 TabVariant::Segmented | TabVariant::Folder => px(24.),
                 TabVariant::Underline => px(26.),
@@ -220,6 +230,11 @@ impl TabVariant {
                 bg: cx.theme().transparent.into(),
                 ..Default::default()
             },
+            TabVariant::Panel => TabStyle {
+                fg: cx.theme().tab_foreground,
+                bg: cx.theme().transparent.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -275,6 +290,13 @@ impl TabVariant {
                 bg: cx.theme().transparent.into(),
                 ..Default::default()
             },
+            // The bar is one surface with the content, so the tab itself
+            // carries the whole hover highlight.
+            TabVariant::Panel => TabStyle {
+                fg: cx.theme().tab_active_foreground,
+                bg: cx.theme().tokens.accent.opacity(0.8).into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -324,6 +346,13 @@ impl TabVariant {
             TabVariant::Folder => TabStyle {
                 fg: cx.theme().tab_active_foreground,
                 bg: cx.theme().transparent.into(),
+                ..Default::default()
+            },
+            // The content is painted with `tab`, so the selected tab
+            // takes the tab bar's own shade to sit above that surface.
+            TabVariant::Panel => TabStyle {
+                fg: cx.theme().tab_active_foreground,
+                bg: cx.theme().tokens.accent.into(),
                 ..Default::default()
             },
         }
@@ -399,6 +428,11 @@ impl TabVariant {
                 bg: cx.theme().transparent.into(),
                 ..Default::default()
             },
+            TabVariant::Panel => TabStyle {
+                fg: cx.theme().muted_foreground,
+                bg: cx.theme().transparent.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -422,6 +456,7 @@ impl TabVariant {
                 Size::Large => cx.theme().radius_lg,
                 _ => cx.theme().radius_lg,
             },
+            TabVariant::Panel => cx.theme().radius,
             _ => px(0.),
         }
     }
@@ -714,6 +749,12 @@ impl Tab {
         self
     }
 
+    /// Use Panel variant.
+    pub fn panel(mut self) -> Self {
+        self.variant = TabVariant::Panel;
+        self
+    }
+
     /// Set the left side of the tab
     pub fn prefix(mut self, prefix: impl IntoElement) -> Self {
         self.prefix = Some(prefix.into_any_element());
@@ -850,6 +891,7 @@ impl RenderOnce for Tab {
         let height = self.variant.height(self.size);
         let aria_label = self.a11y_label();
         let folder = self.variant == TabVariant::Folder;
+        let panel = self.variant == TabVariant::Panel;
         let metrics = FolderTabMetrics::new(self.size, cx);
         let has_prefix = self.prefix.is_some();
         let has_suffix = self.suffix.is_some();
@@ -1011,7 +1053,7 @@ impl RenderOnce for Tab {
             .map(|this| match self.size {
                 Size::XSmall => this.text_xs(),
                 Size::Large => this.text_base(),
-                _ if folder => this.text_xs(),
+                _ if folder || panel => this.text_size(cx.theme().mono_font_size),
                 _ => this.text_sm(),
             })
             .rounded(radius)
@@ -1063,16 +1105,18 @@ impl RenderOnce for Tab {
                             .bottom(metrics.top_padding)
                             .rounded(metrics.radius)
                             // .bg(cx.theme().tokens.secondary),
-                            .bg(cx.theme().tokens.button_hover),
+                            .bg(cx.theme().tokens.accent.opacity(0.8)),
                     )
                 },
             )
-            // In the gap after the tab, on a whole pixel, level with the content.
+            // In the gap after the tab, centered on the gap and level with
+            // the content. The offset covers half the gap plus half the
+            // line itself, so the line's center sits on the gap's middle.
             .when(folder && self.separator, |this| {
                 this.child(
                     div()
                         .absolute()
-                        .right(-(FOLDER_TAB_GAP / 2.))
+                        .right(-((FOLDER_TAB_GAP + px(1.)) / 2.))
                         .top((height - metrics.top_padding - metrics.separator_height) / 2.)
                         .w(px(1.))
                         .h(metrics.separator_height)

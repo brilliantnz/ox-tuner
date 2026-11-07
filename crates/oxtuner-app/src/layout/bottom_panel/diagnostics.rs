@@ -11,6 +11,7 @@ use std::{rc::Rc, time::Duration};
 use gpui_kit::base::{VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
 use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _,
@@ -19,7 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollEvent, Size, Styled as _, Subscription, Task, Window, div, px, size,
+    ScrollEvent, ScrollStrategy, Size, Styled as _, Subscription, Task, Window, div, px, size,
 };
 use oxtuner_log::{LogRecord, LogSnapshot};
 use tracing::Level;
@@ -207,6 +208,43 @@ impl DiagnosticsView {
         }
     }
 
+    /// Shows the records around one filter, with every other filter cleared.
+    ///
+    /// The caller has already made the tab visible. Follow and pause are reset
+    /// so the target is at the live end of the list, and the level and
+    /// subsystem pickers go back to All so a filter from an earlier search
+    /// cannot hide the record the notification points at.
+    pub(crate) fn reveal(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.paused = false;
+        self.paused_snapshot = None;
+        self.follow = true;
+        self.follow_pending = true;
+        self.clear_after = None;
+        self.force = true;
+        self.last_revision = 0;
+
+        self.query.update(cx, |query, cx| {
+            query.set_value(filter.unwrap_or_default(), window, cx);
+        });
+        self.level.update(cx, |level, cx| {
+            level.set_selected_index(Some(IndexPath::new(0)), window, cx);
+        });
+        self.subsystem.update(cx, |subsystem, cx| {
+            subsystem.set_selected_index(Some(IndexPath::new(0)), window, cx);
+        });
+
+        if self.active {
+            self.start_tick(cx);
+        }
+
+        cx.notify();
+    }
+
     fn start_tick(&mut self, cx: &mut Context<'_, Self>) {
         self.tick = None;
         if !self.active || self.paused {
@@ -296,8 +334,8 @@ impl DiagnosticsView {
 
         let handle = self.scroll.base_handle();
         let offset = handle.offset().y;
-        let max = handle.max_offset().y;
-        if offset > max + px(1.0) {
+        let bottom = -handle.max_offset().y;
+        if offset > bottom + px(1.0) {
             self.follow = false;
         }
     }
@@ -633,7 +671,13 @@ impl Render for DiagnosticsView {
             .size_full();
 
             if self.follow && self.follow_pending {
-                self.scroll.scroll_to_bottom();
+                // `scroll_to_bottom` uses the item count from the previous
+                // layout. With a record just added that count is one short, so
+                // the newest row stops just below the viewport. Naming the
+                // newest row directly makes the deferred scroll use this
+                // frame's sizes.
+                self.scroll
+                    .scroll_to_item(self.records.len().saturating_sub(1), ScrollStrategy::Top);
                 self.follow_pending = false;
             }
 
@@ -650,9 +694,11 @@ impl Render for DiagnosticsView {
             .child(
                 div()
                     .id("diagnostics-list-scroll")
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .pr_1()
                     .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                         let upward = match event.delta {
                             ScrollDelta::Pixels(delta) => delta.y > px(0.),
@@ -664,7 +710,24 @@ impl Render for DiagnosticsView {
                             cx.notify();
                         }
                     }))
-                    .child(body),
+                    .child(body)
+                    // A virtual list owns its scroll and virtualization, so
+                    // it takes the scrollbar directly instead of the
+                    // `Scrollable` wrapper.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(6.))
+                            .child(
+                                Scrollbar::vertical(&self.scroll)
+                                    .id("diagnostics-list-scrollbar")
+                                    .mode(ScrollbarMode::Scrolling)
+                                    .viewport_from_layout(),
+                            ),
+                    ),
             )
     }
 }
@@ -743,9 +806,20 @@ fn record_matches(record: &LogRecord, query: &str) -> bool {
         return true;
     }
 
-    record.fields.iter().any(|(name, value)| {
-        name.to_lowercase().contains(query) || value.to_lowercase().contains(query)
-    })
+    record
+        .fields
+        .iter()
+        .any(|(name, value)| field_matches(name, value, query))
+}
+
+fn field_matches(name: &str, value: &str, query: &str) -> bool {
+    // A notification links to a record with `op=op-42`. The field is stored
+    // as a name and a value, so matching them separately would never see the
+    // pair the user searched for.
+    let name = name.to_lowercase();
+    let value = value.to_lowercase();
+
+    name.contains(query) || value.contains(query) || format!("{name}={value}").contains(query)
 }
 
 fn record_text(record: &LogRecord) -> String {
@@ -848,6 +922,13 @@ mod tests {
     fn time_labels_keep_the_clock_part() {
         assert_eq!(time_label("2026-11-01T05:20:55.123456Z"), "05:20:55.123");
         assert_eq!(time_label("2026-11-01T13:20:55+08:00"), "13:20:55");
+    }
+
+    #[test]
+    fn a_filter_can_match_a_whole_field_pair() {
+        assert!(field_matches("op", "op-42", "op=op-42"));
+        assert!(field_matches("op", "op-42", "op"));
+        assert!(!field_matches("op", "op-42", "op=op-7"));
     }
 
     #[test]
@@ -1004,6 +1085,30 @@ mod tests {
 
         let count = view.read_with(cx, |view, _| view.records.len());
         assert!(count >= 100, "expected at least 100 records, got {count}");
+
+        let (offset, max) = view.read_with(cx, |view, _| {
+            let handle = view.scroll.base_handle();
+            (handle.offset().y, handle.max_offset().y)
+        });
+        assert_eq!(
+            offset, -max,
+            "follow must start pinned to the newest record"
+        );
+
+        tracing::info!(target: "oxtuner_core", "record after follow");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .expect("render the new record");
+        let (offset, max) = view.read_with(cx, |view, _| {
+            let handle = view.scroll.base_handle();
+            (handle.offset().y, handle.max_offset().y)
+        });
+        assert_eq!(
+            offset, -max,
+            "follow must stay pinned while the diagnostics tab stays open"
+        );
 
         let (before, position) = view.read_with(cx, |view, _| {
             let handle = view.scroll.base_handle();

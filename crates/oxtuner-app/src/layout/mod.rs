@@ -195,6 +195,21 @@ impl AppLayout {
         }
     }
 
+    /// Opens Diagnostics with a notification's filter.
+    ///
+    /// The panel is made visible in the session document, then the view is
+    /// updated once so the tab switch and the filter land in the same frame.
+    pub(crate) fn show_diagnostics(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.bottom_panel
+            .update(cx, |panel, cx| panel.show_diagnostics(filter, window, cx));
+        cx.notify();
+    }
+
     /// The panel toggles at the trailing edge of the main bar.
     /// Each reads its state from the session document, so the
     /// pressed appearance and the panel itself cannot disagree.
@@ -534,6 +549,25 @@ pub fn toggle_bottom_panel(cx: &mut App) {
     toggle_panel(cx, |layout| {
         layout.bottom_visible = !layout.bottom_visible;
     });
+}
+
+/// Opens the panel on Diagnostics and puts `filter` in its search box.
+///
+/// The notification surface calls this when the user asks for details. The
+/// panel is forced visible first, because a notification can arrive while it
+/// was hidden; the filter and the tab then change in the same update.
+pub(crate) fn show_diagnostics(window: &mut Window, cx: &mut App, filter: Option<String>) {
+    AppState::update_global(cx, |data| data.layout.bottom_visible = true);
+    schedule_save(cx);
+
+    match app::window::main_view(cx) {
+        Some(view) => {
+            view.update(cx, |this, cx| {
+                this.show_diagnostics(filter, window, cx);
+            });
+        }
+        None => app::window::notify_main(cx),
+    }
 }
 
 /// Flips one panel's visibility, saves, and repaints.

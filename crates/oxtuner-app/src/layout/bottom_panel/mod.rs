@@ -117,6 +117,25 @@ impl BottomPanel {
         }
     }
 
+    /// Shows Diagnostics with one filter, for a notification's details action.
+    ///
+    /// This bypasses the tab click path on purpose: the panel is already open
+    /// or opening, and the filter must be applied even when Diagnostics was
+    /// the active tab.
+    pub(crate) fn show_diagnostics(
+        &mut self,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.tab = BottomTab::Diagnostics;
+        self.diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.set_active(true, cx);
+            diagnostics.reveal(filter, window, cx);
+        });
+        cx.notify();
+    }
+
     /// Switches the visible category.
     fn select(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let tab = BottomTab::from_index(index);
@@ -141,12 +160,11 @@ impl Render for BottomPanel {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // The folder bar is the panel's only chrome row: the tabs name the
-            // categories, and closing stays one quiet icon at the trailing edge.
             .child(
                 TabBar::new("bottom-panel-tabs")
-                    .folder()
-                    .bg(cx.theme().tab_bar)
+                    .panel()
+                    .py_1()
+                    .pl_1()
                     .small()
                     .selected_index(tab.index())
                     .on_click(cx.listener(|this, index, _, cx| this.select(*index, cx)))
@@ -162,11 +180,12 @@ impl Render for BottomPanel {
                         ),
                     ),
             )
-            // The folder shape joins the content painted with the active-tab
-            // color, so the selected tab reads as part of the panel below it.
-            // Only the visible category is built, so switching to another tab
-            // starts that category's content at the top. Diagnostics owns its
-            // own virtual-list scroll, so the outer scroll is skipped there.
+            // The selected tab and the content share one surface, so the active
+            // category reads as a filled tab on the panel rather than a folder
+            // joined to the body. Only the visible category is built, so
+            // switching to another tab starts that category's content at the
+            // top. Diagnostics owns its own virtual-list scroll, so the outer
+            // scroll is skipped there.
             .child(
                 div()
                     .id(ElementId::Name(
@@ -182,7 +201,7 @@ impl Render for BottomPanel {
                     .when(tab != BottomTab::Diagnostics, |this| {
                         this.overflow_y_scroll()
                     })
-                    .bg(cx.theme().tokens.tab_active)
+                    .bg(cx.theme().tokens.tab)
                     .p_3()
                     .child(tab.content(diagnostics)),
             )

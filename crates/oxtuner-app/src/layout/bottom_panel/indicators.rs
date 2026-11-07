@@ -6,12 +6,11 @@
 
 use gpui_kit::base::v_flex;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    AnyElement, App, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div,
 };
-use oxtuner_core::{Failure, FailureCode, IndicatorReading, IndicatorSummary};
+use oxtuner_core::{IndicatorReading, IndicatorSummary};
 use oxtuner_ui::indicator::{IndicatorState, IndicatorStrip, IndicatorView};
 
 use crate::core::CoreService;
@@ -24,13 +23,8 @@ pub(super) struct Indicators;
 impl RenderOnce for Indicators {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let danger = cx.theme().danger;
         let status = CoreService::status(cx);
         let pending = status.pending_project.is_some();
-        let failure = status
-            .failure
-            .as_ref()
-            .map(|failure| failure_banner(failure, danger, muted));
 
         let content = match status.definition() {
             None if pending => empty(t!("app.editor.opening_project"), muted),
@@ -54,50 +48,8 @@ impl RenderOnce for Indicators {
             }
         };
 
-        v_flex()
-            .w_full()
-            .gap_2()
-            .when_some(failure, gpui_kit::ParentElement::child)
-            .child(content)
+        v_flex().w_full().child(content)
     }
-}
-
-/// Shows why the last command failed, when one did.
-///
-/// The tab is the first place a failed definition or project load becomes
-/// visible, so the message stays next to the empty strip until a command
-/// succeeds.
-fn failure_banner(failure: &Failure, danger: Hsla, muted: Hsla) -> AnyElement {
-    let heading = match failure.code {
-        FailureCode::DefinitionRejected => t!("app.bottom_panel.definition_failed"),
-        FailureCode::ProjectRejected => t!("app.bottom_panel.project_failed"),
-        FailureCode::TuneSaveFailed => t!("app.bottom_panel.save_failed"),
-        FailureCode::NothingToSave => t!("app.bottom_panel.nothing_to_save"),
-        FailureCode::TableUnavailable | FailureCode::TableEditRejected => {
-            t!("app.bottom_panel.table_failed")
-        }
-        FailureCode::DialogUnavailable | FailureCode::DialogEditRejected => {
-            t!("app.bottom_panel.dialog_failed")
-        }
-        _ => t!("app.bottom_panel.command_failed"),
-    };
-
-    v_flex()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(danger)
-                .child(heading),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(muted)
-                .child(failure.message.clone()),
-        )
-        .into_any_element()
 }
 
 /// Maps the summary and the frame by position.
