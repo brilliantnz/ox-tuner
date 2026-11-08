@@ -1017,6 +1017,11 @@ pub struct Gauge {
     pub label_digits: Number,
     /// Optional availability expression.
     pub active: Option<Expr>,
+    /// Availability expression source, as written.
+    ///
+    /// `Expr` keeps no source text, so the parser stores it beside the parsed
+    /// form for summaries that carry gates as data.
+    pub active_source: Option<String>,
     /// Source line.
     pub line: u32,
 }
