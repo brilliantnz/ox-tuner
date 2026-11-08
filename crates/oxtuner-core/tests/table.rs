@@ -920,6 +920,7 @@ dialog = presDialog, "Presentation", border
   field = "Never", limit, { 0 }
   field = "Visible after zero", limit, 0, { limit > 2 }
   field = "Element two", arr[2], { limit > 1 }
+  field = "Array gate", limit, { arrayValue(array.arr, 1.5) == 99 }
   checkbox = "Flipped", algo, flipValue
   runtimeValue = "Live label", rpm, { gated > 1 }
   indicator = { gated > 1 }, "Gated off", { Dynamic label }
@@ -1093,16 +1094,16 @@ fn a_dialog_carries_options_conditions_help_and_topic_help() {
         .iter()
         .find(|field| field.variable == "gated")
         .expect("the gated row is present");
-    assert_eq!(gated.visibility, None);
-    assert_eq!(gated.enabled.as_deref(), Some("gated > 10"));
+    assert_eq!(gated.visibility_expression, None);
+    assert_eq!(gated.enable_expression.as_deref(), Some("gated > 10"));
 
     let both = dialog
         .fields
         .iter()
         .find(|field| field.variable == "both")
         .expect("the two-condition row is present");
-    assert_eq!(both.enabled.as_deref(), Some("nCyl == 4"));
-    assert_eq!(both.visibility.as_deref(), Some("gated > 1"));
+    assert_eq!(both.enable_expression.as_deref(), Some("nCyl == 4"));
+    assert_eq!(both.visibility_expression.as_deref(), Some("gated > 1"));
 
     let shown = dialog
         .fields
@@ -1110,11 +1111,11 @@ fn a_dialog_carries_options_conditions_help_and_topic_help() {
         .find(|field| field.label == "Shown only")
         .expect("the empty-slot row is present");
     assert_eq!(
-        shown.visibility.as_deref(),
+        shown.visibility_expression.as_deref(),
         Some("limit > 5"),
         "an empty enable slot keeps the visible expression in the visible slot"
     );
-    assert_eq!(shown.enabled, None);
+    assert_eq!(shown.enable_expression, None);
 
     let slider = dialog
         .fields
@@ -1233,7 +1234,7 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Glued gate")
         .expect("a space-joined gate resolves");
     assert_eq!(glued.variable, "gated");
-    assert_eq!(glued.enabled.as_deref(), Some("gated > 5"));
+    assert_eq!(glued.enable_expression.as_deref(), Some("gated > 5"));
 
     let bare = dialog
         .fields
@@ -1241,7 +1242,7 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Bare gate")
         .expect("a bare `!` gate resolves");
     assert_eq!(bare.variable, "both");
-    assert_eq!(bare.enabled.as_deref(), Some("!gated"));
+    assert_eq!(bare.enable_expression.as_deref(), Some("!gated"));
 
     let condvar = dialog
         .fields
@@ -1249,7 +1250,7 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Condvar gate")
         .expect("a bare variable gate resolves");
     assert_eq!(condvar.variable, "limit");
-    assert_eq!(condvar.enabled.as_deref(), Some("gated"));
+    assert_eq!(condvar.enable_expression.as_deref(), Some("gated"));
 
     let warning = dialog
         .fields
@@ -1257,8 +1258,8 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Conditional warning")
         .expect("a conditional note is carried");
     assert_eq!(warning.tone, DialogFieldTone::Danger);
-    assert_eq!(warning.visibility.as_deref(), Some("limit > 5"));
-    assert_eq!(warning.enabled, None);
+    assert_eq!(warning.visibility_expression.as_deref(), Some("limit > 5"));
+    assert_eq!(warning.enable_expression, None);
 
     let never = dialog
         .fields
@@ -1266,7 +1267,7 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Never")
         .expect("a `{ 0 }` row is carried");
     assert_eq!(
-        never.enabled.as_deref(),
+        never.enable_expression.as_deref(),
         Some("0"),
         "zero is a real disabled gate, not a placeholder"
     );
@@ -1277,11 +1278,11 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Visible after zero")
         .expect("a zero-placeholder row is carried");
     assert_eq!(
-        zero_placeholder.visibility.as_deref(),
+        zero_placeholder.visibility_expression.as_deref(),
         Some("limit > 2"),
         "a bare zero keeps the enable slot empty"
     );
-    assert_eq!(zero_placeholder.enabled, None);
+    assert_eq!(zero_placeholder.enable_expression, None);
 
     let element = dialog
         .fields
@@ -1302,19 +1303,123 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .find(|field| field.label == "Gated slider")
         .expect("a slider with a gate is carried");
     assert_eq!(
-        slider.enabled.as_deref(),
+        slider.enable_expression.as_deref(),
         Some("limit > 0"),
         "the orientation is not a gate slot"
     );
-    assert_eq!(slider.visibility, None);
+    assert_eq!(slider.visibility_expression, None);
 
     let check = dialog
         .fields
         .iter()
         .find(|field| field.label == "Gated check")
         .expect("a checkbox with a visibility gate is carried");
-    assert_eq!(check.visibility.as_deref(), Some("limit > 0"));
-    assert_eq!(check.enabled, None);
+    assert_eq!(check.visibility_expression.as_deref(), Some("limit > 0"));
+    assert_eq!(check.enable_expression, None);
+}
+
+#[test]
+fn a_dialog_resolves_its_gates_against_the_working_tune() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-gate-evaluation");
+
+    let gated = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated")
+        .expect("the gated row is present");
+    assert!(gated.gates.visible);
+    assert!(gated.gates.enabled, "gated = 20 passes `gated > 10`");
+    assert!(!gated.gates.unresolved);
+
+    let both = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Both")
+        .expect("the two-condition row is present");
+    assert!(both.gates.visible, "gated = 20 passes `gated > 1`");
+    assert!(
+        both.gates.enabled,
+        "`nCyl` is unknown, so the enable gate stays open"
+    );
+    assert!(both.gates.unresolved);
+
+    let never = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Never")
+        .expect("the zero gate row is present");
+    assert!(never.gates.visible);
+    assert!(!never.gates.enabled, "`{{ 0 }}` is a real disabled gate");
+    assert!(!never.gates.unresolved);
+
+    let visible = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Shown only")
+        .expect("the visibility-only row is present");
+    assert!(visible.gates.visible, "limit = 10 passes `limit > 5`");
+    assert!(visible.gates.enabled, "the empty enable slot stays open");
+
+    let array = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Array gate")
+        .expect("the arrayValue gate is present");
+    assert!(
+        !array.gates.enabled,
+        "arrayValue(array.arr, 1.5) interpolates to 2.5, not 99"
+    );
+    assert!(
+        !array.gates.unresolved,
+        "the array element resolves instead of failing open"
+    );
+
+    let inner = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Inner plain")
+        .expect("the gated panel row is present");
+    assert!(inner.gates.visible);
+    assert!(
+        inner.gates.enabled,
+        "`show_inner` is unknown, so the inherited gate stays open"
+    );
+    assert!(inner.gates.unresolved);
+
+    let slider = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated slider")
+        .expect("the gated slider is present");
+    assert!(slider.gates.enabled, "limit = 10 passes `limit > 0`");
+
+    let check = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated check")
+        .expect("the gated checkbox is present");
+    assert!(check.gates.visible, "limit = 10 passes `limit > 0`");
+
+    let runtime = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::RuntimeValue)
+        .expect("the runtime value is present");
+    assert!(runtime.gates.enabled, "gated = 20 passes `gated > 1`");
+
+    let preset = dialog
+        .presets
+        .iter()
+        .find(|preset| preset.label == "Common sensors")
+        .expect("the preset is present");
+    assert!(preset.gates.enabled, "limit = 10 passes `limit > 0`");
+
+    let ping = dialog
+        .commands
+        .iter()
+        .find(|command| command.label == "Ping")
+        .expect("the command button is present");
+    assert!(ping.gates.enabled, "limit = 10 passes `limit > 0`");
 }
 
 #[test]
@@ -1339,7 +1444,7 @@ fn a_checkbox_and_a_runtime_value_keep_their_flags_and_labels() {
         "a runtime value labels its row from the first field"
     );
     assert_eq!(runtime.target, "rpm");
-    assert_eq!(runtime.enabled.as_deref(), Some("gated > 1"));
+    assert_eq!(runtime.enable_expression.as_deref(), Some("gated > 1"));
 
     let indicator = dialog
         .widgets
@@ -1350,8 +1455,8 @@ fn a_checkbox_and_a_runtime_value_keep_their_flags_and_labels() {
         indicator.label, "Dynamic label",
         "a label expression is text, not a gate"
     );
-    assert_eq!(indicator.enabled, None);
-    assert_eq!(indicator.visibility, None);
+    assert_eq!(indicator.enable_expression, None);
+    assert_eq!(indicator.visibility_expression, None);
 
     let outside = dialog
         .fields
@@ -1404,7 +1509,7 @@ fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
         .iter()
         .find(|preset| preset.label == "Common sensors")
         .expect("a setting selector is a preset");
-    assert_eq!(preset.enabled.as_deref(), Some("limit > 0"));
+    assert_eq!(preset.enable_expression.as_deref(), Some("limit > 0"));
     assert_eq!(preset.options.len(), 2);
     assert!(
         dialog
@@ -1440,7 +1545,7 @@ fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
         .expect("a command button is carried");
     assert_eq!(ping.command, "cmdPing");
     assert!(ping.known);
-    assert_eq!(ping.enabled.as_deref(), Some("limit > 0"));
+    assert_eq!(ping.enable_expression.as_deref(), Some("limit > 0"));
     let ghost = dialog
         .commands
         .iter()
@@ -1545,7 +1650,7 @@ fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
         .find(|field| field.label == "Gated plain")
         .expect("a gated panel flattens");
     assert_eq!(gated.section, "Gated");
-    assert_eq!(gated.enabled.as_deref(), Some("limit > 0"));
+    assert_eq!(gated.enable_expression.as_deref(), Some("limit > 0"));
 
     assert_eq!(dialog.unmodeled.len(), 1);
     assert_eq!(dialog.unmodeled[0].keyword, "mysteryRow");

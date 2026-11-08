@@ -522,6 +522,10 @@ app:
       en: Click a value to edit it. Enter saves and moves to the next row.
     empty:
       en: This dialog has no constants to edit.
+    no_visible_fields:
+      en: No settings are available with the current configuration.
+    unavailable_for_settings:
+      en: Not available with the current settings
     no_value:
       en: '—'
     toggle_on:

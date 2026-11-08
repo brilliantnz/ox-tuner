@@ -18,6 +18,7 @@ mod editor;
 mod edits;
 mod events;
 mod frontpage;
+mod gates;
 mod ops;
 mod project;
 
@@ -32,6 +33,7 @@ pub use edits::{
 };
 pub use events::{Event, Failure, FailureCode};
 pub use frontpage::{FrontPageGauge, GaugeSummary, IndicatorSummary};
+pub use gates::GateState;
 pub(crate) use ops::Envelope;
 pub use ops::{AxisEdit, AxisKind, CellEdit, Command, OpId, RejectReason};
 pub use project::{

@@ -6,6 +6,10 @@ use std::sync::Arc;
 use oxtuner_ini::{DialogRow, RowKind};
 use oxtuner_project::Project;
 
+use crate::gate::{GateEvaluator, resolve_gates};
+use crate::message::GateState;
+use crate::realtime::RealtimeFrame;
+
 /// What a dialog row holds, for the UI to pick a presentation.
 #[expect(
     clippy::exhaustive_enums,
@@ -97,9 +101,11 @@ pub struct DialogFieldSummary {
     /// single filtered copy.
     pub options: Arc<[DialogSelectOption]>,
     /// Visibility condition from the row (`{ … }`), as written.
-    pub visibility: Option<String>,
+    pub visibility_expression: Option<String>,
     /// Enable condition from the row (`{ … }`), as written.
-    pub enabled: Option<String>,
+    pub enable_expression: Option<String>,
+    /// Whether the definition's gates let this row appear and accept edits.
+    pub gates: GateState,
     /// Help text for this variable from `[SettingContextHelp]`.
     pub help: Option<String>,
     /// Lowest user value the definition accepts, when stated.
@@ -194,9 +200,11 @@ pub struct DialogPreset {
     /// Label from the selector row.
     pub label: String,
     /// Visibility condition from the selector (`{ … }`), as written.
-    pub visibility: Option<String>,
+    pub visibility_expression: Option<String>,
     /// Enable condition from the selector (`{ … }`), as written.
-    pub enabled: Option<String>,
+    pub enable_expression: Option<String>,
+    /// Whether the definition's gates let this selector appear and accept picks.
+    pub gates: GateState,
     /// Options in document order.
     pub options: Vec<DialogPresetOption>,
 }
@@ -234,9 +242,11 @@ pub struct DialogCommand {
     /// Command the button sends.
     pub command: String,
     /// Visibility condition from the row (`{ … }`), as written.
-    pub visibility: Option<String>,
+    pub visibility_expression: Option<String>,
     /// Enable condition from the row (`{ … }`), as written.
-    pub enabled: Option<String>,
+    pub enable_expression: Option<String>,
+    /// Whether the definition's gates let this button appear and be pressed.
+    pub gates: GateState,
     /// Whether `[ControllerCommands]` declares the command.
     pub known: bool,
     /// Bare flags from the row (`closeDialogOnClick`, `showMessageOnClick` and
@@ -275,9 +285,11 @@ pub struct DialogWidget {
     /// What it shows: a gauge name, an indicator expression, or a channel.
     pub target: String,
     /// Visibility condition from the row (`{ … }`), as written.
-    pub visibility: Option<String>,
+    pub visibility_expression: Option<String>,
     /// Enable condition from the row (`{ … }`), as written.
-    pub enabled: Option<String>,
+    pub enable_expression: Option<String>,
+    /// Whether the definition's gates let this widget appear and update.
+    pub gates: GateState,
     /// The nested panel title the row came from, empty at the dialog's top.
     pub section: String,
     /// Display units from the row, empty when the gauge template provides them.
@@ -300,7 +312,11 @@ impl DialogSummary {
     ///
     /// Tables and curves a panel embeds are grids, not rows: the menu opens
     /// them, and only the grid's snapshot carries their values.
-    pub(crate) fn from_project(project: &Project, name: &str) -> Result<Self, String> {
+    pub(crate) fn from_project(
+        project: &Project,
+        name: &str,
+        live: Option<&RealtimeFrame>,
+    ) -> Result<Self, String> {
         let definition = project.definition();
         let dialog = definition
             .dialogs
@@ -309,7 +325,19 @@ impl DialogSummary {
 
         let mut walk = RowWalk::new(project);
         walk.walk(&dialog.name, "");
-        let finished = walk.finish();
+
+        let mut finished = walk.finish();
+        let mut evaluator = GateEvaluator::new(definition, project.tune(), live);
+        finished.resolve(&mut evaluator);
+
+        let unresolved: Vec<&str> = evaluator.unresolved().collect();
+        if !unresolved.is_empty() {
+            tracing::debug!(
+                dialog = %dialog.name,
+                unresolved = ?unresolved,
+                "dialog gates could not be evaluated"
+            );
+        }
 
         let changed = finished.fields.iter().filter(|field| field.changed).count();
         Ok(Self {
@@ -373,6 +401,43 @@ struct RowWalk<'project> {
     curves: Vec<String>,
     unmodeled: Vec<DialogUnmodeledRow>,
     options_cache: HashMap<String, Arc<[DialogSelectOption]>>,
+}
+
+impl FinishedWalk {
+    /// Resolves every gate the walk carried against the working tune.
+    fn resolve(&mut self, evaluator: &mut GateEvaluator<'_>) {
+        for field in &mut self.fields {
+            field.gates = resolve_gates(
+                evaluator,
+                field.visibility_expression.as_deref(),
+                field.enable_expression.as_deref(),
+            );
+        }
+
+        for preset in &mut self.presets {
+            preset.gates = resolve_gates(
+                evaluator,
+                preset.visibility_expression.as_deref(),
+                preset.enable_expression.as_deref(),
+            );
+        }
+
+        for command in &mut self.commands {
+            command.gates = resolve_gates(
+                evaluator,
+                command.visibility_expression.as_deref(),
+                command.enable_expression.as_deref(),
+            );
+        }
+
+        for widget in &mut self.widgets {
+            widget.gates = resolve_gates(
+                evaluator,
+                widget.visibility_expression.as_deref(),
+                widget.enable_expression.as_deref(),
+            );
+        }
+    }
 }
 
 impl<'project> RowWalk<'project> {
@@ -640,8 +705,9 @@ impl<'project> RowWalk<'project> {
                 .first()
                 .map(|field| oxtuner_ini::fields::unquote(field).to_owned())
                 .unwrap_or_default(),
-            visibility: and_gate(self.gates.visible.as_deref(), visibility),
-            enabled: and_gate(self.gates.enabled.as_deref(), enabled),
+            visibility_expression: and_gate(self.gates.visible.as_deref(), visibility),
+            enable_expression: and_gate(self.gates.enabled.as_deref(), enabled),
+            gates: GateState::default(),
             options: Vec::new(),
         });
         self.pending_preset = Some(self.presets.len() - 1);
@@ -1189,8 +1255,9 @@ fn command_row(project: &Project, row: &DialogRow, gates: &InheritedGates) -> Di
             .map(|field| oxtuner_ini::fields::unquote(field).to_owned())
             .unwrap_or_default(),
         command: command.clone(),
-        visibility: and_gate(gates.visible.as_deref(), visibility),
-        enabled: and_gate(gates.enabled.as_deref(), enabled),
+        visibility_expression: and_gate(gates.visible.as_deref(), visibility),
+        enable_expression: and_gate(gates.enabled.as_deref(), enabled),
+        gates: GateState::default(),
         known: !command.is_empty()
             && project
                 .definition()
@@ -1275,8 +1342,9 @@ fn widget_row(
         kind,
         label,
         target,
-        visibility: and_gate(gates.visible.as_deref(), visibility),
-        enabled: and_gate(gates.enabled.as_deref(), enabled),
+        visibility_expression: and_gate(gates.visible.as_deref(), visibility),
+        enable_expression: and_gate(gates.enabled.as_deref(), enabled),
+        gates: GateState::default(),
         section: section.to_owned(),
         units,
         minimum,
@@ -1388,8 +1456,9 @@ fn note(
         section: section.to_owned(),
         tone,
         options: Arc::default(),
-        visibility: and_gate(gates.visible.as_deref(), visibility),
-        enabled: and_gate(gates.enabled.as_deref(), enabled),
+        visibility_expression: and_gate(gates.visible.as_deref(), visibility),
+        enable_expression: and_gate(gates.enabled.as_deref(), enabled),
+        gates: GateState::default(),
         help: None,
         minimum: None,
         maximum: None,
@@ -1515,8 +1584,9 @@ fn field_row(walk: &mut RowWalk<'_>, row: &DialogRow, section: &str) -> Option<D
         section: section.to_owned(),
         tone: label_tone,
         options,
-        visibility: and_gate(walk.gates.visible.as_deref(), visibility),
-        enabled: and_gate(walk.gates.enabled.as_deref(), enabled),
+        visibility_expression: and_gate(walk.gates.visible.as_deref(), visibility),
+        enable_expression: and_gate(walk.gates.enabled.as_deref(), enabled),
+        gates: GateState::default(),
         help,
         minimum: spec.minimum,
         maximum: spec.maximum,

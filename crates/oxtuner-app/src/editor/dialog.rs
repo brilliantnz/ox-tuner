@@ -13,6 +13,7 @@ use std::{collections::HashMap, path::PathBuf};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::toolbar::Toolbar;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -21,7 +22,8 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use oxtuner_core::{
-    DialogFieldKind, DialogFieldTone, DialogSummary, Failure, FailureCode, SaveSummary,
+    DialogFieldKind, DialogFieldSummary, DialogFieldTone, DialogSummary, Failure, FailureCode,
+    SaveSummary,
 };
 
 use crate::core::CoreService;
@@ -64,6 +66,9 @@ pub(crate) struct DialogEditor {
     /// The tune revision the cache was filled at. An edit or a save elsewhere
     /// can move a value another dialog shows, so the cache drops then too.
     cache_revision: u64,
+    /// The tune revision the open snapshot was built at. Gates are evaluated
+    /// against the working tune, so a cross-dialog edit can make them stale.
+    dialog_revision: u64,
     /// The row being typed into, by field index.
     editing: Option<RowEditing>,
     /// Optimistic values not yet echoed by the core.
@@ -97,6 +102,7 @@ impl DialogEditor {
             project_root,
             definition_revision,
             cache_revision: 0,
+            dialog_revision: 0,
             editing: None,
             pending: HashMap::new(),
             _core,
@@ -118,9 +124,12 @@ impl DialogEditor {
             return;
         };
 
+        let status = CoreService::status(cx);
+        let tune_revision = status.tune_revision;
+        let stale = self.dialog_revision != tune_revision;
         let already_shown = self.requested.as_deref() == Some(name)
             && self.dialog.as_ref().is_some_and(|dialog| dialog.id == name);
-        if already_shown {
+        if already_shown && !stale {
             cx.notify();
             return;
         }
@@ -129,13 +138,19 @@ impl DialogEditor {
         self.failure = None;
         self.editing = None;
         self.pending.clear();
-        let existing = CoreService::status(cx)
+
+        let existing = status
             .dialog
             .as_ref()
             .filter(|dialog| dialog.id == name)
             .cloned();
-        if let Some(dialog) = existing.or_else(|| self.cache.get(name).cloned()) {
+
+        if stale {
+            self.dialog = None;
+            crate::core::read_dialog(name, cx);
+        } else if let Some(dialog) = existing.or_else(|| self.cache.get(name).cloned()) {
             self.dialog = Some(dialog);
+            self.dialog_revision = tune_revision;
         } else {
             self.dialog = None;
             crate::core::read_dialog(name, cx);
@@ -153,6 +168,7 @@ impl DialogEditor {
         self.cache.clear();
         self.failure = None;
         self.dialog = None;
+        self.dialog_revision = 0;
         self.editing = None;
         self.pending.clear();
 
@@ -249,7 +265,11 @@ impl DialogEditor {
                 .retain(|variable, pending| field_value(&dialog, variable) != Some(*pending));
             self.cache.insert(dialog.id.clone(), dialog.clone());
             self.dialog = Some(dialog);
+            self.dialog_revision = revision;
         }
+
+        self.drop_unavailable_edit();
+
         if dialog_matches {
             self.failure = None;
         }
@@ -258,6 +278,7 @@ impl DialogEditor {
                 self.cache.remove(name);
             }
             self.dialog = None;
+            self.dialog_revision = 0;
             self.editing = None;
             self.pending.clear();
         }
@@ -276,6 +297,23 @@ impl DialogEditor {
         cx.notify();
     }
 
+    /// Drops an input whose row the definition no longer shows or enables.
+    ///
+    /// An edit can switch off the gate of the row being edited. Without this,
+    /// Enter would still commit a row the definition now hides.
+    fn drop_unavailable_edit(&mut self) {
+        let unavailable = self.editing.as_ref().is_some_and(|editing| {
+            self.dialog
+                .as_ref()
+                .and_then(|dialog| dialog.fields.get(editing.index))
+                .is_none_or(|field| !row_available(field))
+        });
+
+        if unavailable {
+            self.editing = None;
+        }
+    }
+
     /// The displayed value of one field, optimistic edits first.
     fn value(&self, dialog: &DialogSummary, index: usize) -> Option<f64> {
         let field = dialog.fields.get(index)?;
@@ -284,12 +322,12 @@ impl DialogEditor {
 
     /// Starts editing a row, seeded with its current value.
     fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let writable = self
+        let editable = self
             .dialog
             .as_ref()
             .and_then(|dialog| dialog.fields.get(index))
-            .is_some_and(|field| field.writable);
-        if !writable {
+            .is_some_and(row_editable);
+        if !editable {
             return;
         }
         let text = self
@@ -325,7 +363,7 @@ impl DialogEditor {
         let Some(field) = dialog.fields.get(index) else {
             return;
         };
-        if !field.writable || field.kind != DialogFieldKind::Toggle {
+        if !row_editable(field) || field.kind != DialogFieldKind::Toggle {
             return;
         }
         let current = self.value(dialog, index).unwrap_or(0.0);
@@ -349,6 +387,18 @@ impl DialogEditor {
         };
         let index = editing.index;
         let text = editing.text.clone();
+
+        let editable = self
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.fields.get(index))
+            .is_some_and(row_editable);
+        if !editable {
+            self.editing = None;
+            cx.notify();
+            return;
+        }
+
         let operation = match parse_edit(&text) {
             Ok(Some(operation)) => operation,
             Ok(None) => {
@@ -410,17 +460,12 @@ impl DialogEditor {
         cx.notify();
     }
 
-    /// Moves the edit to the next writable row, if there is one.
+    /// Moves the edit to the next editable row, if there is one.
     fn edit_next(&mut self, from: usize, cx: &mut Context<'_, Self>) {
-        let next = self.dialog.as_ref().and_then(|dialog| {
-            dialog
-                .fields
-                .iter()
-                .enumerate()
-                .skip(from + 1)
-                .find(|(_, field)| field.writable)
-                .map(|(index, _)| index)
-        });
+        let next = self
+            .dialog
+            .as_ref()
+            .and_then(|dialog| next_editable(&dialog.fields, from));
         if let Some(index) = next {
             let text = self
                 .dialog
@@ -444,7 +489,7 @@ impl DialogEditor {
         let _ = cx;
     }
 
-    /// Moves the edit one writable row up or down, committing first.
+    /// Moves the edit one editable row up or down, committing first.
     fn commit_and_move(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
         let from = self.editing.as_ref().map(|editing| editing.index);
         self.commit_edit(cx);
@@ -453,16 +498,10 @@ impl DialogEditor {
             let _ = from;
             self.editing = None;
             if let Some(from) = from {
-                let previous = self.dialog.as_ref().and_then(|dialog| {
-                    dialog
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .take(from)
-                        .rev()
-                        .find(|(_, field)| field.writable)
-                        .map(|(index, _)| index)
-                });
+                let previous = self
+                    .dialog
+                    .as_ref()
+                    .and_then(|dialog| previous_editable(&dialog.fields, from));
                 if let Some(index) = previous {
                     let text = self
                         .dialog
@@ -593,11 +632,16 @@ impl DialogEditor {
         let theme = cx.theme().clone();
         let mut rows = Vec::new();
         let mut section = "";
-
-        if dialog
+        let visible: Vec<(usize, &DialogFieldSummary)> = dialog
             .fields
             .iter()
-            .any(|field| field.power_cycle && field.changed)
+            .enumerate()
+            .filter(|(_, field)| field.gates.visible)
+            .collect();
+
+        if visible
+            .iter()
+            .any(|(_, field)| field.power_cycle && field.changed)
         {
             rows.push(
                 div()
@@ -612,7 +656,7 @@ impl DialogEditor {
             );
         }
 
-        for (index, field) in dialog.fields.iter().enumerate() {
+        for (index, field) in visible {
             if field.section != section && !field.section.is_empty() {
                 section = &field.section;
                 rows.push(
@@ -629,10 +673,14 @@ impl DialogEditor {
 
             // Text the definition prints between values is not a row to edit.
             if field.kind == DialogFieldKind::Note {
-                let color = match field.tone {
-                    DialogFieldTone::Danger => theme.danger,
-                    DialogFieldTone::Info => theme.info,
-                    DialogFieldTone::Normal => theme.muted_foreground,
+                let color = if field.gates.enabled {
+                    match field.tone {
+                        DialogFieldTone::Danger => theme.danger,
+                        DialogFieldTone::Info => theme.info,
+                        DialogFieldTone::Normal => theme.muted_foreground,
+                    }
+                } else {
+                    theme.muted_foreground
                 };
                 rows.push(
                     div()
@@ -686,11 +734,18 @@ impl DialogEditor {
                 |editing| editing.text.clone().into(),
             );
             let toggle = field.kind == DialogFieldKind::Toggle;
-            let label_color = match field.tone {
-                DialogFieldTone::Danger => theme.danger,
-                DialogFieldTone::Info => theme.info,
-                DialogFieldTone::Normal => theme.foreground,
+            let available = field.gates.enabled;
+            let label_color = if available {
+                match field.tone {
+                    DialogFieldTone::Danger => theme.danger,
+                    DialogFieldTone::Info => theme.info,
+                    DialogFieldTone::Normal => theme.foreground,
+                }
+            } else {
+                theme.muted_foreground
             };
+            let unavailable_reason =
+                (!available).then(|| t!("app.dialog.unavailable_for_settings").to_string());
 
             rows.push(
                 h_flex()
@@ -729,7 +784,7 @@ impl DialogEditor {
                             .px_2()
                             .py_1()
                             .rounded(theme.radius)
-                            .when(field.writable, |this| {
+                            .when(field.writable && available, |this| {
                                 this.hover(|this| this.bg(theme.secondary_hover))
                                     .cursor_pointer()
                                     .on_mouse_down(
@@ -743,8 +798,13 @@ impl DialogEditor {
                                         }),
                                     )
                             })
-                            .when(!field.writable, |this| {
+                            .when(!field.writable || !available, |this| {
                                 this.text_color(theme.muted_foreground)
+                            })
+                            .when_some(unavailable_reason, |this, reason| {
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::new(reason.clone()).build(window, cx)
+                                })
                             })
                             .when_some(editing, |this, _| {
                                 this.border_1().border_color(if invalid {
@@ -792,7 +852,14 @@ impl DialogEditor {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         if let Some(dialog) = dialog {
-            if dialog.fields.is_empty() && dialog.unavailable.is_empty() {
+            let has_visible = dialog.fields.iter().any(|field| field.gates.visible);
+            if !has_visible && dialog.unavailable.is_empty() {
+                let message = if dialog.fields.is_empty() {
+                    t!("app.dialog.empty")
+                } else {
+                    t!("app.dialog.no_visible_fields")
+                };
+
                 return div()
                     .flex_1()
                     .min_h_0()
@@ -801,7 +868,7 @@ impl DialogEditor {
                     .justify_center()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(t!("app.dialog.empty"))
+                    .child(message)
                     .into_any_element();
             }
             return div()
@@ -919,6 +986,37 @@ impl Render for DialogEditor {
     }
 }
 
+/// Whether the definition currently shows a row and lets it accept edits.
+fn row_available(field: &DialogFieldSummary) -> bool {
+    field.gates.visible && field.gates.enabled
+}
+
+/// Whether this session may start an edit on a row.
+fn row_editable(field: &DialogFieldSummary) -> bool {
+    field.writable && row_available(field)
+}
+
+/// The next row Enter can move to, skipping hidden and disabled rows.
+fn next_editable(fields: &[DialogFieldSummary], from: usize) -> Option<usize> {
+    fields
+        .iter()
+        .enumerate()
+        .skip(from + 1)
+        .find(|(_, field)| row_editable(field))
+        .map(|(index, _)| index)
+}
+
+/// The previous row an upward move can reach, skipping hidden and disabled rows.
+fn previous_editable(fields: &[DialogFieldSummary], from: usize) -> Option<usize> {
+    fields
+        .iter()
+        .enumerate()
+        .take(from)
+        .rev()
+        .find(|(_, field)| row_editable(field))
+        .map(|(index, _)| index)
+}
+
 /// The snapshot value of one variable, for echo reconciliation.
 fn field_value(dialog: &DialogSummary, variable: &str) -> Option<f64> {
     dialog
@@ -926,4 +1024,63 @@ fn field_value(dialog: &DialogSummary, variable: &str) -> Option<f64> {
         .iter()
         .find(|field| field.variable == variable)
         .and_then(|field| field.value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxtuner_core::GateState;
+
+    fn row(writable: bool, gates: GateState) -> DialogFieldSummary {
+        DialogFieldSummary {
+            label: String::new(),
+            variable: String::new(),
+            value: None,
+            text: None,
+            units: String::new(),
+            digits: 0,
+            changed: false,
+            display_only: false,
+            writable,
+            kind: DialogFieldKind::Value,
+            section: String::new(),
+            tone: DialogFieldTone::Normal,
+            options: std::sync::Arc::default(),
+            visibility_expression: None,
+            enable_expression: None,
+            gates,
+            help: None,
+            minimum: None,
+            maximum: None,
+            index: None,
+            hex: false,
+            flip: false,
+            power_cycle: false,
+        }
+    }
+
+    #[test]
+    fn hidden_and_disabled_rows_are_skipped() {
+        let open = GateState::open();
+        let hidden = GateState {
+            visible: false,
+            ..open
+        };
+        let disabled = GateState {
+            enabled: false,
+            ..open
+        };
+        let fields = vec![
+            row(true, hidden),
+            row(true, disabled),
+            row(false, open),
+            row(true, open),
+            row(true, open),
+        ];
+
+        assert_eq!(next_editable(&fields, 0), Some(3));
+        assert_eq!(previous_editable(&fields, 4), Some(3));
+        assert_eq!(next_editable(&fields, 4), None);
+        assert_eq!(previous_editable(&fields, 0), None);
+    }
 }

@@ -14,6 +14,10 @@ publish = false
 bench = false
 
 [[bench]]
+name = "dialog"
+harness = false
+
+[[bench]]
 name = "summary"
 harness = false
 
