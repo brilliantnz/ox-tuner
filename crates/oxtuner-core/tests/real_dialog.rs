@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, DefinitionSummary, DialogFieldKind,
-    DialogFieldTone, DialogSummary, Event, start,
+    DialogFieldTone, DialogSummary, Event, ProjectSummary, start,
 };
 use oxtuner_ini::{SettingsContext, parse_bytes};
 
@@ -103,6 +103,7 @@ struct RealProject {
     handle: CoreHandle,
     _thread: CoreThread,
     events: BlockingEventStream,
+    summary: ProjectSummary,
 }
 
 impl RealProject {
@@ -137,17 +138,21 @@ impl RealProject {
         parts.handle.open_project(&dir).expect("the open is queued");
 
         let event = events.recv_timeout(WAIT).expect("an event arrives");
-        assert!(
-            matches!(event, Event::ProjectOpened { .. }),
-            "expected a project open, got {event:?}"
-        );
+        let Event::ProjectOpened { summary, .. } = event else {
+            panic!("expected a project open, got {event:?}");
+        };
 
         Self {
             dir,
             handle: parts.handle,
             _thread: parts.thread,
             events,
+            summary,
         }
+    }
+
+    fn summary(&self) -> &ProjectSummary {
+        &self.summary
     }
 
     fn read_dialog(&self, name: &str) -> DialogSummary {
@@ -306,6 +311,43 @@ fn a_real_speeduino_dialog_resolves_an_array_value_gate() {
 }
 
 #[test]
+fn a_real_speeduino_project_evaluates_menu_gates() {
+    let Some((path, bytes)) = require_ini() else {
+        println!("skipped: no real Speeduino INI (see the module docs)");
+        return;
+    };
+
+    println!("definition: {}", path.display());
+    let project = RealProject::open(&bytes, "speeduino-menu-gates");
+    let menu = &project.summary().definition.menu;
+
+    let trim = find_menu_node(menu, "Sequential fuel trim (5-8)")
+        .expect("the sequential trim menu item is present");
+    assert!(
+        !trim.gates.enabled,
+        "the default two-channel board cannot run channels 5-8"
+    );
+    assert!(trim.gates.visible);
+    assert!(!trim.gates.unresolved, "nFuelChannels resolves");
+
+    let can = find_menu_node(menu, "CAN Broadcasting menu")
+        .expect("the CAN broadcasting item is present");
+    assert!(!can.gates.enabled, "CAN is off by default");
+    assert!(!can.gates.unresolved, "CANisAvailable resolves");
+
+    let rtc =
+        find_menu_node(menu, "Setup realtime clock").expect("the realtime clock item is present");
+    assert!(
+        !rtc.gates.enabled,
+        "the default board layout does not carry an RTC"
+    );
+    assert!(
+        !rtc.gates.unresolved,
+        "boardHasRTC resolves through arrayValue"
+    );
+}
+
+#[test]
 fn a_real_speeduino_blank_row_reads_as_a_note() {
     let Some((path, bytes)) = require_ini() else {
         println!("skipped: no real Speeduino INI (see the module docs)");
@@ -391,11 +433,11 @@ fn a_real_rusefi_definition_keeps_visibility_gates_and_widget_labels() {
     let protection = find_menu_node(&summary.menu, "Lambda protection")
         .expect("the lambda protection menu item is present");
     assert_eq!(
-        protection.visible.as_deref(),
+        protection.visibility_expression.as_deref(),
         Some("isInjectionEnabled"),
         "the second slot is visibility: {protection:?}"
     );
-    assert_eq!(protection.enabled, None);
+    assert_eq!(protection.enable_expression, None);
 
     // A `runtimeValue` labels its row from the first field.
     let project = RealProject::open(&bytes, "rusefi-runtime");

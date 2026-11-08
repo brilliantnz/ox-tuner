@@ -34,7 +34,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{MenuNode, SaveSummary};
+use oxtuner_core::{MenuNode, MenuNodeKind, SaveSummary};
 use oxtuner_ui::dock::{
     BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
     PanelId, PanelStyle, panel_handle,
@@ -199,6 +199,14 @@ impl Workspace {
     /// Opens `node` in a tab, or shows the tab it already has.
     pub(crate) fn open_node(&mut self, node: MenuNode, cx: &mut Context<'_, Self>) {
         self.prune(cx);
+
+        // The realtime display is a pinned tab, not a document. The Speeduino
+        // menu names it `std_realtime`; focus the existing charts instead of
+        // opening a placeholder tab that would outlive the menu entry.
+        if node.kind == MenuNodeKind::Standard && node.target.as_deref() == Some("std_realtime") {
+            self.reveal(self.realtime.entity_id(), cx);
+            return;
+        }
 
         if let Some(existing) = self
             .editors
@@ -575,7 +583,7 @@ mod tests {
         AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Point, Render, TestAppContext,
         Window, WindowBounds, WindowOptions, div, px, size,
     };
-    use oxtuner_core::{FailureCode, MenuNode, MenuNodeKind};
+    use oxtuner_core::{FailureCode, GateState, MenuNode, MenuNodeKind};
     use oxtuner_ui::dock::{BasePanel as _, PaneRef};
 
     use super::*;
@@ -598,8 +606,9 @@ mod tests {
             detail: None,
             target: Some(id.to_owned()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         }
     }
@@ -697,6 +706,29 @@ mod tests {
         assert!(
             !cx.update(|cx| workspace.read(cx).realtime.read(cx).closable(cx)),
             "the charts are not a document and must not offer a close command"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_realtime_standard_entry_focuses_the_charts(cx: &mut TestAppContext) {
+        let (_, workspace, _seen) = open(cx);
+
+        let mut realtime = node("std_realtime", "Realtime Display");
+        realtime.kind = MenuNodeKind::Standard;
+        realtime.target = Some("std_realtime".to_owned());
+
+        cx.update(|cx| {
+            workspace.update(cx, |workspace, cx| workspace.open_node(realtime, cx));
+        });
+
+        assert!(
+            cx.update(|cx| workspace.read(cx).editors.is_empty()),
+            "std_realtime is a pinned tab, not a document"
+        );
+        assert_eq!(
+            cx.update(|cx| tabs(&workspace, cx)),
+            cx.update(|cx| pinned(&workspace, cx)),
+            "opening std_realtime adds no tab"
         );
     }
 

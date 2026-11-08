@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use gpui_kit::SharedString;
 use oxtuner_core::{
     BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, Failure, FailureCode,
-    ImportSummary, JournalEntry, LogSnapshot, LogSummary, OpId, PortChoice, PortSummary,
+    ImportSummary, JournalEntry, LogSnapshot, LogSummary, MenuNode, OpId, PortChoice, PortSummary,
     ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, TableSummary, TuneStatus,
     WriteSummary,
 };
@@ -102,6 +102,9 @@ pub(crate) struct CoreStatus {
     /// Moves when a definition or project is installed, so views can rebuild
     /// their channel lists.
     pub(crate) definition_revision: u64,
+    /// Moves when the core publishes an evaluated menu, without invalidating
+    /// the dialog/table snapshots that `definition_revision` governs.
+    pub(crate) menu_revision: u64,
 }
 
 /// A project open the UI is waiting for.
@@ -214,6 +217,7 @@ pub(super) enum Update {
         dialog: DialogSummary,
         edited: bool,
     },
+    Menu(Vec<MenuNode>),
     Connected(ConnectionSummary),
     Reconnected(ConnectionSummary),
     LinkLost(String),
@@ -262,6 +266,7 @@ impl CoreStatus {
                 self.failure = None;
                 self.tune_status = None;
                 self.definition_revision = self.definition_revision.wrapping_add(1);
+                self.menu_revision = self.menu_revision.wrapping_add(1);
             }
             Update::Opened(project) => {
                 self.project = Some(project);
@@ -276,6 +281,7 @@ impl CoreStatus {
                 self.journal = None;
                 self.snapshots.clear();
                 self.definition_revision = self.definition_revision.wrapping_add(1);
+                self.menu_revision = self.menu_revision.wrapping_add(1);
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
@@ -310,6 +316,14 @@ impl CoreStatus {
                 if edited {
                     self.tune_revision = self.tune_revision.wrapping_add(1);
                 }
+            }
+            Update::Menu(menu) => {
+                if let Some(project) = &mut self.project {
+                    project.definition.menu = menu;
+                } else if let Some(definition) = &mut self.definition {
+                    definition.menu = menu;
+                }
+                self.menu_revision = self.menu_revision.wrapping_add(1);
             }
             Update::Tested(summary) => {
                 let port = summary.port.clone();

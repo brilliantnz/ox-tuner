@@ -138,6 +138,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             },
             None,
         ),
+        Event::MenuChanged { menu } => (Update::Menu(menu), None),
         Event::ConnectionTested { summary, .. } => (Update::Tested(summary), None),
         Event::Connected { summary, .. } => (Update::Connected(summary), None),
         Event::Reconnected { summary } => (Update::Reconnected(summary), None),

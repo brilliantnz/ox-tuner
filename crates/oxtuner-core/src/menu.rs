@@ -18,7 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
-use crate::message::{expression_slot, order_gates, panel_target};
+use crate::gate::{GateEvaluator, resolve_gates};
+use crate::message::{GateState, expression_slot, order_gates, panel_target};
 
 /// What a node in the navigation tree is.
 #[expect(
@@ -98,10 +99,15 @@ pub struct MenuNode {
     /// Enable condition from the menu or item (`{ … }`), as written.
     ///
     /// Menus and items take `{enable}` first and `{visible}` second; a single
-    /// gate is always the enable one. The core carries the expressions raw.
-    pub enabled: Option<String>,
+    /// gate is always the enable one.
+    pub enable_expression: Option<String>,
     /// Visibility condition from the menu or item (`{ … }`), as written.
-    pub visible: Option<String>,
+    pub visibility_expression: Option<String>,
+    /// The evaluated gates for this node, including every ancestor's gates.
+    ///
+    /// The sidebar keeps every node and disables the ones whose visibility or
+    /// enable gate is false; it never removes a node because of a gate.
+    pub gates: GateState,
     /// Child nodes, in definition order.
     pub children: Vec<MenuNode>,
 }
@@ -117,6 +123,39 @@ pub(crate) fn build(definition: &Definition) -> Vec<MenuNode> {
         .enumerate()
         .map(|(index, menu)| build_menu(index, menu, definition))
         .collect()
+}
+
+/// Evaluates every node's gates against the working tune.
+///
+/// A node's `gates` is its own gate combined with every ancestor's, because the
+/// sidebar disables a subtree rather than hiding it. An unresolved gate stays
+/// open, like every other definition gate.
+pub(crate) fn evaluate(menu: &mut [MenuNode], evaluator: &mut GateEvaluator<'_>) {
+    for node in menu {
+        evaluate_node(node, evaluator, GateState::default());
+    }
+}
+
+fn evaluate_node(node: &mut MenuNode, evaluator: &mut GateEvaluator<'_>, inherited: GateState) {
+    let own = resolve_gates(
+        evaluator,
+        node.visibility_expression.as_deref(),
+        node.enable_expression.as_deref(),
+    );
+    node.gates = combine(inherited, own);
+
+    for child in &mut node.children {
+        evaluate_node(child, evaluator, node.gates);
+    }
+}
+
+/// A node is available only when its own gates and every ancestor's are open.
+fn combine(parent: GateState, own: GateState) -> GateState {
+    GateState {
+        visible: parent.visible && own.visible,
+        enabled: parent.enabled && own.enabled,
+        unresolved: parent.unresolved || own.unresolved,
+    }
 }
 
 fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
@@ -151,8 +190,9 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         detail: None,
         target: None,
         embedded: None,
-        enabled,
-        visible,
+        enable_expression: enabled,
+        visibility_expression: visible,
+        gates: GateState::default(),
         children,
     }
 }
@@ -184,8 +224,9 @@ fn build_item(
             detail: None,
             target: None,
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         },
         MenuTargetKind::Standard => MenuNode {
@@ -196,8 +237,9 @@ fn build_item(
             // The name is the app-owned screen this item asks for.
             target: (!item.target.is_empty()).then(|| item.target.clone()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         },
         MenuTargetKind::Panel => resolve(id, label, &item.target, definition),
@@ -207,8 +249,8 @@ fn build_item(
 
     let (visible, enabled) = item_gates(item);
     let mut node = node;
-    node.visible = visible;
-    node.enabled = enabled;
+    node.visibility_expression = visible;
+    node.enable_expression = enabled;
     Some(node)
 }
 
@@ -220,7 +262,21 @@ fn build_item(
 /// write a visibility-only item. A bare number is the same placeholder; any
 /// other bare token travels on as written.
 fn item_gates(item: &MenuItem) -> (Option<String>, Option<String>) {
-    condition_gates(&item.conditions)
+    // Speeduino writes a non-zero menu index after the label
+    // (`subMenu = target, "Label", 9, { gate }`). It is toolbar metadata, not a
+    // gate slot; only a bare `0` is the empty enable placeholder rusEFI uses.
+    let conditions: Vec<String> = item
+        .conditions
+        .iter()
+        .filter(|condition| !is_non_zero_number(condition))
+        .cloned()
+        .collect();
+
+    condition_gates(&conditions)
+}
+
+fn is_non_zero_number(text: &str) -> bool {
+    text.trim().parse::<f64>().is_ok_and(|value| value != 0.0)
 }
 
 /// Orders raw condition fields into `(visibility, enabled)`.
@@ -264,8 +320,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
     }
@@ -278,8 +335,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
     }
@@ -291,8 +349,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: curve_detail(curve, definition),
             target: Some(curve.name.clone()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
     }
@@ -310,8 +369,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
                 })),
             target: Some(dialog.name.clone()),
             embedded: embedded.map(|found| found.id),
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
     }
@@ -323,8 +383,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: None,
             target: Some(target.to_owned()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
     }
@@ -335,8 +396,9 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
         detail: None,
         target: Some(target.to_owned()),
         embedded: None,
-        enabled: None,
-        visible: None,
+        enable_expression: None,
+        visibility_expression: None,
+        gates: GateState::default(),
         children: Vec::new(),
     }
 }
@@ -538,6 +600,7 @@ menu = \"Gated\", { engineOn }, { showMenu }
   subMenu = veTableDialog, \"Both\", { engineOn }, { showBoth }
   subMenu = idleCurve, \"Single\", { engineOn }
   subMenu = helpDialog, \"Bare\", 0, { showHelp }
+  subMenu = helpDialog, \"Indexed\", 9, { showIndexed }
   subMenu = helpDialog, \"Empty\", {}, { showEmpty }
 ";
 
@@ -659,31 +722,59 @@ menu = \"Gated\", { engineOn }, { showMenu }
         assert_eq!(tree.len(), 1);
         let menu = &tree[0];
         assert_eq!(
-            menu.enabled.as_deref(),
+            menu.enable_expression.as_deref(),
             Some("engineOn"),
             "the top-level menu carries its own gate"
         );
-        assert_eq!(menu.visible.as_deref(), Some("showMenu"));
+        assert_eq!(menu.visibility_expression.as_deref(), Some("showMenu"));
 
         let both = node(&menu.children, "Both");
-        assert_eq!(both.enabled.as_deref(), Some("engineOn"));
-        assert_eq!(both.visible.as_deref(), Some("showBoth"));
+        assert_eq!(both.enable_expression.as_deref(), Some("engineOn"));
+        assert_eq!(both.visibility_expression.as_deref(), Some("showBoth"));
 
         let single = node(&menu.children, "Single");
-        assert_eq!(single.enabled.as_deref(), Some("engineOn"));
-        assert_eq!(single.visible, None);
+        assert_eq!(single.enable_expression.as_deref(), Some("engineOn"));
+        assert_eq!(single.visibility_expression, None);
 
         let bare = node(&menu.children, "Bare");
         assert_eq!(
-            bare.visible.as_deref(),
+            bare.visibility_expression.as_deref(),
             Some("showHelp"),
             "a bare `0` keeps the empty enable slot"
         );
-        assert_eq!(bare.enabled, None);
+        assert_eq!(bare.enable_expression, None);
+
+        let indexed = node(&menu.children, "Indexed");
+        assert_eq!(
+            indexed.enable_expression.as_deref(),
+            Some("showIndexed"),
+            "a non-zero menu index is metadata, not an empty gate slot"
+        );
+        assert_eq!(indexed.visibility_expression, None);
 
         let empty = node(&menu.children, "Empty");
-        assert_eq!(empty.visible.as_deref(), Some("showEmpty"));
-        assert_eq!(empty.enabled, None);
+        assert_eq!(empty.visibility_expression.as_deref(), Some("showEmpty"));
+        assert_eq!(empty.enable_expression, None);
+    }
+
+    #[test]
+    fn a_menu_gate_inherits_from_its_ancestors() {
+        let parent = GateState {
+            visible: true,
+            enabled: false,
+            unresolved: false,
+        };
+        let own = GateState {
+            visible: false,
+            enabled: true,
+            unresolved: true,
+        };
+
+        let combined = combine(parent, own);
+
+        assert!(!combined.visible, "a closed visibility gate wins");
+        assert!(!combined.enabled, "a closed parent enable gate wins");
+        assert!(combined.unresolved, "an unresolved ancestor stays visible");
     }
 
     #[test]

@@ -26,8 +26,10 @@ pub(crate) struct Explorer {
     tree: Entity<TreeState>,
     /// The menu the tree was built from; compared to skip no-op rebuilds.
     menu: Vec<MenuNode>,
-    /// The core status revision the current menu belongs to.
-    revision: u64,
+    /// The core definition revision the current menu belongs to.
+    definition_revision: u64,
+    /// The core menu revision the current gates belong to.
+    menu_revision: u64,
     /// Every node by id, for row decoration and selection lookup.
     nodes: Rc<HashMap<String, MenuNode>>,
     /// Ids of the folders the user opened. The tree component's own state is
@@ -54,8 +56,10 @@ pub(crate) struct Explorer {
 impl Explorer {
     /// Builds the tree from the definition the core already owns, if any.
     pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
+        let status = CoreService::status(cx);
         let menu = current_menu(cx);
-        let revision = CoreService::status(cx).definition_revision;
+        let definition_revision = status.definition_revision;
+        let menu_revision = status.menu_revision;
         let expanded = HashSet::new();
         let (items, nodes) = build(&menu, &expanded);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
@@ -74,7 +78,8 @@ impl Explorer {
         Self {
             tree,
             menu,
-            revision,
+            definition_revision,
+            menu_revision,
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
@@ -97,7 +102,8 @@ impl Explorer {
         Self {
             tree,
             menu,
-            revision: 0,
+            definition_revision: 0,
+            menu_revision: 0,
             nodes: Rc::new(nodes),
             expanded,
             selected: None,
@@ -142,27 +148,45 @@ impl Explorer {
         // without the menu changing, so every status change repaints the tree.
         cx.notify();
 
-        // Every core status change notifies this observer. The revision is the
-        // cheap gate: cloning the menu to compare it on a table read or a save
-        // was work with no possible outcome.
-        let revision = CoreService::status(cx).definition_revision;
-        if revision == self.revision {
+        // Every core status change notifies this observer. The two revisions
+        // are the cheap gate: cloning the menu on every table read or save was
+        // work with no possible outcome.
+        let status = CoreService::status(cx);
+        let definition_revision = status.definition_revision;
+        let menu_revision = status.menu_revision;
+        if definition_revision == self.definition_revision && menu_revision == self.menu_revision {
             return;
         }
-        self.revision = revision;
+        self.definition_revision = definition_revision;
+        self.menu_revision = menu_revision;
 
         let menu = current_menu(cx);
         if menu == self.menu {
             return;
         }
 
+        self.replace_menu(menu, cx);
+    }
+
+    /// Replaces the tree while keeping the open folder set and the highlight.
+    fn replace_menu(&mut self, menu: Vec<MenuNode>, cx: &mut Context<'_, Self>) {
+        // A gate refresh must not drop the highlight from the document in
+        // front. Keep the selection and replace it with the new node state.
+        let selected_id = self.selected.as_ref().map(|node| node.id.clone());
         let (items, nodes) = build(&menu, &self.expanded);
         let ids: HashSet<String> = nodes.keys().cloned().collect();
         self.expanded.retain(|id| ids.contains(id));
         self.menu = menu;
         self.nodes = Rc::new(nodes);
-        self.selected = None;
         self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+
+        self.selected = selected_id.and_then(|id| self.nodes.get(&id).cloned());
+        if let Some(node) = &self.selected {
+            let id = SharedString::from(node.id.clone());
+            let index = self.tree.read(cx).index_of(&id);
+            self.tree
+                .update(cx, |tree, cx| tree.set_selected_index(index, cx));
+        }
         cx.notify();
     }
 
@@ -195,7 +219,7 @@ impl Explorer {
         let Some(node) = self.nodes.get(id).cloned() else {
             return;
         };
-        if !node.children.is_empty() {
+        if !node.children.is_empty() || !node.gates.visible || !node.gates.enabled {
             return;
         }
 
@@ -310,10 +334,9 @@ impl Explorer {
         // A folder is a disclosure control. Mouse clicks never select one, and
         // keyboard focus on one must not replace the open table with a folder
         // placeholder.
-        if selected
-            .as_ref()
-            .is_some_and(|node| !node.children.is_empty())
-        {
+        if selected.as_ref().is_some_and(|node| {
+            !node.children.is_empty() || !node.gates.visible || !node.gates.enabled
+        }) {
             return;
         }
         // A rebuild clears the tree's selected index while the folder is
@@ -397,7 +420,7 @@ fn tree_item(
 #[cfg(test)]
 mod tests {
     use gpui_kit::TestAppContext;
-    use oxtuner_core::MenuNodeKind;
+    use oxtuner_core::{GateState, MenuNodeKind};
 
     use super::*;
 
@@ -413,8 +436,9 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children,
         }
     }
@@ -461,6 +485,68 @@ mod tests {
         let expanded = HashSet::from(["menu:0".to_owned()]);
         let (items, _) = build(&menu, &expanded);
         assert!(items[0].is_expanded());
+    }
+
+    #[gpui_kit::test]
+    fn a_disabled_node_is_not_selectable(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let mut disabled = node("menu:0/0", "Disabled", Vec::new());
+        disabled.gates.enabled = false;
+        let explorer = cx.update(|cx| {
+            cx.new(|cx| Explorer::for_test(vec![node("menu:0", "Tuning", vec![disabled])], cx))
+        });
+
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| {
+                explorer.select_node("menu:0/0", cx);
+            });
+        });
+
+        assert!(
+            cx.update(|cx| explorer.read(cx).selected().is_none()),
+            "a disabled leaf must not open"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_gate_refresh_keeps_the_selected_document(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        let explorer = cx.update(|cx| {
+            cx.new(|cx| {
+                Explorer::for_test(
+                    vec![node(
+                        "menu:0",
+                        "Tuning",
+                        vec![node("menu:0/0", "VE Table", Vec::new())],
+                    )],
+                    cx,
+                )
+            })
+        });
+
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| {
+                explorer.select_node("menu:0/0", cx);
+            });
+        });
+
+        let mut updated = node("menu:0/0", "VE Table", Vec::new());
+        updated.gates.enabled = false;
+        cx.update(|cx| {
+            explorer.update(cx, |explorer, cx| {
+                explorer.replace_menu(vec![node("menu:0", "Tuning", vec![updated])], cx);
+            });
+        });
+
+        let selected = cx.update(|cx| explorer.read(cx).selected().cloned());
+        let selected = selected.expect("the document stays selected");
+        assert_eq!(selected.label, "VE Table");
+        assert!(
+            !selected.gates.enabled,
+            "the highlight carries the refreshed gate state"
+        );
     }
 
     #[gpui_kit::test]

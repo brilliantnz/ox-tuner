@@ -58,6 +58,15 @@ fn definition() -> String {
             .expect("writing to a String cannot fail");
     }
 
+    ini.push_str("\n[Menu]\nmenuDialog = main\nmenu = \"Bench\"\n");
+    for index in 0..64 {
+        writeln!(
+            ini,
+            "  subMenu = benchDialog, \"Menu {index}\", {{ flag{index} }}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+
     ini
 }
 
@@ -66,6 +75,9 @@ fn tune() -> &'static str {
      <msq xmlns=\"http://www.msefi.com/:msq\">\n\
      \x20   <bibliography author=\"bench\" tuneComment=\"bench\"/>\n\
      \x20   <versionInfo fileFormat=\"5.0\" firmwareInfo=\"bench\" nPages=\"1\" signature=\"bench 1\"/>\n\
+     \x20   <page number=\"0\" size=\"160\">\n\
+     \x20       <constant name=\"flag0\">0.0</constant>\n\
+     \x20   </page>\n\
      </msq>\n"
 }
 
@@ -141,6 +153,32 @@ impl Fixture {
             }
         }
     }
+
+    /// Edits one scalar and reads the dialog again.
+    ///
+    /// The read is queued after the edit; the core evaluates the menu after the
+    /// edit and before it handles the read, so the round trip includes the menu
+    /// refresh without depending on the `MenuChanged` variant existing on the
+    /// baseline.
+    fn edit_and_read(&self, value: f64) {
+        let op = self
+            .handle
+            .edit_scalar("benchDialog", "flag0", value)
+            .expect("the scalar edit is queued");
+
+        loop {
+            match self.events.recv().expect("the core is alive") {
+                Event::DialogEdited { op: answered, .. } if answered == op => break,
+                Event::Failed {
+                    op: answered,
+                    failure,
+                } if answered == op => panic!("the scalar edit failed: {failure:?}"),
+                _ => {}
+            }
+        }
+
+        self.read_dialog();
+    }
 }
 
 impl Drop for Fixture {
@@ -158,5 +196,17 @@ fn bench_dialog_read(criterion: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_dialog_read);
+fn bench_dialog_edit(criterion: &mut Criterion) {
+    let fixture = Fixture::new();
+    let mut value = 0.0;
+
+    criterion.bench_function("core_dialog_edit_gated_synthetic", |bencher| {
+        bencher.iter(|| {
+            value = 1.0 - value;
+            fixture.edit_and_read(value);
+        });
+    });
+}
+
+criterion_group!(benches, bench_dialog_read, bench_dialog_edit);
 criterion_main!(benches);

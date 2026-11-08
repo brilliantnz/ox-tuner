@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use oxtuner_ini::{Definition, Number, Severity};
 use oxtuner_project::Project;
 
+use crate::gate::GateEvaluator;
 use crate::menu::MenuNode;
+use crate::realtime::RealtimeFrame;
 
 use super::{FrontPageGauge, GaugeSummary, IndicatorSummary};
 
@@ -296,7 +298,11 @@ pub struct ProjectSummary {
 
 impl ProjectSummary {
     /// Builds the UI-facing summary of an open project.
-    pub(crate) fn from_project(project: &Project) -> Self {
+    ///
+    /// The menu is evaluated here because its gates depend on the tune. A
+    /// definition loaded without a tune keeps the raw menu and leaves every
+    /// node open.
+    pub(crate) fn from_project(project: &Project, live: Option<&RealtimeFrame>) -> Self {
         let report = project.report();
         let label = project
             .definition_path()
@@ -313,12 +319,24 @@ impl ProjectSummary {
             .collect();
         let read_only_reason = report.is_read_only().then(|| read_only_reasons.join("; "));
 
+        let mut definition = DefinitionSummary::new(label, project.definition());
+        let mut evaluator = GateEvaluator::new(project.definition(), project.tune(), live);
+        crate::menu::evaluate(&mut definition.menu, &mut evaluator);
+
+        let unresolved: Vec<&str> = evaluator.unresolved().collect();
+        if !unresolved.is_empty() {
+            tracing::debug!(
+                unresolved = ?unresolved,
+                "menu gates could not be evaluated"
+            );
+        }
+
         Self {
             root: project.root().to_owned(),
             tune_path: project.tune_path().to_owned(),
             definition_path: project.definition_path().to_owned(),
             in_project: project.is_in_project(),
-            definition: DefinitionSummary::new(label, project.definition()),
+            definition,
             read_only: report.is_read_only(),
             read_only_reason,
             read_only_reasons,
