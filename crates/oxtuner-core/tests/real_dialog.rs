@@ -208,11 +208,16 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         .find(|field| field.kind == DialogFieldKind::Note && field.tone == DialogFieldTone::Danger)
         .expect("a conditional warning note is carried");
     assert_eq!(
-        warning.visibility.as_deref(),
+        warning.visibility_expression.as_deref(),
         Some("injLayout == 3 && !sequentialFuelAvailable"),
         "`{{}}, {{}}, {{visible}}` keeps the visible expression in the visible slot: {warning:?}"
     );
-    assert_eq!(warning.enabled, None);
+    assert_eq!(warning.enable_expression, None);
+    assert!(
+        !warning.gates.visible,
+        "the default injLayout is 0, so the sequential warning is hidden"
+    );
+    assert!(!warning.gates.unresolved);
 
     let layout = dialog
         .fields
@@ -230,11 +235,16 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         .find(|field| field.variable == "inj4CylPairing")
         .expect("the injector pairing row is present");
     assert_eq!(
-        pairing.visibility.as_deref(),
+        pairing.visibility_expression.as_deref(),
         Some("injLayout != 0 && nCylinders == 4"),
         "`{{}}, {{visible}}` is visibility, not enablement"
     );
-    assert_eq!(pairing.enabled, None);
+    assert_eq!(pairing.enable_expression, None);
+    assert!(
+        !pairing.gates.visible,
+        "the default injLayout is 0, so the pairing row is hidden"
+    );
+    assert!(!pairing.gates.unresolved);
     assert!(
         pairing.power_cycle,
         "`requiresPowerCycle = inj4CylPairing` marks the row"
@@ -254,15 +264,6 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         "a constant absent from requiresPowerCycle stays unflagged"
     );
 
-    let fan = project.read_dialog("fanSettings");
-    let warning = fan
-        .fields
-        .iter()
-        .find(|field| field.label == "No PWM Fan available on MCU")
-        .expect("the blank display-only row reads as a note");
-    assert_eq!(warning.kind, DialogFieldKind::Note);
-    assert_eq!(warning.tone, DialogFieldTone::Danger);
-
     println!(
         "fields: {}, tables: {:?}, curves: {:?}, widgets: {}, commands: {}, presets: {}",
         dialog.fields.len(),
@@ -272,6 +273,57 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         dialog.commands.len(),
         dialog.presets.len(),
     );
+}
+
+#[test]
+fn a_real_speeduino_dialog_resolves_an_array_value_gate() {
+    let Some((path, bytes)) = require_ini() else {
+        println!("skipped: no real Speeduino INI (see the module docs)");
+        return;
+    };
+
+    println!("definition: {}", path.display());
+    let project = RealProject::open(&bytes, "speeduino-array-gate");
+
+    // `nFuelChannels` is a computed channel over `arrayValue`, so this gate
+    // proves the array path on a real definition instead of failing open.
+    let trim = project.read_dialog("inj_trim_enable");
+    let enabled = trim
+        .fields
+        .iter()
+        .find(|field| field.variable == "fuelTrimEnabled")
+        .expect("the fuel trim enable row is present");
+
+    assert!(
+        !enabled.gates.enabled,
+        "the default injLayout is not sequential"
+    );
+    assert!(enabled.gates.visible);
+    assert!(
+        !enabled.gates.unresolved,
+        "`nFuelChannels` resolves through the computed channel and arrayValue"
+    );
+}
+
+#[test]
+fn a_real_speeduino_blank_row_reads_as_a_note() {
+    let Some((path, bytes)) = require_ini() else {
+        println!("skipped: no real Speeduino INI (see the module docs)");
+        return;
+    };
+
+    println!("definition: {}", path.display());
+    let project = RealProject::open(&bytes, "speeduino-note");
+
+    let fan = project.read_dialog("fanSettings");
+    let warning = fan
+        .fields
+        .iter()
+        .find(|field| field.label == "No PWM Fan available on MCU")
+        .expect("the blank display-only row reads as a note");
+
+    assert_eq!(warning.kind, DialogFieldKind::Note);
+    assert_eq!(warning.tone, DialogFieldTone::Danger);
 }
 
 #[test]

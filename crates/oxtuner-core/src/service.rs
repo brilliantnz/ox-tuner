@@ -962,7 +962,7 @@ fn handle(
         ),
         Command::RevertTune => revert_tune(op, session, journal_dir, events, report),
         Command::RevertTarget { name } => {
-            revert_target(op, session, journal_dir, events, report, &name)
+            revert_target(op, session, journal_dir, events, report, latest, &name)
         }
         Command::ImportTune { path, consented } => import_tune(
             op,
@@ -1438,7 +1438,8 @@ fn handle(
                 return Outcome::Continue;
             };
 
-            match DialogSummary::from_project(project, &name) {
+            let frame = latest.get();
+            match DialogSummary::from_project(project, &name, frame.as_deref()) {
                 Ok(dialog) => {
                     tracing::debug!(
                         %op,
@@ -1518,7 +1519,8 @@ fn handle(
                 return Outcome::Continue;
             }
 
-            match DialogSummary::from_project(project, &dialog) {
+            let frame = latest.get();
+            match DialogSummary::from_project(project, &dialog, frame.as_deref()) {
                 Ok(dialog) => {
                     tracing::debug!(
                         %op,
@@ -2283,6 +2285,7 @@ fn revert_target(
     journal_dir: Option<&std::path::Path>,
     events: &EventTx,
     report: &mut CoreReport,
+    latest: &LatestFrame,
     name: &str,
 ) -> Outcome {
     let Some(project) = session.project_mut() else {
@@ -2324,7 +2327,7 @@ fn revert_target(
     if let Ok(table) = TableSummary::from_project(project, name) {
         send(events, Event::TableEdited { op, table });
     }
-    if let Ok(dialog) = DialogSummary::from_project(project, name) {
+    if let Ok(dialog) = DialogSummary::from_project(project, name, latest.get().as_deref()) {
         send(events, Event::DialogEdited { op, dialog });
     }
     send_status(events, op, project);
@@ -2360,7 +2363,7 @@ fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String
         variables.extend(table_variables(&table));
     }
 
-    if let Ok(dialog) = DialogSummary::from_project(project, name) {
+    if let Ok(dialog) = DialogSummary::from_project(project, name, None) {
         variables.extend(
             dialog
                 .fields

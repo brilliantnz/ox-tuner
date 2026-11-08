@@ -36,6 +36,8 @@ pub enum Expr {
     /// A function call, kept unresolved: real INIs call functions this build
     /// does not implement, and failing to *parse* them would break the file.
     Call(String, Vec<Expr>),
+    /// One array element written as `constant[index]`, as Speeduino gates do.
+    Index(Box<Expr>, Box<Expr>),
 }
 
 /// Prefix operators.
@@ -125,6 +127,44 @@ impl fmt::Display for BinaryOp {
     }
 }
 
+/// The values an expression can read while it is evaluated.
+///
+/// The definition layer parses every expression into [`Expr`]; the caller
+/// supplies the values because they depend on where the expression is used
+/// (a tune constant, a computed output channel, or a live frame).
+pub trait EvalContext {
+    /// Resolves one identifier, case-sensitively as the definition wrote it.
+    fn value(&mut self, name: &str) -> Option<f64>;
+
+    /// Resolves one `arrayValue(array.name, index)` lookup.
+    ///
+    /// `name` includes the `array.` prefix the dialect requires. The default
+    /// returns `None`, so an evaluator without array support leaves the call
+    /// unresolved instead of guessing.
+    fn array_value(&mut self, name: &str, index: f64) -> Option<f64> {
+        let _ = (name, index);
+        None
+    }
+
+    /// Resolves one element written as `name[index]`.
+    ///
+    /// The dialect uses this form in menus and dialogs (`outputPin[0]`) beside
+    /// the `arrayValue()` helper. The default forwards to
+    /// [`Self::array_value`]; a context that supports arrays gets both forms.
+    fn element(&mut self, name: &str, index: f64) -> Option<f64> {
+        self.array_value(name, index)
+    }
+}
+
+/// An [`EvalContext`] over a plain identifier lookup.
+struct Lookup<'a>(&'a dyn Fn(&str) -> Option<f64>);
+
+impl EvalContext for Lookup<'_> {
+    fn value(&mut self, name: &str) -> Option<f64> {
+        (self.0)(name)
+    }
+}
+
 impl Expr {
     /// Parses the body of an expression field (without braces).
     ///
@@ -150,11 +190,20 @@ impl Expr {
     /// identifier, a divide by zero, an unknown function, a non-finite result.
     /// Callers must treat `None` as "leave it dynamic", never as zero.
     pub fn evaluate(&self, lookup: &dyn Fn(&str) -> Option<f64>) -> Option<f64> {
+        self.evaluate_with(&mut Lookup(lookup))
+    }
+
+    /// Evaluates the expression against a full [`EvalContext`].
+    ///
+    /// This is [`Self::evaluate`] plus `arrayValue`: the context resolves both
+    /// identifiers and array elements. Everything unresolved still yields
+    /// `None`; an unknown function never becomes a guess.
+    pub fn evaluate_with(&self, context: &mut dyn EvalContext) -> Option<f64> {
         let value = match self {
             Self::Number(number) => *number,
-            Self::Ident(name) => lookup(name)?,
+            Self::Ident(name) => context.value(name)?,
             Self::Unary(operator, operand) => {
-                let operand = operand.evaluate(lookup)?;
+                let operand = operand.evaluate_with(context)?;
                 match operator {
                     UnaryOp::Negate => -operand,
                     UnaryOp::Plus => operand,
@@ -163,21 +212,38 @@ impl Expr {
                 }
             }
             Self::Binary(operator, left, right) => {
-                let left = left.evaluate(lookup)?;
-                let right = right.evaluate(lookup)?;
+                let left = left.evaluate_with(context)?;
+                let right = right.evaluate_with(context)?;
                 apply_binary(*operator, left, right)?
             }
             Self::Ternary(condition, when_true, when_false) => {
-                if condition.evaluate(lookup)? == 0.0 {
-                    when_false.evaluate(lookup)?
+                if condition.evaluate_with(context)? == 0.0 {
+                    when_false.evaluate_with(context)?
                 } else {
-                    when_true.evaluate(lookup)?
+                    when_true.evaluate_with(context)?
                 }
+            }
+            Self::Index(base, index) => {
+                let Self::Ident(name) = base.as_ref() else {
+                    return None;
+                };
+                let index = index.evaluate_with(context)?;
+                context.element(name, index)?
+            }
+            Self::Call(name, arguments) if name.eq_ignore_ascii_case("arrayvalue") => {
+                let [array, index] = arguments.as_slice() else {
+                    return None;
+                };
+                let Self::Ident(array_name) = array else {
+                    return None;
+                };
+                let index = index.evaluate_with(context)?;
+                context.array_value(array_name, index)?
             }
             Self::Call(name, arguments) => {
                 let values: Vec<f64> = arguments
                     .iter()
-                    .map(|argument| argument.evaluate(lookup))
+                    .map(|argument| argument.evaluate_with(context))
                     .collect::<Option<Vec<f64>>>()?;
                 evaluate_call(name, &values)?
             }
@@ -212,6 +278,10 @@ impl Expr {
                 for argument in arguments {
                     argument.collect_identifiers(found);
                 }
+            }
+            Self::Index(base, index) => {
+                base.collect_identifiers(found);
+                index.collect_identifiers(found);
             }
         }
     }
@@ -426,6 +496,8 @@ fn one_char_symbol(character: char) -> Option<&'static str> {
         '^' => "^",
         '~' => "~",
         '!' => "!",
+        '[' => "[",
+        ']' => "]",
         _ => return None,
     })
 }
@@ -569,7 +641,14 @@ impl Parser {
                     }
                     return Ok(Expr::Call(name, arguments));
                 }
-                Ok(Expr::Ident(name))
+
+                let base = Expr::Ident(name);
+                if self.eat("[") {
+                    let index = self.ternary()?;
+                    self.expect("]")?;
+                    return Ok(Expr::Index(Box::new(base), Box::new(index)));
+                }
+                Ok(base)
             }
             Some(Token::Symbol("(")) => {
                 self.index += 1;
@@ -636,6 +715,84 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct TestContext {
+        values: std::collections::HashMap<&'static str, f64>,
+        arrays: std::collections::HashMap<&'static str, Vec<f64>>,
+    }
+
+    impl EvalContext for TestContext {
+        fn value(&mut self, name: &str) -> Option<f64> {
+            self.values.get(name).copied()
+        }
+
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the test supplies small non-negative array indexes"
+        )]
+        fn array_value(&mut self, name: &str, index: f64) -> Option<f64> {
+            let index = index.trunc() as usize;
+            self.arrays.get(name)?.get(index).copied()
+        }
+    }
+
+    #[test]
+    fn array_value_resolves_through_the_context() {
+        let expression = Expr::parse("arrayValue(array.trim, 1) + 1").expect("parses");
+        let mut context = TestContext::default();
+        context.arrays.insert("array.trim", vec![10.0, 20.0]);
+
+        assert_eq!(expression.evaluate_with(&mut context), Some(21.0));
+    }
+
+    #[test]
+    fn array_value_needs_a_constant_name_and_two_arguments() {
+        let mut context = TestContext::default();
+        context.arrays.insert("array.trim", vec![10.0, 20.0]);
+
+        for source in [
+            "arrayValue(array.trim)",
+            "arrayValue(array.trim, 0, 1)",
+            "arrayValue(1 + 2, 0)",
+        ] {
+            let expression = Expr::parse(source).expect(source);
+
+            assert_eq!(
+                expression.evaluate_with(&mut context),
+                None,
+                "{source} must not fold"
+            );
+        }
+    }
+
+    #[test]
+    fn an_indexed_constant_resolves_through_the_context() {
+        let expression = Expr::parse("outputPin[index] + 1").expect("parses");
+        let mut context = TestContext::default();
+        context.values.insert("index", 1.0);
+        context.arrays.insert("outputPin", vec![10.0, 20.0]);
+
+        assert_eq!(expression.evaluate_with(&mut context), Some(21.0));
+        assert_eq!(expression.identifiers(), vec!["outputPin", "index"]);
+    }
+
+    #[test]
+    fn an_indexed_expression_needs_an_identifier_base() {
+        let error = Expr::parse("(1 + 2)[0]").expect_err("only a constant name can be indexed");
+
+        assert_ne!(error.message, "");
+    }
+
+    #[test]
+    fn array_value_without_a_context_value_stays_unresolved() {
+        let expression = Expr::parse("arrayValue(array.missing, 0)").expect("parses");
+        let mut context = TestContext::default();
+
+        assert_eq!(expression.evaluate_with(&mut context), None);
+    }
+
     #[test]
     fn arithmetic_comparison_and_bitwise_operators_evaluate() {
         let cases = [
@@ -661,7 +818,7 @@ mod tests {
 
     #[test]
     fn a_malformed_expression_reports_a_position_instead_of_panicking() {
-        for source in ["1 +", "(", "a ? b", "1 ~ 2", "foo(", "1 2"] {
+        for source in ["1 +", "(", "a ? b", "1 ~ 2", "foo(", "1 2", "arr["] {
             let error = Expr::parse(source).expect_err(source);
             assert!(!error.message.is_empty(), "{source}");
         }
