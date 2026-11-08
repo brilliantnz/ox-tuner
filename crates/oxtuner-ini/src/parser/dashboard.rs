@@ -66,6 +66,10 @@ pub(crate) fn parse_gauges(
                 .get(11)
                 .and_then(|field| crate::fields::expression_body(field))
                 .and_then(|source| crate::expr::Expr::parse(source).ok()),
+            active_source: fields
+                .get(11)
+                .and_then(|field| crate::fields::expression_body(field))
+                .map(str::to_owned),
             line: *line,
         };
 

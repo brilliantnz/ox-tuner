@@ -96,10 +96,13 @@ pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
     AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary, CurveAxes,
-    DefinitionSummary, DialogFieldKind, DialogFieldSummary, DialogSummary, Event, Failure,
-    FailureCode, ImportSummary, IndicatorSummary, JournalEntry, OpId, PortSummary, ProjectSummary,
-    ReadAllSummary, RejectReason, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
-    WriteSummary,
+    DefinitionSummary, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogFieldTone,
+    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
+    DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind, Event, Failure, FailureCode,
+    FrontPageGauge, GaugeSummary, ImportSummary, IndicatorSummary, JournalEntry, KeyActionSummary,
+    OpId, PortSummary, ProjectSummary, ReadAllSummary, ReferenceTableIdentifier,
+    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableSummary, RejectReason,
+    RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
 };
 pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
 pub use realtime::{

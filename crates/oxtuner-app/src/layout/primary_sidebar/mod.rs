@@ -303,6 +303,8 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
+            enabled: None,
+            visible: None,
             children: vec![MenuNode {
                 id: "menu:0/0".to_owned(),
                 label: "VE Table".to_owned(),
@@ -310,6 +312,8 @@ mod tests {
                 detail: None,
                 target: Some("veTableTbl".to_owned()),
                 embedded: None,
+                enabled: None,
+                visible: None,
                 children: Vec::new(),
             }],
         }]
@@ -361,6 +365,8 @@ mod tests {
             detail: None,
             target: Some("veTableTbl".to_owned()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
         let folder = MenuNode {
@@ -370,6 +376,8 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
+            enabled: None,
+            visible: None,
             children: vec![table.clone()],
         };
         let dialog = MenuNode {
@@ -379,6 +387,8 @@ mod tests {
             detail: None,
             target: Some("idleDialog".to_owned()),
             embedded: Some("veTableTbl".to_owned()),
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
 
@@ -482,6 +492,8 @@ mod tests {
                 detail: None,
                 target: Some(format!("table{ix}")),
                 embedded: None,
+                enabled: None,
+                visible: None,
                 children: Vec::new(),
             })
             .collect();

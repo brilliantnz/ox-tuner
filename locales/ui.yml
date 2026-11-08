@@ -439,6 +439,8 @@ app:
       en: Retry
     read_only:
       en: Read-only
+    power_cycle:
+      en: Power cycle
     position:
       en: '%{x} · %{y}'
     cursor_value:
@@ -528,6 +530,10 @@ app:
       en: 'Off'
     unavailable_panels:
       en: 'Built-in panels this build cannot draw: %{names}'
+    power_cycle:
+      en: Power cycle
+    power_cycle_changed:
+      en: Changed settings need an ECU power cycle before they take effect.
   cluster:
     title:
       en: Cluster

@@ -1,11 +1,12 @@
-//! The dialog editor: a dialog's scalar constants as an editable list.
+//! The dialog editor: a dialog's constants as an editable list.
 //!
 //! Tables tune maps; dialogs tune constants — fuel load, injector size, ego
-//! limits. Each row names its variable and shows its user-unit value; clicking
-//! a writable row edits it in place. Enter commits and moves to the next
-//! writable row, so a tuner walks down the list; Escape cancels. The core stays
-//! the only owner of tune values: a commit becomes a scalar command and the
-//! echoed snapshot clears the optimistic value.
+//! limits. Each row names its variable and shows its user-unit value; a
+//! writable row edits in place, a checkbox or radio flips on click, and a note
+//! is text the definition prints. Enter commits and moves to the next writable
+//! row, so a tuner walks down the list; Escape cancels. The core stays the only
+//! owner of tune values: a commit becomes a scalar command and the echoed
+//! snapshot clears the optimistic value.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -19,7 +20,9 @@ use gpui_kit::{
     KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{DialogFieldKind, DialogSummary, Failure, FailureCode, SaveSummary};
+use oxtuner_core::{
+    DialogFieldKind, DialogFieldTone, DialogSummary, Failure, FailureCode, SaveSummary,
+};
 
 use crate::core::CoreService;
 use crate::i18n::t;
@@ -326,7 +329,12 @@ impl DialogEditor {
             return;
         }
         let current = self.value(dialog, index).unwrap_or(0.0);
-        let next = if current == 0.0 { 1.0 } else { 0.0 };
+        let checked = if field.flip {
+            current == 0.0
+        } else {
+            current != 0.0
+        };
+        let next = if field.flip == checked { 1.0 } else { 0.0 };
         let (dialog_id, variable) = (dialog.id.clone(), field.variable.clone());
         self.pending.insert(variable.clone(), next);
         self.failure = None;
@@ -586,6 +594,24 @@ impl DialogEditor {
         let mut rows = Vec::new();
         let mut section = "";
 
+        if dialog
+            .fields
+            .iter()
+            .any(|field| field.power_cycle && field.changed)
+        {
+            rows.push(
+                div()
+                    .px_4()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.5))
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .child(t!("app.dialog.power_cycle_changed"))
+                    .into_any_element(),
+            );
+        }
+
         for (index, field) in dialog.fields.iter().enumerate() {
             if field.section != section && !field.section.is_empty() {
                 section = &field.section;
@@ -603,10 +629,10 @@ impl DialogEditor {
 
             // Text the definition prints between values is not a row to edit.
             if field.kind == DialogFieldKind::Note {
-                let color = if field.warning {
-                    theme.danger
-                } else {
-                    theme.muted_foreground
+                let color = match field.tone {
+                    DialogFieldTone::Danger => theme.danger,
+                    DialogFieldTone::Info => theme.info,
+                    DialogFieldTone::Normal => theme.muted_foreground,
                 };
                 rows.push(
                     div()
@@ -630,10 +656,16 @@ impl DialogEditor {
                 },
                 |value| {
                     if field.kind == DialogFieldKind::Toggle {
-                        return if value == 0.0 {
-                            t!("app.dialog.toggle_off").to_string()
+                        let checked = if field.flip {
+                            value == 0.0
                         } else {
+                            value != 0.0
+                        };
+
+                        return if checked {
                             t!("app.dialog.toggle_on").to_string()
+                        } else {
+                            t!("app.dialog.toggle_off").to_string()
                         };
                     }
                     let rendered = format!("{value:.digits$}", digits = usize::from(field.digits));
@@ -654,6 +686,11 @@ impl DialogEditor {
                 |editing| editing.text.clone().into(),
             );
             let toggle = field.kind == DialogFieldKind::Toggle;
+            let label_color = match field.tone {
+                DialogFieldTone::Danger => theme.danger,
+                DialogFieldTone::Info => theme.info,
+                DialogFieldTone::Normal => theme.foreground,
+            };
 
             rows.push(
                 h_flex()
@@ -669,8 +706,18 @@ impl DialogEditor {
                             .min_w_0()
                             .truncate()
                             .text_sm()
+                            .text_color(label_color)
                             .child(field.label.clone()),
                     )
+                    .when(field.power_cycle, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(theme.warning)
+                                .child(t!("app.dialog.power_cycle")),
+                        )
+                    })
                     .child(
                         div()
                             .id(("dialog-field", index))

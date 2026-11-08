@@ -598,6 +598,8 @@ mod tests {
             detail: None,
             target: Some(id.to_owned()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         }
     }

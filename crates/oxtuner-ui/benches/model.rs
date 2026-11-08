@@ -25,6 +25,7 @@ fn table() -> TableSummary {
         digits: 0,
         minimum: None,
         maximum: None,
+        power_cycle: false,
         values: (0..32).map(|index| f64::from(index) * 500.0).collect(),
     };
 
@@ -46,6 +47,7 @@ fn table() -> TableSummary {
         cell_minimum: None,
         cell_maximum: None,
         writable: true,
+        power_cycle: false,
         curve: None,
     }
 }
