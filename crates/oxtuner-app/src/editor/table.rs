@@ -456,7 +456,7 @@ impl TableEditor {
         let theme = cx.theme().clone();
         let title: SharedString =
             table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
-        let power_cycle = t!("app.table.power_cycle").to_string();
+        let power_cycle = t!("app.table.power_cycle");
         let axis_caption = |axis: &oxtuner_core::AxisSummary| {
             if axis.power_cycle {
                 format!("{} ({power_cycle})", axis.caption())

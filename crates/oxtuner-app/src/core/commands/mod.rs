@@ -72,7 +72,7 @@ pub(super) fn send<T>(
 /// The global is installed by [`start`] before the first window exists, so this
 /// normally has somewhere to put the message; the guard is for the boot order,
 /// where a failure can only be logged.
-pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
+pub(super) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
     if !cx.has_global::<CoreService>() {
         tracing::error!(code = code.as_str(), %message, "failure before the core was installed");
         return;

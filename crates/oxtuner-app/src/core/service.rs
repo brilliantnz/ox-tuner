@@ -163,7 +163,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
         definition_cache_dir: Some(paths.definition_cache_dir()),
         ..CoreConfig::default()
     };
-    let service = match oxtuner_core::start(&config) {
+    let (service, pump) = match oxtuner_core::start(&config) {
         Ok(CoreParts {
             handle,
             events,
@@ -172,8 +172,7 @@ pub fn start(cx: &mut App, auto_sim: bool) {
             history,
             log,
             thread,
-        }) => {
-            spawn_event_pump(events, frames, cx);
+        }) => (
             CoreService {
                 handle: Some(handle),
                 thread: Some(thread),
@@ -186,26 +185,36 @@ pub fn start(cx: &mut App, auto_sim: bool) {
                 log_status: log,
                 pending_import: None,
                 auto_sim,
-            }
-        }
+            },
+            Some((events, frames)),
+        ),
         Err(error) => {
             // Without a core the app still runs: the commands report that the
             // core is not running, and nothing claims to be loaded.
             tracing::error!(%error, "the core did not start");
-            CoreService {
-                handle: None,
-                thread: None,
-                status: CoreStatus::default(),
-                latest: LatestFrame::default(),
-                history: ChartHistory::default(),
-                log_status: LogStatus::new(),
-                pending_import: None,
-                auto_sim,
-            }
+            (
+                CoreService {
+                    handle: None,
+                    thread: None,
+                    status: CoreStatus::default(),
+                    latest: LatestFrame::default(),
+                    history: ChartHistory::default(),
+                    log_status: LogStatus::new(),
+                    pending_import: None,
+                    auto_sim,
+                },
+                None,
+            )
         }
     };
 
+    // Install the global before the pump can deliver its first event: the
+    // pump's fold reads the status through it.
     cx.set_global(service);
+
+    if let Some((events, frames)) = pump {
+        spawn_event_pump(events, frames, cx);
+    }
 }
 
 fn spawn_event_pump(events: EventStream, frames: FrameWatch, cx: &mut App) {
