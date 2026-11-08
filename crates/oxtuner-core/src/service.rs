@@ -489,6 +489,7 @@ fn run(
         let connection_revision = live
             .as_ref()
             .map(|connection| connection.connection_revision);
+        let had_frame = latest.get().is_some();
         service_live(
             &mut live,
             &mut session,
@@ -505,8 +506,9 @@ fn run(
             .as_ref()
             .map(|connection| connection.connection_revision)
             != connection_revision;
+        let first_frame = !had_frame && latest.get().is_some();
 
-        if menu_dirty || connection_changed {
+        if menu_dirty || connection_changed || first_frame {
             refresh_menu(&events, &session, &latest, &mut last_menu);
             menu_dirty = false;
         }
@@ -1152,6 +1154,18 @@ fn handle(
             match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
                     let cache_hit = project.definition_source() == DefinitionSource::Cache;
+                    // The old session's frame belongs to another definition and
+                    // must be gone before the new menu is evaluated.
+                    teardown(
+                        live,
+                        session,
+                        safety,
+                        journal_dir,
+                        latest,
+                        events,
+                        history,
+                        log,
+                    );
                     let summary = ProjectSummary::from_project(&project, latest.get().as_deref());
                     tracing::info!(
                         %op,
@@ -1163,16 +1177,6 @@ fn handle(
                         read_only = summary.read_only,
                         cache_hit,
                         "project opened"
-                    );
-                    teardown(
-                        live,
-                        session,
-                        safety,
-                        journal_dir,
-                        latest,
-                        events,
-                        history,
-                        log,
                     );
                     configure_history(history, project.definition());
                     *session = Session::Project(Box::new(project));
@@ -2763,7 +2767,6 @@ fn refuse(
     Outcome::Continue
 }
 
-/// Sends the derived tune status after a change.
 /// Re-evaluates the menu and publishes it only when the tree changed.
 ///
 /// Menu gates read the working tune and the live frame. A tune edit or a
@@ -2800,6 +2803,7 @@ fn refresh_menu(
     send(events, Event::MenuChanged { menu });
 }
 
+/// Sends the derived tune status after a change.
 fn send_status(events: &EventTx, op: OpId, project: &Project) {
     send(
         events,

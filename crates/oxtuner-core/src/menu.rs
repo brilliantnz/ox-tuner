@@ -262,21 +262,7 @@ fn build_item(
 /// write a visibility-only item. A bare number is the same placeholder; any
 /// other bare token travels on as written.
 fn item_gates(item: &MenuItem) -> (Option<String>, Option<String>) {
-    // Speeduino writes a non-zero menu index after the label
-    // (`subMenu = target, "Label", 9, { gate }`). It is toolbar metadata, not a
-    // gate slot; only a bare `0` is the empty enable placeholder rusEFI uses.
-    let conditions: Vec<String> = item
-        .conditions
-        .iter()
-        .filter(|condition| !is_non_zero_number(condition))
-        .cloned()
-        .collect();
-
-    condition_gates(&conditions)
-}
-
-fn is_non_zero_number(text: &str) -> bool {
-    text.trim().parse::<f64>().is_ok_and(|value| value != 0.0)
+    condition_gates(&item.conditions)
 }
 
 /// Orders raw condition fields into `(visibility, enabled)`.
