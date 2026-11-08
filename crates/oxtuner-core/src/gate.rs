@@ -6,7 +6,9 @@
 //! reported as [`Gate::Unresolved`], and callers keep the gated item available:
 //! a gap in the evaluator must never lock a user out of a setting.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use oxtuner_ini::expr::{EvalContext, Expr};
 use oxtuner_ini::{ChannelKind, Definition};
@@ -38,6 +40,35 @@ impl Gate {
     }
 }
 
+thread_local! {
+    /// Parsed gate expressions, keyed by source text.
+    ///
+    /// Definitions repeat a gate on many rows (a panel gate is inherited by
+    /// every row it embeds), and a dialog is read again after every edit.
+    /// Parsing is the expensive part, so the cache follows the core thread
+    /// instead of one summary build.
+    static PARSED_GATES: RefCell<HashMap<String, Option<Rc<Expr>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// How many distinct gate expressions the parser cache keeps.
+const PARSED_GATE_LIMIT: usize = 4_096;
+
+fn parse_gate(expression: &str) -> Option<Rc<Expr>> {
+    PARSED_GATES.with_borrow_mut(|cache| {
+        if let Some(parsed) = cache.get(expression) {
+            return parsed.clone();
+        }
+
+        let parsed = Expr::parse(expression).ok().map(Rc::new);
+        if cache.len() >= PARSED_GATE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(expression.to_owned(), parsed.clone());
+        parsed
+    })
+}
+
 /// Resolves definition gates against the working tune.
 ///
 /// Values are looked up in this order: the newest realtime frame, computed
@@ -51,8 +82,7 @@ pub(crate) struct GateEvaluator<'tune> {
     continuous: HashMap<String, String>,
     values: HashMap<String, Option<f64>>,
     resolving: HashSet<String>,
-    arrays: HashMap<(String, u64), Option<f64>>,
-    parsed: HashMap<String, Option<Expr>>,
+    arrays: HashMap<String, HashMap<u64, Option<f64>>>,
     unresolved: BTreeSet<String>,
 }
 
@@ -93,7 +123,6 @@ impl<'tune> GateEvaluator<'tune> {
             values: HashMap::new(),
             resolving: HashSet::new(),
             arrays: HashMap::new(),
-            parsed: HashMap::new(),
             unresolved: BTreeSet::new(),
         }
     }
@@ -105,7 +134,7 @@ impl<'tune> GateEvaluator<'tune> {
             return Gate::Open;
         }
 
-        let Some(parsed) = self.parsed(expression) else {
+        let Some(parsed) = parse_gate(expression) else {
             self.unresolved.insert(expression.to_owned());
             return Gate::Unresolved;
         };
@@ -125,20 +154,15 @@ impl<'tune> GateEvaluator<'tune> {
         self.unresolved.iter().map(String::as_str)
     }
 
-    fn parsed(&mut self, expression: &str) -> Option<Expr> {
-        if let Some(parsed) = self.parsed.get(expression) {
-            return parsed.clone();
+    fn value(&mut self, name: &str) -> Option<f64> {
+        if let Some(cached) = self.values.get(name) {
+            return *cached;
         }
 
-        let parsed = Expr::parse(expression).ok();
-        self.parsed.insert(expression.to_owned(), parsed.clone());
-        parsed
-    }
-
-    fn value(&mut self, name: &str) -> Option<f64> {
         let key = name.to_ascii_lowercase();
-
-        if let Some(cached) = self.values.get(&key) {
+        if key != name
+            && let Some(cached) = self.values.get(&key)
+        {
             return *cached;
         }
 
@@ -150,20 +174,32 @@ impl<'tune> GateEvaluator<'tune> {
 
         let resolved = self.resolve(name, &key);
         self.resolving.remove(&key);
-        self.values.insert(key, resolved);
+        self.values.insert(name.to_owned(), resolved);
+        if key != name {
+            self.values.insert(key, resolved);
+        }
         resolved
     }
 
     fn resolve(&mut self, name: &str, key: &str) -> Option<f64> {
-        if let Some(value) = self.live.get(key) {
+        if let Some(value) = self.live.get(name).or_else(|| self.live.get(key)) {
             return Some(*value);
         }
 
-        if let Some(expression) = self.computed.get(key).cloned() {
+        if let Some(expression) = self
+            .computed
+            .get(name)
+            .or_else(|| self.computed.get(key))
+            .cloned()
+        {
             return expression.evaluate_with(self);
         }
 
-        if let Some(channel) = self.continuous.get(key).cloned()
+        if let Some(channel) = self
+            .continuous
+            .get(name)
+            .or_else(|| self.continuous.get(key))
+            .cloned()
             && let Some(value) = self.live.get(&channel)
         {
             return Some(*value);
@@ -178,14 +214,21 @@ impl<'tune> GateEvaluator<'tune> {
         }
 
         let name = array_name(name);
-        let key = (name.to_ascii_lowercase(), index.to_bits());
+        let bits = index.to_bits();
 
-        if let Some(cached) = self.arrays.get(&key) {
+        if let Some(cached) = self
+            .arrays
+            .get(name)
+            .and_then(|by_index| by_index.get(&bits))
+        {
             return *cached;
         }
 
         let resolved = self.interpolate(name, index);
-        self.arrays.insert(key, resolved);
+        self.arrays
+            .entry(name.to_owned())
+            .or_default()
+            .insert(bits, resolved);
         resolved
     }
 
