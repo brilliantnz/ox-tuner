@@ -62,6 +62,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             digits: 0,
             minimum: Some(0.0),
             maximum: Some(10_000.0),
+            power_cycle: false,
             values: (0..columns).map(|value| value as f64 * 500.0).collect(),
         },
         y_axis: AxisSummary {
@@ -72,6 +73,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             digits: 0,
             minimum: Some(0.0),
             maximum: Some(255.0),
+            power_cycle: false,
             values: (0..rows).map(|value| value as f64 * 10.0).collect(),
         },
         minimum: 0.0,
@@ -79,6 +81,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
         cell_minimum: Some(0.0),
         cell_maximum: Some(255.0),
         writable: true,
+        power_cycle: false,
         curve: None,
     }
 }

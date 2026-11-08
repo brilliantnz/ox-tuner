@@ -1,10 +1,12 @@
-//! Reads the real Speeduino definition through the core, when available locally.
+//! Reads the real Speeduino and rusEFI definitions through the core, when
+//! available locally.
 //!
-//! The INI is a third-party file that ox-tuner does not bundle, so it is never
-//! checked in. The test looks for it in the git-ignored study folder
-//! (`docs/tmp/local/ini/`) or at the path in `OXTUNER_INI_SPEEDUINO`. When
-//! neither exists the test reports that it was skipped. Set
-//! `OXTUNER_INI_REQUIRED=1` to turn a missing fixture into a hard failure.
+//! The INIs are third-party files that ox-tuner does not bundle, so they are
+//! never checked in. The tests look in the git-ignored study folder
+//! (`docs/tmp/local/ini/`) or at the paths in `OXTUNER_INI_SPEEDUINO` and
+//! `OXTUNER_INI_RUSEFI`. When a fixture is absent the test reports that it was
+//! skipped. Set `OXTUNER_INI_REQUIRED=1` to turn a missing fixture into a hard
+//! failure.
 
 #![expect(
     clippy::print_stdout,
@@ -18,14 +20,14 @@ use std::time::Duration;
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, DefinitionSummary, DialogFieldKind,
-    DialogSummary, Event, start,
+    DialogFieldTone, DialogSummary, Event, start,
 };
 use oxtuner_ini::{SettingsContext, parse_bytes};
 
 const WAIT: Duration = Duration::from_secs(60);
 
-fn locate_ini() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("OXTUNER_INI_SPEEDUINO") {
+fn locate(env: &str, fallback: &str) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var(env) {
         let path = PathBuf::from(path);
 
         if path.is_file() {
@@ -34,13 +36,14 @@ fn locate_ini() -> Option<PathBuf> {
     }
 
     let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/tmp/local/ini/speeduino-202501.7.ini");
+        .join("../../docs/tmp/local/ini")
+        .join(fallback);
 
     fallback.is_file().then_some(fallback)
 }
 
-fn require_ini() -> Option<(PathBuf, Vec<u8>)> {
-    let path = locate_ini()?;
+fn require(env: &str, fallback: &str) -> Option<(PathBuf, Vec<u8>)> {
+    let path = locate(env, fallback)?;
 
     let required = std::env::var_os("OXTUNER_INI_REQUIRED").is_some_and(|value| value == "1");
 
@@ -54,6 +57,14 @@ fn require_ini() -> Option<(PathBuf, Vec<u8>)> {
     };
 
     Some((path, bytes))
+}
+
+fn require_ini() -> Option<(PathBuf, Vec<u8>)> {
+    require("OXTUNER_INI_SPEEDUINO", "speeduino-202501.7.ini")
+}
+
+fn require_rusefi() -> Option<(PathBuf, Vec<u8>)> {
+    require("OXTUNER_INI_RUSEFI", "rusefi.ini")
 }
 
 struct Harness {
@@ -194,12 +205,14 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
     let warning = dialog
         .fields
         .iter()
-        .find(|field| field.kind == DialogFieldKind::Note && field.warning)
+        .find(|field| field.kind == DialogFieldKind::Note && field.tone == DialogFieldTone::Danger)
         .expect("a conditional warning note is carried");
-    assert!(
-        warning.enabled.is_some(),
-        "the warning keeps its gate: {warning:?}"
+    assert_eq!(
+        warning.visibility.as_deref(),
+        Some("injLayout == 3 && !sequentialFuelAvailable"),
+        "`{{}}, {{}}, {{visible}}` keeps the visible expression in the visible slot: {warning:?}"
     );
+    assert_eq!(warning.enabled, None);
 
     let layout = dialog
         .fields
@@ -210,6 +223,45 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         !layout.options.is_empty(),
         "a bits row carries its select options"
     );
+
+    let pairing = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "inj4CylPairing")
+        .expect("the injector pairing row is present");
+    assert_eq!(
+        pairing.visibility.as_deref(),
+        Some("injLayout != 0 && nCylinders == 4"),
+        "`{{}}, {{visible}}` is visibility, not enablement"
+    );
+    assert_eq!(pairing.enabled, None);
+    assert!(
+        pairing.power_cycle,
+        "`requiresPowerCycle = inj4CylPairing` marks the row"
+    );
+    assert!(
+        layout.power_cycle,
+        "`requiresPowerCycle = pinLayout` marks the row"
+    );
+
+    let stoich = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "stoich")
+        .expect("the stoichiometric row is present");
+    assert!(
+        !stoich.power_cycle,
+        "a constant absent from requiresPowerCycle stays unflagged"
+    );
+
+    let fan = project.read_dialog("fanSettings");
+    let warning = fan
+        .fields
+        .iter()
+        .find(|field| field.label == "No PWM Fan available on MCU")
+        .expect("the blank display-only row reads as a note");
+    assert_eq!(warning.kind, DialogFieldKind::Note);
+    assert_eq!(warning.tone, DialogFieldTone::Danger);
 
     println!(
         "fields: {}, tables: {:?}, curves: {:?}, widgets: {}, commands: {}, presets: {}",
@@ -251,4 +303,56 @@ fn a_real_definition_reports_its_gauges_and_slots() {
         summary.front_page_gauges.len(),
         summary.unsupported,
     );
+}
+
+fn find_menu_node<'tree>(
+    nodes: &'tree [oxtuner_core::MenuNode],
+    label: &str,
+) -> Option<&'tree oxtuner_core::MenuNode> {
+    for node in nodes {
+        if node.label == label {
+            return Some(node);
+        }
+
+        if let Some(found) = find_menu_node(&node.children, label) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+#[test]
+fn a_real_rusefi_definition_keeps_visibility_gates_and_widget_labels() {
+    let Some((path, bytes)) = require_rusefi() else {
+        println!("skipped: no real rusEFI INI (see the module docs)");
+        return;
+    };
+
+    println!("definition: {}", path.display());
+    let core = Harness::start();
+    let summary = core.load_definition(&bytes);
+
+    assert!(!summary.gauges.is_empty(), "gauge templates are served");
+
+    // rusEFI writes `0, {visible}`; the zero is the empty enable placeholder.
+    let protection = find_menu_node(&summary.menu, "Lambda protection")
+        .expect("the lambda protection menu item is present");
+    assert_eq!(
+        protection.visible.as_deref(),
+        Some("isInjectionEnabled"),
+        "the second slot is visibility: {protection:?}"
+    );
+    assert_eq!(protection.enabled, None);
+
+    // A `runtimeValue` labels its row from the first field.
+    let project = RealProject::open(&bytes, "rusefi-runtime");
+    let monitor = project.read_dialog("aePumpMonitor");
+    let runtime = monitor
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == oxtuner_core::DialogWidgetKind::RuntimeValue)
+        .expect("the monitor dialog carries a runtime value");
+    assert_eq!(runtime.label, "Accumulated enrichment (ms/fraction)");
+    assert_eq!(runtime.target, "accumulatedValue");
 }

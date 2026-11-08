@@ -22,11 +22,11 @@ mod ops;
 mod project;
 
 pub use editor::{
-    AxisSummary, CurveAxes, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogHelpLink,
-    DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption, DialogSummary,
-    DialogUnmodeledRow, DialogWidget, DialogWidgetKind, TableSummary,
+    AxisSummary, CurveAxes, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogFieldTone,
+    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
+    DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind, TableSummary,
 };
-pub(crate) use editor::{condition_body, order_gates};
+pub(crate) use editor::{expression_slot, order_gates, panel_target};
 pub use edits::{
     BurnSummary, ImportSummary, JournalEntry, RevertSummary, SaveSummary, WriteSummary,
 };

@@ -50,6 +50,8 @@ pub struct TableSummary {
     pub cell_maximum: Option<f64>,
     /// Whether the session may store edits.
     pub writable: bool,
+    /// Whether a change to this table's cells needs an ECU power cycle.
+    pub power_cycle: bool,
     /// The definition's axis frame when this snapshot is a curve.
     pub curve: Option<CurveAxes>,
 }
@@ -78,6 +80,8 @@ pub struct AxisSummary {
     pub minimum: Option<f64>,
     /// Highest user value the bins variable accepts, when stated.
     pub maximum: Option<f64>,
+    /// Whether a change to this axis needs an ECU power cycle.
+    pub power_cycle: bool,
     /// Axis values, in definition order.
     pub values: Vec<f64>,
 }
@@ -285,6 +289,10 @@ impl TableSummary {
             cell_minimum: spec.minimum,
             cell_maximum: spec.maximum,
             writable: !project.is_read_only() && tune.is_writable(cells_name),
+            power_cycle: project
+                .definition()
+                .extensions
+                .requires_power_cycle(cells_name),
             curve: None,
         })
     }
@@ -327,7 +335,12 @@ impl TableSummary {
             minimum = minimum.min(value);
             maximum = maximum.max(value);
             cells.push(value);
-            states.push(CellState::Unknown);
+            states.push(
+                project
+                    .images()
+                    .cell_state(cells_name, 0, index)
+                    .unwrap_or(CellState::Unknown),
+            );
             let edited = matches!(
                 (tune.raw_at(cells_name, index), baseline.raw_at(cells_name, index)),
                 (Ok(current), Ok(saved)) if current != saved
@@ -356,6 +369,7 @@ impl TableSummary {
             digits: spec.digits,
             minimum: spec.minimum,
             maximum: spec.maximum,
+            power_cycle: false,
             values: vec![minimum],
         };
         let axes = curve_axes(curve, &x_axis.values, &cells);
@@ -381,6 +395,10 @@ impl TableSummary {
             cell_minimum: spec.minimum,
             cell_maximum: spec.maximum,
             writable: !project.is_read_only() && tune.is_writable(cells_name),
+            power_cycle: project
+                .definition()
+                .extensions
+                .requires_power_cycle(cells_name),
             curve: Some(axes),
         })
     }
@@ -430,6 +448,7 @@ fn axis_summary(
             digits: 0,
             minimum: None,
             maximum: None,
+            power_cycle: false,
             values: (0..length).map(axis_position).collect(),
         };
     };
@@ -461,6 +480,10 @@ fn axis_summary(
         digits: spec.map_or(0, |spec| spec.digits),
         minimum: spec.and_then(|spec| spec.minimum),
         maximum: spec.and_then(|spec| spec.maximum),
+        power_cycle: project
+            .definition()
+            .extensions
+            .requires_power_cycle(&axis.array),
         values,
     }
 }

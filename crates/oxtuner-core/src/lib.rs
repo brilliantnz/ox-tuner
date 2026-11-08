@@ -96,9 +96,9 @@ pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use message::{
     AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary, CurveAxes,
-    DefinitionSummary, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogHelpLink,
-    DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption, DialogSummary,
-    DialogUnmodeledRow, DialogWidget, DialogWidgetKind, Event, Failure, FailureCode,
+    DefinitionSummary, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogFieldTone,
+    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
+    DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind, Event, Failure, FailureCode,
     FrontPageGauge, GaugeSummary, ImportSummary, IndicatorSummary, JournalEntry, KeyActionSummary,
     OpId, PortSummary, ProjectSummary, ReadAllSummary, ReferenceTableIdentifier,
     ReferenceTableLimit, ReferenceTableSolution, ReferenceTableSummary, RejectReason,

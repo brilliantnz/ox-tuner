@@ -8,7 +8,8 @@
 //! `groupMenu` is a nested folder, and every other entry is a leaf pointing at a
 //! table, a curve, a dialog or one of the built-in `std_*` dialogs. Separators
 //! are not nodes. A target the definition does not declare stays visible as
-//! [`MenuNodeKind::Missing`] rather than disappearing silently.
+//! [`MenuNodeKind::Missing`] rather than disappearing silently, and a `std_*`
+//! leaf keeps its name so the app can route it to its own screen.
 //!
 //! Sizes travel as [`MenuDetail`], not as text: the core has no language, so the
 //! UI phrases them (`16 × 16`, `9 points`, `4 rows`).
@@ -17,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
-use crate::message::{condition_body, order_gates};
+use crate::message::{expression_slot, order_gates, panel_target};
 
 /// What a node in the navigation tree is.
 #[expect(
@@ -84,8 +85,9 @@ pub struct MenuNode {
     /// The definition object this node opens, when it opens one.
     ///
     /// For a table this is the table id (not the menu's map id), for a curve or
-    /// dialog its name. The editor asks the core for that id; it never reads the
-    /// definition itself.
+    /// dialog its name, and for a `std_*` item the standard name the app routes
+    /// to its own screen. The editor asks the core for that id; it never reads
+    /// the definition itself.
     pub target: Option<String>,
     /// The table or curve a dialog's panels embed, when it declares one.
     ///
@@ -93,12 +95,12 @@ pub struct MenuNode {
     /// 16×16 fuel map: opening the dialog name alone would lose the grid, so the
     /// id travels beside the dialog target and the editor can show both.
     pub embedded: Option<String>,
-    /// Enable condition from the item (`{ … }`), as written.
+    /// Enable condition from the menu or item (`{ … }`), as written.
     ///
-    /// Menu items take `{enable}` first and `{visible}` second; a single gate
-    /// is always the enable one. The core carries the expressions raw.
+    /// Menus and items take `{enable}` first and `{visible}` second; a single
+    /// gate is always the enable one. The core carries the expressions raw.
     pub enabled: Option<String>,
-    /// Visibility condition from the item (`{ … }`), as written.
+    /// Visibility condition from the menu or item (`{ … }`), as written.
     pub visible: Option<String>,
     /// Child nodes, in definition order.
     pub children: Vec<MenuNode>,
@@ -118,7 +120,7 @@ pub(crate) fn build(definition: &Definition) -> Vec<MenuNode> {
 }
 
 fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
-    let mut children: Vec<MenuNode> = Vec::new();
+    let mut children: Vec<MenuNode> = Vec::with_capacity(menu.items.len());
     // Where each group header landed in `children`, keyed by its index in
     // `menu.items`, so a child finds its group without scanning the tree.
     let mut groups: HashMap<usize, usize> = HashMap::new();
@@ -140,6 +142,8 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         }
     }
 
+    let (visible, enabled) = condition_gates(&menu.conditions);
+
     MenuNode {
         id: format!("menu:{index}"),
         label: clean_label(&menu.title),
@@ -147,8 +151,8 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         detail: None,
         target: None,
         embedded: None,
-        enabled: None,
-        visible: None,
+        enabled,
+        visible,
         children,
     }
 }
@@ -189,7 +193,8 @@ fn build_item(
             label,
             kind: MenuNodeKind::Standard,
             detail: None,
-            target: None,
+            // The name is the app-owned screen this item asks for.
+            target: (!item.target.is_empty()).then(|| item.target.clone()),
             embedded: None,
             enabled: None,
             visible: None,
@@ -210,27 +215,38 @@ fn build_item(
 /// Enable and visibility gates of one menu item, as written.
 ///
 /// Items take `{enable}` first and `{visible}` second; a single gate is always
-/// the enable one. Bare numbers (`0`) are placeholders and skipped; any other
-/// bare token travels on as written.
+/// the enable one. The empty placeholder keeps its slot, so `0, {visible}` and
+/// `{}, {visible}` read as visibility, which is how both reference generators
+/// write a visibility-only item. A bare number is the same placeholder; any
+/// other bare token travels on as written.
 fn item_gates(item: &MenuItem) -> (Option<String>, Option<String>) {
-    let mut found = Vec::new();
+    condition_gates(&item.conditions)
+}
 
-    for condition in &item.conditions {
-        let trimmed = condition.trim();
-
-        if let Some(body) = condition_body(trimmed) {
-            found.push(body);
-            continue;
-        }
-
-        if trimmed.is_empty() || trimmed.parse::<f64>().is_ok() {
-            continue;
-        }
-
-        found.push(trimmed.to_owned());
+/// Orders raw condition fields into `(visibility, enabled)`.
+fn condition_gates(conditions: &[String]) -> (Option<String>, Option<String>) {
+    if conditions.is_empty() {
+        return (None, None);
     }
 
-    order_gates(found)
+    let slots = conditions
+        .iter()
+        .map(|condition| {
+            let trimmed = condition.trim();
+
+            if let Some(slot) = expression_slot(trimmed) {
+                return slot.into_condition();
+            }
+
+            if trimmed.is_empty() || trimmed.parse::<f64>().is_ok() {
+                return None;
+            }
+
+            Some(trimmed.to_owned())
+        })
+        .collect();
+
+    order_gates(slots)
 }
 
 /// Resolves a `subMenu` target to the editor it opens.
@@ -379,10 +395,9 @@ pub(crate) fn embedded_target(
         if row.kind != RowKind::Panel {
             continue;
         }
-        let Some(field) = row.fields.first() else {
+        let Some(target) = panel_target(row) else {
             continue;
         };
-        let target = field.trim().trim_matches('"');
         if let Some(table) = table_by_target(target, definition)
             && let Some(detail) = table_detail(table, definition)
         {
@@ -519,10 +534,11 @@ signature = \"speeduino 202501\"
 
 [Menu]
 menuDialog = main
-menu = \"Gated\"
+menu = \"Gated\", { engineOn }, { showMenu }
   subMenu = veTableDialog, \"Both\", { engineOn }, { showBoth }
   subMenu = idleCurve, \"Single\", { engineOn }
   subMenu = helpDialog, \"Bare\", 0, { showHelp }
+  subMenu = helpDialog, \"Empty\", {}, { showEmpty }
 ";
 
     fn parse(text: &str) -> Definition {
@@ -565,6 +581,11 @@ menu = \"Gated\"
 
         let standard = node(&menu.children, "Realtime Display");
         assert_eq!(standard.kind, MenuNodeKind::Standard);
+        assert_eq!(
+            standard.target.as_deref(),
+            Some("std_realtime"),
+            "the app-owned screen keeps its standard target name"
+        );
 
         let group = node(&menu.children, "Protection");
         assert_eq!(group.kind, MenuNodeKind::Group);
@@ -637,6 +658,12 @@ menu = \"Gated\"
 
         assert_eq!(tree.len(), 1);
         let menu = &tree[0];
+        assert_eq!(
+            menu.enabled.as_deref(),
+            Some("engineOn"),
+            "the top-level menu carries its own gate"
+        );
+        assert_eq!(menu.visible.as_deref(), Some("showMenu"));
 
         let both = node(&menu.children, "Both");
         assert_eq!(both.enabled.as_deref(), Some("engineOn"));
@@ -648,11 +675,15 @@ menu = \"Gated\"
 
         let bare = node(&menu.children, "Bare");
         assert_eq!(
-            bare.enabled.as_deref(),
+            bare.visible.as_deref(),
             Some("showHelp"),
-            "a bare `0` placeholder is skipped, the brace is the enable gate"
+            "a bare `0` keeps the empty enable slot"
         );
-        assert_eq!(bare.visible, None);
+        assert_eq!(bare.enabled, None);
+
+        let empty = node(&menu.children, "Empty");
+        assert_eq!(empty.visible.as_deref(), Some("showEmpty"));
+        assert_eq!(empty.enabled, None);
     }
 
     #[test]
@@ -673,7 +704,7 @@ table = veTable1Tbl, veTable1Map, \"VE Table\", 1
 
 [UserDefined]
 dialog = north, \"\"
-panel = veTable1Tbl, North
+panel = veTable1Tbl { tableVisible }
 dialog = veTableDialog, \"VE Table\"
 panel = north, North
 panel = loopB, South

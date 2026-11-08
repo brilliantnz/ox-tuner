@@ -14,41 +14,39 @@
 
 use oxtuner_project::Project;
 
-/// One composable `std_*` panel: its title and candidate rows.
-pub(crate) struct StdPanel {
+/// One composable `std_*` panel: its name, title and candidate rows.
+struct StdPanel {
+    /// Standard name as written in the definition.
+    name: &'static str,
     /// Panel title, used as the rows' section.
-    pub(crate) title: &'static str,
+    title: &'static str,
     /// `(label, constant)` candidates in display order.
-    pub(crate) rows: &'static [(&'static str, &'static str)],
+    rows: &'static [(&'static str, &'static str)],
 }
 
 /// The panels this build composes.
-const PANELS: &[(&str, StdPanel)] = &[
-    (
-        "std_injection",
-        StdPanel {
-            title: "Injection Setup",
-            rows: &[
-                ("Control Algorithm", "algorithm"),
-                ("Required Fuel", "reqFuel"),
-                ("Cylinder Count", "nCylinders"),
-                ("Engine Stroke", "twoStroke"),
-                ("Engine Type", "engineType"),
-                ("Injector Type", "injType"),
-                ("Injector Divider", "divider"),
-                ("Injection Timing", "alternate"),
-                ("Injector Count", "nInjectors"),
-                ("Injector Open Time", "injOpen"),
-            ],
-        },
-    ),
-    (
-        "std_ms3rtc",
-        StdPanel {
-            title: "Real Time Clock",
-            rows: &[("RTC Trim", "rtc_trim")],
-        },
-    ),
+const PANELS: &[StdPanel] = &[
+    StdPanel {
+        name: "std_injection",
+        title: "Injection Setup",
+        rows: &[
+            ("Control Algorithm", "algorithm"),
+            ("Required Fuel", "reqFuel"),
+            ("Cylinder Count", "nCylinders"),
+            ("Engine Stroke", "twoStroke"),
+            ("Engine Type", "engineType"),
+            ("Injector Type", "injType"),
+            ("Injector Divider", "divider"),
+            ("Injection Timing", "alternate"),
+            ("Injector Count", "nInjectors"),
+            ("Injector Open Time", "injOpen"),
+        ],
+    },
+    StdPanel {
+        name: "std_ms3rtc",
+        title: "Real Time Clock",
+        rows: &[("RTC Trim", "rtc_trim")],
+    },
 ];
 
 /// The composable panel `name` names, with rows limited to constants the
@@ -63,8 +61,7 @@ pub(crate) fn synthesize(
 ) -> Option<(&'static str, Vec<(String, String)>)> {
     let panel = PANELS
         .iter()
-        .find(|(known, _)| known.eq_ignore_ascii_case(name))
-        .map(|(_, panel)| panel)?;
+        .find(|panel| panel.name.eq_ignore_ascii_case(name))?;
 
     let rows: Vec<(String, String)> = panel
         .rows

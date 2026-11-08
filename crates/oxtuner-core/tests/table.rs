@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use oxtuner_core::{
     BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, DialogFieldKind,
-    DialogPresetAssignment, DialogSummary, DialogWidgetKind, Event, FailureCode, OpId,
-    TableSummary, start,
+    DialogFieldTone, DialogPresetAssignment, DialogSummary, DialogWidgetKind, Event, FailureCode,
+    OpId, TableSummary, start,
 };
 use oxtuner_project::TUNE_FILE;
 
@@ -761,7 +761,11 @@ fn a_dialog_flattens_the_panels_it_embeds() {
     assert_eq!(dialog.fields[0].value, Some(12.0));
     assert!(dialog.fields[0].writable);
     assert_eq!(dialog.fields[1].kind, DialogFieldKind::Note);
-    assert!(dialog.fields[1].warning, "the `!` marker is a warning");
+    assert_eq!(
+        dialog.fields[1].tone,
+        DialogFieldTone::Danger,
+        "the `!` marker is a danger label"
+    );
     assert_eq!(
         dialog.fields[2].section, "Injection Setup",
         "a composed `std_*` panel keeps its own title"
@@ -870,9 +874,10 @@ signature = "speeduino 202501"
 
 [Constants]
 nPages = 1
-pageSize = 16
+pageSize = 20
 page = 1
 algo = bits, U08, 0, [0:2], "MAP", "TPS", "INVALID", "IMAP/EMAP"
+blank = bits, U08, 16, [0:1], "", ""
 limit = scalar, U08, 1, "units", 1, 0, 0, 100, 0
 gated = scalar, U08, 2, "units", 1, 0, 0, 100, 0
 both = scalar, U08, 3, "units", 1, 0, 0, 100, 0
@@ -883,6 +888,11 @@ zc = array, U08, 12, [2x2], "%", 1, 0, 0, 255, 0
 
 [SettingContextHelp]
 algo = "Pick the load source"
+
+[ConstantExtensions]
+requiresPowerCycle = limit
+requiresPowerCycle = xb
+requiresPowerCycle = zc
 
 [ControllerCommands]
 cmdPing = "p"
@@ -907,7 +917,16 @@ dialog = presDialog, "Presentation", border
   field = "Bare gate", both, !gated
   field = "Condvar gate", limit, gated
   field = "!Conditional warning", {}, { limit > 5 }
+  field = "Never", limit, { 0 }
+  field = "Visible after zero", limit, 0, { limit > 2 }
   field = "Element two", arr[2], { limit > 1 }
+  checkbox = "Flipped", algo, flipValue
+  runtimeValue = "Live label", rpm, { gated > 1 }
+  indicator = { gated > 1 }, "Gated off", { Dynamic label }
+  field = !"Outside marker", limit
+  displayOnlyField = !"Blank row", blank
+  slider = "Gated slider", limit, horizontal, { limit > 0 }
+  checkbox = "Gated check", algo, {}, { limit > 0 }
   help = helpGeneral, "General help"
   webHelp = "https://example.com/help"
   settingSelector = "Common sensors", { limit > 0 }
@@ -940,6 +959,13 @@ dialog = presetInner, "Preset Inner"
 dialog = gatedPanel, "Gated"
   field = "Gated plain", gated
 
+dialog = helpInner, "Help Inner"
+  topicHelp = "https://example.com/inner"
+  field = "Help inner value", limit
+
+dialog = helpParent, "Help Parent"
+  panel = helpInner
+
 [Menu]
 menuDialog = main
 menu = "Tuning"
@@ -950,8 +976,9 @@ const PRESENTATION_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
     <bibliography author="TunerStudio" tuneComment="fixture"/>
     <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
-    <page number="0" size="16">
+    <page number="0" size="20">
         <constant name="algo">1.0</constant>
+        <constant name="blank">0.0</constant>
         <constant name="limit">10.0</constant>
         <constant name="gated">20.0</constant>
         <constant name="both">30.0</constant>
@@ -1082,8 +1109,12 @@ fn a_dialog_carries_options_conditions_help_and_topic_help() {
         .iter()
         .find(|field| field.label == "Shown only")
         .expect("the empty-slot row is present");
-    assert_eq!(shown.visibility, None);
-    assert_eq!(shown.enabled.as_deref(), Some("limit > 5"));
+    assert_eq!(
+        shown.visibility.as_deref(),
+        Some("limit > 5"),
+        "an empty enable slot keeps the visible expression in the visible slot"
+    );
+    assert_eq!(shown.enabled, None);
 
     let slider = dialog
         .fields
@@ -1092,6 +1123,10 @@ fn a_dialog_carries_options_conditions_help_and_topic_help() {
         .expect("the slider row is present");
     assert_eq!(slider.minimum, Some(0.0));
     assert_eq!(slider.maximum, Some(100.0));
+    assert!(
+        slider.power_cycle,
+        "`requiresPowerCycle = limit` reaches the row"
+    );
 
     assert!(
         dialog
@@ -1122,6 +1157,53 @@ fn read_pres_dialog(label: &str) -> (TempDir, Harness, DialogSummary) {
     assert_eq!(answered, op, "the reply belongs to the queued read");
 
     (dir, core, dialog)
+}
+
+#[test]
+fn power_cycle_flags_reach_tables_and_their_axes() {
+    let (_dir, core, _dialog) = read_pres_dialog("dialog-power-cycle");
+
+    let (_, table) = core.read("embTbl");
+    assert!(
+        table.power_cycle,
+        "`requiresPowerCycle = zc` marks the table cells"
+    );
+    assert!(
+        table.x_axis.power_cycle,
+        "`requiresPowerCycle = xb` marks the column axis"
+    );
+    assert!(
+        !table.y_axis.power_cycle,
+        "an unflagged axis stays unflagged"
+    );
+}
+
+#[test]
+fn a_nested_panel_keeps_its_topic_help_to_itself() {
+    let (_dir, core, _dialog) = read_pres_dialog("dialog-topic-help");
+
+    core.handle
+        .read_dialog("helpParent")
+        .expect("the parent read is queued");
+    let Event::DialogRead { dialog, .. } = core.next() else {
+        panic!("expected a parent dialog read");
+    };
+    assert_eq!(
+        dialog.topic_help, None,
+        "the embedded panel's topicHelp does not become the parent's"
+    );
+
+    core.handle
+        .read_dialog("helpInner")
+        .expect("the inner read is queued");
+    let Event::DialogRead { dialog, .. } = core.next() else {
+        panic!("expected an inner dialog read");
+    };
+    assert_eq!(
+        dialog.topic_help.as_deref(),
+        Some("https://example.com/inner"),
+        "the dialog that declares topicHelp keeps it"
+    );
 }
 
 #[test]
@@ -1174,8 +1256,32 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
         .iter()
         .find(|field| field.label == "Conditional warning")
         .expect("a conditional note is carried");
-    assert!(warning.warning);
-    assert_eq!(warning.enabled.as_deref(), Some("limit > 5"));
+    assert_eq!(warning.tone, DialogFieldTone::Danger);
+    assert_eq!(warning.visibility.as_deref(), Some("limit > 5"));
+    assert_eq!(warning.enabled, None);
+
+    let never = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Never")
+        .expect("a `{ 0 }` row is carried");
+    assert_eq!(
+        never.enabled.as_deref(),
+        Some("0"),
+        "zero is a real disabled gate, not a placeholder"
+    );
+
+    let zero_placeholder = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Visible after zero")
+        .expect("a zero-placeholder row is carried");
+    assert_eq!(
+        zero_placeholder.visibility.as_deref(),
+        Some("limit > 2"),
+        "a bare zero keeps the enable slot empty"
+    );
+    assert_eq!(zero_placeholder.enabled, None);
 
     let element = dialog
         .fields
@@ -1185,6 +1291,84 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
     assert_eq!(element.variable, "arr");
     assert_eq!(element.index, Some(2));
     assert_eq!(element.value, Some(3.0));
+    assert!(
+        !element.writable,
+        "`EditScalar` cannot store an array element yet"
+    );
+
+    let slider = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated slider")
+        .expect("a slider with a gate is carried");
+    assert_eq!(
+        slider.enabled.as_deref(),
+        Some("limit > 0"),
+        "the orientation is not a gate slot"
+    );
+    assert_eq!(slider.visibility, None);
+
+    let check = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated check")
+        .expect("a checkbox with a visibility gate is carried");
+    assert_eq!(check.visibility.as_deref(), Some("limit > 0"));
+    assert_eq!(check.enabled, None);
+}
+
+#[test]
+fn a_checkbox_and_a_runtime_value_keep_their_flags_and_labels() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-flags");
+
+    let checkbox = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Flipped")
+        .expect("the checkbox row is present");
+    assert_eq!(checkbox.kind, DialogFieldKind::Toggle);
+    assert!(checkbox.flip, "`flipValue` reverses the checked state");
+
+    let runtime = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::RuntimeValue)
+        .expect("the runtime value is carried");
+    assert_eq!(
+        runtime.label, "Live label",
+        "a runtime value labels its row from the first field"
+    );
+    assert_eq!(runtime.target, "rpm");
+    assert_eq!(runtime.enabled.as_deref(), Some("gated > 1"));
+
+    let indicator = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::Indicator)
+        .expect("the indicator is carried");
+    assert_eq!(
+        indicator.label, "Dynamic label",
+        "a label expression is text, not a gate"
+    );
+    assert_eq!(indicator.enabled, None);
+    assert_eq!(indicator.visibility, None);
+
+    let outside = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Outside marker")
+        .expect("a marker outside the quotes is split");
+    assert_eq!(outside.tone, DialogFieldTone::Danger);
+    assert_eq!(outside.variable, "limit");
+
+    let blank = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Blank row")
+        .expect("a blank display-only constant reads as a note");
+    assert_eq!(blank.kind, DialogFieldKind::Note);
+    assert_eq!(blank.text.as_deref(), Some("Blank row"));
+    assert_eq!(blank.tone, DialogFieldTone::Danger);
 }
 
 #[test]
@@ -1235,12 +1419,18 @@ fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
             DialogPresetAssignment {
                 variable: "limit".to_owned(),
                 value: "5".to_owned(),
+                power_cycle: true,
             },
             DialogPresetAssignment {
                 variable: "gated".to_owned(),
                 value: "6".to_owned(),
+                power_cycle: false,
             },
         ],
+    );
+    assert!(
+        preset.options[0].power_cycle,
+        "one flagged assignment marks the whole option"
     );
 
     let ping = dialog
@@ -1274,10 +1464,9 @@ fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
     let indicator = dialog
         .widgets
         .iter()
-        .find(|widget| widget.kind == DialogWidgetKind::Indicator)
+        .find(|widget| widget.kind == DialogWidgetKind::Indicator && widget.label == "Gated on")
         .expect("an indicator row is carried");
     assert_eq!(indicator.target, "gated > 1");
-    assert_eq!(indicator.label, "Gated on");
     assert!(
         dialog
             .widgets

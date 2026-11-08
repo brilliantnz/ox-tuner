@@ -470,6 +470,7 @@ fn curve_table() -> TableSummary {
             digits: 1,
             minimum: None,
             maximum: None,
+            power_cycle: false,
             values: vec![6.0, 8.0, 16.0],
         },
         y_axis: AxisSummary {
@@ -480,6 +481,7 @@ fn curve_table() -> TableSummary {
             digits: 0,
             minimum: None,
             maximum: None,
+            power_cycle: false,
             values: vec![100.0],
         },
         minimum: 100.0,
@@ -487,6 +489,7 @@ fn curve_table() -> TableSummary {
         cell_minimum: Some(0.0),
         cell_maximum: Some(255.0),
         writable: true,
+        power_cycle: false,
         curve: Some(CurveAxes {
             x_min: 6.0,
             x_max: 22.0,
