@@ -456,9 +456,23 @@ impl TableEditor {
         let theme = cx.theme().clone();
         let title: SharedString =
             table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
-        let axes =
-            table.map(|table| format!("{} · {}", table.x_axis.caption(), table.y_axis.caption()));
+        let power_cycle = t!("app.table.power_cycle").to_string();
+        let axis_caption = |axis: &oxtuner_core::AxisSummary| {
+            if axis.power_cycle {
+                format!("{} ({power_cycle})", axis.caption())
+            } else {
+                axis.caption()
+            }
+        };
+        let axes = table.map(|table| {
+            format!(
+                "{} · {}",
+                axis_caption(&table.x_axis),
+                axis_caption(&table.y_axis)
+            )
+        });
         let read_only = table.is_some_and(|table| !table.writable);
+        let table_power_cycle = table.is_some_and(|table| table.power_cycle);
         let has_table = table.is_some();
         let is_curve = table.is_some_and(|table| table.curve.is_some());
 
@@ -654,6 +668,14 @@ impl TableEditor {
                             .truncate()
                             .child(title),
                     )
+                    .when(table_power_cycle, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.warning)
+                                .child(power_cycle.clone()),
+                        )
+                    })
                     .when_some(axes, |this, axes| {
                         this.child(
                             div()
@@ -993,6 +1015,7 @@ mod tests {
                 digits: 0,
                 minimum: Some(0.0),
                 maximum: Some(10_000.0),
+                power_cycle: false,
                 values: vec![1000.0, 2000.0],
             },
             y_axis: AxisSummary {
@@ -1003,6 +1026,7 @@ mod tests {
                 digits: 0,
                 minimum: Some(0.0),
                 maximum: Some(255.0),
+                power_cycle: false,
                 values: vec![50.0, 100.0],
             },
             minimum: 10.0,
@@ -1010,6 +1034,7 @@ mod tests {
             cell_minimum: Some(0.0),
             cell_maximum: Some(255.0),
             writable: true,
+            power_cycle: false,
             curve: None,
         }
     }
