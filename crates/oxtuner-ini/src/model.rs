@@ -1017,13 +1017,13 @@ pub struct Gauge {
     pub label_digits: Number,
     /// Optional availability expression.
     pub active: Option<Expr>,
+    /// Source line.
+    pub line: u32,
     /// Availability expression source, as written.
     ///
     /// `Expr` keeps no source text, so the parser stores it beside the parsed
     /// form for summaries that carry gates as data.
     pub active_source: Option<String>,
-    /// Source line.
-    pub line: u32,
 }
 
 /// One dashboard indicator.
@@ -1214,6 +1214,8 @@ pub struct Menu {
     pub items: Vec<MenuItem>,
     /// Window the menu belongs to (`main` when unset).
     pub dialog: Option<String>,
+    /// Enable/visible expressions on the `menu =` line, as written.
+    pub conditions: Vec<String>,
 }
 
 /// `[SettingGroups]`: a named multi-choice whose options become `#if` flags.
@@ -1424,6 +1426,17 @@ impl Extensions {
     /// Whether a constant is controller-owned.
     pub fn is_read_only(&self, name: &str) -> bool {
         self.read_only.contains(name)
+    }
+
+    /// Whether a change to `name` needs the ECU power-cycled before it takes
+    /// effect.
+    ///
+    /// The dialect writes the name as declared, but constants are matched
+    /// case-insensitively elsewhere, so this lookup is too.
+    pub fn requires_power_cycle(&self, name: &str) -> bool {
+        self.power_cycle
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(name))
     }
 }
 

@@ -295,16 +295,25 @@ fn open_menu(definition: &mut Definition, fields: &[String], dialog: Option<&Str
         .map(|field| crate::fields::unquote(field).to_owned())
         .unwrap_or_default();
 
+    let conditions = fields.get(1..).unwrap_or_default().to_vec();
+
     if let Some(position) = definition
         .menus
         .iter()
         .position(|menu| menu.title.eq_ignore_ascii_case(&title))
     {
+        let menu = &mut definition.menus[position];
+
+        if menu.conditions.is_empty() {
+            menu.conditions = conditions;
+        }
+
         return position;
     }
 
     definition.menus.push(Menu {
         title,
+        conditions,
         items: Vec::new(),
         dialog: dialog.cloned(),
     });
