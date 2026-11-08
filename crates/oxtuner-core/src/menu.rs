@@ -17,6 +17,8 @@ use std::collections::{HashMap, HashSet};
 
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
+use crate::message::{condition_body, order_gates};
+
 /// What a node in the navigation tree is.
 #[expect(
     clippy::exhaustive_enums,
@@ -91,6 +93,13 @@ pub struct MenuNode {
     /// 16×16 fuel map: opening the dialog name alone would lose the grid, so the
     /// id travels beside the dialog target and the editor can show both.
     pub embedded: Option<String>,
+    /// Enable condition from the item (`{ … }`), as written.
+    ///
+    /// Menu items take `{enable}` first and `{visible}` second; a single gate
+    /// is always the enable one. The core carries the expressions raw.
+    pub enabled: Option<String>,
+    /// Visibility condition from the item (`{ … }`), as written.
+    pub visible: Option<String>,
     /// Child nodes, in definition order.
     pub children: Vec<MenuNode>,
 }
@@ -138,6 +147,8 @@ fn build_menu(index: usize, menu: &Menu, definition: &Definition) -> MenuNode {
         detail: None,
         target: None,
         embedded: None,
+        enabled: None,
+        visible: None,
         children,
     }
 }
@@ -169,6 +180,8 @@ fn build_item(
             detail: None,
             target: None,
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         },
         MenuTargetKind::Standard => MenuNode {
@@ -178,13 +191,46 @@ fn build_item(
             detail: None,
             target: None,
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         },
         MenuTargetKind::Panel => resolve(id, label, &item.target, definition),
         // Filtered above; a divider never becomes a node.
         MenuTargetKind::Separator => return None,
     };
+
+    let (visible, enabled) = item_gates(item);
+    let mut node = node;
+    node.visible = visible;
+    node.enabled = enabled;
     Some(node)
+}
+
+/// Enable and visibility gates of one menu item, as written.
+///
+/// Items take `{enable}` first and `{visible}` second; a single gate is always
+/// the enable one. Bare numbers (`0`) are placeholders and skipped; any other
+/// bare token travels on as written.
+fn item_gates(item: &MenuItem) -> (Option<String>, Option<String>) {
+    let mut found = Vec::new();
+
+    for condition in &item.conditions {
+        let trimmed = condition.trim();
+
+        if let Some(body) = condition_body(trimmed) {
+            found.push(body);
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.parse::<f64>().is_ok() {
+            continue;
+        }
+
+        found.push(trimmed.to_owned());
+    }
+
+    order_gates(found)
 }
 
 /// Resolves a `subMenu` target to the editor it opens.
@@ -202,6 +248,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
     }
@@ -214,6 +262,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: table_detail(table, definition),
             target: Some(table.id.clone()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
     }
@@ -225,6 +275,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: curve_detail(curve, definition),
             target: Some(curve.name.clone()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
     }
@@ -242,6 +294,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
                 })),
             target: Some(dialog.name.clone()),
             embedded: embedded.map(|found| found.id),
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
     }
@@ -253,6 +307,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             detail: None,
             target: Some(target.to_owned()),
             embedded: None,
+            enabled: None,
+            visible: None,
             children: Vec::new(),
         };
     }
@@ -263,6 +319,8 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
         detail: None,
         target: Some(target.to_owned()),
         embedded: None,
+        enabled: None,
+        visible: None,
         children: Vec::new(),
     }
 }
@@ -455,6 +513,18 @@ menu = \"3D &Tuning Maps\"
   subMenu = std_separator
 ";
 
+    const GATED_FIXTURE: &str = "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Menu]
+menuDialog = main
+menu = \"Gated\"
+  subMenu = veTableDialog, \"Both\", { engineOn }, { showBoth }
+  subMenu = idleCurve, \"Single\", { engineOn }
+  subMenu = helpDialog, \"Bare\", 0, { showHelp }
+";
+
     fn parse(text: &str) -> Definition {
         parse_str(text, &SettingsContext::new()).expect("parses")
     }
@@ -559,6 +629,30 @@ menu = \"3D &Tuning Maps\"
             build(&definition).is_empty(),
             "a definition without menus must build an empty tree"
         );
+    }
+
+    #[test]
+    fn menu_gates_travel_enable_first() {
+        let tree = build(&parse(GATED_FIXTURE));
+
+        assert_eq!(tree.len(), 1);
+        let menu = &tree[0];
+
+        let both = node(&menu.children, "Both");
+        assert_eq!(both.enabled.as_deref(), Some("engineOn"));
+        assert_eq!(both.visible.as_deref(), Some("showBoth"));
+
+        let single = node(&menu.children, "Single");
+        assert_eq!(single.enabled.as_deref(), Some("engineOn"));
+        assert_eq!(single.visible, None);
+
+        let bare = node(&menu.children, "Bare");
+        assert_eq!(
+            bare.enabled.as_deref(),
+            Some("showHelp"),
+            "a bare `0` placeholder is skipped, the brace is the enable gate"
+        );
+        assert_eq!(bare.visible, None);
     }
 
     #[test]

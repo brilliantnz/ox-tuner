@@ -1556,7 +1556,11 @@ mod tests {
             channels: 229,
             tables: 21,
             curves: 34,
-            gauges: 90,
+            gauges: Vec::new(),
+            front_page_gauges: Vec::new(),
+            key_actions: Vec::new(),
+            reference_tables: Vec::new(),
+            unsupported: Vec::new(),
             dialogs: 239,
             indicators: Vec::new(),
             menu: Vec::new(),
@@ -1600,6 +1604,15 @@ mod tests {
             changed: 0,
             writable: true,
             unavailable: Vec::new(),
+            topic_help: None,
+            layout: None,
+            help_links: Vec::new(),
+            presets: Vec::new(),
+            commands: Vec::new(),
+            widgets: Vec::new(),
+            tables: Vec::new(),
+            curves: Vec::new(),
+            unmodeled: Vec::new(),
         }
     }
 

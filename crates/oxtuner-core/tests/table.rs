@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oxtuner_core::{
-    BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, DialogFieldKind, Event,
-    FailureCode, OpId, TableSummary, start,
+    BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, DialogFieldKind,
+    DialogPresetAssignment, DialogSummary, DialogWidgetKind, Event, FailureCode, OpId,
+    TableSummary, start,
 };
 use oxtuner_project::TUNE_FILE;
 
@@ -88,6 +89,10 @@ impl TempDir {
     }
 
     fn with_tune(label: &str, tune: &str) -> Self {
+        Self::with_definition(label, DEFINITION, tune)
+    }
+
+    fn with_definition(label: &str, definition: &str, tune: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -96,7 +101,7 @@ impl TempDir {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(path.join("projectCfg")).expect("temporary project is creatable");
-        fs::write(path.join("projectCfg/mainController.ini"), DEFINITION)
+        fs::write(path.join("projectCfg/mainController.ini"), definition)
             .expect("the definition is writable");
         fs::write(path.join(TUNE_FILE), tune).expect("the tune is writable");
         Self { path }
@@ -385,7 +390,10 @@ fn reverting_a_dialog_reverts_its_constants_and_its_map() {
     let Event::DialogEdited { dialog, .. } = core.next() else {
         panic!("expected the dialog echo");
     };
-    assert_eq!(dialog.changed, 1);
+    assert_eq!(
+        dialog.changed, 2,
+        "reqFuel shows twice: directly and in the composed injection panel"
+    );
 
     let _ = core
         .handle
@@ -746,8 +754,8 @@ fn a_dialog_flattens_the_panels_it_embeds() {
         .collect();
     assert_eq!(
         labels,
-        vec!["Req. Fuel", "Values must be sane"],
-        "the panel's rows are the dialog's rows"
+        vec!["Req. Fuel", "Values must be sane", "Required Fuel"],
+        "the panel's rows are the dialog's rows, plus the composed panel"
     );
     assert_eq!(dialog.fields[0].section, "South");
     assert_eq!(dialog.fields[0].value, Some(12.0));
@@ -755,9 +763,13 @@ fn a_dialog_flattens_the_panels_it_embeds() {
     assert_eq!(dialog.fields[1].kind, DialogFieldKind::Note);
     assert!(dialog.fields[1].warning, "the `!` marker is a warning");
     assert_eq!(
+        dialog.fields[2].section, "Injection Setup",
+        "a composed `std_*` panel keeps its own title"
+    );
+    assert!(
+        dialog.unavailable.is_empty(),
+        "a composable panel is rows, not a missing name: {:?}",
         dialog.unavailable,
-        vec!["std_injection"],
-        "a built-in panel is named, not silently dropped"
     );
 }
 
@@ -850,4 +862,503 @@ fn a_definition_only_session_cannot_read_a_table() {
     };
 
     assert_eq!(failure.code, FailureCode::TableUnavailable);
+}
+
+const PRESENTATION_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+algo = bits, U08, 0, [0:2], "MAP", "TPS", "INVALID", "IMAP/EMAP"
+limit = scalar, U08, 1, "units", 1, 0, 0, 100, 0
+gated = scalar, U08, 2, "units", 1, 0, 0, 100, 0
+both = scalar, U08, 3, "units", 1, 0, 0, 100, 0
+arr = array, U08, 4, [4], "units", 1, 0, 0, 100, 0
+xb = array, U08, 8, [2], "rpm", 100, 0, 0, 10000, 0
+yb = array, U08, 10, [2], "kPa", 1, 0, 0, 255, 0
+zc = array, U08, 12, [2x2], "%", 1, 0, 0, 255, 0
+
+[SettingContextHelp]
+algo = "Pick the load source"
+
+[ControllerCommands]
+cmdPing = "p"
+
+[TableEditor]
+table = embTbl, embMap, "Embedded", 1
+  xBins = xb, rpm
+  yBins = yb, map
+  zBins = zc
+
+[UserDefined]
+dialog = presDialog, "Presentation", border
+  topicHelp = "https://example.com/engine-constants"
+  field = "Load source", algo
+  field = "Gated", gated, { gated > 10 }
+  field = "Both", both, { nCyl == 4 }, { gated > 1 }
+  field = "Shown only", limit, {}, { limit > 5 }
+  slider = "Limit slider", limit
+  help = "A helper note"
+  field = "Plain", limit
+  field = "Glued gate", gated { gated > 5 }
+  field = "Bare gate", both, !gated
+  field = "Condvar gate", limit, gated
+  field = "!Conditional warning", {}, { limit > 5 }
+  field = "Element two", arr[2], { limit > 1 }
+  help = helpGeneral, "General help"
+  webHelp = "https://example.com/help"
+  settingSelector = "Common sensors", { limit > 0 }
+  settingOption = "Low", limit=5, gated=6
+  panel = presetInner
+  settingOption = "High", limit=50
+  commandButton = "Ping", cmdPing, { limit > 0 }
+  commandButton = "Ghost", cmdMissing
+  gauge = someGauge
+  indicator = { gated > 1 }, "Gated off", "Gated on"
+  runtimeValue = "Live", rpm
+  graphLine = rpm, "RPM", 0, 8000
+  readout = gated, "Gated weight", "%", 0, 100
+  radio = vertical, "Radio algo", algo
+  field = "Hex limit", limit, {}, {}, displayInHex
+  commandButton = "Reboot", cmdPing, { limit > 0 }, closeDialogOnClick
+  commandButton = "Notify", cmdPing, showMessageOnClick, "Done"
+  mysteryRow = nine, ten
+  panel = gatedInner { show_inner }
+  panel = gatedPanel, North, { limit > 0 }
+  panel = embTbl
+  panel = std_ms3Rtc {rtc_mode}
+
+dialog = gatedInner, "Inner"
+  field = "Inner plain", limit
+
+dialog = presetInner, "Preset Inner"
+  field = "Between options"
+
+dialog = gatedPanel, "Gated"
+  field = "Gated plain", gated
+
+[Menu]
+menuDialog = main
+menu = "Tuning"
+  subMenu = presDialog, "Presentation"
+"#;
+
+const PRESENTATION_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <bibliography author="TunerStudio" tuneComment="fixture"/>
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant name="algo">1.0</constant>
+        <constant name="limit">10.0</constant>
+        <constant name="gated">20.0</constant>
+        <constant name="both">30.0</constant>
+        <constant name="arr">1.0 2.0 3.0 4.0</constant>
+        <constant name="xb">1000.0 2000.0</constant>
+        <constant name="yb">50.0 100.0</constant>
+        <constant name="zc">10.0 20.0 30.0 40.0</constant>
+    </page>
+</msq>
+"#;
+
+const STD_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 4
+page = 1
+reqFuel = scalar, U08, 0, "ms", 1, 0, 0, 255, 0
+nCylinders = scalar, U08, 1, "", 1, 0, 0, 8, 0
+
+[UserDefined]
+dialog = stdTest, "Std"
+  panel = std_injection
+  panel = std_bogus
+
+[Menu]
+menuDialog = main
+menu = "Tuning"
+  subMenu = stdTest, "Std"
+"#;
+
+const STD_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <bibliography author="TunerStudio" tuneComment="fixture"/>
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="4">
+        <constant name="reqFuel">12.0</constant>
+        <constant name="nCylinders">4.0</constant>
+    </page>
+</msq>
+"#;
+
+#[test]
+fn a_known_std_panel_composes_while_an_unknown_one_is_named() {
+    let dir = TempDir::with_definition("dialog-std", STD_DEFINITION, STD_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .read_dialog("stdTest")
+        .expect("the read is queued");
+    let Event::DialogRead {
+        op: answered,
+        dialog,
+    } = core.next()
+    else {
+        panic!("expected a dialog read");
+    };
+
+    assert_eq!(answered, op);
+
+    let labels: Vec<&str> = dialog
+        .fields
+        .iter()
+        .map(|field| field.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["Required Fuel", "Cylinder Count"]);
+    assert!(
+        dialog
+            .fields
+            .iter()
+            .all(|field| field.section == "Injection Setup"),
+        "composed rows keep the panel title as their section"
+    );
+    assert_eq!(
+        dialog.unavailable,
+        vec!["std_bogus"],
+        "only the uncomposable panel is named"
+    );
+}
+
+#[test]
+fn a_dialog_carries_options_conditions_help_and_topic_help() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-presentation");
+    assert_eq!(
+        dialog.topic_help.as_deref(),
+        Some("https://example.com/engine-constants")
+    );
+    assert_eq!(dialog.layout.as_deref(), Some("border"));
+
+    let field = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "algo")
+        .expect("the bits row is present");
+    assert_eq!(field.label, "Load source");
+    assert_eq!(field.value, Some(1.0));
+
+    let labels: Vec<&str> = field
+        .options
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["MAP", "TPS", "IMAP/EMAP"]);
+    assert_eq!(field.help.as_deref(), Some("Pick the load source"));
+
+    let gated = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "gated")
+        .expect("the gated row is present");
+    assert_eq!(gated.visibility, None);
+    assert_eq!(gated.enabled.as_deref(), Some("gated > 10"));
+
+    let both = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "both")
+        .expect("the two-condition row is present");
+    assert_eq!(both.enabled.as_deref(), Some("nCyl == 4"));
+    assert_eq!(both.visibility.as_deref(), Some("gated > 1"));
+
+    let shown = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Shown only")
+        .expect("the empty-slot row is present");
+    assert_eq!(shown.visibility, None);
+    assert_eq!(shown.enabled.as_deref(), Some("limit > 5"));
+
+    let slider = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Limit slider")
+        .expect("the slider row is present");
+    assert_eq!(slider.minimum, Some(0.0));
+    assert_eq!(slider.maximum, Some(100.0));
+
+    assert!(
+        dialog
+            .fields
+            .iter()
+            .any(|field| field.text.as_deref() == Some("A helper note")),
+        "a `help` row is a note, not dropped"
+    );
+}
+
+fn read_pres_dialog(label: &str) -> (TempDir, Harness, DialogSummary) {
+    let dir = TempDir::with_definition(label, PRESENTATION_DEFINITION, PRESENTATION_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .read_dialog("presDialog")
+        .expect("the read is queued");
+    let Event::DialogRead {
+        op: answered,
+        dialog,
+    } = core.next()
+    else {
+        panic!("expected a dialog read");
+    };
+
+    assert_eq!(answered, op, "the reply belongs to the queued read");
+
+    (dir, core, dialog)
+}
+
+#[test]
+fn a_dialog_names_gated_panels_by_their_bare_name() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-gated-panels");
+
+    assert!(
+        dialog.unavailable.iter().any(|name| name == "std_ms3Rtc"),
+        "a gated `std_*` panel is reported by its bare name: {:?}",
+        dialog.unavailable,
+    );
+
+    let inner = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Inner plain")
+        .expect("a gated panel still flattens");
+    assert_eq!(inner.section, "Inner");
+}
+
+#[test]
+fn a_dialog_resolves_glued_bare_and_conditional_gates() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-gates");
+    let glued = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Glued gate")
+        .expect("a space-joined gate resolves");
+    assert_eq!(glued.variable, "gated");
+    assert_eq!(glued.enabled.as_deref(), Some("gated > 5"));
+
+    let bare = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Bare gate")
+        .expect("a bare `!` gate resolves");
+    assert_eq!(bare.variable, "both");
+    assert_eq!(bare.enabled.as_deref(), Some("!gated"));
+
+    let condvar = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Condvar gate")
+        .expect("a bare variable gate resolves");
+    assert_eq!(condvar.variable, "limit");
+    assert_eq!(condvar.enabled.as_deref(), Some("gated"));
+
+    let warning = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Conditional warning")
+        .expect("a conditional note is carried");
+    assert!(warning.warning);
+    assert_eq!(warning.enabled.as_deref(), Some("limit > 5"));
+
+    let element = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Element two")
+        .expect("an array element resolves");
+    assert_eq!(element.variable, "arr");
+    assert_eq!(element.index, Some(2));
+    assert_eq!(element.value, Some(3.0));
+}
+
+#[test]
+fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-collections");
+
+    assert!(
+        dialog
+            .help_links
+            .iter()
+            .any(|link| link.topic == "helpGeneral" && link.title == "General help"),
+        "a two-field help row is a link: {:?}",
+        dialog.help_links,
+    );
+    assert!(
+        dialog
+            .help_links
+            .iter()
+            .any(|link| link.topic == "https://example.com/help"),
+        "a webHelp row is a link: {:?}",
+        dialog.help_links,
+    );
+    assert!(
+        !dialog
+            .fields
+            .iter()
+            .any(|field| field.label == "helpGeneral"),
+        "a help link is not note text"
+    );
+
+    let preset = dialog
+        .presets
+        .iter()
+        .find(|preset| preset.label == "Common sensors")
+        .expect("a setting selector is a preset");
+    assert_eq!(preset.enabled.as_deref(), Some("limit > 0"));
+    assert_eq!(preset.options.len(), 2);
+    assert!(
+        dialog
+            .fields
+            .iter()
+            .any(|field| field.label == "Between options"),
+        "a panel between selector and options still flattens"
+    );
+    assert_eq!(
+        preset.options[0].assignments,
+        vec![
+            DialogPresetAssignment {
+                variable: "limit".to_owned(),
+                value: "5".to_owned(),
+            },
+            DialogPresetAssignment {
+                variable: "gated".to_owned(),
+                value: "6".to_owned(),
+            },
+        ],
+    );
+
+    let ping = dialog
+        .commands
+        .iter()
+        .find(|command| command.label == "Ping")
+        .expect("a command button is carried");
+    assert_eq!(ping.command, "cmdPing");
+    assert!(ping.known);
+    assert_eq!(ping.enabled.as_deref(), Some("limit > 0"));
+    let ghost = dialog
+        .commands
+        .iter()
+        .find(|command| command.label == "Ghost")
+        .expect("an unknown command is carried");
+    assert!(!ghost.known);
+}
+
+#[test]
+fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-widgets");
+
+    assert!(
+        dialog
+            .widgets
+            .iter()
+            .any(|widget| widget.kind == DialogWidgetKind::Gauge && widget.target == "someGauge"),
+        "a gauge row is carried: {:?}",
+        dialog.widgets,
+    );
+    let indicator = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::Indicator)
+        .expect("an indicator row is carried");
+    assert_eq!(indicator.target, "gated > 1");
+    assert_eq!(indicator.label, "Gated on");
+    assert!(
+        dialog
+            .widgets
+            .iter()
+            .any(|widget| widget.kind == DialogWidgetKind::RuntimeValue && widget.target == "rpm"),
+        "a runtime value is carried: {:?}",
+        dialog.widgets,
+    );
+
+    assert_eq!(dialog.tables, vec!["embTbl"]);
+
+    let algo = dialog
+        .fields
+        .iter()
+        .find(|field| field.variable == "algo")
+        .expect("the bits row is present");
+    assert_eq!(algo.kind, DialogFieldKind::Select);
+
+    let slider = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Limit slider")
+        .expect("the slider row is present");
+    assert_eq!(slider.kind, DialogFieldKind::Slider);
+
+    let radio = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Radio algo")
+        .expect("an orientation-first radio resolves");
+    assert_eq!(radio.variable, "algo");
+    assert_eq!(radio.kind, DialogFieldKind::Toggle);
+
+    let hex = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Hex limit")
+        .expect("a hex row is present");
+    assert!(hex.hex);
+
+    let reboot = dialog
+        .commands
+        .iter()
+        .find(|command| command.label == "Reboot")
+        .expect("a flagged button is carried");
+    assert_eq!(reboot.flags, vec!["closeDialogOnClick"]);
+    let notify = dialog
+        .commands
+        .iter()
+        .find(|command| command.label == "Notify")
+        .expect("a message button is carried");
+    assert_eq!(notify.flags, vec!["showMessageOnClick", "Done"]);
+
+    let trace = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::GraphLine)
+        .expect("a graph line is carried");
+    assert_eq!(trace.units, "RPM");
+    assert_eq!(trace.minimum, Some(0.0));
+    assert_eq!(trace.maximum, Some(8000.0));
+
+    let readout = dialog
+        .widgets
+        .iter()
+        .find(|widget| widget.kind == DialogWidgetKind::Readout)
+        .expect("a full readout is carried");
+    assert_eq!(readout.label, "Gated weight");
+    assert_eq!(readout.units, "%");
+    assert_eq!(readout.minimum, Some(0.0));
+    assert_eq!(readout.maximum, Some(100.0));
+
+    let gated = dialog
+        .fields
+        .iter()
+        .find(|field| field.label == "Gated plain")
+        .expect("a gated panel flattens");
+    assert_eq!(gated.section, "Gated");
+    assert_eq!(gated.enabled.as_deref(), Some("limit > 0"));
+
+    assert_eq!(dialog.unmodeled.len(), 1);
+    assert_eq!(dialog.unmodeled[0].keyword, "mysteryRow");
+    assert_eq!(dialog.unmodeled[0].fields, vec!["nine", "ten"]);
 }

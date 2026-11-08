@@ -413,6 +413,8 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
+            enabled: None,
+            visible: None,
             children,
         }
     }
