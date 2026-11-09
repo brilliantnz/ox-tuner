@@ -14,8 +14,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _}
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window, div,
-    px,
+    FontWeight, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription,
+    Window, div, px,
 };
 use oxtuner_core::{MenuNode, MenuNodeKind};
 use oxtuner_ui::dock::{BasePanel, Panel, PanelEvent};
@@ -49,6 +49,9 @@ pub(crate) struct EditorPanel {
     tab: EditorTab,
     table: Entity<TableEditor>,
     dialog: Entity<DialogEditor>,
+    /// Refreshed when the dialog snapshot arrives, so the embedded panel's gate
+    /// decides whether the grid view stays on offer.
+    _embed_watch: Subscription,
 }
 
 impl EditorPanel {
@@ -56,6 +59,7 @@ impl EditorPanel {
     pub(crate) fn new(node: MenuNode, cx: &mut Context<'_, Self>) -> Self {
         let table = cx.new(TableEditor::new);
         let dialog = cx.new(DialogEditor::new);
+        let embed_watch = cx.observe(&dialog, |panel, _, cx| panel.follow_embed(cx));
 
         let mut panel = Self {
             focus: cx.focus_handle(),
@@ -63,6 +67,7 @@ impl EditorPanel {
             tab: EditorTab::Table,
             table,
             dialog,
+            _embed_watch: embed_watch,
         };
         panel.sync(cx);
         panel
@@ -87,10 +92,12 @@ impl EditorPanel {
     ///
     /// Tables and curves share the grid: a curve resolves as a one-row table,
     /// so its bins and values edit the same way. Dialogs get the grid they
-    /// embed, with their constants behind a tab, or the constants alone.
+    /// embed, with their constants behind a tab, or the constants alone. The
+    /// dialog snapshot is read even while the grid is in front, because only it
+    /// carries the embedding panel's gate.
     fn sync(&mut self, cx: &mut Context<'_, Self>) {
         let label = SharedString::from(self.node.label.clone());
-        let has_grid = self.node.embedded.is_some();
+        let has_grid = self.grid_available(cx);
 
         let table_target = match self.node.kind {
             MenuNodeKind::Table | MenuNodeKind::Curve => self.node.target.clone(),
@@ -100,9 +107,7 @@ impl EditorPanel {
             _ => None,
         };
         let dialog_target = match self.node.kind {
-            MenuNodeKind::Dialog if !(has_grid && self.tab == EditorTab::Table) => {
-                self.node.target.clone()
-            }
+            MenuNodeKind::Dialog => self.node.target.clone(),
             _ => None,
         };
 
@@ -114,9 +119,54 @@ impl EditorPanel {
         });
     }
 
+    /// Whether a dialog still offers the grid its panel embeds.
+    ///
+    /// The gate travels on the embed row. A snapshot that has not arrived, or
+    /// one that names no such embed, keeps the grid available rather than
+    /// hiding a screen the definition may still allow.
+    fn grid_available(&self, cx: &App) -> bool {
+        let Some(target) = self.node.embedded.as_deref() else {
+            return false;
+        };
+
+        self.dialog
+            .read(cx)
+            .embed_state(target)
+            .is_none_or(|gates| gates.visible)
+    }
+
+    /// Applies the embedding panel's gate to the views this tab offers.
+    ///
+    /// A hidden panel withdraws the grid and leaves the constants; a disabled
+    /// one keeps the grid readable and closes its write path.
+    fn follow_embed(&mut self, cx: &mut Context<'_, Self>) {
+        if self.node.kind != MenuNodeKind::Dialog {
+            return;
+        }
+        let Some(target) = self.node.embedded.clone() else {
+            return;
+        };
+        let Some(gates) = self.dialog.read(cx).embed_state(&target) else {
+            return;
+        };
+
+        self.table.update(cx, |editor, cx| {
+            editor.set_embed_enabled(gates.enabled, cx);
+        });
+
+        if !gates.visible && self.tab == EditorTab::Table {
+            self.tab = EditorTab::Constants;
+            self.sync(cx);
+        }
+        cx.notify();
+    }
+
     /// Switches which view a dialog-backed node shows.
     fn set_tab(&mut self, tab: EditorTab, cx: &mut Context<'_, Self>) {
         if self.tab == tab {
+            return;
+        }
+        if tab == EditorTab::Table && !self.grid_available(cx) {
             return;
         }
 
@@ -271,7 +321,7 @@ impl Render for EditorPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let is_table = matches!(self.node.kind, MenuNodeKind::Table | MenuNodeKind::Curve);
         let is_dialog = self.node.kind == MenuNodeKind::Dialog;
-        let dialog_has_grid = is_dialog && self.node.embedded.is_some();
+        let dialog_has_grid = is_dialog && self.grid_available(cx);
         let show_table = is_table || (dialog_has_grid && self.tab == EditorTab::Table);
         let show_dialog = is_dialog && !show_table;
 
