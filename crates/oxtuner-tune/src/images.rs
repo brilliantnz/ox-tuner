@@ -526,8 +526,7 @@ impl TuneImages {
             .retain(|_, overlay| *overlay != Overlay::Conflict);
     }
 
-    /// Replaces the working image (an import). The caller owns consent policy
-    /// ([`crate::WriteIntent::needs_consent`]).
+    /// Replaces the working image (an import). The caller owns consent policy.
     ///
     /// The imported tune keeps its own layout allocation, so values are adopted
     /// into this project's layout after a name-and-shape check; the session's
