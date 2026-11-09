@@ -11,7 +11,7 @@ use tracing::{
 };
 use tracing_subscriber::layer::{Context, Layer};
 
-use crate::record::{LogRecord, LogSnapshot};
+use crate::record::{LogBufferSnapshot, LogRecord};
 
 const DEFAULT_CAPACITY: usize = 5_000;
 
@@ -51,10 +51,10 @@ impl LogStore {
     }
 
     /// The newest records, oldest first, with the drop and revision counters.
-    pub fn snapshot(&self) -> LogSnapshot {
+    pub fn snapshot(&self) -> LogBufferSnapshot {
         let ring = self.lock();
 
-        LogSnapshot {
+        LogBufferSnapshot {
             records: ring.records.iter().cloned().collect(),
             dropped: ring.dropped,
             revision: ring.revision,

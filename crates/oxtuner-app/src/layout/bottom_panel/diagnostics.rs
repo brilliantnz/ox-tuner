@@ -22,7 +22,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollDelta,
     ScrollEvent, ScrollStrategy, Size, Styled as _, Subscription, Task, Window, div, px, size,
 };
-use oxtuner_log::{LogRecord, LogSnapshot};
+use oxtuner_log::{LogBufferSnapshot, LogRecord};
 use tracing::Level;
 
 use crate::i18n::t;
@@ -126,7 +126,7 @@ pub(crate) struct DiagnosticsView {
     last_width: Pixels,
     last_revision: u64,
     clear_after: Option<u64>,
-    paused_snapshot: Option<LogSnapshot>,
+    paused_snapshot: Option<LogBufferSnapshot>,
     follow_pending: bool,
     ring_total: usize,
     ring_dropped: u64,
@@ -379,7 +379,7 @@ impl DiagnosticsView {
         self.force = false;
     }
 
-    fn rebuild(&mut self, snapshot: LogSnapshot, cx: &App) {
+    fn rebuild(&mut self, snapshot: LogBufferSnapshot, cx: &App) {
         let query = self.query.read(cx).value().to_lowercase();
         let level = LevelFilter::from_index(
             self.level
@@ -772,9 +772,10 @@ fn header(cx: &App, status: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-fn snapshot(cx: &App) -> LogSnapshot {
-    crate::platform::logging::handle(cx)
-        .map_or_else(LogSnapshot::default, |handle| handle.store().snapshot())
+fn snapshot(cx: &App) -> LogBufferSnapshot {
+    crate::platform::logging::handle(cx).map_or_else(LogBufferSnapshot::default, |handle| {
+        handle.store().snapshot()
+    })
 }
 
 /// The date is the same for a session, so the table shows the clock part.
