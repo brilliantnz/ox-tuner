@@ -70,6 +70,18 @@ pub struct RealtimeSpec {
     pub start_offset: u16,
 }
 
+/// What a `[ControllerCommands]` action sent and received.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommandReport {
+    /// Command strings sent.
+    pub commands: usize,
+    /// Bytes written to the wire.
+    pub bytes: usize,
+    /// Bytes the ECU answered.
+    pub replies: usize,
+}
+
 /// The defined commands of one page.
 #[derive(Debug, Clone)]
 struct PageCommands {
@@ -166,6 +178,18 @@ const SIGNATURE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// 50 ms is far longer than the gap between bytes at 115200 baud (0.09 ms) and
 /// far shorter than a user would notice.
 const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
+
+/// How long a controller command waits for its first reply byte.
+///
+/// A raw action is often fire-and-forget, so silence is success. The wait is
+/// short enough that a chain of such commands does not stall the link.
+const COMMAND_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long a controller command's reply may be quiet before it ends.
+const COMMAND_REPLY_QUIET: Duration = Duration::from_millis(50);
+
+/// The most bytes one controller command's reply is drained into.
+const COMMAND_REPLY_MAX: usize = 1024;
 
 /// The longest signature reply accepted.
 ///
@@ -431,6 +455,77 @@ impl MsProtocol {
         self.port_open_delay
     }
 
+    /// Sends one `[ControllerCommands]` action.
+    ///
+    /// Each command string is encoded in order and written as its own
+    /// conversation. On a legacy link the dialect declares no reply length, so
+    /// any reply is drained until quiet; on an envelope link the reply is read
+    /// as one frame. Silence is not a failure: several controller actions (a
+    /// reset, for one) never answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when a command cannot be encoded or the link
+    /// fails. A timeout with no bytes is treated as a command that does not
+    /// reply.
+    pub fn run_commands(
+        &mut self,
+        io: &mut dyn Transport,
+        commands: &[Command],
+    ) -> Result<CommandReport, ProtocolError> {
+        let mut report = CommandReport::default();
+
+        for command in commands {
+            let request = self.encode(command, 0, 0, 0, &[])?;
+            io.flush_input();
+
+            match self.link {
+                LinkMode::Legacy => {
+                    // A raw action has no declared reply length, so whatever
+                    // arrives is drained instead of parsed. Silence is normal:
+                    // several actions (a reset, for one) never answer.
+                    io.write_all(&request)?;
+
+                    let mut reply = Vec::new();
+                    match io.read_until(
+                        &mut reply,
+                        COMMAND_REPLY_MAX,
+                        0,
+                        COMMAND_REPLY_QUIET,
+                        COMMAND_REPLY_TIMEOUT,
+                    ) {
+                        Ok(()) | Err(TransportError::Timeout { .. }) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+
+                    report.bytes += request.len();
+                    report.replies += reply.len();
+                }
+                LinkMode::Envelope => {
+                    // An envelope reply has a length, so read it as a frame;
+                    // only complete silence means the action did not answer.
+                    // A partial frame is a desynchronised link, not success.
+                    let framed = Frame::encode(&request)?;
+                    io.write_all(&framed)?;
+
+                    match self.framed_reply(io) {
+                        Ok(payload) => report.replies += payload.len(),
+                        Err(ProtocolError::Transport(TransportError::Timeout {
+                            got: 0, ..
+                        })) => {}
+                        Err(error) => return Err(error),
+                    }
+
+                    report.bytes += framed.len();
+                }
+            }
+
+            report.commands += 1;
+        }
+
+        Ok(report)
+    }
+
     /// Reads a whole page, chunked at the blocking factor.
     ///
     /// The page size is the definition's, so a short page in the middle of a
@@ -642,11 +737,15 @@ impl MsProtocol {
         &mut self,
         io: &mut dyn Transport,
         request: &[u8],
-        operation: &'static str,
+        _operation: &'static str,
     ) -> Result<Vec<u8>, ProtocolError> {
         let framed = Frame::encode(request)?;
         io.write_all(&framed)?;
+        self.framed_reply(io)
+    }
 
+    /// Reads one complete framed reply.
+    fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
         let mut header = [0u8; 2];
         io.read_exact_timeout(&mut header, self.block_read_timeout)?;
         let length = Frame::length(header);
@@ -665,7 +764,6 @@ impl MsProtocol {
         bytes.extend_from_slice(&header);
         bytes.extend_from_slice(&rest);
         let reply = Frame::parse(&bytes)?;
-        let _ = operation;
         Ok(reply.payload)
     }
 

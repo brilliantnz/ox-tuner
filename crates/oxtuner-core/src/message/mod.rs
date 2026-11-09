@@ -30,7 +30,8 @@ pub use editor::{
 };
 pub(crate) use editor::{expression_slot, order_gates, panel_target};
 pub use edits::{
-    BurnSummary, ImportSummary, JournalEntry, RevertSummary, SaveSummary, WriteSummary,
+    BurnSummary, ControllerCommandSummary, ImportSummary, JournalEntry, RevertSummary, SaveSummary,
+    WriteSummary,
 };
 pub use events::{Event, Failure, FailureCode};
 pub use frontpage::{FrontPageGauge, GaugeSummary, IndicatorSummary};

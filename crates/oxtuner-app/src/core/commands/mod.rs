@@ -21,7 +21,7 @@ pub(crate) use transfer::{
 };
 pub(crate) use tune::{
     acknowledge_write_failure, burn_to_flash, refresh_tune_status, revert_target, revert_tune,
-    set_writes_enabled, write_to_ram,
+    run_controller_command, set_writes_enabled, write_to_ram,
 };
 
 use std::future::Future;

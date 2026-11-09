@@ -59,6 +59,10 @@ map = scalar, U08, 2, "kPa", 1.0, 0.0
 status = scalar, U08, 3, "bits", 1.0, 0.0
 burnPending = bits, U08, 3, [4:4]
 
+[ControllerCommands]
+cmdPing = "z"
+cmdChain = "z", "w"
+
 [UserDefined]
 dialog = engineDialog, "Engine"
   field = "Req. Fuel", reqFuel
@@ -220,6 +224,14 @@ impl Harness {
 
     fn burn(&self) -> Event {
         let op = self.handle.burn_to_flash(Vec::new()).expect("queued");
+        self.wait(|event| event.op() == Some(op))
+    }
+
+    fn run_command(&self, command: &str) -> Event {
+        let op = self
+            .handle
+            .run_controller_command("engineDialog", command)
+            .expect("queued");
         self.wait(|event| event.op() == Some(op))
     }
 
@@ -869,6 +881,141 @@ fn a_write_without_a_project_is_refused() {
     let op: OpId = core.handle.write_to_ram(Vec::new()).expect("queued");
     let (kind, _) = failure(&core.wait(|event| event.op() == Some(op)));
     assert_eq!(kind, FailureCode::WriteRefused);
+
+    core.close();
+}
+
+#[test]
+fn a_controller_command_is_refused_while_writes_are_off() {
+    let dir = TempDir::new("command-writes-off");
+    let core = Harness::start(false);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+
+    let (kind, message) = failure(&core.run_command("cmdPing"));
+
+    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert!(message.contains("writes are disabled"), "{message}");
+    assert!(
+        core.journal().1.is_empty(),
+        "a refused command must not reach the journal"
+    );
+
+    core.close();
+}
+
+#[test]
+fn a_controller_command_marks_the_ecu_image_stale() {
+    let dir = TempDir::new("command-stale");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+    assert_ne!(core.table().states[0], oxtuner_core::CellState::Unknown);
+
+    let event = core.run_command("cmdPing");
+
+    let Event::ControllerCommandRan { summary, .. } = event else {
+        panic!("expected a controller command, got {event:?}");
+    };
+    assert_eq!(summary.command, "cmdPing");
+    assert_eq!(summary.dialog, "engineDialog");
+    assert_eq!(summary.commands, 1);
+    assert_eq!(summary.bytes, 1);
+
+    assert_eq!(
+        core.table().states[0],
+        oxtuner_core::CellState::Unknown,
+        "a raw controller action bypasses memory synchronization"
+    );
+
+    let (_, entries) = core.journal();
+    assert_eq!(entries.len(), 2, "begin and result");
+    assert_eq!(entries[0].operation, "command");
+    assert_eq!(entries[0].phase, "begin");
+    assert_eq!(entries[1].phase, "result");
+    assert_eq!(entries[1].result, "ok");
+
+    // A fresh read makes the ECU image authoritative again.
+    core.read_all();
+    assert_ne!(core.table().states[0], oxtuner_core::CellState::Unknown);
+
+    core.close();
+}
+
+#[test]
+fn a_controller_command_sends_every_string_in_order() {
+    let dir = TempDir::new("command-chain");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+
+    let event = core.run_command("cmdChain");
+
+    let Event::ControllerCommandRan { summary, .. } = event else {
+        panic!("expected a controller command, got {event:?}");
+    };
+    assert_eq!(summary.commands, 2);
+    assert_eq!(summary.bytes, 2, "each string is one byte on a legacy link");
+
+    core.close();
+}
+
+#[test]
+fn a_controller_command_runs_on_the_envelope_link() {
+    let dir = TempDir::new("command-envelope");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect_with(SimConfig::default(), Some(oxtuner_core::LinkMode::Envelope));
+    core.read_all();
+
+    let event = core.run_command("cmdPing");
+
+    let Event::ControllerCommandRan { summary, .. } = event else {
+        panic!("expected a controller command, got {event:?}");
+    };
+    assert_eq!(summary.command, "cmdPing");
+    assert!(
+        summary.bytes > 1,
+        "an envelope command carries its frame on the wire"
+    );
+
+    core.close();
+}
+
+#[test]
+fn an_unknown_controller_command_is_refused() {
+    let dir = TempDir::new("command-unknown");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+
+    let (kind, message) = failure(&core.run_command("cmdMissing"));
+
+    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert!(message.contains("not declared"), "{message}");
+
+    core.close();
+}
+
+#[test]
+fn a_controller_command_is_refused_on_a_signature_mismatch() {
+    let dir = TempDir::new("command-read-only");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig {
+        signature: Some("another firmware".to_owned()),
+        ..SimConfig::default()
+    });
+    core.read_all();
+
+    let (kind, message) = failure(&core.run_command("cmdPing"));
+
+    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert!(message.contains("read-only"), "{message}");
 
     core.close();
 }

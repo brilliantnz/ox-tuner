@@ -337,6 +337,27 @@ impl CoreHandle {
         })
     }
 
+    /// Runs one `[ControllerCommands]` action from a dialog button.
+    ///
+    /// The reply is [`crate::Event::ControllerCommandRan`] or
+    /// [`crate::Event::Failed`]. The action passes the same safety gate as a
+    /// write, and the ECU image is stale after it succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn run_controller_command(
+        &self,
+        dialog: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::RunControllerCommand {
+            dialog: dialog.into(),
+            command: command.into(),
+        })
+    }
+
     /// Connects over a serial device or a link the application supplies.
     ///
     /// The reply is [`crate::Event::Connected`] or [`crate::Event::Failed`].

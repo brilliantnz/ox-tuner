@@ -22,8 +22,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossfire::{Rx, TrySendError, spsc};
-use oxtuner_ini::Definition;
-use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol, ProtocolError};
+use oxtuner_ini::{Command as IniCommand, Definition};
+use oxtuner_protocol::{Behavior, CommandReport, LinkMode, MsProtocol, Protocol, ProtocolError};
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
@@ -79,6 +79,8 @@ pub(crate) enum IoOp {
     WritePages { pages: Vec<PageWrite> },
     /// Burn a list of pages.
     BurnPages { pages: Vec<u8> },
+    /// Send one `[ControllerCommands]` action's command strings, in order.
+    Command { commands: Vec<IniCommand> },
     /// Read one realtime block.
     ReadRealtime,
     /// Reopen the link and read the signature again.
@@ -169,6 +171,8 @@ pub(crate) enum IoOutcome {
     Written { pages: usize, bytes: usize },
     /// Pages were burned.
     Burned { pages: usize },
+    /// One controller command action was sent.
+    Command { report: CommandReport },
     /// One realtime block.
     Realtime { block: Vec<u8> },
     /// The link reopened and answered again.
@@ -546,6 +550,10 @@ fn execute(
             }
             (IoOutcome::Burned { pages: count }, false)
         }
+        IoOp::Command { commands } => match protocol.run_commands(transport, &commands) {
+            Ok(report) => (IoOutcome::Command { report }, false),
+            Err(error) => (failure(&error), false),
+        },
         IoOp::ReadRealtime => match protocol.read_realtime(transport) {
             Ok(block) => (IoOutcome::Realtime { block }, false),
             Err(error) => (failure(&error), false),

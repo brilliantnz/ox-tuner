@@ -230,6 +230,7 @@ pub(super) enum Update {
     },
     Written(WriteSummary),
     Burned(BurnSummary),
+    ControllerCommand,
     Imported(ImportSummary),
     Reverted(RevertSummary),
     TuneStatus(TuneStatus),
@@ -393,6 +394,12 @@ impl CoreStatus {
                 self.last_burn = Some(summary);
                 self.write_halted = None;
                 self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::ControllerCommand => {
+                self.failure = None;
+                // A raw command bypassed memory synchronization, so the ECU
+                // image is stale; open tables must read their states again.
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Imported(summary) => {

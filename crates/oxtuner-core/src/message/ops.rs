@@ -164,6 +164,25 @@ pub enum Command {
         /// Cells to write, in user units.
         edits: Vec<CellEdit>,
     },
+    /// Run one `[ControllerCommands]` action from a dialog button.
+    ///
+    /// A controller command is a raw ECU action: it bypasses memory
+    /// synchronization, so the working image cannot assume the ECU still holds
+    /// what the last read saw. The core therefore requires the same gate as a
+    /// write (S1, S3, S8) and marks the ECU side stale after the command
+    /// succeeds. Only an explicit click sends it; nothing runs on open, close
+    /// or edit.
+    ///
+    /// The reply is [`super::Event::ControllerCommandRan`] or
+    /// [`super::Event::Failed`] with
+    /// [`super::FailureCode::ControllerCommandRefused`] or
+    /// [`super::FailureCode::ControllerCommandFailed`].
+    RunControllerCommand {
+        /// Dialog the button was pressed in, for the echo.
+        dialog: String,
+        /// `[ControllerCommands]` name.
+        command: String,
+    },
     /// Apply user-unit edits to one table's axis bins.
     ///
     /// `table` is the table id (or its 3-D map id, or a curve name — anything
@@ -345,6 +364,7 @@ impl Command {
             Self::EditScalar { .. } => "edit-scalar",
             Self::EditTable { .. } => "edit-table",
             Self::EditAxis { .. } => "edit-axis",
+            Self::RunControllerCommand { .. } => "run-controller-command",
             Self::Connect { .. } => "connect",
             Self::TestConnection { .. } => "test-connection",
             Self::Disconnect => "disconnect",

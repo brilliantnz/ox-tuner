@@ -8,9 +8,9 @@ use oxtuner_tune::TuneStatus;
 use crate::menu::MenuNode;
 
 use super::{
-    BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, ImportSummary, JournalEntry,
-    OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason, RevertSummary, SaveSummary,
-    TableSummary, WriteSummary,
+    BurnSummary, ConnectionSummary, ControllerCommandSummary, DefinitionSummary, DialogSummary,
+    ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason,
+    RevertSummary, SaveSummary, TableSummary, WriteSummary,
 };
 
 /// A reply from the core.
@@ -69,6 +69,16 @@ pub enum Event {
         op: OpId,
         /// The dialog after the edit.
         dialog: DialogSummary,
+    },
+    /// One `[ControllerCommands]` action was sent.
+    ///
+    /// The ECU side is stale afterwards, because the action bypassed memory
+    /// synchronization; a page read restores the derived states.
+    ControllerCommandRan {
+        /// The command this answers.
+        op: OpId,
+        /// What was sent.
+        summary: ControllerCommandSummary,
     },
     /// A tune or connection change altered one or more menu gates.
     ///
@@ -255,6 +265,7 @@ impl Event {
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }
             | Self::DialogEdited { op, .. }
+            | Self::ControllerCommandRan { op, .. }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
             | Self::Connected { op, .. }
@@ -318,6 +329,13 @@ pub enum FailureCode {
     DialogUnavailable,
     /// A scalar edit was not finite, not a scalar, or the session is read-only.
     DialogEditRejected,
+    /// A controller command was refused before any byte was sent: the
+    /// definition does not declare it, the session is not connected, writes are
+    /// off (S8), the signature does not match (S1), the path is halted (S3), or
+    /// another operation owns the link.
+    ControllerCommandRefused,
+    /// A controller command was sent, but the wire failed before it finished.
+    ControllerCommandFailed,
     /// The port could not be opened, the definition has no message set, or a
     /// connection is already up.
     ConnectFailed,
@@ -376,6 +394,8 @@ impl FailureCode {
             Self::TableEditRejected => "table-edit-rejected",
             Self::DialogUnavailable => "dialog-unavailable",
             Self::DialogEditRejected => "dialog-edit-rejected",
+            Self::ControllerCommandRefused => "controller-command-refused",
+            Self::ControllerCommandFailed => "controller-command-failed",
             Self::ConnectFailed => "connect-failed",
             Self::TestFailed => "test-failed",
             Self::NotConnected => "not-connected",

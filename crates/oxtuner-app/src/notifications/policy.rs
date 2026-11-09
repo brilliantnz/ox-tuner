@@ -142,6 +142,8 @@ fn failure_title(code: FailureCode) -> String {
         FailureCode::TableEditRejected => t!("app.notifications.failed_table_edit"),
         FailureCode::DialogUnavailable => t!("app.notifications.failed_dialog"),
         FailureCode::DialogEditRejected => t!("app.notifications.failed_dialog_edit"),
+        FailureCode::ControllerCommandRefused => t!("app.notifications.failed_command_refused"),
+        FailureCode::ControllerCommandFailed => t!("app.notifications.failed_command"),
         FailureCode::ConnectFailed => t!("app.notifications.failed_connect"),
         FailureCode::TestFailed => t!("app.notifications.failed_test"),
         FailureCode::NotConnected => t!("app.notifications.failed_not_connected"),

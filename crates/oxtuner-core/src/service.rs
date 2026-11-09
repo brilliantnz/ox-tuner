@@ -39,10 +39,10 @@ use crate::journal::{self, Journal};
 use crate::link::PortChoice;
 use crate::menu::MenuNode;
 use crate::message::{
-    AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary,
-    Envelope, Event, Failure, FailureCode, ImportSummary, JournalEntry, OpId, PortSummary,
-    ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SignatureVerdict, TableSummary,
-    WriteSummary,
+    AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, ControllerCommandSummary,
+    DefinitionSummary, DialogSummary, Envelope, Event, Failure, FailureCode, ImportSummary,
+    JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary,
+    SignatureVerdict, TableSummary, WriteSummary,
 };
 use crate::realtime::{FrameNotify, FrameWatch, LatestFrame, RealtimeDecoder, RealtimeFrame};
 use crate::safety::{Safety, clamp_user};
@@ -722,7 +722,10 @@ fn handle(
                 );
                 return Outcome::Continue;
             };
-            if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+            if connection.write_tx.is_some()
+                || connection.pending_kind(PendingKind::Write)
+                || connection.pending_kind(PendingKind::Command)
+            {
                 report.failures += 1;
                 send(
                     events,
@@ -730,8 +733,8 @@ fn handle(
                         op,
                         failure: Failure {
                             code: FailureCode::Busy,
-                            message: "a write or burn is still running; closing now resets the \
-                                      board and could drop it"
+                            message: "a write, burn or controller command is still running; \
+                                      closing now resets the board and could drop it"
                                 .to_owned(),
                         },
                     },
@@ -793,14 +796,18 @@ fn handle(
                 );
                 return Outcome::Continue;
             }
-            if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+            if connection.write_tx.is_some()
+                || connection.pending_kind(PendingKind::Write)
+                || connection.pending_kind(PendingKind::Command)
+            {
                 send(
                     events,
                     Event::Failed {
                         op,
                         failure: Failure {
                             code: FailureCode::ReadFailed,
-                            message: "a write or burn is running; read the pages after it finishes"
+                            message: "a write, burn or controller command is running; read the \
+                                      pages after it finishes"
                                 .to_owned(),
                         },
                     },
@@ -1599,6 +1606,21 @@ fn handle(
             *menu_dirty = true;
             Outcome::Continue
         }
+        Command::RunControllerCommand { dialog, command } => {
+            let outcome = run_controller_command(
+                op,
+                session,
+                live,
+                safety,
+                journal_dir,
+                events,
+                report,
+                &dialog,
+                &command,
+            );
+            *menu_dirty = true;
+            outcome
+        }
         Command::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
             teardown(
@@ -1823,6 +1845,178 @@ fn adopt_ecu_image(
     Outcome::Continue
 }
 
+/// Runs one `[ControllerCommands]` action (ADR-0011).
+///
+/// A controller command is a raw ECU action, so it passes the same gate as a
+/// write even though it touches no tune value: connected, matching signature,
+/// writes enabled, no halted verification. It is journaled before it reaches
+/// the wire, and the ECU image becomes unknown afterwards because the action
+/// bypasses memory synchronization.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the handler mirrors the fields of one protocol request"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the refusal reasons stay in one place so the safety gate is easy to audit"
+)]
+fn run_controller_command(
+    op: OpId,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    safety: &Safety,
+    journal_dir: Option<&std::path::Path>,
+    events: &EventTx,
+    report: &mut CoreReport,
+    dialog: &str,
+    name: &str,
+) -> Outcome {
+    let Some(connection) = live.as_ref() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "connect to the ECU before sending a controller command",
+        );
+    };
+    if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "a write or burn is running; send the command after it finishes",
+        );
+    }
+    if connection.pending_kind(PendingKind::ReadAll) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "a page read is running; send the command after it finishes",
+        );
+    }
+    if connection.command_tx.is_some() || connection.pending_kind(PendingKind::Command) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "a controller command is already running",
+        );
+    }
+
+    let Some(project) = session.project() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "open a project before sending a controller command",
+        );
+    };
+    let Some(controller) = project.definition().controller_commands.get_ci(name) else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            &format!("`{name}` is not declared in [ControllerCommands]"),
+        );
+    };
+    let commands = controller.commands.clone();
+    if commands.is_empty() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            &format!("`{name}` declares no command string"),
+        );
+    }
+
+    let read_only = project.report().read_only_reasons().join("; ");
+    if let Err(reason) = safety.gate(
+        connection.connected,
+        connection.verdict == SignatureVerdict::Match,
+        true,
+        (!read_only.is_empty()).then_some(read_only.as_str()),
+    ) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            reason.as_str(),
+        );
+    }
+
+    let Some(journal) = session.journal(journal_dir) else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            "no write journal can be written for this session; refusing an unjournaled command",
+        );
+    };
+    let begin = JournalEntry {
+        at: journal::timestamp(),
+        operation: "command".to_owned(),
+        phase: "begin".to_owned(),
+        port: connection.link_label.clone(),
+        signature: connection.signature.clone(),
+        pages: "all".to_owned(),
+        cells: 0,
+        variables: 0,
+        result: "pending".to_owned(),
+        detail: format!("[ControllerCommands] {name} from dialog {dialog}"),
+    };
+    if let Err(error) = journal.append(&begin) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::JournalFailed,
+            &format!("the write journal could not be written: {error}"),
+        );
+    }
+
+    let Some(connection) = live.as_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::ControllerCommandRefused,
+            "the session closed before the command started",
+        );
+    };
+    connection.command_tx = Some(CommandTxn {
+        dialog: dialog.to_owned(),
+        name: name.to_owned(),
+        journal,
+    });
+
+    if let Err(error) = connection.request(op, PendingKind::Command, IoOp::Command { commands }) {
+        finish_command_failed(connection, "the controller command could not be queued");
+        report.failures += 1;
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::ControllerCommandRefused,
+                    message: error.to_string(),
+                },
+            },
+        );
+    }
+
+    Outcome::Continue
+}
+
 /// Starts a verified RAM write (S1–S3, S6–S8).
 #[expect(
     clippy::too_many_arguments,
@@ -1867,6 +2061,15 @@ fn write_to_ram(
             op,
             FailureCode::WriteRefused,
             "a page read is running; write after it finishes",
+        );
+    }
+    if connection.pending_kind(PendingKind::Command) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "a controller command is running; write after it finishes",
         );
     }
     let Some(project) = session.project_mut() else {
@@ -2114,6 +2317,15 @@ fn burn_to_flash(
             op,
             FailureCode::BurnRefused,
             "a page read is running; burn after it finishes",
+        );
+    }
+    if connection.pending_kind(PendingKind::Command) {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::BurnRefused,
+            "a controller command is running; burn after it finishes",
         );
     }
     let Some(project) = session.project() else {
@@ -2752,7 +2964,7 @@ fn refuse(
     code: FailureCode,
     message: &str,
 ) -> Outcome {
-    tracing::warn!(%op, code = code.as_str(), %message, "write-path command refused");
+    tracing::warn!(%op, code = code.as_str(), %message, "command refused before the wire");
     report.failures += 1;
     send(
         events,
@@ -3049,6 +3261,8 @@ enum PendingKind {
     Trace,
     /// A write or burn transaction phase.
     Write,
+    /// One `[ControllerCommands]` action on the wire.
+    Command,
     /// A requested disconnect.
     Disconnect,
     /// A reconnect attempt (no command owns it).
@@ -3171,6 +3385,17 @@ struct WriteTxn {
     journal: Option<Journal>,
 }
 
+/// One controller command action in flight.
+///
+/// Kept beside the write transaction so the reply can close its journal record
+/// with the same evidence path a write uses.
+#[derive(Debug)]
+struct CommandTxn {
+    dialog: String,
+    name: String,
+    journal: Journal,
+}
+
 /// A live ECU session: the I/O thread, its pending conversations and the
 /// summary the UI shows.
 #[expect(
@@ -3209,6 +3434,8 @@ struct Live {
     verdict: SignatureVerdict,
     /// The transaction in flight, if a write or burn is running.
     write_tx: Option<WriteTxn>,
+    /// The controller command in flight, if one is running.
+    command_tx: Option<CommandTxn>,
     /// The live session log, when one is recording.
     logger: Option<Logger>,
     /// Channel names in the running log's column order.
@@ -3269,6 +3496,7 @@ impl Live {
             signature: String::new(),
             verdict: SignatureVerdict::Mismatch,
             write_tx: None,
+            command_tx: None,
             logger: None,
             log_columns: Vec::new(),
             page_bytes: BTreeMap::new(),
@@ -3503,6 +3731,10 @@ fn teardown(
     }
     log.mark_stopped();
 
+    finish_command_failed(
+        &mut live,
+        "the session was closed before the command completed",
+    );
     for pending in std::mem::take(&mut live.pending).into_values() {
         match pending.kind {
             // Background work the UI never asked for: no answer to send.
@@ -3822,8 +4054,10 @@ fn service_live(
         && !connection.pending_kind(PendingKind::Realtime)
         && !connection.pending_kind(PendingKind::ReadAll)
         && !connection.pending_kind(PendingKind::Write)
+        && !connection.pending_kind(PendingKind::Command)
         && !connection.pending_kind(PendingKind::Reconnect)
         && connection.write_tx.is_none()
+        && connection.command_tx.is_none()
     {
         if let Err(error) =
             connection.request(OpId::new(0), PendingKind::Realtime, IoOp::ReadRealtime)
@@ -4675,6 +4909,36 @@ fn record_result(transaction: &WriteTxn, live: &Live, result: &str, detail: &str
     }
 }
 
+/// Records the result line for a controller command's journal, best effort.
+fn record_command_result(transaction: &CommandTxn, live: &Live, result: &str, detail: &str) {
+    let entry = JournalEntry {
+        at: journal::timestamp(),
+        operation: "command".to_owned(),
+        phase: "result".to_owned(),
+        port: live.link_label.clone(),
+        signature: live.signature.clone(),
+        pages: "all".to_owned(),
+        cells: 0,
+        variables: 0,
+        result: result.to_owned(),
+        detail: format!(
+            "[ControllerCommands] {} from dialog {} ({detail})",
+            transaction.name, transaction.dialog
+        ),
+    };
+    if let Err(error) = transaction.journal.append(&entry) {
+        tracing::warn!(%error, "the controller command result could not be written");
+    }
+}
+
+/// Closes a controller command's journal after a failure.
+fn finish_command_failed(live: &mut Live, detail: &str) {
+    let Some(transaction) = live.command_tx.take() else {
+        return;
+    };
+    record_command_result(&transaction, live, "failed", detail);
+}
+
 /// Ends a transaction before the wire saw it, without halting.
 #[expect(
     clippy::needless_pass_by_value,
@@ -4892,6 +5156,53 @@ fn on_reply(
             );
             true
         }
+        (PendingKind::Command, IoOutcome::Command { report: sent }) => {
+            let Some(transaction) = live.command_tx.take() else {
+                tracing::warn!(op = %pending.op, "a controller command reply had no transaction");
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op: pending.op,
+                        failure: Failure {
+                            code: FailureCode::ControllerCommandFailed,
+                            message: "the controller command lost its transaction record"
+                                .to_owned(),
+                        },
+                    },
+                );
+                return true;
+            };
+
+            record_command_result(&transaction, live, "ok", "sent");
+            // A raw controller action bypasses memory synchronization, so the
+            // ECU side is no longer the image the last read confirmed.
+            session.mark_unknown();
+            live.polled();
+
+            let summary = ControllerCommandSummary {
+                dialog: transaction.dialog,
+                command: transaction.name,
+                commands: sent.commands,
+                bytes: sent.bytes,
+                replies: sent.replies,
+            };
+            tracing::info!(
+                op = %pending.op,
+                command = %summary.command,
+                commands = summary.commands,
+                bytes = summary.bytes,
+                "controller command sent"
+            );
+            send(
+                events,
+                Event::ControllerCommandRan {
+                    op: pending.op,
+                    summary,
+                },
+            );
+            true
+        }
         (PendingKind::Trace, IoOutcome::TraceSaved { path, frames }) => {
             tracing::info!(path = %path.display(), frames, "session trace saved");
             send(
@@ -4928,6 +5239,9 @@ fn on_reply(
                 %failure.message,
                 "a wire operation failed"
             );
+            if kind == PendingKind::Command {
+                finish_command_failed(live, &failure.message);
+            }
             if kind != PendingKind::Realtime {
                 report.failures += 1;
                 send(
@@ -4974,6 +5288,7 @@ fn failure_code(kind: PendingKind) -> FailureCode {
         PendingKind::Realtime => FailureCode::RealtimeRejected,
         PendingKind::Trace => FailureCode::TraceFailed,
         PendingKind::Write => FailureCode::WriteFailed,
+        PendingKind::Command => FailureCode::ControllerCommandFailed,
         PendingKind::Disconnect | PendingKind::Reconnect => FailureCode::NotConnected,
     }
 }
@@ -4998,6 +5313,7 @@ fn connection_lost(
         tracing::info!("the session log was closed because the link was lost");
     }
 
+    finish_command_failed(live, &format!("the link was lost: {reason}"));
     // Every conversation that was waiting is answered now: a vanished link
     // must not leave a command unanswered.
     for pending in std::mem::take(&mut live.pending).into_values() {

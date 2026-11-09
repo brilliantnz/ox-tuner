@@ -64,6 +64,8 @@ pub(crate) enum Request<'a> {
         offset: u16,
         count: u16,
     },
+    /// One `[ControllerCommands]` action.
+    ControllerCommand,
 }
 
 /// The message set of one definition.
@@ -72,7 +74,65 @@ pub(crate) struct SimEcu {
     pub(crate) signature: Vec<u8>,
     query: Option<CommandPattern>,
     realtime: Option<RealtimeEcu>,
+    /// `[ControllerCommands]` command strings, in definition order.
+    controller: Vec<CommandPattern>,
     pub(crate) pages: Vec<PageEcu>,
+}
+
+/// One command pattern with the definition's variables resolved.
+fn pattern_for(
+    command: &Command,
+    variables: &HashMap<String, u8>,
+    force_big_endian: bool,
+) -> Option<CommandPattern> {
+    CommandPattern::new(command, force_big_endian, &|name| {
+        variables.get(&name.to_ascii_lowercase()).copied()
+    })
+}
+
+/// Every page's commands, in definition order.
+fn build_pages(
+    definition: &Definition,
+    variables: &HashMap<String, u8>,
+    force_big_endian: bool,
+) -> Vec<PageEcu> {
+    let pattern = |command: &Command| pattern_for(command, variables, force_big_endian);
+
+    definition
+        .pages
+        .iter()
+        .map(|page| PageEcu {
+            number: page.number,
+            size: usize::try_from(page.size).unwrap_or(0),
+            identifier: page_identifier(page.number, page.identifier.as_ref(), &|name| {
+                variables.get(&name.to_ascii_lowercase()).copied()
+            }),
+            read: page
+                .read_command
+                .as_ref()
+                .filter(|command| !command.is_empty())
+                .and_then(pattern),
+            write: page
+                .chunk_write
+                .as_ref()
+                .filter(|command| !command.is_empty())
+                .or(page
+                    .value_write
+                    .as_ref()
+                    .filter(|command| !command.is_empty()))
+                .and_then(pattern),
+            burn: page
+                .burn_command
+                .as_ref()
+                .filter(|command| !command.is_empty())
+                .and_then(pattern),
+            crc: page
+                .crc_command
+                .as_ref()
+                .filter(|command| !command.is_empty())
+                .and_then(pattern),
+        })
+        .collect()
 }
 
 impl SimEcu {
@@ -80,11 +140,7 @@ impl SimEcu {
     pub(crate) fn new(definition: &Definition, signature: String) -> Result<Self, SimError> {
         let variables = variables(definition);
         let force_big_endian = definition.protocol.force_big_endian_protocol;
-        let pattern = |command: &Command| {
-            CommandPattern::new(command, force_big_endian, &|name| {
-                variables.get(&name.to_ascii_lowercase()).copied()
-            })
-        };
+        let pattern = |command: &Command| pattern_for(command, &variables, force_big_endian);
 
         let query = definition
             .query_command
@@ -124,41 +180,7 @@ impl SimEcu {
                 })
             });
 
-        let pages = definition
-            .pages
-            .iter()
-            .map(|page| PageEcu {
-                number: page.number,
-                size: usize::try_from(page.size).unwrap_or(0),
-                identifier: page_identifier(page.number, page.identifier.as_ref(), &|name| {
-                    variables.get(&name.to_ascii_lowercase()).copied()
-                }),
-                read: page
-                    .read_command
-                    .as_ref()
-                    .filter(|command| !command.is_empty())
-                    .and_then(pattern),
-                write: page
-                    .chunk_write
-                    .as_ref()
-                    .filter(|command| !command.is_empty())
-                    .or(page
-                        .value_write
-                        .as_ref()
-                        .filter(|command| !command.is_empty()))
-                    .and_then(pattern),
-                burn: page
-                    .burn_command
-                    .as_ref()
-                    .filter(|command| !command.is_empty())
-                    .and_then(pattern),
-                crc: page
-                    .crc_command
-                    .as_ref()
-                    .filter(|command| !command.is_empty())
-                    .and_then(pattern),
-            })
-            .collect::<Vec<_>>();
+        let pages = build_pages(definition, &variables, force_big_endian);
 
         if query.is_none() && pages.iter().all(|page| page.read.is_none()) {
             return Err(SimError {
@@ -170,10 +192,20 @@ impl SimEcu {
             });
         }
 
+        let mut controller = Vec::new();
+        for (_, action) in definition.controller_commands.iter() {
+            for command in &action.commands {
+                if let Some(pattern) = pattern(command) {
+                    controller.push(pattern);
+                }
+            }
+        }
+
         Ok(Self {
             signature: signature.into_bytes(),
             query,
             realtime,
+            controller,
             pages,
         })
     }
@@ -239,6 +271,12 @@ impl SimEcu {
             }
         }
 
+        for pattern in &self.controller {
+            if pattern.matches(bytes) {
+                return Some(Request::ControllerCommand);
+            }
+        }
+
         None
     }
 }
@@ -293,6 +331,10 @@ baro = scalar, U08, 0, \"kpa\", 1.0, 0.0
 ochGetCommand = \"r%2o%2c\"
 ochBlockSize = 8
 rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+
+[ControllerCommands]
+cmdPing = \"z\"
+cmdOff = \"y\\x01\"
 ",
             &SettingsContext::new(),
         )
@@ -304,6 +346,19 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
 
         assert_eq!(ecu.interpret(b"Q"), Some(Request::Signature));
+    }
+
+    #[test]
+    fn a_controller_command_is_recognised() {
+        let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
+
+        assert_eq!(ecu.interpret(b"z"), Some(Request::ControllerCommand));
+        assert_eq!(ecu.interpret(b"y\x01"), Some(Request::ControllerCommand));
+        assert_eq!(
+            ecu.interpret(b"x"),
+            None,
+            "an undeclared action stays unknown"
+        );
     }
 
     #[test]
