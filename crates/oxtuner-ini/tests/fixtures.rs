@@ -72,7 +72,7 @@ fn the_speeduino_dialect_parses_into_the_expected_model() {
             .map(|c| c.raw.as_str()),
         Some("b%2i")
     );
-    assert_eq!(definition.protocol.blocking_factor, Some(251));
+    assert_eq!(definition.comms.blocking_factor, Some(251));
 
     let constant = definition.constant("idleAdvRPM").expect("idleAdvRPM");
     assert_eq!(constant.page, 1);
@@ -174,14 +174,14 @@ fn the_settings_that_rewrite_the_protocol_are_applied_before_commands() {
         Some("B%2i")
     );
     // …and both `mcu_stm32` and `COMMS_COMPAT` rewrite the blocking factor.
-    assert_eq!(definition.protocol.blocking_factor, Some(121));
+    assert_eq!(definition.comms.blocking_factor, Some(121));
 
     let definition = parse_str(
         &text,
         &SettingsContext::new().with_overrides([("mcu_stm32", true)]),
     )
     .expect("parses");
-    assert_eq!(definition.protocol.blocking_factor, Some(121));
+    assert_eq!(definition.comms.blocking_factor, Some(121));
     assert_eq!(
         definition
             .page(1)
@@ -198,7 +198,7 @@ fn the_speeduino_commands_encode_to_the_documented_bytes() {
         parse_str(&fixture("speeduino-like.ini"), &SettingsContext::new()).expect("parses");
 
     let och_get = definition
-        .protocol
+        .comms
         .och_get_command
         .as_ref()
         .expect("ochGetCommand");
@@ -233,7 +233,7 @@ fn the_rusefi_dialect_parses_into_the_expected_model() {
     // A file-level entry before the first section is kept, not rejected.
     assert_eq!(
         definition
-            .protocol
+            .comms
             .raw
             .get("enable2ndByteCanID")
             .map(String::as_str),

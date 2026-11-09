@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oxtuner_ini::{Command, CommandArguments, Definition};
+use oxtuner_ini::{CommandArguments, CommandTemplate, Definition};
 use oxtuner_transport::{Transport, TransportError};
 
 use crate::behavior::{BurnPlan, CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
@@ -90,10 +90,10 @@ struct PageCommands {
     identifier: [u8; 2],
     /// What the firmware needs before this page may be used.
     switch: PageSwitch,
-    read: Option<Command>,
-    write: Option<Command>,
-    burn: Option<Command>,
-    crc: Option<Command>,
+    read: Option<CommandTemplate>,
+    write: Option<CommandTemplate>,
+    burn: Option<CommandTemplate>,
+    crc: Option<CommandTemplate>,
     /// How a CRC reply from this page is encoded.
     crc_reply: Option<CrcReply>,
 }
@@ -209,7 +209,7 @@ const FALLBACK_BLOCKING_FACTOR: usize = 128;
 pub struct MsProtocol {
     name: &'static str,
     variables: HashMap<String, u8>,
-    signature_command: Option<Command>,
+    signature_command: Option<CommandTemplate>,
     handshake: Vec<Vec<u8>>,
     pages: Vec<PageCommands>,
     blocking_factor: usize,
@@ -227,7 +227,7 @@ pub struct MsProtocol {
 
 #[derive(Debug, Clone)]
 struct Realtime {
-    command: Command,
+    command: CommandTemplate,
     spec: RealtimeSpec,
 }
 
@@ -307,17 +307,17 @@ fn build_handshake(
 
 fn build_realtime(definition: &Definition) -> Option<Realtime> {
     definition
-        .protocol
+        .comms
         .och_get_command
         .clone()
-        .zip(definition.protocol.och_block_size)
+        .zip(definition.comms.och_block_size)
         .and_then(|(command, block_size)| {
             let block_size = u16::try_from(block_size).ok()?;
             (block_size > 0).then(|| Realtime {
                 command,
                 spec: RealtimeSpec {
                     block_size,
-                    start_offset: u16::try_from(definition.protocol.output_channel_start_offset)
+                    start_offset: u16::try_from(definition.comms.output_channel_start_offset)
                         .unwrap_or(u16::MAX),
                 },
             })
@@ -365,35 +365,35 @@ impl MsProtocol {
             handshake,
             pages,
             blocking_factor: definition
-                .protocol
+                .comms
                 .blocking_factor
                 .and_then(|factor| usize::try_from(factor).ok())
                 .filter(|factor| *factor > 0)
                 .unwrap_or(FALLBACK_BLOCKING_FACTOR),
             inter_write_delay: definition
-                .protocol
+                .comms
                 .inter_write_delay_ms
                 .map(|milliseconds| Duration::from_millis(u64::from(milliseconds))),
-            write_blocks: definition.protocol.write_blocks,
+            write_blocks: definition.comms.write_blocks,
             block_read_timeout: definition
-                .protocol
+                .comms
                 .block_read_timeout_ms
                 .map_or(Duration::from_secs(2), |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             page_activation_delay: definition
-                .protocol
+                .comms
                 .page_activation_delay_ms
                 .map_or(Duration::ZERO, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             port_open_delay: definition
-                .protocol
+                .comms
                 .delay_after_port_open_ms
                 .map_or(Duration::ZERO, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
-            force_big_endian: definition.protocol.force_big_endian_protocol,
+            force_big_endian: definition.comms.force_big_endian_protocol,
             realtime,
             link: default_link(definition),
             reply_code: behavior.reply_code(definition),
@@ -471,7 +471,7 @@ impl MsProtocol {
     pub fn run_commands(
         &mut self,
         io: &mut dyn Transport,
-        commands: &[Command],
+        commands: &[CommandTemplate],
     ) -> Result<CommandReport, ProtocolError> {
         let mut report = CommandReport::default();
 
@@ -716,7 +716,7 @@ impl MsProtocol {
 
     fn encode(
         &self,
-        command: &Command,
+        command: &CommandTemplate,
         page: u16,
         offset: u16,
         count: u16,
@@ -1088,7 +1088,7 @@ impl Protocol for MsProtocol {
 /// path. [`MsProtocol::with_link_mode`] overrides the choice for a session that
 /// needs the other one.
 fn default_link(definition: &Definition) -> LinkMode {
-    match definition.protocol.envelope.as_deref() {
+    match definition.comms.envelope.as_deref() {
         Some(format) if format.eq_ignore_ascii_case("msEnvelope_1.0") => LinkMode::Envelope,
         _ => LinkMode::Legacy,
     }

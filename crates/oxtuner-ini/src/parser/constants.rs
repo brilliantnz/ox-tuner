@@ -9,18 +9,18 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::fields::{Command, split_fields, split_fields_preserving_empty};
+use crate::fields::{CommandTemplate, split_fields, split_fields_preserving_empty};
 use crate::model::{
-    BitOption, Constant, ConstantClass, ConstantFlags, DataType, Definition, Dimension, Endianness,
-    Number, Offset, Page, PcVariable, Protocol, Shape, Text,
+    BitOption, CommsSettings, Constant, ConstantClass, ConstantFlags, DataType, Definition,
+    Dimension, Endianness, Number, Offset, Page, PcVariable, Shape, Text,
 };
 use crate::preprocess::Expander;
 
 use super::SectionParser;
 
-/// Protocol keys that are recognised but not modelled yet. Their value is kept
-/// verbatim in [`Protocol::raw`] rather than being dropped.
-const PRESERVED_PROTOCOL_KEYS: &[&str] = &[
+/// Communication keys that are recognised but not modelled yet. Their value
+/// is kept verbatim in [`CommsSettings::raw`] rather than being dropped.
+const PRESERVED_COMMS_KEYS: &[&str] = &[
     "validatearraybounds",
     "uselegacyftempunits",
     "restrictsquirtrelationship",
@@ -54,7 +54,7 @@ pub(crate) fn parse_identification(
                 section.understand(*line);
             }
             "querycommand" => {
-                definition.query_command = Some(Command::parse(&value));
+                definition.query_command = Some(CommandTemplate::parse(&value));
                 section.understand(*line);
             }
             "versioninfo" => {
@@ -78,7 +78,7 @@ pub(crate) fn parse_identification(
             }
             _ => {
                 // Everything else is a tunable the model keeps verbatim.
-                definition.protocol.raw.insert(key.clone(), value.clone());
+                definition.comms.raw.insert(key.clone(), value.clone());
                 section.understand(*line);
             }
         }
@@ -108,15 +108,15 @@ impl Cursor {
     }
 }
 
-/// Command blocks declared inside a single `page = k` block (iniSpec 3.77).
+/// Command template blocks declared inside a single `page = k` block (iniSpec 3.77).
 #[derive(Debug, Default, Clone)]
 struct PageCommands {
-    identifier: Option<Command>,
-    read: Option<Command>,
-    burn: Option<Command>,
-    value_write: Option<Command>,
-    chunk_write: Option<Command>,
-    crc: Option<Command>,
+    identifier: Option<CommandTemplate>,
+    read: Option<CommandTemplate>,
+    burn: Option<CommandTemplate>,
+    value_write: Option<CommandTemplate>,
+    chunk_write: Option<CommandTemplate>,
+    crc: Option<CommandTemplate>,
 }
 
 /// The page table as it is collected from `[Constants]`.
@@ -124,12 +124,12 @@ struct PageCommands {
 struct PageTable {
     n_pages: Option<u32>,
     sizes: Vec<u32>,
-    identifiers: Vec<Command>,
-    reads: Vec<Command>,
-    burns: Vec<Command>,
-    value_writes: Vec<Command>,
-    chunk_writes: Vec<Command>,
-    crcs: Vec<Command>,
+    identifiers: Vec<CommandTemplate>,
+    reads: Vec<CommandTemplate>,
+    burns: Vec<CommandTemplate>,
+    value_writes: Vec<CommandTemplate>,
+    chunk_writes: Vec<CommandTemplate>,
+    crcs: Vec<CommandTemplate>,
     start_offsets: Vec<u32>,
     overrides: BTreeMap<u8, PageCommands>,
 }
@@ -149,9 +149,9 @@ impl PageTable {
     /// A single command declared inside a `page = k` block belongs to that
     /// page; anything else is the parallel list for every page.
     fn set_commands(&mut self, page: u8, kind: CommandKind, value: &str) {
-        let commands: Vec<Command> = split_fields_preserving_empty(value)
+        let commands: Vec<CommandTemplate> = split_fields_preserving_empty(value)
             .iter()
-            .map(|field| Command::parse(field))
+            .map(|field| CommandTemplate::parse(field))
             .collect();
 
         if page != 0 && commands.len() == 1 {
@@ -179,7 +179,11 @@ impl PageTable {
         *target = commands;
     }
 
-    fn at(list: &[Command], page: u8, per_page: Option<&Command>) -> Option<Command> {
+    fn at(
+        list: &[CommandTemplate],
+        page: u8,
+        per_page: Option<&CommandTemplate>,
+    ) -> Option<CommandTemplate> {
         if let Some(command) = per_page {
             return Some(command.clone());
         }
@@ -311,7 +315,7 @@ pub(crate) fn parse_constants(
             continue;
         }
 
-        let parsed = parse_protocol_key(
+        let parsed = parse_comms_key(
             definition,
             &mut table,
             current_page,
@@ -324,7 +328,7 @@ pub(crate) fn parse_constants(
             section.understand(*line);
         } else {
             section.unrecognized_key(key, *line);
-            definition.protocol.raw.insert(lowered, value.to_owned());
+            definition.comms.raw.insert(lowered, value.to_owned());
         }
     }
 
@@ -343,8 +347,8 @@ fn is_constant_entry(fields: &[Cow<'_, str>]) -> bool {
     }
 }
 
-/// Handles the protocol and page-table keys that appear inside `[Constants]`.
-fn parse_protocol_key(
+/// Handles the communication and page-table keys that appear inside `[Constants]`.
+fn parse_comms_key(
     definition: &mut Definition,
     table: &mut PageTable,
     page: u8,
@@ -353,7 +357,7 @@ fn parse_protocol_key(
     section: &mut SectionParser,
     line: u32,
 ) -> bool {
-    let protocol: &mut Protocol = &mut definition.protocol;
+    let comms: &mut CommsSettings = &mut definition.comms;
     match key {
         "endianness" => {
             // An unreadable value keeps the dialect default instead of guessing.
@@ -370,23 +374,23 @@ fn parse_protocol_key(
         "pagevaluewrite" => table.set_commands(page, CommandKind::ValueWrite, value),
         "pagechunkwrite" => table.set_commands(page, CommandKind::ChunkWrite, value),
         "crc32checkcommand" | "pagecrccommand" => table.set_commands(page, CommandKind::Crc, value),
-        "blockingfactor" => protocol.blocking_factor = crate::fields::parse_u32(value),
-        "interwritedelay" => protocol.inter_write_delay_ms = crate::fields::parse_u32(value),
-        "writeblocks" | "tswriteblocks" => protocol.write_blocks = is_on(value),
-        "blockreadtimeout" => protocol.block_read_timeout_ms = crate::fields::parse_u32(value),
+        "blockingfactor" => comms.blocking_factor = crate::fields::parse_u32(value),
+        "interwritedelay" => comms.inter_write_delay_ms = crate::fields::parse_u32(value),
+        "writeblocks" | "tswriteblocks" => comms.write_blocks = is_on(value),
+        "blockreadtimeout" => comms.block_read_timeout_ms = crate::fields::parse_u32(value),
         "pageactivationdelay" => {
-            protocol.page_activation_delay_ms = crate::fields::parse_u32(value);
+            comms.page_activation_delay_ms = crate::fields::parse_u32(value);
         }
-        "delayafterportopen" => protocol.delay_after_port_open_ms = crate::fields::parse_u32(value),
-        "nocommreaddelay" => protocol.no_comm_read_delay = is_on(value),
+        "delayafterportopen" => comms.delay_after_port_open_ms = crate::fields::parse_u32(value),
+        "nocommreaddelay" => comms.no_comm_read_delay = is_on(value),
         "messageenvelopeformat" => {
-            protocol.envelope = Some(crate::fields::unquote(value).to_owned());
+            comms.envelope = Some(crate::fields::unquote(value).to_owned());
         }
-        "forcebigendianprotocol" => protocol.force_big_endian_protocol = is_on(value),
+        "forcebigendianprotocol" => comms.force_big_endian_protocol = is_on(value),
         "outputchannelstartoffset" => {
             // An unreadable value keeps the dialect default instead of guessing.
             if let Some(offset) = crate::fields::parse_u32(value) {
-                protocol.output_channel_start_offset = offset;
+                comms.output_channel_start_offset = offset;
             } else {
                 section.warn(
                     "bad-number",
@@ -396,12 +400,12 @@ fn parse_protocol_key(
             }
         }
         "defaultruntimerecordpersec" => {
-            protocol.default_runtime_record_per_sec = crate::fields::parse_u32(value);
+            comms.default_runtime_record_per_sec = crate::fields::parse_u32(value);
         }
         "maxunusedruntimerange" => {
             // An unreadable value keeps the dialect default instead of guessing.
             if let Some(range) = crate::fields::parse_u32(value) {
-                protocol.max_unused_runtime_range = range;
+                comms.max_unused_runtime_range = range;
             } else {
                 section.warn(
                     "bad-number",
@@ -410,14 +414,14 @@ fn parse_protocol_key(
                 );
             }
         }
-        "retrieveconfigerror" => protocol.retrieve_config_error = Some(Command::parse(value)),
-        "ochgetcommand" => protocol.och_get_command = Some(Command::parse(value)),
-        "ochblocksize" => protocol.och_block_size = crate::fields::parse_u32(value),
+        "retrieveconfigerror" => comms.retrieve_config_error = Some(CommandTemplate::parse(value)),
+        "ochgetcommand" => comms.och_get_command = Some(CommandTemplate::parse(value)),
+        "ochblocksize" => comms.och_block_size = crate::fields::parse_u32(value),
         other => {
-            if !PRESERVED_PROTOCOL_KEYS.contains(&other) {
+            if !PRESERVED_COMMS_KEYS.contains(&other) {
                 return false;
             }
-            protocol.raw.insert(other.to_owned(), value.to_owned());
+            comms.raw.insert(other.to_owned(), value.to_owned());
         }
     }
     true

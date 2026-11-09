@@ -170,7 +170,7 @@ pub(crate) fn parse_dialogs(
             continue;
         };
 
-        if kind == RowKind::Unknown {
+        if kind == RowKind::Unmodeled {
             // Kept as data; reported once so coverage stays honest.
             section.unrecognized_key(&keyword, *line);
         }
@@ -249,7 +249,7 @@ pub(crate) fn parse_menu(
                 let kind = match lowered.as_str() {
                     "groupmenu" => MenuTargetKind::Group,
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
-                    _ => MenuTargetKind::Panel,
+                    _ => MenuTargetKind::DefinitionTarget,
                 };
                 let owner = if lowered == "groupchildmenu" {
                     group
@@ -286,7 +286,7 @@ pub(crate) fn parse_menu(
                 // Menu overrides (iniSpec 3.78) are recognised and preserved;
                 // applying them belongs to the UI layer.
                 definition
-                    .protocol
+                    .comms
                     .raw
                     .insert(format!("menu.{key}"), value.to_owned());
                 section.understand(*line);
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(dialog.title.as_deref(), Some("VE Table"));
         assert_eq!(dialog.layout.as_deref(), Some("border"));
         assert_eq!(dialog.rows.len(), 2);
-        assert_eq!(dialog.rows[0].kind, RowKind::Panel);
+        assert_eq!(dialog.rows[0].kind, RowKind::EmbeddedPanel);
         assert_eq!(dialog.rows[1].kind, RowKind::Field);
     }
 
@@ -455,7 +455,7 @@ mod tests {
         );
 
         let dialog = definition.dialogs.get("d").expect("dialog");
-        assert_eq!(dialog.rows[0].kind, RowKind::Unknown);
+        assert_eq!(dialog.rows[0].kind, RowKind::Unmodeled);
         assert_eq!(dialog.rows[0].keyword, "brandNewRow");
         assert_eq!(dialog.rows[0].fields, vec!["a", "b"]);
     }
@@ -469,7 +469,7 @@ mod tests {
         let menu = definition.menus.first().expect("menu");
         assert_eq!(menu.title, "Fuel");
         assert_eq!(menu.items.len(), 3);
-        assert_eq!(menu.items[0].kind, MenuTargetKind::Panel);
+        assert_eq!(menu.items[0].kind, MenuTargetKind::DefinitionTarget);
         assert_eq!(menu.items[1].kind, MenuTargetKind::Standard);
         assert_eq!(menu.items[2].kind, MenuTargetKind::Separator);
     }
@@ -489,7 +489,7 @@ mod tests {
             menu.items[4].group, None,
             "a plain subMenu closes the group"
         );
-        assert_eq!(menu.items[4].kind, MenuTargetKind::Panel);
+        assert_eq!(menu.items[4].kind, MenuTargetKind::DefinitionTarget);
     }
 
     #[test]

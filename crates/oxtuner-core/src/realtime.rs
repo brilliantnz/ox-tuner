@@ -302,7 +302,7 @@ impl RealtimeDecoder {
             indicators,
             endianness: definition.endianness,
             block_size: definition
-                .protocol
+                .comms
                 .och_block_size
                 .and_then(|size| usize::try_from(size).ok())
                 .unwrap_or(0),

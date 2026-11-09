@@ -62,13 +62,14 @@ pub mod settings;
 pub mod source;
 
 pub use error::{Diagnostic, IniError, Severity};
-pub use fields::{Command, CommandArguments, Placeholder, Segment};
+pub use fields::{CommandArguments, CommandTemplate, Placeholder, Segment};
 pub use model::{
-    Axis, BitOption, BitRange, Channel, ChannelKind, Constant, ConstantClass, ConstantFlags,
-    Coverage, Curve, DataType, DatalogEntry, Definition, Dialog, DialogRow, Dimension, Endianness,
-    Extensions, FrontPage, Gauge, Indicator, KeyAction, Menu, MenuItem, MenuTargetKind, Number,
-    Offset, Ordered, Page, PcVariable, Protocol, ReferenceTable, RowKind, ScatteredConfig,
-    SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text, UnsupportedSection,
+    Axis, BitOption, BitRange, Channel, ChannelKind, CommsSettings, Constant, ConstantClass,
+    ConstantFlags, Coverage, Curve, DataType, DatalogEntry, Definition, Dialog, DialogRow,
+    Dimension, Endianness, Extensions, FrontPage, Gauge, Indicator, KeyAction, Menu, MenuItem,
+    MenuTargetKind, Number, Offset, Ordered, Page, PcVariable, ReferenceTable, RowKind,
+    ScatteredConfig, SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text,
+    UnsupportedSection,
 };
 pub use parser::{
     MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,

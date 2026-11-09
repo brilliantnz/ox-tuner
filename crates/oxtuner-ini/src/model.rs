@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::error::Diagnostic;
 use crate::expr::Expr;
-use crate::fields::Command;
+use crate::fields::CommandTemplate;
 
 /// A name-keyed, insertion-ordered collection.
 ///
@@ -824,8 +824,8 @@ impl Channel {
 /// Scattered ("full optimized") realtime reads.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScatteredConfig {
-    /// Command used for a scattered read.
-    pub get_command: Option<Command>,
+    /// Command template used for a scattered read.
+    pub get_command: Option<CommandTemplate>,
     /// Name of the U16 offset array constant.
     pub offset_array: Option<String>,
     /// Expression that says whether scattered reads are enabled.
@@ -834,7 +834,7 @@ pub struct ScatteredConfig {
 
 /// Communication parameters, derived **after** settings resolution.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct Protocol {
+pub struct CommsSettings {
     /// Maximum payload bytes per read/write chunk.
     pub blocking_factor: Option<u32>,
     /// Delay between written bytes, in milliseconds.
@@ -853,8 +853,8 @@ pub struct Protocol {
     pub envelope: Option<String>,
     /// Offsets and lengths are big-endian on the wire even when data is little.
     pub force_big_endian_protocol: bool,
-    /// Command that reads the realtime block.
-    pub och_get_command: Option<Command>,
+    /// Command template that reads the realtime block.
+    pub och_get_command: Option<CommandTemplate>,
     /// Size of the realtime block, in bytes.
     pub och_block_size: Option<u32>,
     /// Base added to realtime offsets.
@@ -865,12 +865,12 @@ pub struct Protocol {
     pub default_runtime_record_per_sec: Option<u32>,
     /// Channel-count hint for block sizing; 0 disables it.
     pub max_unused_runtime_range: u32,
-    /// Command that retrieves the configuration error text.
-    pub retrieve_config_error: Option<Command>,
-    /// Command that starts a burst read (`[BurstMode]`).
-    pub burst_get_command: Option<Command>,
-    /// Every recognised protocol key with its raw value, so nothing is lost
-    /// before the protocol crate models it.
+    /// Command template that retrieves the configuration error text.
+    pub retrieve_config_error: Option<CommandTemplate>,
+    /// Command template that starts a burst read (`[BurstMode]`).
+    pub burst_get_command: Option<CommandTemplate>,
+    /// Every recognised communication key with its raw value, so nothing is
+    /// lost before the protocol crate models it.
     pub raw: BTreeMap<String, String>,
 }
 
@@ -884,18 +884,18 @@ pub struct Page {
     /// Base address added to every constant offset on this page.
     pub start_offset: u32,
     /// Two-byte page identifier used by `%2i`.
-    pub identifier: Option<Command>,
-    /// Command that reads part of this page.
-    pub read_command: Option<Command>,
-    /// Command that burns this page. `None` (or an empty command) means the
+    pub identifier: Option<CommandTemplate>,
+    /// Command template that reads part of this page.
+    pub read_command: Option<CommandTemplate>,
+    /// Command template that burns this page. `None` (or an empty command) means the
     /// page cannot be burned.
-    pub burn_command: Option<Command>,
-    /// Command that writes a single value.
-    pub value_write: Option<Command>,
-    /// Command that writes a chunk.
-    pub chunk_write: Option<Command>,
-    /// Command that returns the page's CRC32.
-    pub crc_command: Option<Command>,
+    pub burn_command: Option<CommandTemplate>,
+    /// Command template that writes a single value.
+    pub value_write: Option<CommandTemplate>,
+    /// Command template that writes a chunk.
+    pub chunk_write: Option<CommandTemplate>,
+    /// Command template that returns the page's CRC32.
+    pub crc_command: Option<CommandTemplate>,
 }
 
 impl Page {
@@ -908,8 +908,9 @@ impl Page {
 
     /// Whether the page can be written at all.
     pub fn is_writable(&self) -> bool {
-        let usable =
-            |command: &Option<Command>| command.as_ref().is_some_and(|command| !command.is_empty());
+        let usable = |command: &Option<CommandTemplate>| {
+            command.as_ref().is_some_and(|command| !command.is_empty())
+        };
         usable(&self.value_write) || usable(&self.chunk_write)
     }
 }
@@ -1085,7 +1086,7 @@ pub enum RowKind {
     /// `runtimeValue`.
     RuntimeValue,
     /// `panel` — embeds another dialog, table, curve or standard dialog.
-    Panel,
+    EmbeddedPanel,
     /// `gauge`.
     Gauge,
     /// `liveGraph`.
@@ -1103,13 +1104,13 @@ pub enum RowKind {
     /// `commandButton`.
     CommandButton,
     /// `help` / `text`.
-    Help,
+    HelpText,
     /// `webHelp`.
     WebHelp,
     /// `topicHelp`.
     TopicHelp,
     /// Anything this build does not model yet; kept as data.
-    Unknown,
+    Unmodeled,
 }
 
 impl RowKind {
@@ -1125,7 +1126,7 @@ impl RowKind {
             "settingoption" => Self::SettingOption,
             "array1d" => Self::Array1D,
             "runtimevalue" => Self::RuntimeValue,
-            "panel" => Self::Panel,
+            "panel" => Self::EmbeddedPanel,
             "gauge" => Self::Gauge,
             "livegraph" => Self::LiveGraph,
             "graphline" => Self::GraphLine,
@@ -1134,10 +1135,10 @@ impl RowKind {
             "readoutpanel" => Self::ReadoutPanel,
             "readout" => Self::Readout,
             "commandbutton" => Self::CommandButton,
-            "help" | "text" => Self::Help,
+            "help" | "text" => Self::HelpText,
             "webhelp" => Self::WebHelp,
             "topichelp" => Self::TopicHelp,
-            _ => Self::Unknown,
+            _ => Self::Unmodeled,
         }
     }
 }
@@ -1178,7 +1179,7 @@ pub struct Dialog {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuTargetKind {
     /// Another dialog / table / curve.
-    Panel,
+    DefinitionTarget,
     /// A divider.
     Separator,
     /// A group header declared with `groupMenu`.
@@ -1241,10 +1242,10 @@ pub struct SettingOption {
 /// One raw controller command.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ControllerCommand {
-    /// Command name.
+    /// Command template name.
     pub name: String,
     /// Commands executed in order; envelope bytes excluded.
-    pub commands: Vec<Command>,
+    pub commands: Vec<CommandTemplate>,
     /// Description, when `displayCommand` opted the command into the UI.
     pub description: Option<String>,
     /// Source line.
@@ -1451,8 +1452,8 @@ pub struct Definition {
     pub ini_version: Option<String>,
     /// `iniSpecVersion`.
     pub spec_version: Option<f64>,
-    /// Command whose reply is the signature.
-    pub query_command: Option<Command>,
+    /// Command template whose reply is the signature.
+    pub query_command: Option<CommandTemplate>,
     /// Firmware version text.
     pub version_info: Option<String>,
     /// Byte order of calibration data.
@@ -1460,7 +1461,7 @@ pub struct Definition {
     /// Pages by number, 1-based.
     pub pages: Vec<Page>,
     /// Communication parameters.
-    pub protocol: Protocol,
+    pub comms: CommsSettings,
     /// Calibration constants in load order.
     pub constants: Ordered<Constant>,
     /// PC-side variables in load order.
@@ -1530,7 +1531,7 @@ impl Definition {
             version_info: None,
             endianness: Endianness::default(),
             pages: Vec::new(),
-            protocol: Protocol::default(),
+            comms: CommsSettings::default(),
             constants: Ordered::new(),
             pc_variables: Ordered::new(),
             channels: Ordered::new(),
@@ -1756,7 +1757,7 @@ impl Definition {
     }
 }
 
-fn command_text(command: Option<&Command>) -> String {
+fn command_text(command: Option<&CommandTemplate>) -> String {
     match command {
         Some(command) if !command.is_empty() => command.raw.clone(),
         Some(_) => "<empty>".to_owned(),
@@ -1936,10 +1937,10 @@ mod tests {
         let mut page = Page::default();
         assert!(!page.is_burnable());
 
-        page.burn_command = Some(Command::parse(r#""""#));
+        page.burn_command = Some(CommandTemplate::parse(r#""""#));
         assert!(!page.is_burnable());
 
-        page.burn_command = Some(Command::parse(r#""B%2i""#));
+        page.burn_command = Some(CommandTemplate::parse(r#""B%2i""#));
         assert!(page.is_burnable());
     }
 

@@ -3464,7 +3464,7 @@ impl Live {
         standalone: Option<Box<Tune>>,
     ) -> Self {
         let realtime_block = definition
-            .protocol
+            .comms
             .och_block_size
             .and_then(|size| u16::try_from(size).ok())
             .filter(|size| *size > 0);
@@ -3956,7 +3956,7 @@ fn connect(
 
 /// The framing a definition asks for.
 fn default_framing(definition: &Definition) -> LinkMode {
-    match definition.protocol.envelope.as_deref() {
+    match definition.comms.envelope.as_deref() {
         Some(format) if format.eq_ignore_ascii_case("msEnvelope_1.0") => LinkMode::Envelope,
         _ => LinkMode::Legacy,
     }

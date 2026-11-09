@@ -4,7 +4,7 @@
 //! Property tests complement the fuzz targets: the fuzz job runs longer, these
 //! run on every CI leg with the same invariant.
 
-use oxtuner_ini::{Command, Definition, SettingsContext};
+use oxtuner_ini::{CommandTemplate, Definition, SettingsContext};
 use oxtuner_protocol::{
     Behavior, CommandPattern, Frame, FrameDecoder, LinkMode, MsProtocol, Protocol, ProtocolError,
 };
@@ -44,11 +44,11 @@ proptest! {
 
     #[test]
     fn a_command_matcher_never_panics_on_wire_bytes(data: Vec<u8>) {
-        let command = Command::parse("p%2i%2o%2c");
+        let command = CommandTemplate::parse("p%2i%2o%2c");
         let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
         let _ = pattern.capture(&data);
 
-        let command = Command::parse("M%2i%2o%2c%v");
+        let command = CommandTemplate::parse("M%2i%2o%2c%v");
         let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
         let _ = pattern.capture(&data);
     }

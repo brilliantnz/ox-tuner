@@ -87,7 +87,7 @@ pub fn split_fields(value: &str) -> Vec<String> {
 
 /// [`split_fields`] without dropping empty fields.
 ///
-/// Command lists need this: rusEFI declares `burnCommand = "B%2i", "", ""`,
+/// Command template lists need this: rusEFI declares `burnCommand = "B%2i", "", ""`,
 /// where the empty strings mark pages that cannot be burned. Dropping them
 /// would shift every later page onto the wrong command.
 pub fn split_fields_preserving_empty(value: &str) -> Vec<String> {
@@ -179,14 +179,14 @@ pub fn parse_f64(value: &str) -> Option<f64> {
     value.parse().ok()
 }
 
-/// A command string turned into segments the protocol layer can encode.
+/// A command template turned into segments the protocol layer can encode.
 ///
 /// Dialect grammar: literal ASCII bytes, `\xHH` escapes, `$name` substitutions
 /// from PC variables, and the `%` placeholders. Anything else is kept as
 /// [`Segment::Unparsed`] so a definition we only partly understand still loads
 /// and can be reported precisely.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub struct Command {
+pub struct CommandTemplate {
     /// The command as written, minus the surrounding quotes.
     pub raw: String,
     /// The pieces, in wire order.
@@ -249,7 +249,7 @@ impl fmt::Display for Placeholder {
     }
 }
 
-impl Command {
+impl CommandTemplate {
     /// Parses a quoted or bare command string.
     pub fn parse(value: &str) -> Self {
         let raw = unquote(value).to_owned();
@@ -398,7 +398,7 @@ impl Command {
     }
 }
 
-/// Values substituted into a command at send time.
+/// Values substituted into a command template at send time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandArguments<'a> {
     /// Page identifier, written as `[canId][page]` for `%2i`.
@@ -475,7 +475,7 @@ mod tests {
     fn a_megasquirt_command_expands_to_the_documented_bytes() {
         // The spec's worked example: `"r$tsCanId\x0e\x00\x00\x00\x3c"` with
         // tsCanId = 0 goes on the wire as 72 00 0E 00 00 00 3C.
-        let command = Command::parse(r#""r$tsCanId\x0e\x00\x00\x00\x3c""#);
+        let command = CommandTemplate::parse(r#""r$tsCanId\x0e\x00\x00\x00\x3c""#);
 
         let bytes = command
             .encode(&CommandArguments::default(), &|name| {
@@ -491,7 +491,7 @@ mod tests {
         // Offsets and counts are little-endian on the wire (the dialect
         // default; `forceBigEndianProtocol` flips them).
         // The page identifier is the [canId][page] pair, big-endian.
-        let command = Command::parse(r#""p%2i%2o%2c""#);
+        let command = CommandTemplate::parse(r#""p%2i%2o%2c""#);
 
         let bytes = command
             .encode(
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn force_big_endian_protocol_flips_offset_and_count() {
-        let command = Command::parse(r#""p%2i%2o%2c""#);
+        let command = CommandTemplate::parse(r#""p%2i%2o%2c""#);
 
         let bytes = command
             .encode(
@@ -533,7 +533,7 @@ mod tests {
     fn an_escaped_dollar_still_substitutes() {
         // Speeduino writes `"\$tsCanId\x01"`; the backslash only escapes the
         // dollar for the INI reader.
-        let command = Command::parse(r#""\$tsCanId\x01""#);
+        let command = CommandTemplate::parse(r#""\$tsCanId\x01""#);
 
         let bytes = command
             .encode(&CommandArguments::default(), &|_| Some(0x07))
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn an_unknown_variable_is_an_error_not_a_zero_byte() {
-        let command = Command::parse(r#""$missing""#);
+        let command = CommandTemplate::parse(r#""$missing""#);
 
         let error = command
             .encode(&CommandArguments::default(), &|_| None)
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_payload_placeholder_accepts_a_whole_block() {
-        let command = Command::parse(r#""M%2i%2o%2c%2v""#);
+        let command = CommandTemplate::parse(r#""M%2i%2o%2c%2v""#);
 
         let bytes = command
             .encode(
@@ -577,7 +577,7 @@ mod tests {
     fn a_single_value_placeholder_writes_every_payload_byte() {
         // The corpus uses `%v` for a word as well as for one byte: the count
         // says how many bytes follow, and the firmware reads that many.
-        let command = Command::parse(r#""M%2i%2o%2c%v""#);
+        let command = CommandTemplate::parse(r#""M%2i%2o%2c%v""#);
 
         let bytes = command
             .encode(

@@ -144,7 +144,7 @@ fn one_hundred_replays_are_identical() {
     // The bench definition asks for a 10 ms page-activation delay. It changes
     // timing, not bytes, so the determinism loop turns it off: 100 full replays
     // then finish in well under a second instead of spending 15 s asleep.
-    definition.protocol.page_activation_delay_ms = None;
+    definition.comms.page_activation_delay_ms = None;
     let trace = Trace::load(&fixture()).expect("the fixture parses");
     let behavior = Behavior::select(&definition).expect("a known family");
 
