@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::{IniPage, Layout, Tune, TuneError, Values};
+use crate::{IniPage, Tune, TuneError, TuneLayout, Values};
 
 /// The difference between two tunes built from the same layout.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,7 +66,7 @@ impl fmt::Display for TuneDiff {
 ///
 /// `TuneImages` enforces the shared layout when it is built, so its status
 /// computation uses this directly instead of re-validating on every frame.
-pub(crate) fn diff_values(layout: &Layout, baseline: &[Values], other: &[Values]) -> TuneDiff {
+pub(crate) fn diff_values(layout: &TuneLayout, baseline: &[Values], other: &[Values]) -> TuneDiff {
     let mut diff = TuneDiff::default();
 
     for (index, variable) in layout.variables().iter().enumerate() {

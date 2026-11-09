@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use oxtuner_ini::Definition;
-use oxtuner_tune::{EntryShape, Layout, Tune, Values, VariableSpec};
+use oxtuner_tune::{EntryShape, Tune, TuneLayout, Values, VariableSpec};
 
 use crate::check::{IssueKind, LoadReport};
 use crate::msq::{Entry, Msq};
@@ -30,7 +30,7 @@ pub struct LoadedTune {
     /// The working image, values in raw units.
     pub tune: Tune,
     /// The layout every value was interpreted through.
-    pub layout: Arc<Layout>,
+    pub layout: Arc<TuneLayout>,
     /// What the load gate found.
     pub report: LoadReport,
 }
@@ -102,7 +102,7 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         }
     }
 
-    let layout = Arc::new(Layout::build(definition, &|name| {
+    let layout = Arc::new(TuneLayout::build(definition, &|name| {
         user_values.get(name).copied()
     }));
     for issue in layout.issues() {

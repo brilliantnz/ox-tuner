@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{IniPage, Layout, Owner, Tune, TuneDiff, TuneError};
+use crate::{IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
 
 mod conflict;
 mod state;
@@ -16,7 +16,7 @@ use state::aggregate;
 /// The tune's four images plus the transient overlays the core maintains.
 #[derive(Debug, Clone)]
 pub struct TuneImages {
-    layout: Arc<Layout>,
+    layout: Arc<TuneLayout>,
     baseline: Tune,
     working: Tune,
     ecu_ram: Option<Tune>,
@@ -99,7 +99,7 @@ impl TuneImages {
     }
 
     /// The layout all four images share.
-    pub fn layout(&self) -> &Arc<Layout> {
+    pub fn layout(&self) -> &Arc<TuneLayout> {
         &self.layout
     }
 
@@ -376,7 +376,7 @@ impl TuneImages {
     ///
     /// The imported tune keeps its own layout allocation, so values are adopted
     /// into this project's layout after a name-and-shape check; the session's
-    /// `Arc<Layout>` is never replaced under the views holding it.
+    /// `Arc<TuneLayout>` is never replaced under the views holding it.
     ///
     /// # Errors
     ///

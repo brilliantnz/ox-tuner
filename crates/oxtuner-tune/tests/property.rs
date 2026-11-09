@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use oxtuner_ini::{SettingsContext, parse_str};
-use oxtuner_tune::{CellState, Layout, Tune, TuneDiff, TuneImages};
+use oxtuner_tune::{CellState, Tune, TuneDiff, TuneImages, TuneLayout};
 use proptest::prelude::*;
 
 const DEFINITION: &str = r#"
@@ -40,9 +40,9 @@ const CELLS: [(&str, usize); 6] = [
     ("table", 3),
 ];
 
-fn layout() -> Arc<Layout> {
+fn layout() -> Arc<TuneLayout> {
     let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
-    Arc::new(Layout::build(&definition, &|_| None))
+    Arc::new(TuneLayout::build(&definition, &|_| None))
 }
 
 fn apply(tune: &mut Tune, edits: &[(usize, u8)]) {

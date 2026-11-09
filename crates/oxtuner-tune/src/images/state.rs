@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{IniPage, Layout, TuneDiff, TuneError};
+use crate::{IniPage, TuneDiff, TuneError, TuneLayout};
 
 use super::TuneImages;
 
@@ -128,7 +128,7 @@ pub(super) fn aggregate(states: impl Iterator<Item = CellState>) -> CellState {
 
 #[derive(Debug, Clone)]
 pub struct StateTable {
-    layout: Arc<Layout>,
+    layout: Arc<TuneLayout>,
     cells: Vec<Vec<CellState>>,
     pages: Vec<PageState>,
     overall: CellState,

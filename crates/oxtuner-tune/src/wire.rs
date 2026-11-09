@@ -18,7 +18,7 @@
 
 use oxtuner_ini::{DataType, Endianness};
 
-use crate::{EntryShape, IniPage, Layout, Tune, TuneError, VariableSpec};
+use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 
 /// What one page decode did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl DecodeReport {
 /// Returns [`TuneError::UnknownPage`] for a page the layout does not declare
 /// and [`TuneError::ShortPage`] when the image is shorter than the page.
 pub fn decode_page(
-    layout: &Layout,
+    layout: &TuneLayout,
     page: IniPage,
     bytes: &[u8],
     tune: &mut Tune,
@@ -151,7 +151,7 @@ pub fn decode_page(
 /// # Errors
 ///
 /// Returns [`TuneError::UnknownPage`] for a page the layout does not declare.
-pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
+pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
     };
@@ -243,7 +243,7 @@ pub fn encode_page(layout: &Layout, page: IniPage, tune: &Tune) -> Result<Vec<u8
 /// Returns [`TuneError::UnknownPage`] for an undeclared page and
 /// [`TuneError::ShortPage`] when the base image is shorter than the page.
 pub fn patch_page(
-    layout: &Layout,
+    layout: &TuneLayout,
     page: IniPage,
     base: &[u8],
     tune: &Tune,
@@ -540,7 +540,7 @@ name = string, ASCII, 4, 4
     #[test]
     fn a_page_decodes_into_raw_values() {
         let definition = definition();
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
 
         let report = decode_page(
@@ -561,7 +561,7 @@ name = string, ASCII, 4, 4
     #[test]
     fn a_page_round_trips_through_the_codec() {
         let definition = definition();
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
         let bytes = [0x10, 0x27, 0xFB, 0x14, b'o', b'x', b' ', b' ', 0, 0];
 
@@ -590,7 +590,7 @@ value = scalar, U08, 2, \"x\", 1.0, 0.0
             &SettingsContext::new(),
         )
         .expect("parses");
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
 
         let report =
@@ -624,7 +624,7 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
         .expect("parses");
         // The text address (99) lies past the 4-byte page: a definition bug the
         // encoder must skip instead of slicing out of bounds.
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let tune = Tune::new(Arc::new(layout.clone()));
 
         let bytes = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
@@ -635,7 +635,7 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
     #[test]
     fn a_short_page_is_refused() {
         let definition = definition();
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
 
         let error =
@@ -647,7 +647,7 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
     #[test]
     fn a_patch_writes_only_the_named_variable() {
         let definition = definition();
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
         tune.set_user("rpm", 4200.0).expect("known");
         let base = [0x10, 0x27, 0xFB, 0x14, b'o', b'x', b' ', b' ', 0, 0];
@@ -663,7 +663,7 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
     #[test]
     fn a_patch_clears_the_rest_of_a_short_text_field() {
         let definition = definition();
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
         tune.set_text("name", "ox").expect("known");
 
@@ -698,7 +698,7 @@ fan = bits, U08, 0, [1:1]
             &SettingsContext::new(),
         )
         .expect("parses");
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
         tune.set_user("fan", 1.0).expect("known");
 
