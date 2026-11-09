@@ -12,9 +12,9 @@
 //!
 //! ```text
 //! Definition (oxtuner-ini)
-//!     │  Layout::build         one frozen entry per constant / PC variable
+//!     │  TuneLayout::build         one frozen entry per constant / PC variable
 //!     ▼
-//!   Layout ──▶ Tune              raw values + edit timestamps
+//!   TuneLayout ──▶ Tune              raw values + edit timestamps
 //!     │          │
 //!     │          ├── TuneDiff    what changed, how many cells, per page
 //!     │          ▼
@@ -84,7 +84,7 @@ pub use images::{
     CellState, CellValue, Conflict, PageState, StateTable, TuneImages, TuneStatus, conflict_names,
 };
 pub use layout::{
-    EntryShape, IssueSeverity, Layout, LayoutIssue, LayoutIssueKind, Owner, PageLayout,
+    EntryShape, IssueSeverity, LayoutIssue, LayoutIssueKind, Owner, PageLayout, TuneLayout,
     VariableSpec,
 };
 pub use page::{IniPage, MsqPage};

@@ -30,14 +30,14 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
 "#;
 
     fn tune() -> Tune {
-        // Every tune in these tests must share one `Arc<Layout>`: the images
+        // Every tune in these tests must share one `Arc<TuneLayout>`: the images
         // reject anything else, exactly as production does when the ECU image
         // is read through the same definition as the working image.
-        static LAYOUT: OnceLock<Arc<Layout>> = OnceLock::new();
+        static LAYOUT: OnceLock<Arc<TuneLayout>> = OnceLock::new();
         let layout = LAYOUT.get_or_init(|| {
             let definition =
                 parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
-            Arc::new(Layout::build(&definition, &|_| None))
+            Arc::new(TuneLayout::build(&definition, &|_| None))
         });
         Tune::new(Arc::clone(layout))
     }
@@ -291,7 +291,7 @@ note = string, ASCII, 8
     fn scaled_images() -> TuneImages {
         let definition =
             parse_str(SCALED_DEFINITION, &SettingsContext::new()).expect("definition parses");
-        let layout = Arc::new(Layout::build(&definition, &|_| None));
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
         TuneImages::from_working(Tune::new(layout))
     }
 

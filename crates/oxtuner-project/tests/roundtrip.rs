@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use oxtuner_ini::{Definition, SettingsContext, parse_str};
 use oxtuner_project::{Msq, format_values, load};
-use oxtuner_tune::{Layout, Values};
+use oxtuner_tune::{TuneLayout, Values};
 use proptest::prelude::*;
 
 const DEFINITION: &str = r#"
@@ -34,9 +34,9 @@ fn definition() -> &'static Definition {
     })
 }
 
-fn layout() -> &'static Layout {
-    static BUILT: OnceLock<Layout> = OnceLock::new();
-    BUILT.get_or_init(|| Layout::build(definition(), &|_| None))
+fn layout() -> &'static TuneLayout {
+    static BUILT: OnceLock<TuneLayout> = OnceLock::new();
+    BUILT.get_or_init(|| TuneLayout::build(definition(), &|_| None))
 }
 
 fn tune_with(entries: &str) -> String {

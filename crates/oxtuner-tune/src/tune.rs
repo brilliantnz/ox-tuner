@@ -15,7 +15,7 @@ use std::time::SystemTime;
 
 use oxtuner_ini::Definition;
 
-use crate::{AttributeError, EntryShape, IniPage, Layout, RawConversion, Values, VariableSpec};
+use crate::{AttributeError, EntryShape, IniPage, RawConversion, TuneLayout, Values, VariableSpec};
 
 /// One edited cell, for the edit log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -145,7 +145,7 @@ impl From<AttributeError> for TuneError {
 /// The working image of a tune.
 #[derive(Debug, Clone)]
 pub struct Tune {
-    layout: Arc<Layout>,
+    layout: Arc<TuneLayout>,
     values: Vec<Values>,
     edits: BTreeMap<Cell, SystemTime>,
 }
@@ -153,12 +153,12 @@ pub struct Tune {
 impl Tune {
     /// A tune built from a definition with every value at its default.
     pub fn from_definition(definition: &Definition) -> Self {
-        let layout = Layout::build(definition, &|_| None);
+        let layout = TuneLayout::build(definition, &|_| None);
         Self::new(Arc::new(layout))
     }
 
     /// A tune whose values are the layout's defaults.
-    pub fn new(layout: Arc<Layout>) -> Self {
+    pub fn new(layout: Arc<TuneLayout>) -> Self {
         let values = layout
             .variables()
             .iter()
@@ -172,7 +172,7 @@ impl Tune {
     }
 
     /// The frozen layout every value is interpreted through.
-    pub fn layout(&self) -> &Arc<Layout> {
+    pub fn layout(&self) -> &Arc<TuneLayout> {
         &self.layout
     }
 

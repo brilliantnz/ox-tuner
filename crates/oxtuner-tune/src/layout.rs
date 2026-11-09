@@ -207,13 +207,13 @@ pub struct PageLayout {
     pub size: u32,
     /// Base address added to every constant offset (`parameterStartOffset`).
     pub start_offset: u32,
-    /// Indices into [`Layout::variables`], in definition order.
+    /// Indices into [`TuneLayout::variables`], in definition order.
     pub variables: Vec<usize>,
 }
 
 impl PageLayout {
     /// Number of cells on the page.
-    pub fn cell_count(&self, layout: &Layout) -> usize {
+    pub fn cell_count(&self, layout: &TuneLayout) -> usize {
         self.variables
             .iter()
             .map(|index| layout.variables[*index].element_count())
@@ -292,7 +292,7 @@ impl fmt::Display for LayoutIssue {
 
 /// The frozen shape of one tune.
 #[derive(Debug, Clone)]
-pub struct Layout {
+pub struct TuneLayout {
     signature: String,
     endianness: Endianness,
     variables: Vec<VariableSpec>,
@@ -302,7 +302,7 @@ pub struct Layout {
     issues: Vec<LayoutIssue>,
 }
 
-impl Layout {
+impl TuneLayout {
     /// Builds the layout from a definition.
     ///
     /// `values` supplies **user-unit** values for names referenced by
@@ -720,7 +720,7 @@ REQFUEL = scalar, U08, 1, "", 1, 0, 0, 3, 0
     #[test]
     fn the_layout_index_is_case_insensitive_and_keeps_the_first_name() {
         let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
-        let layout = Layout::build(&definition, &|_| None);
+        let layout = TuneLayout::build(&definition, &|_| None);
 
         let index = layout.index("reqFuel").expect("first spelling");
         assert_eq!(layout.index("REQFUEL"), Some(index));

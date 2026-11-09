@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use oxtuner_ini::{Definition, IniError, SettingsContext};
-use oxtuner_tune::{Layout, Tune, TuneDiff, TuneError, TuneImages};
+use oxtuner_tune::{Tune, TuneDiff, TuneError, TuneImages, TuneLayout};
 
 use crate::check::LoadReport;
 use crate::definition_cache::{DefinitionCache, DefinitionSource, IncludeRecorder};
@@ -493,7 +493,7 @@ impl Project {
     }
 
     /// The layout every value is interpreted through.
-    pub fn layout(&self) -> &Arc<Layout> {
+    pub fn layout(&self) -> &Arc<TuneLayout> {
         self.images.layout()
     }
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_ini::{Definition, SettingsContext, parse_str};
-use oxtuner_tune::{Layout, StateTable, Tune, TuneImages};
+use oxtuner_tune::{StateTable, Tune, TuneImages, TuneLayout};
 
 /// The reference project's definition, in shape if not in content.
 ///
@@ -66,12 +66,12 @@ pageSize = 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288, 288,
     parse_str(&text, &SettingsContext::new()).expect("the synthetic definition parses")
 }
 
-fn layout(definition: &Definition) -> Arc<Layout> {
-    Arc::new(Layout::build(definition, &|_| None))
+fn layout(definition: &Definition) -> Arc<TuneLayout> {
+    Arc::new(TuneLayout::build(definition, &|_| None))
 }
 
 /// A tune that looks connected: RAM and flash equal, every tenth cell edited.
-fn images(layout: Arc<Layout>) -> TuneImages {
+fn images(layout: Arc<TuneLayout>) -> TuneImages {
     let baseline = Tune::new(Arc::clone(&layout));
     let mut ram = baseline.snapshot();
     let mut working = baseline.snapshot();
@@ -104,7 +104,7 @@ fn budget(criterion: &mut Criterion) {
     let table = StateTable::build(&images);
 
     criterion.bench_function("layout_build_15_pages_818_constants", |bencher| {
-        bencher.iter(|| black_box(Layout::build(black_box(&definition), &|_| None)));
+        bencher.iter(|| black_box(TuneLayout::build(black_box(&definition), &|_| None)));
     });
 
     criterion.bench_function("layout_lookup_mixed_case", |bencher| {

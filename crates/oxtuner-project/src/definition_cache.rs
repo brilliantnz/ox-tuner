@@ -11,7 +11,7 @@
 //! special because the cache lives in the application's cache directory, never
 //! inside the project.
 //!
-//! # Layout
+//! # `TuneLayout`
 //!
 //! ```text
 //! magic[8] | header_len u32-le | header (postcard) | definition (postcard)

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::{Layout, TuneDiff, Values};
+use crate::{TuneDiff, TuneLayout, Values};
 
 use super::TuneImages;
 
@@ -66,7 +66,11 @@ pub fn conflict_names(images: &TuneImages) -> BTreeSet<String> {
         .collect()
 }
 
-pub(super) fn diff_writable_values(layout: &Layout, left: &[Values], right: &[Values]) -> TuneDiff {
+pub(super) fn diff_writable_values(
+    layout: &TuneLayout,
+    left: &[Values],
+    right: &[Values],
+) -> TuneDiff {
     let mut diff = TuneDiff::default();
     for (index, variable) in layout.variables().iter().enumerate() {
         if variable.is_controller_owned() || variable.address.is_none() {

@@ -122,7 +122,7 @@ pub(crate) fn clamp_user(spec: &VariableSpec, value: f64) -> (f64, bool) {
 #[cfg(test)]
 mod tests {
     use oxtuner_ini::{SettingsContext, parse_str};
-    use oxtuner_tune::Layout;
+    use oxtuner_tune::TuneLayout;
 
     use super::*;
 
@@ -141,7 +141,7 @@ fuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
             &SettingsContext::new(),
         )
         .expect("parses");
-        Layout::build(&definition, &|_| None)
+        TuneLayout::build(&definition, &|_| None)
             .variable(name)
             .expect("a variable")
             .clone()
