@@ -197,7 +197,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
                 .iter()
                 .filter_map(|page| page.read_command.as_ref()),
         )
-        .chain(definition.protocol.och_get_command.iter())
+        .chain(definition.comms.och_get_command.iter())
         .filter_map(|command| command.segments.first())
         .filter_map(|segment| match segment {
             oxtuner_ini::Segment::Byte(byte) => Some(*byte),
@@ -324,7 +324,7 @@ fn the_bench_page_crc_matches_the_page_it_read() {
     // The Arduino resets on open; give it the definition's delay to boot.
     std::thread::sleep(std::time::Duration::from_millis(
         definition
-            .protocol
+            .comms
             .delay_after_port_open_ms
             .unwrap_or(0)
             .into(),

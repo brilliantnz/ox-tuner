@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::fields::{Command, split_fields};
+use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Ordered, ReferenceTable};
 
 use super::SectionParser;
@@ -155,9 +155,9 @@ pub(crate) fn parse_controller_commands(
             continue;
         }
 
-        let commands: Vec<Command> = split_fields(&value)
+        let commands: Vec<CommandTemplate> = split_fields(&value)
             .iter()
-            .map(|field| Command::parse(field))
+            .map(|field| CommandTemplate::parse(field))
             .collect();
         if commands.is_empty() {
             section.warn(
@@ -226,7 +226,7 @@ pub(crate) fn parse_reference_tables(
             lowered.as_str(),
             "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
         ) {
-            definition.protocol.raw.insert(key.clone(), value.clone());
+            definition.comms.raw.insert(key.clone(), value.clone());
             section.understand(*line);
             continue;
         }
@@ -245,7 +245,7 @@ pub(crate) fn parse_reference_tables(
 
         let understood = apply_reference_table_key(
             table,
-            &mut definition.protocol.raw,
+            &mut definition.comms.raw,
             &lowered,
             &fields,
             &name,

@@ -109,7 +109,7 @@ pub(crate) fn parse_tables(
             // protection, which belongs to the UI layer.
             "userpassword" => {
                 definition
-                    .protocol
+                    .comms
                     .raw
                     .insert(format!("table.{}.userpassword", table.id), value.to_owned());
             }
@@ -242,7 +242,7 @@ pub(crate) fn parse_curves(
             // topic. Kept verbatim rather than dropped.
             "size" | "topichelp" | "userpassword" => {
                 definition
-                    .protocol
+                    .comms
                     .raw
                     .insert(format!("curve.{}.{key}", curve.name), value.to_owned());
             }

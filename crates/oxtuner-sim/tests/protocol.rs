@@ -311,7 +311,7 @@ fn every_page_and_realtime_block_round_trips_at_the_declared_size() {
     let block = protocol.read_realtime(&mut transport).expect("realtime");
     assert_eq!(
         block.len(),
-        usize::try_from(definition.protocol.och_block_size.expect("declared")).unwrap_or(0)
+        usize::try_from(definition.comms.och_block_size.expect("declared")).unwrap_or(0)
     );
 }
 

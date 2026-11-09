@@ -123,7 +123,7 @@ fn the_reference_speeduino_ini_parses() {
         default_burn.map(|command| command.raw.as_str()),
         Some("b%2i")
     );
-    assert_eq!(definition.protocol.blocking_factor, Some(251));
+    assert_eq!(definition.comms.blocking_factor, Some(251));
 
     let compatible = parse_bytes(
         &bytes,
@@ -140,7 +140,7 @@ fn the_reference_speeduino_ini_parses() {
         "COMMS_COMPAT must rewrite burnCommand"
     );
     assert_eq!(
-        compatible.protocol.blocking_factor,
+        compatible.comms.blocking_factor,
         Some(121),
         "mcu_stm32 must rewrite blockingFactor"
     );

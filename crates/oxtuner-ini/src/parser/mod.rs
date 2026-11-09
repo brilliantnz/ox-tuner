@@ -212,7 +212,7 @@ fn dispatch(
                 section.count_entry();
                 if let Some((key, value)) = crate::fields::split_assignment(text) {
                     definition
-                        .protocol
+                        .comms
                         .raw
                         .insert(key.trim().to_owned(), value.trim().to_owned());
                     section.understand(*line);

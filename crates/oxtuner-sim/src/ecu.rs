@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use oxtuner_ini::{ChannelKind, Command, Definition};
+use oxtuner_ini::{ChannelKind, CommandTemplate, Definition};
 use oxtuner_protocol::{CommandPattern, page_identifier};
 
 use crate::SimError;
@@ -81,7 +81,7 @@ pub(crate) struct SimEcu {
 
 /// One command pattern with the definition's variables resolved.
 fn pattern_for(
-    command: &Command,
+    command: &CommandTemplate,
     variables: &HashMap<String, u8>,
     force_big_endian: bool,
 ) -> Option<CommandPattern> {
@@ -96,7 +96,7 @@ fn build_pages(
     variables: &HashMap<String, u8>,
     force_big_endian: bool,
 ) -> Vec<PageEcu> {
-    let pattern = |command: &Command| pattern_for(command, variables, force_big_endian);
+    let pattern = |command: &CommandTemplate| pattern_for(command, variables, force_big_endian);
 
     definition
         .pages
@@ -139,8 +139,9 @@ impl SimEcu {
     /// Builds the message set, using `signature` as the reply text.
     pub(crate) fn new(definition: &Definition, signature: String) -> Result<Self, SimError> {
         let variables = variables(definition);
-        let force_big_endian = definition.protocol.force_big_endian_protocol;
-        let pattern = |command: &Command| pattern_for(command, &variables, force_big_endian);
+        let force_big_endian = definition.comms.force_big_endian_protocol;
+        let pattern =
+            |command: &CommandTemplate| pattern_for(command, &variables, force_big_endian);
 
         let query = definition
             .query_command
@@ -148,19 +149,19 @@ impl SimEcu {
             .filter(|command| !command.is_empty())
             .and_then(pattern);
         let realtime = definition
-            .protocol
+            .comms
             .och_get_command
             .as_ref()
             .and_then(|command| {
                 let pattern = pattern(command)?;
                 let block_size = definition
-                    .protocol
+                    .comms
                     .och_block_size
                     .and_then(|size| usize::try_from(size).ok())?;
                 Some(RealtimeEcu {
                     pattern,
                     block_size,
-                    start_offset: u16::try_from(definition.protocol.output_channel_start_offset)
+                    start_offset: u16::try_from(definition.comms.output_channel_start_offset)
                         .unwrap_or(0),
                     burn_pending: definition.channels.iter().find_map(|(name, channel)| {
                         if !name.eq_ignore_ascii_case("burnPending") {

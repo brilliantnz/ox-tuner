@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use crate::fields::{Command, split_fields};
+use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{
     BitRange, Channel, ChannelKind, DataType, Definition, Number, ScatteredConfig, Text,
 };
@@ -29,19 +29,19 @@ pub(crate) fn parse_channels(
 
         match key.to_ascii_lowercase().as_str() {
             "ochgetcommand" => {
-                definition.protocol.och_get_command = Some(Command::parse(&value));
+                definition.comms.och_get_command = Some(CommandTemplate::parse(&value));
                 section.understand(*line);
                 continue;
             }
             "ochblocksize" => {
-                definition.protocol.och_block_size = crate::fields::parse_u32(&value);
+                definition.comms.och_block_size = crate::fields::parse_u32(&value);
                 section.understand(*line);
                 continue;
             }
             "maxunusedruntimerange" => {
                 // An unreadable value keeps the dialect default instead of guessing.
                 if let Some(range) = crate::fields::parse_u32(&value) {
-                    definition.protocol.max_unused_runtime_range = range;
+                    definition.comms.max_unused_runtime_range = range;
                 } else {
                     section.warn(
                         "bad-number",
@@ -57,16 +57,16 @@ pub(crate) fn parse_channels(
             }
             "scatteredochgetcommand" => {
                 let scattered = definition
-                    .protocol
+                    .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
-                scattered.get_command = Some(Command::parse(&value));
+                scattered.get_command = Some(CommandTemplate::parse(&value));
                 section.understand(*line);
                 continue;
             }
             "scatteredoffsetarray" => {
                 let scattered = definition
-                    .protocol
+                    .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
                 scattered.offset_array = Some(crate::fields::unquote(&value).to_owned());
@@ -75,7 +75,7 @@ pub(crate) fn parse_channels(
             }
             "scatteredgetenabled" => {
                 let scattered = definition
-                    .protocol
+                    .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
                 scattered.enabled = Some(value.clone());
@@ -253,7 +253,7 @@ pub(crate) fn parse_burst_mode(
         };
         match key.to_ascii_lowercase().as_str() {
             "getcommand" => {
-                definition.protocol.burst_get_command = Some(Command::parse(&value));
+                definition.comms.burst_get_command = Some(CommandTemplate::parse(&value));
                 section.understand(*line);
             }
             _ => section.unrecognized_key(&key, *line),

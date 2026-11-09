@@ -131,7 +131,7 @@ pub trait EcuBehavior: Send + Sync {
     /// Commands to send once after the port opens, before the first read.
     ///
     /// An empty slice is the normal answer.
-    fn handshake(&self, definition: &Definition) -> Vec<oxtuner_ini::Command>;
+    fn handshake(&self, definition: &Definition) -> Vec<oxtuner_ini::CommandTemplate>;
 
     /// The page checksum variant, when the definition offers a command.
     fn crc(&self, definition: &Definition, page: u8) -> Option<Crc>;
@@ -221,7 +221,7 @@ impl EcuBehavior for SpeeduinoBehavior {
         }
     }
 
-    fn handshake(&self, _definition: &Definition) -> Vec<oxtuner_ini::Command> {
+    fn handshake(&self, _definition: &Definition) -> Vec<oxtuner_ini::CommandTemplate> {
         Vec::new()
     }
 
@@ -272,8 +272,8 @@ impl EcuBehavior for MsCompatibleBehavior {
             .pages
             .iter()
             .any(|page| page.read_command.is_some());
-        let has_realtime = definition.protocol.och_get_command.is_some()
-            && definition.protocol.och_block_size.is_some();
+        let has_realtime =
+            definition.comms.och_get_command.is_some() && definition.comms.och_block_size.is_some();
         if has_pages && has_realtime {
             Match::Compatible
         } else {
@@ -281,7 +281,7 @@ impl EcuBehavior for MsCompatibleBehavior {
         }
     }
 
-    fn handshake(&self, _definition: &Definition) -> Vec<oxtuner_ini::Command> {
+    fn handshake(&self, _definition: &Definition) -> Vec<oxtuner_ini::CommandTemplate> {
         // rusEFI and FOME answer as soon as the port is open; the port's DTR
         // reset is covered by `delayAfterPortOpen`.
         Vec::new()

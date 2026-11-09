@@ -22,7 +22,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossfire::{Rx, TrySendError, spsc};
-use oxtuner_ini::{Command as IniCommand, Definition};
+use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
 use oxtuner_protocol::{Behavior, CommandReport, LinkMode, MsProtocol, Protocol, ProtocolError};
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
@@ -80,7 +80,7 @@ pub(crate) enum IoOp {
     /// Burn a list of pages.
     BurnPages { pages: Vec<u8> },
     /// Send one `[ControllerCommands]` action's command strings, in order.
-    Command { commands: Vec<IniCommand> },
+    Command { commands: Vec<IniCommandTemplate> },
     /// Read one realtime block.
     ReadRealtime,
     /// Reopen the link and read the signature again.

@@ -640,11 +640,11 @@ impl<'project> RowWalk<'project> {
                             .filter(|link| !link.is_empty());
                     }
                 }
-                RowKind::Help | RowKind::WebHelp => {
+                RowKind::HelpText | RowKind::WebHelp => {
                     self.pending_preset = None;
                     self.walk_help(row, section);
                 }
-                RowKind::Panel | RowKind::IndicatorPanel | RowKind::ReadoutPanel => {
+                RowKind::EmbeddedPanel | RowKind::IndicatorPanel | RowKind::ReadoutPanel => {
                     // No group close: the nested dialog is its own frame and
                     // `walk` saves and restores the pending selector.
                     self.walk_panel(row, section);
@@ -677,7 +677,7 @@ impl<'project> RowWalk<'project> {
                         self.fields.push(field);
                     }
                 }
-                RowKind::Array1D | RowKind::Unknown => {
+                RowKind::Array1D | RowKind::Unmodeled => {
                     self.pending_preset = None;
 
                     self.unmodeled.push(DialogUnmodeledRow {

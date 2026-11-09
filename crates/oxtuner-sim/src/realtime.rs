@@ -103,7 +103,7 @@ impl Generator {
     /// Reads the channels of `definition` and prepares their sources.
     pub(crate) fn new(definition: &Definition, seed: u64) -> Self {
         let block_size = definition
-            .protocol
+            .comms
             .och_block_size
             .and_then(|size| usize::try_from(size).ok())
             .unwrap_or(0);

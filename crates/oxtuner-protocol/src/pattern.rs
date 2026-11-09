@@ -2,14 +2,14 @@
 //!
 //! The simulator has to understand the commands a definition declares without
 //! hard-coding Speeduino's letters. [`CommandPattern`] is that bridge: it reads
-//! the same [`oxtuner_ini::Command`] the protocol encodes with and recognises
+//! the same [`oxtuner_ini::CommandTemplate`] the protocol encodes with and recognises
 //! the bytes on the wire, extracting the page, offset, count and payload.
 //!
 //! ```text
 //! "p%2i%2o%2c"  ──▶  ['p'] [page: u8, u8] [offset: u16] [count: u16]
 //! ```
 
-use oxtuner_ini::{Command, Placeholder, Segment};
+use oxtuner_ini::{CommandTemplate, Placeholder, Segment};
 
 /// One recognised piece of a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl CommandPattern {
     /// value: guessing either would make the simulator answer a command the
     /// firmware would not.
     pub fn new(
-        command: &Command,
+        command: &CommandTemplate,
         force_big_endian: bool,
         variables: &dyn Fn(&str) -> Option<u8>,
     ) -> Option<Self> {
@@ -187,7 +187,7 @@ impl CommandPattern {
 /// own default, and never invents a CAN id.
 pub fn page_identifier(
     number: u8,
-    identifier: Option<&oxtuner_ini::Command>,
+    identifier: Option<&oxtuner_ini::CommandTemplate>,
     variables: &dyn Fn(&str) -> Option<u8>,
 ) -> [u8; 2] {
     let encoded = identifier.and_then(|command| {
@@ -203,17 +203,17 @@ pub fn page_identifier(
 
 #[cfg(test)]
 mod tests {
-    use oxtuner_ini::Command;
+    use oxtuner_ini::CommandTemplate;
 
     use super::*;
 
     fn pattern(text: &str) -> CommandPattern {
-        CommandPattern::new(&Command::parse(text), false, &|_| Some(0)).expect("a pattern")
+        CommandPattern::new(&CommandTemplate::parse(text), false, &|_| Some(0)).expect("a pattern")
     }
 
     #[test]
     fn a_page_read_yields_its_page_offset_and_count() {
-        let command = Command::parse(r#""p%2i%2o%2c""#);
+        let command = CommandTemplate::parse(r#""p%2i%2o%2c""#);
         let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
 
         let matched = pattern

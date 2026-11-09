@@ -242,7 +242,7 @@ fn build_item(
             gates: GateState::default(),
             children: Vec::new(),
         },
-        MenuTargetKind::Panel => resolve(id, label, &item.target, definition),
+        MenuTargetKind::DefinitionTarget => resolve(id, label, &item.target, definition),
         // Filtered above; a divider never becomes a node.
         MenuTargetKind::Separator => return None,
     };
@@ -393,7 +393,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
 fn is_help_topic(definition: &Definition, target: &str) -> bool {
     definition.dialogs.values().any(|dialog| {
         dialog.rows.iter().any(|row| {
-            row.kind == RowKind::Help
+            row.kind == RowKind::HelpText
                 && row.fields.first().is_some_and(|field| {
                     field.trim().trim_matches('"').eq_ignore_ascii_case(target)
                 })
@@ -440,7 +440,7 @@ pub(crate) fn embedded_target(
     }
     let dialog = definition.dialogs.get_ci(name)?;
     for row in &dialog.rows {
-        if row.kind != RowKind::Panel {
+        if row.kind != RowKind::EmbeddedPanel {
             continue;
         }
         let Some(target) = panel_target(row) else {
