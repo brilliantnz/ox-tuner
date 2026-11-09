@@ -932,7 +932,7 @@ fn a_controller_command_marks_the_ecu_image_stale() {
 
     let (_, entries) = core.journal();
     assert_eq!(entries.len(), 2, "begin and result");
-    assert_eq!(entries[0].operation, "command");
+    assert_eq!(entries[0].operation, "controller-command");
     assert_eq!(entries[0].phase, "begin");
     assert_eq!(entries[1].phase, "result");
     assert_eq!(entries[1].result, "ok");

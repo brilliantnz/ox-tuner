@@ -100,7 +100,7 @@ pub struct ImportSummary {
 pub struct JournalEntry {
     /// UTC time, RFC 3339.
     pub at: String,
-    /// `write`, `burn`, `revert`, `import` or `restore`.
+    /// `write`, `burn`, `controller-command`, `revert`, `import` or `restore`.
     pub operation: String,
     /// `begin` or `result`.
     pub phase: String,

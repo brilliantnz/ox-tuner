@@ -55,7 +55,7 @@ pub(crate) fn set_writes_enabled(enabled: bool, cx: &mut App) {
 ///
 /// The core decides whether the session may run it; this sender only carries
 /// the dialog and the command name.
-pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) {
+pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) -> bool {
     let dialog = dialog.to_owned();
     let command = command.to_owned();
 
@@ -64,7 +64,7 @@ pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) 
         FailureCode::ControllerCommandRefused,
         "run-controller-command",
         move |handle| handle.run_controller_command(dialog, command),
-    );
+    )
 }
 
 /// Clears a halted write path after the user reviewed the failure.

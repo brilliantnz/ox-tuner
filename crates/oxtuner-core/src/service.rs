@@ -1963,7 +1963,7 @@ fn run_controller_command(
     };
     let begin = JournalEntry {
         at: journal::timestamp(),
-        operation: "command".to_owned(),
+        operation: "controller-command".to_owned(),
         phase: "begin".to_owned(),
         port: connection.link_label.clone(),
         signature: connection.signature.clone(),
@@ -4912,7 +4912,7 @@ fn record_result(transaction: &WriteTxn, live: &Live, result: &str, detail: &str
 fn record_command_result(transaction: &CommandTxn, live: &Live, result: &str, detail: &str) {
     let entry = JournalEntry {
         at: journal::timestamp(),
-        operation: "command".to_owned(),
+        operation: "controller-command".to_owned(),
         phase: "result".to_owned(),
         port: live.link_label.clone(),
         signature: live.signature.clone(),

@@ -965,9 +965,9 @@ fn command_card(dialog: &DialogSummary, cx: &mut Context<'_, DialogEditor>) -> O
 
 /// Sends a command button's action and shows its declared message.
 fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut App) {
-    crate::core::run_controller_command(dialog, command, cx);
-
-    if let Some(message) = message {
+    if crate::core::run_controller_command(dialog, command, cx)
+        && let Some(message) = message
+    {
         notifications::publish(
             NotificationDraft::new(
                 NotificationSeverity::Info,

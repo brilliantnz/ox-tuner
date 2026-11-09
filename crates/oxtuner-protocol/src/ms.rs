@@ -76,9 +76,9 @@ pub struct RealtimeSpec {
 pub struct CommandReport {
     /// Command strings sent.
     pub commands: usize,
-    /// Bytes written to the wire.
+    /// Bytes written to the wire, including framing.
     pub bytes: usize,
-    /// Bytes the ECU answered.
+    /// Reply payload bytes, without framing.
     pub replies: usize,
 }
 
@@ -522,6 +522,10 @@ impl MsProtocol {
 
             report.commands += 1;
         }
+
+        // A raw action may answer after the drain window, and the next
+        // conversation must not read those bytes as its own reply.
+        io.flush_input();
 
         Ok(report)
     }
