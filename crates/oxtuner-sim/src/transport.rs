@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use oxtuner_ini::Definition;
-use oxtuner_protocol::{Behavior, Frame, ReplyCode, crc32};
+use oxtuner_protocol::{BehaviorKind, Frame, ReplyCode, crc32};
 use oxtuner_transport::{Transport, TransportError};
 
 use crate::SimError;
@@ -216,7 +216,7 @@ impl SimTransport {
             faults.arm(rule);
         }
 
-        let reply_code = Behavior::select(definition).map_or(ReplyCode::Leading, |behavior| {
+        let reply_code = BehaviorKind::select(definition).map_or(ReplyCode::Leading, |behavior| {
             behavior.as_dyn().reply_code(definition)
         });
 

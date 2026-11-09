@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
-use oxtuner_protocol::{Behavior, CommandReport, LinkMode, MsProtocol, Protocol, ProtocolError};
+use oxtuner_protocol::{
+    BehaviorKind, LinkMode, MsProtocol, Protocol, ProtocolError, RawCommandReport,
+};
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
@@ -59,7 +61,7 @@ pub(crate) struct IoPlan {
     /// The definition the protocol encodes with; owned by the thread.
     pub(crate) definition: Box<Definition>,
     /// The behavior selected for it.
-    pub(crate) behavior: Behavior,
+    pub(crate) behavior: BehaviorKind,
     /// The framing override (`None` uses the definition's own).
     pub(crate) link_mode: Option<LinkMode>,
     /// Where the bytes go.
@@ -172,7 +174,7 @@ pub(crate) enum IoOutcome {
     /// Pages were burned.
     Burned { pages: usize },
     /// One controller command action was sent.
-    Command { report: CommandReport },
+    Command { report: RawCommandReport },
     /// One realtime block.
     Realtime { block: Vec<u8> },
     /// The link reopened and answered again.
@@ -686,7 +688,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     #[test]
     fn the_io_thread_answers_a_signature_query() {
         let definition = definition();
-        let behavior = Behavior::select(&definition).expect("a family");
+        let behavior = BehaviorKind::select(&definition).expect("a family");
         let plan = IoPlan {
             definition: Box::new(definition),
             behavior,

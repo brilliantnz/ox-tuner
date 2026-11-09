@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use oxtuner_core::RealtimeDecoder;
 use oxtuner_ini::SettingsContext;
-use oxtuner_protocol::{Behavior, Frame, LinkMode, MsProtocol, Protocol};
+use oxtuner_protocol::{BehaviorKind, Frame, LinkMode, MsProtocol, Protocol};
 use oxtuner_transport::{Direction, ReplayTransport, Trace, Transport};
 
 /// The parts of the real `speeduino 202501` definition the replay needs.
@@ -80,7 +80,7 @@ fn the_recorded_no2c_session_replays_without_hardware() {
     }
 
     let definition = definition();
-    let behavior = Behavior::select(&definition).expect("a known family");
+    let behavior = BehaviorKind::select(&definition).expect("a known family");
     let mut protocol = MsProtocol::new(&definition, behavior.as_dyn())
         .expect("the definition is complete")
         .with_link_mode(LinkMode::Envelope);
@@ -146,7 +146,7 @@ fn one_hundred_replays_are_identical() {
     // then finish in well under a second instead of spending 15 s asleep.
     definition.comms.page_activation_delay_ms = None;
     let trace = Trace::load(&fixture()).expect("the fixture parses");
-    let behavior = Behavior::select(&definition).expect("a known family");
+    let behavior = BehaviorKind::select(&definition).expect("a known family");
 
     let expected = run(&trace, &definition, behavior);
     for _ in 0..100 {
@@ -158,7 +158,7 @@ fn one_hundred_replays_are_identical() {
 fn run(
     trace: &Trace,
     definition: &oxtuner_ini::Definition,
-    behavior: Behavior,
+    behavior: BehaviorKind,
 ) -> (String, Vec<u8>, Vec<u8>) {
     let mut replay = ReplayTransport::new(trace.clone());
     replay.open().expect("opens");

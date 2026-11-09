@@ -18,7 +18,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_ini::{Definition, SettingsContext, parse_str};
-use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol};
+use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
 use oxtuner_sim::{SimConfig, SimTransport};
 use oxtuner_transport::Transport;
 
@@ -68,7 +68,7 @@ fn bench_build(criterion: &mut Criterion) {
 
 fn bench_realtime_read(criterion: &mut Criterion) {
     let definition = definition();
-    let behavior = Behavior::select(&definition).expect("a known family");
+    let behavior = BehaviorKind::select(&definition).expect("a known family");
     let mut protocol = MsProtocol::new(&definition, behavior.as_dyn())
         .expect("the definition is complete")
         .with_link_mode(LinkMode::Legacy);
@@ -92,7 +92,7 @@ fn bench_realtime_read(criterion: &mut Criterion) {
 
 fn bench_page_read(criterion: &mut Criterion) {
     let definition = definition();
-    let behavior = Behavior::select(&definition).expect("a known family");
+    let behavior = BehaviorKind::select(&definition).expect("a known family");
     let mut protocol = MsProtocol::new(&definition, behavior.as_dyn())
         .expect("the definition is complete")
         .with_link_mode(LinkMode::Legacy);

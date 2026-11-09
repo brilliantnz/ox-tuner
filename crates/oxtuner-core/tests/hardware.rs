@@ -314,7 +314,7 @@ fn the_bench_page_crc_matches_the_page_it_read() {
     let port = std::env::var("OX_TUNER_SERIAL_PORT")
         .unwrap_or_else(|_| "/dev/cu.usbmodem21201".to_owned());
     let definition = read_definition();
-    let behavior = oxtuner_protocol::Behavior::select(&definition).expect("a known family");
+    let behavior = oxtuner_protocol::BehaviorKind::select(&definition).expect("a known family");
     let mut protocol = oxtuner_protocol::MsProtocol::new(&definition, behavior.as_dyn())
         .expect("the definition is complete");
     let mut transport = oxtuner_transport::SerialTransport::new(

@@ -156,7 +156,7 @@ pub trait EcuBehavior: Send + Sync {
     reason = "the shipped behavior families are a closed set"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Behavior {
+pub enum BehaviorKind {
     /// Speeduino, the first target (ADR-0009); the read-only path verified on
     /// the bench NO2C (P4).
     Speeduino(SpeeduinoBehavior),
@@ -164,7 +164,7 @@ pub enum Behavior {
     MsCompatible(MsCompatibleBehavior),
 }
 
-impl Behavior {
+impl BehaviorKind {
     /// Selects the first behavior that claims `definition`.
     ///
     /// `Exact` matches win over `Compatible` ones, so a Speeduino-derived file
@@ -377,8 +377,8 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         let definition = definition("speeduino 202501");
 
         assert!(matches!(
-            Behavior::select(&definition),
-            Some(Behavior::Speeduino(_))
+            BehaviorKind::select(&definition),
+            Some(BehaviorKind::Speeduino(_))
         ));
     }
 
@@ -386,7 +386,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
     fn rusefi_and_fome_are_claimed_exactly_by_the_generic_behavior() {
         for signature in ["rusEFI v20240101", "fome 202401"] {
             let definition = definition(signature);
-            let behavior = Behavior::select(&definition).expect("claimed");
+            let behavior = BehaviorKind::select(&definition).expect("claimed");
 
             assert_eq!(behavior.as_dyn().matches(&definition), Match::Exact);
             assert_eq!(behavior.as_dyn().name(), "ms-compatible");
@@ -398,8 +398,8 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         let definition = definition("speeduino fome 202401");
 
         assert!(matches!(
-            Behavior::select(&definition),
-            Some(Behavior::Speeduino(_))
+            BehaviorKind::select(&definition),
+            Some(BehaviorKind::Speeduino(_))
         ));
     }
 
@@ -411,7 +411,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         )
         .expect("parses");
 
-        assert!(Behavior::select(&definition).is_none());
+        assert!(BehaviorKind::select(&definition).is_none());
     }
 
     #[test]

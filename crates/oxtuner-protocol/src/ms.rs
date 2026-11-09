@@ -73,7 +73,7 @@ pub struct RealtimeSpec {
 /// What a `[ControllerCommands]` action sent and received.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CommandReport {
+pub struct RawCommandReport {
     /// Command strings sent.
     pub commands: usize,
     /// Bytes written to the wire, including framing.
@@ -472,8 +472,8 @@ impl MsProtocol {
         &mut self,
         io: &mut dyn Transport,
         commands: &[CommandTemplate],
-    ) -> Result<CommandReport, ProtocolError> {
-        let mut report = CommandReport::default();
+    ) -> Result<RawCommandReport, ProtocolError> {
+        let mut report = RawCommandReport::default();
 
         for command in commands {
             let request = self.encode(command, 0, 0, 0, &[])?;

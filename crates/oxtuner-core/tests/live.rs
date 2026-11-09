@@ -12,7 +12,7 @@ use oxtuner_core::{
     SignatureVerdict,
 };
 use oxtuner_ini::{SettingsContext, parse_str};
-use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol};
+use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp, SimTransport};
 use oxtuner_transport::{ReplayTransport, Trace, Transport};
 
@@ -313,7 +313,7 @@ fn a_recorded_session_contains_only_read_commands_and_replays() {
     // Replay through the same protocol: the recorded conversation answers
     // without hardware, deterministically.
     let definition = parse_str(FIXTURE, &SettingsContext::new()).expect("the fixture parses");
-    let behavior = Behavior::select(&definition).expect("a known family");
+    let behavior = BehaviorKind::select(&definition).expect("a known family");
     let mut replay = ReplayTransport::new(trace);
     replay.open().expect("replay opens");
     let mut protocol = MsProtocol::new(&definition, behavior.as_dyn())

@@ -6,7 +6,8 @@
 
 use oxtuner_ini::{CommandTemplate, Definition, SettingsContext};
 use oxtuner_protocol::{
-    Behavior, CommandPattern, Frame, FrameDecoder, LinkMode, MsProtocol, Protocol, ProtocolError,
+    BehaviorKind, CommandPattern, Frame, FrameDecoder, LinkMode, MsProtocol, Protocol,
+    ProtocolError,
 };
 use oxtuner_transport::{ReplayTransport, Trace, Transport};
 use proptest::prelude::*;
@@ -73,7 +74,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
         &SettingsContext::new(),
     )
     .expect("parses");
-    let behavior = Behavior::select(&definition).expect("a family");
+    let behavior = BehaviorKind::select(&definition).expect("a family");
     let mut protocol = MsProtocol::new(&definition, behavior.as_dyn())
         .expect("complete")
         .with_link_mode(LinkMode::Envelope);
