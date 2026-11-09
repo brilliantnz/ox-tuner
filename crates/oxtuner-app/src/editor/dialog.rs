@@ -1,43 +1,51 @@
-//! The dialog editor: a dialog's constants as an editable list.
+//! The dialog editor: a dialog's constants as editable cards.
 //!
-//! Tables tune maps; dialogs tune constants — fuel load, injector size, ego
-//! limits. Each row names its variable and shows its user-unit value; a
-//! writable row edits in place, a checkbox or radio flips on click, and a note
-//! is text the definition prints. Enter commits and moves to the next writable
-//! row, so a tuner walks down the list; Escape cancels. The core stays the only
-//! owner of tune values: a commit becomes a scalar command and the echoed
-//! snapshot clears the optimistic value.
+//! Tables tune maps; dialogs tune constants: fuel load, injector size, ego
+//! limits. The definition groups those constants into panels, so each panel is
+//! one card and each row is one value. A definition-supplied label list becomes
+//! a select, a boolean becomes a switch, a raw number or string stays an input,
+//! and printed text becomes an alert banner.
+//!
+//! The core stays the only owner of tune values. A control reports the value it
+//! wants, a scalar command carries it to the core, and the echoed snapshot
+//! clears the optimistic value. The editor keeps no tune state of its own.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::toolbar::Toolbar;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rems,
 };
 use oxtuner_core::{
-    DialogFieldKind, DialogFieldSummary, DialogFieldTone, DialogSummary, Failure, FailureCode,
-    SaveSummary,
+    DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode, SaveSummary,
 };
+use oxtuner_ui::table::{EditOp, parse_edit};
 
 use crate::core::CoreService;
 use crate::i18n::t;
-use oxtuner_ui::table::{EditOp, parse_edit};
+use crate::notifications::{self, NotificationDraft, NotificationKey, NotificationSeverity};
+use crate::ui::constant::{self, ConstantInput, ConstantOption, ConstantSelect, InputKind};
 
-/// An in-progress row edit.
-struct RowEditing {
-    /// Index into the snapshot's fields.
-    index: usize,
-    /// Text as typed.
-    text: String,
-    /// Whether the last commit attempt could not parse the text.
-    invalid: bool,
+/// What a visible row needs as its trailing control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WidgetKind {
+    /// A number input.
+    Number,
+    /// A text input, read-only until the core can store strings.
+    Text,
+    /// A definition-supplied option list.
+    Select,
 }
 
 /// The dialog editor for the node selected in the navigation tree.
@@ -47,8 +55,8 @@ pub(crate) struct DialogEditor {
     label: SharedString,
     /// The dialog id the selection asked for.
     requested: Option<String>,
-    /// Last seen snapshot; the grid pattern of render-from-status would repaint
-    /// under the user's edit, so the snapshot is owned here instead.
+    /// Last seen snapshot. The editor owns it instead of reading the status in
+    /// render, because a repaint would otherwise replace the row being edited.
     dialog: Option<DialogSummary>,
     /// Last save seen, so its echo refreshes the "changed" marks.
     last_save: Option<SaveSummary>,
@@ -60,19 +68,31 @@ pub(crate) struct DialogEditor {
     /// The project the cache belongs to, so another folder starts clean.
     project_root: Option<PathBuf>,
     /// The definition revision the open rows were read under. A project switch
-    /// or a reloaded definition invalidates the values on screen, not only the
-    /// cache behind them.
+    /// or a reloaded definition invalidates the values on screen.
     definition_revision: u64,
-    /// The tune revision the cache was filled at. An edit or a save elsewhere
-    /// can move a value another dialog shows, so the cache drops then too.
+    /// The tune revision the cache was filled at.
     cache_revision: u64,
-    /// The tune revision the open snapshot was built at. Gates are evaluated
-    /// against the working tune, so a cross-dialog edit can make them stale.
+    /// The tune revision the open snapshot was built at.
     dialog_revision: u64,
-    /// The row being typed into, by field index.
-    editing: Option<RowEditing>,
+    /// The failure serial the editor has already acted on. A status change that
+    /// carries the same rejection must not overwrite a newer keystroke.
+    failure_serial: u64,
     /// Optimistic values not yet echoed by the core.
     pending: HashMap<String, f64>,
+    /// Per-row inputs, keyed by field index.
+    inputs: HashMap<usize, ConstantInput>,
+    /// Per-row option pickers, keyed by field index.
+    selects: HashMap<usize, ConstantSelect>,
+    /// The subscriptions that turn a control event into an edit.
+    subscriptions: HashMap<usize, Subscription>,
+    /// Set when the core refused an edit, so the next frame redraws the stored
+    /// value even inside a control the user still has focus in.
+    force_sync: bool,
+    /// Whether this dialog already raised the power-cycle notice for its
+    /// current set of changed settings.
+    power_cycle_notified: bool,
+    /// The dialog the controls were built for, so another dialog starts clean.
+    widget_dialog: Option<String>,
     _core: Subscription,
 }
 
@@ -84,13 +104,15 @@ impl DialogEditor {
     )]
     pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
         let _core = cx.observe_global::<CoreService>(DialogEditor::sync);
-        let (project_root, definition_revision) = {
+        let (project_root, definition_revision, failure_serial) = {
             let status = CoreService::status(cx);
             (
                 status.project.as_ref().map(|project| project.root.clone()),
                 status.definition_revision,
+                status.failure_serial,
             )
         };
+
         Self {
             focus: cx.focus_handle(),
             label: SharedString::default(),
@@ -103,8 +125,14 @@ impl DialogEditor {
             definition_revision,
             cache_revision: 0,
             dialog_revision: 0,
-            editing: None,
+            failure_serial,
             pending: HashMap::new(),
+            inputs: HashMap::new(),
+            selects: HashMap::new(),
+            subscriptions: HashMap::new(),
+            force_sync: false,
+            power_cycle_notified: false,
+            widget_dialog: None,
             _core,
         }
     }
@@ -117,6 +145,7 @@ impl DialogEditor {
         cx: &mut Context<'_, Self>,
     ) {
         self.label = label;
+
         let Some(name) = target else {
             self.requested = None;
             self.failure = None;
@@ -129,6 +158,7 @@ impl DialogEditor {
         let stale = self.dialog_revision != tune_revision;
         let already_shown = self.requested.as_deref() == Some(name)
             && self.dialog.as_ref().is_some_and(|dialog| dialog.id == name);
+
         if already_shown && !stale {
             cx.notify();
             return;
@@ -136,8 +166,8 @@ impl DialogEditor {
 
         self.requested = Some(name.to_owned());
         self.failure = None;
-        self.editing = None;
         self.pending.clear();
+        self.power_cycle_notified = false;
 
         let existing = status
             .dialog
@@ -155,22 +185,20 @@ impl DialogEditor {
             self.dialog = None;
             crate::core::read_dialog(name, cx);
         }
+
+        self.publish_power_cycle_notice(cx);
         cx.notify();
     }
 
     /// Drops the rows a different project or definition invalidates.
-    ///
-    /// The tab keeps its target name: the definition may still declare it, in
-    /// which case the next read draws the new tune's values. A target the new
-    /// definition does not declare comes back as a failure, which is the honest
-    /// answer for a document that no longer exists.
     fn reload(&mut self, cx: &mut Context<'_, Self>) {
         self.cache.clear();
         self.failure = None;
         self.dialog = None;
         self.dialog_revision = 0;
-        self.editing = None;
         self.pending.clear();
+        self.power_cycle_notified = false;
+        self.drop_controls();
 
         let Some(name) = self.requested.clone() else {
             return;
@@ -179,8 +207,49 @@ impl DialogEditor {
         crate::core::read_dialog(&name, cx);
     }
 
+    /// Drops every control and the subscription that keeps it alive.
+    fn drop_controls(&mut self) {
+        self.inputs.clear();
+        self.selects.clear();
+        self.subscriptions.clear();
+        self.force_sync = false;
+        self.widget_dialog = None;
+    }
+
+    /// Raises one notice while any visible setting still needs a power cycle.
+    ///
+    /// The notice lives in the notification surface, not in the board, so it
+    /// can never push the cards down when it appears.
+    fn publish_power_cycle_notice(&mut self, cx: &mut Context<'_, Self>) {
+        let power_cycle_changed = self.dialog.as_ref().is_some_and(|dialog| {
+            dialog
+                .fields
+                .iter()
+                .any(|field| field.gates.visible && field.power_cycle && field.changed)
+        });
+
+        if power_cycle_changed && !self.power_cycle_notified {
+            self.power_cycle_notified = true;
+            notifications::publish(
+                NotificationDraft::new(
+                    NotificationSeverity::Warning,
+                    t!("app.dialog.power_cycle").to_string(),
+                    t!("app.dialog.power_cycle_changed").to_string(),
+                )
+                .key(NotificationKey::named("dialog-power-cycle")),
+                cx,
+            );
+        } else if !power_cycle_changed {
+            self.power_cycle_notified = false;
+        }
+    }
+
     /// Follows core events: a new snapshot, a failure, or a save that makes the
     /// changed marks stale.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one observer folds the whole core status into the editor"
+    )]
     fn sync(&mut self, cx: &mut Context<'_, Self>) {
         let mut snapshot = None;
         let mut failure = None;
@@ -190,19 +259,19 @@ impl DialogEditor {
         let mut reload = None;
         let mut dialog_matches = false;
 
-        // A different project invalidates every snapshot: the values and the
-        // changed marks belong to the folder that produced them. The rows on
-        // screen are part of that snapshot, so they are cleared and read again
-        // rather than left showing the previous tune. An edit or a save moves
-        // the tune itself, so cached rows elsewhere are stale too.
-        let (root, revision, definition_revision) = {
+        // A different project invalidates every snapshot. An edit or a save
+        // moves the tune itself, so cached rows elsewhere are stale too.
+        let (root, revision, definition_revision, failure_serial) = {
             let status = CoreService::status(cx);
             (
                 status.project.as_ref().map(|project| project.root.clone()),
                 status.tune_revision,
                 status.definition_revision,
+                status.failure_serial,
             )
         };
+        let new_failure = failure_serial != self.failure_serial;
+        self.failure_serial = failure_serial;
 
         if root != self.project_root || definition_revision != self.definition_revision {
             self.project_root = root;
@@ -245,7 +314,7 @@ impl DialogEditor {
                     FailureCode::DialogUnavailable | FailureCode::DialogEditRejected
                 )
             {
-                edit_failed = failure_now.code == FailureCode::DialogEditRejected;
+                edit_failed = new_failure && failure_now.code == FailureCode::DialogEditRejected;
                 failure = Some(failure_now.clone());
             }
             if status.last_save != self.last_save {
@@ -268,10 +337,15 @@ impl DialogEditor {
             self.dialog_revision = revision;
         }
 
-        self.drop_unavailable_edit();
-
         if dialog_matches {
             self.failure = None;
+        }
+        if edit_failed {
+            // The core refused the value, so the editor must not keep showing
+            // it as if it were pending. The next frame also redraws the stored
+            // value inside a control that still has focus.
+            self.pending.clear();
+            self.force_sync = true;
         }
         if cleared {
             if let Some(name) = &self.requested {
@@ -279,17 +353,12 @@ impl DialogEditor {
             }
             self.dialog = None;
             self.dialog_revision = 0;
-            self.editing = None;
             self.pending.clear();
+            self.drop_controls();
         }
+        self.publish_power_cycle_notice(cx);
         if failure.is_some() {
             self.failure = failure;
-        }
-        if edit_failed {
-            self.pending.clear();
-            if let Some(editing) = self.editing.as_mut() {
-                editing.invalid = true;
-            }
         }
         if saved && let Some(name) = reload {
             crate::core::read_dialog(&name, cx);
@@ -297,66 +366,145 @@ impl DialogEditor {
         cx.notify();
     }
 
-    /// Drops an input whose row the definition no longer shows or enables.
-    ///
-    /// An edit can switch off the gate of the row being edited. Without this,
-    /// Enter would still commit a row the definition now hides.
-    fn drop_unavailable_edit(&mut self) {
-        let unavailable = self.editing.as_ref().is_some_and(|editing| {
-            self.dialog
-                .as_ref()
-                .and_then(|dialog| dialog.fields.get(editing.index))
-                .is_none_or(|field| !row_available(field))
-        });
-
-        if unavailable {
-            self.editing = None;
-        }
-    }
-
     /// The displayed value of one field, optimistic edits first.
     fn value(&self, dialog: &DialogSummary, index: usize) -> Option<f64> {
         let field = dialog.fields.get(index)?;
+
         self.pending.get(&field.variable).copied().or(field.value)
     }
 
-    /// Starts editing a row, seeded with its current value.
-    fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let editable = self
-            .dialog
-            .as_ref()
-            .and_then(|dialog| dialog.fields.get(index))
-            .is_some_and(row_editable);
-        if !editable {
+    /// Builds or refreshes the controls for the rows on screen.
+    ///
+    /// Widget entities need a window, and the editor learns of a snapshot in an
+    /// observer, so the controls are made on the first render after the data
+    /// arrives. Every later frame only syncs values the user is not typing into.
+    fn ensure_widgets(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.dialog.as_ref() else {
             return;
+        };
+
+        if self.widget_dialog.as_deref() != Some(dialog.id.as_str()) {
+            self.inputs.clear();
+            self.selects.clear();
+            self.subscriptions.clear();
+            self.force_sync = false;
+            self.widget_dialog = Some(dialog.id.clone());
         }
-        let text = self
-            .dialog
-            .as_ref()
-            .and_then(|dialog| self.value(dialog, index))
-            .map(|value| {
-                let digits = self
-                    .dialog
-                    .as_ref()
-                    .and_then(|dialog| dialog.fields.get(index))
-                    .map_or(0, |field| field.digits);
-                format!("{value:.digits$}", digits = usize::from(digits))
-            })
-            .unwrap_or_default();
-        self.editing = Some(RowEditing {
-            index,
-            text,
-            invalid: false,
-        });
-        window.focus(&self.focus, cx);
-        cx.notify();
+
+        let force = std::mem::take(&mut self.force_sync);
+
+        for (index, field) in dialog.fields.iter().enumerate() {
+            if !field.gates.visible {
+                continue;
+            }
+
+            match widget_kind(field) {
+                None => {
+                    self.inputs.remove(&index);
+                    self.selects.remove(&index);
+                    self.subscriptions.remove(&index);
+                }
+                Some(WidgetKind::Select) => {
+                    self.inputs.remove(&index);
+
+                    if !self.selects.contains_key(&index) {
+                        let selected = constant::option_value(self.value(dialog, index));
+                        let select = ConstantSelect::new(window, cx, &field.options, selected);
+                        let subscription = subscribe_select(cx, index, select.state(), window);
+
+                        self.selects.insert(index, select);
+                        self.subscriptions.insert(index, subscription);
+                    }
+
+                    let selected = constant::option_value(self.value(dialog, index));
+
+                    if let Some(select) = self.selects.get_mut(&index)
+                        && (force || !select.is_focused(window, cx))
+                    {
+                        select.set_selected(selected, window, cx);
+                    }
+                }
+                Some(kind @ (WidgetKind::Number | WidgetKind::Text)) => {
+                    self.selects.remove(&index);
+
+                    if !self.inputs.contains_key(&index) {
+                        let text = constant::value_text(field, self.value(dialog, index));
+                        let input_kind = if kind == WidgetKind::Number {
+                            InputKind::Number
+                        } else {
+                            InputKind::Text
+                        };
+                        let input = ConstantInput::new(window, cx, text, input_kind);
+                        let subscription = subscribe_input(cx, index, input.state(), window);
+
+                        self.inputs.insert(index, input);
+                        self.subscriptions.insert(index, subscription);
+                    }
+
+                    if let Some(input) = self.inputs.get(&index)
+                        && (force || !input.is_focused(window, cx))
+                    {
+                        let text = constant::value_text(field, self.value(dialog, index));
+
+                        input.set_text(text, window, cx);
+                    }
+                }
+            }
+        }
     }
 
-    /// Flips a checkbox or radio row.
-    ///
-    /// A toggle has two states, so a click is the whole edit; there is no text
-    /// to type and no reason to open an input for it.
-    fn toggle_field(&mut self, index: usize, cx: &mut Context<'_, Self>) {
+    /// Commits a typed value after Enter or a focus change.
+    fn commit_input(
+        &mut self,
+        index: usize,
+        state: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(dialog) = self.dialog.as_ref() else {
+            return;
+        };
+        let Some(field) = dialog.fields.get(index) else {
+            return;
+        };
+        if !row_editable(field) || field.value.is_none() {
+            return;
+        }
+
+        let text = state.read(cx).value().to_string();
+        let Some(current) = self.value(dialog, index) else {
+            return;
+        };
+        let Some(value) = edited_value(current, &text) else {
+            return;
+        };
+
+        let value = clamp(value, field.minimum, field.maximum);
+        let digits = field.digits;
+
+        state.update(cx, |state, cx| {
+            state.set_value(constant::number_text(value, digits), window, cx);
+        });
+        self.commit_value(index, value, cx);
+    }
+
+    /// Commits a picked option.
+    fn commit_select(&mut self, index: usize, value: u32, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.dialog.as_ref() else {
+            return;
+        };
+        let Some(field) = dialog.fields.get(index) else {
+            return;
+        };
+        if !row_editable(field) || field.kind != DialogFieldKind::Select {
+            return;
+        }
+
+        self.commit_value(index, f64::from(value), cx);
+    }
+
+    /// Commits a switch position.
+    fn set_toggle(&mut self, index: usize, checked: bool, cx: &mut Context<'_, Self>) {
         let Some(dialog) = self.dialog.as_ref() else {
             return;
         };
@@ -366,201 +514,39 @@ impl DialogEditor {
         if !row_editable(field) || field.kind != DialogFieldKind::Toggle {
             return;
         }
-        let current = self.value(dialog, index).unwrap_or(0.0);
-        let checked = if field.flip {
-            current == 0.0
-        } else {
-            current != 0.0
-        };
-        let next = if field.flip == checked { 1.0 } else { 0.0 };
-        let (dialog_id, variable) = (dialog.id.clone(), field.variable.clone());
-        self.pending.insert(variable.clone(), next);
-        self.failure = None;
-        crate::core::edit_scalar(&dialog_id, &variable, next, cx);
-        cx.notify();
+
+        let value = toggle_value(field.flip, checked);
+
+        self.commit_value(index, value, cx);
     }
 
-    /// Commits the in-progress edit; empty text skips the row.
-    fn commit_edit(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(editing) = self.editing.as_ref() else {
+    /// Sends one value and marks it optimistic until the core echoes it.
+    fn commit_value(&mut self, index: usize, value: f64, cx: &mut Context<'_, Self>) {
+        let Some(dialog) = self.dialog.as_ref() else {
             return;
         };
-        let index = editing.index;
-        let text = editing.text.clone();
-
-        let editable = self
-            .dialog
-            .as_ref()
-            .and_then(|dialog| dialog.fields.get(index))
-            .is_some_and(row_editable);
-        if !editable {
-            self.editing = None;
-            cx.notify();
+        let Some(field) = dialog.fields.get(index) else {
+            return;
+        };
+        if !row_editable(field) {
+            return;
+        }
+        let Some(current) = self.value(dialog, index) else {
+            return;
+        };
+        if constant::number_text(current, field.digits)
+            == constant::number_text(value, field.digits)
+        {
             return;
         }
 
-        let operation = match parse_edit(&text) {
-            Ok(Some(operation)) => operation,
-            Ok(None) => {
-                // Nothing typed: leave the row, keep walking.
-                self.editing = None;
-                self.edit_next(index, cx);
-                cx.notify();
-                return;
-            }
-            Err(_) => {
-                self.editing = Some(RowEditing {
-                    index,
-                    text,
-                    invalid: true,
-                });
-                cx.notify();
-                return;
-            }
-        };
-        let Some((dialog_id, variable, current)) = self.dialog.as_ref().and_then(|dialog| {
-            dialog.fields.get(index).map(|field| {
-                (
-                    dialog.id.clone(),
-                    field.variable.clone(),
-                    self.value(dialog, index),
-                )
-            })
-        }) else {
-            self.editing = None;
-            cx.notify();
-            return;
-        };
-        let Some(current) = current else {
-            self.editing = None;
-            cx.notify();
-            return;
-        };
-        let (operation, amount) = operation;
-        let value = match operation {
-            EditOp::Set => amount,
-            EditOp::Add => current + amount,
-            EditOp::Multiply => current * amount,
-            EditOp::Divide => current / amount,
-            EditOp::Percent => current * (1.0 + amount / 100.0),
-        };
-        if !value.is_finite() {
-            self.editing = Some(RowEditing {
-                index,
-                text,
-                invalid: true,
-            });
-            cx.notify();
-            return;
-        }
+        let variable = field.variable.clone();
+        let dialog_id = dialog.id.clone();
+
         self.pending.insert(variable.clone(), value);
-        self.editing = None;
+        self.failure = None;
         crate::core::edit_scalar(&dialog_id, &variable, value, cx);
-        self.edit_next(index, cx);
         cx.notify();
-    }
-
-    /// Moves the edit to the next editable row, if there is one.
-    fn edit_next(&mut self, from: usize, cx: &mut Context<'_, Self>) {
-        let next = self
-            .dialog
-            .as_ref()
-            .and_then(|dialog| next_editable(&dialog.fields, from));
-        if let Some(index) = next {
-            let text = self
-                .dialog
-                .as_ref()
-                .and_then(|dialog| self.value(dialog, index))
-                .map(|value| {
-                    let digits = self
-                        .dialog
-                        .as_ref()
-                        .and_then(|dialog| dialog.fields.get(index))
-                        .map_or(0, |field| field.digits);
-                    format!("{value:.digits$}", digits = usize::from(digits))
-                })
-                .unwrap_or_default();
-            self.editing = Some(RowEditing {
-                index,
-                text,
-                invalid: false,
-            });
-        }
-        let _ = cx;
-    }
-
-    /// Moves the edit one editable row up or down, committing first.
-    fn commit_and_move(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        let from = self.editing.as_ref().map(|editing| editing.index);
-        self.commit_edit(cx);
-        // `commit_edit` already advanced forward; step back when going up.
-        if delta < 0 {
-            let _ = from;
-            self.editing = None;
-            if let Some(from) = from {
-                let previous = self
-                    .dialog
-                    .as_ref()
-                    .and_then(|dialog| previous_editable(&dialog.fields, from));
-                if let Some(index) = previous {
-                    let text = self
-                        .dialog
-                        .as_ref()
-                        .and_then(|dialog| self.value(dialog, index))
-                        .map(|value| {
-                            let digits = self
-                                .dialog
-                                .as_ref()
-                                .and_then(|dialog| dialog.fields.get(index))
-                                .map_or(0, |field| field.digits);
-                            format!("{value:.digits$}", digits = usize::from(digits))
-                        })
-                        .unwrap_or_default();
-                    self.editing = Some(RowEditing {
-                        index,
-                        text,
-                        invalid: false,
-                    });
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    /// The keyboard contract: Enter commits and advances, Escape cancels.
-    fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
-        if self.editing.is_none() {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "enter" | "tab" => self.commit_edit(cx),
-            "escape" => {
-                self.editing = None;
-                cx.notify();
-            }
-            "backspace" => {
-                if let Some(editing) = self.editing.as_mut() {
-                    editing.text.pop();
-                    editing.invalid = false;
-                }
-                cx.notify();
-            }
-            "up" => self.commit_and_move(-1, cx),
-            "down" => self.commit_and_move(1, cx),
-            _ => {
-                if let Some(text) = &event.keystroke.key_char {
-                    for character in text.chars() {
-                        let editable = character.is_ascii_digit()
-                            || matches!(character, '.' | '-' | '+' | '*' | '/' | '=' | 'e' | 'E');
-                        if editable && let Some(editing) = self.editing.as_mut() {
-                            editing.text.push(character);
-                            editing.invalid = false;
-                        }
-                    }
-                    cx.notify();
-                }
-            }
-        }
     }
 
     fn retry(&mut self, cx: &mut Context<'_, Self>) {
@@ -624,223 +610,138 @@ impl DialogEditor {
             .into_any_element()
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one dialog render walks every row kind in document order"
-    )]
-    fn render_rows(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// The panel cards, in document order.
+    fn render_board(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let mut rows = Vec::new();
-        let mut section = "";
-        let visible: Vec<(usize, &DialogFieldSummary)> = dialog
-            .fields
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| field.gates.visible)
-            .collect();
+        let groups = sections(&dialog.title, &dialog.fields);
 
-        if visible
-            .iter()
-            .any(|(_, field)| field.power_cycle && field.changed)
-        {
-            rows.push(
-                div()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .text_xs()
-                    .text_color(theme.warning)
-                    .child(t!("app.dialog.power_cycle_changed"))
-                    .into_any_element(),
-            );
-        }
+        let mut board = v_flex()
+            .debug_selector(|| "constant-board".to_string())
+            .id("constant-board")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .p_4()
+            .gap_4();
 
-        for (index, field) in visible {
-            if field.section != section && !field.section.is_empty() {
-                section = &field.section;
-                rows.push(
-                    div()
-                        .px_4()
-                        .pt_3()
-                        .pb_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(field.section.clone())
-                        .into_any_element(),
-                );
-            }
+        // The power-cycle notice is a notification now, so it does not move the
+        // cards when it appears.
 
-            // Text the definition prints between values is not a row to edit.
-            if field.kind == DialogFieldKind::Note {
-                let color = if field.gates.enabled {
-                    match field.tone {
-                        DialogFieldTone::Danger => theme.danger,
-                        DialogFieldTone::Info => theme.info,
-                        DialogFieldTone::Normal => theme.muted_foreground,
-                    }
-                } else {
-                    theme.muted_foreground
-                };
-                rows.push(
-                    div()
-                        .px_4()
-                        .py_1()
-                        .text_sm()
-                        .text_color(color)
-                        .child(field.label.clone())
-                        .into_any_element(),
-                );
-                continue;
-            }
+        for (ordinal, group) in groups.iter().enumerate() {
+            let rows = group
+                .items
+                .iter()
+                .map(|index| self.render_field(dialog, *index, &dialog.fields[*index], cx))
+                .collect();
 
-            let value = self.value(dialog, index);
-            let text = value.map_or_else(
-                || {
-                    field
-                        .text
-                        .clone()
-                        .unwrap_or_else(|| t!("app.dialog.no_value").to_string())
-                },
-                |value| {
-                    if field.kind == DialogFieldKind::Toggle {
-                        let checked = if field.flip {
-                            value == 0.0
-                        } else {
-                            value != 0.0
-                        };
-
-                        return if checked {
-                            t!("app.dialog.toggle_on").to_string()
-                        } else {
-                            t!("app.dialog.toggle_off").to_string()
-                        };
-                    }
-                    let rendered = format!("{value:.digits$}", digits = usize::from(field.digits));
-                    if field.units.is_empty() {
-                        rendered
-                    } else {
-                        format!("{rendered} {}", field.units)
-                    }
-                },
-            );
-            let editing = self
-                .editing
-                .as_ref()
-                .filter(|editing| editing.index == index);
-            let invalid = editing.as_ref().is_some_and(|editing| editing.invalid);
-            let shown: SharedString = editing.map_or_else(
-                || text.clone().into(),
-                |editing| editing.text.clone().into(),
-            );
-            let toggle = field.kind == DialogFieldKind::Toggle;
-            let available = field.gates.enabled;
-            let label_color = if available {
-                match field.tone {
-                    DialogFieldTone::Danger => theme.danger,
-                    DialogFieldTone::Info => theme.info,
-                    DialogFieldTone::Normal => theme.foreground,
-                }
-            } else {
-                theme.muted_foreground
-            };
-            let unavailable_reason =
-                (!available).then(|| t!("app.dialog.unavailable_for_settings").to_string());
-
-            rows.push(
-                h_flex()
-                    .min_h(px(32.))
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(label_color)
-                            .child(field.label.clone()),
-                    )
-                    .when(field.power_cycle, |this| {
-                        this.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(theme.warning)
-                                .child(t!("app.dialog.power_cycle")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(("dialog-field", index))
-                            .w(px(160.))
-                            .flex_shrink_0()
-                            .flex()
-                            .justify_end()
-                            .text_sm()
-                            .px_2()
-                            .py_1()
-                            .rounded(theme.radius)
-                            .when(field.writable && available, |this| {
-                                this.hover(|this| this.bg(theme.secondary_hover))
-                                    .cursor_pointer()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                                            if toggle {
-                                                this.toggle_field(index, cx);
-                                            } else {
-                                                this.begin_edit(index, window, cx);
-                                            }
-                                        }),
-                                    )
-                            })
-                            .when(!field.writable || !available, |this| {
-                                this.text_color(theme.muted_foreground)
-                            })
-                            .when_some(unavailable_reason, |this, reason| {
-                                this.tooltip(move |window, cx| {
-                                    Tooltip::new(reason.clone()).build(window, cx)
-                                })
-                            })
-                            .when_some(editing, |this, _| {
-                                this.border_1().border_color(if invalid {
-                                    theme.danger
-                                } else {
-                                    theme.info
-                                })
-                            })
-                            .child(shown),
-                    )
-                    .into_any_element(),
-            );
+            board = board.child(constant::card(
+                ("constant-card", ordinal),
+                group.title.clone().into(),
+                // The definition id used to sit under the card title.
+                // dialog.id.clone().into(),
+                rows,
+                cx,
+            ));
         }
 
         if !dialog.unavailable.is_empty() {
-            rows.push(
+            board = board.child(
                 div()
                     .px_4()
-                    .pt_3()
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(t!(
                         "app.dialog.unavailable_panels",
                         names = dialog.unavailable.join(", ")
-                    ))
-                    .into_any_element(),
+                    )),
             );
         }
 
-        v_flex()
-            .id("dialog-fields")
-            .flex_1()
-            .min_h_0()
-            .overflow_scroll()
+        board.into_any_element()
+    }
+
+    /// One row: label and metadata on the leading edge, control on the trailing.
+    fn render_field(
+        &self,
+        dialog: &DialogSummary,
+        index: usize,
+        field: &DialogFieldSummary,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let available = row_available(field);
+        let value = self.value(dialog, index);
+        let changed = field.changed || self.pending.contains_key(&field.variable);
+
+        let control = match field.kind {
+            DialogFieldKind::Note => return constant::note(index, field, cx),
+            DialogFieldKind::Toggle => {
+                let raw = value.unwrap_or(0.0);
+                let checked = if field.flip { raw == 0.0 } else { raw != 0.0 };
+
+                constant::switch_control(
+                    ("constant-switch", index),
+                    checked,
+                    row_editable(field),
+                    field.label.clone().into(),
+                    cx.listener(move |this, checked: &bool, _, cx| {
+                        this.set_toggle(index, *checked, cx);
+                    }),
+                )
+                .into_any_element()
+            }
+            DialogFieldKind::Select => self.selects.get(&index).map_or_else(
+                || fallback_value(field, value, cx),
+                |select| select.render(row_editable(field), field.label.clone().into()),
+            ),
+            DialogFieldKind::Value | DialogFieldKind::Slider => {
+                self.inputs.get(&index).map_or_else(
+                    || fallback_value(field, value, cx),
+                    |input| {
+                        input.render(
+                            field.units.clone().into(),
+                            available,
+                            row_editable(field),
+                            cx,
+                        )
+                    },
+                )
+            }
+        };
+
+        let mut lane = div()
+            .id(("constant-control", index))
+            .w_48()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_2();
+
+        if !available {
+            let reason = t!("app.dialog.unavailable_for_settings").to_string();
+
+            lane = lane.tooltip(move |window, cx| {
+                Tooltip::new(reason.clone()).text_xs().build(window, cx)
+            });
+        }
+
+        h_flex()
+            .debug_selector(move || format!("constant-row-{index}"))
+            .h(rems(3.5))
+            .items_center()
+            .gap_4()
+            .px_4()
             .py_2()
-            .children(rows)
+            // To drop the first row's top border again, replace these two
+            // lines with `.when(!first, |this| this.border_t_1()...)`.
+            .border_t_1()
+            .border_color(theme.border.opacity(0.5))
+            .child(constant::field_label(field, index, available, cx))
+            .child(
+                lane.child(constant::changed_mark(changed, cx))
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(control)),
+            )
             .into_any_element()
     }
 
@@ -851,8 +752,10 @@ impl DialogEditor {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+
         if let Some(dialog) = dialog {
             let has_visible = dialog.fields.iter().any(|field| field.gates.visible);
+
             if !has_visible && dialog.unavailable.is_empty() {
                 let message = if dialog.fields.is_empty() {
                     t!("app.dialog.empty")
@@ -871,10 +774,11 @@ impl DialogEditor {
                     .child(message)
                     .into_any_element();
             }
+
             return div()
                 .flex_1()
                 .min_h_0()
-                .child(self.render_rows(dialog, cx))
+                .child(self.render_board(dialog, cx))
                 .into_any_element();
         }
 
@@ -956,6 +860,47 @@ impl DialogEditor {
     }
 }
 
+/// One card's rows, in document order.
+struct SectionGroup {
+    title: String,
+    items: Vec<usize>,
+}
+
+/// Groups visible rows into consecutive panels.
+///
+/// The definition stores a panel title on every row, and a row's position is
+/// the reading order the definition chose. A title that appears twice with
+/// another panel between them is two cards, not one, so the grouping follows
+/// runs of equal titles instead of collecting by title.
+fn sections(dialog_title: &str, fields: &[DialogFieldSummary]) -> Vec<SectionGroup> {
+    let mut groups: Vec<SectionGroup> = Vec::new();
+    let mut current: Option<&str> = None;
+
+    for (index, field) in fields.iter().enumerate() {
+        if !field.gates.visible {
+            continue;
+        }
+
+        if current != Some(field.section.as_str()) {
+            current = Some(field.section.as_str());
+            groups.push(SectionGroup {
+                title: if field.section.is_empty() {
+                    dialog_title.to_owned()
+                } else {
+                    field.section.clone()
+                },
+                items: Vec::new(),
+            });
+        }
+
+        if let Some(group) = groups.last_mut() {
+            group.items.push(index);
+        }
+    }
+
+    groups
+}
+
 impl Focusable for DialogEditor {
     fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
         self.focus.clone()
@@ -963,13 +908,16 @@ impl Focusable for DialogEditor {
 }
 
 impl Render for DialogEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.ensure_widgets(window, cx);
+
         let theme = cx.theme().clone();
-        let dialog = self.dialog.clone();
-        let failure = self.failure.clone();
-        let header = self.render_header(dialog.as_ref(), cx);
-        let content = self.render_content(dialog.as_ref(), failure.as_ref(), cx);
-        let status = dialog.as_ref().map(|dialog| self.render_status(dialog, cx));
+        let header = self.render_header(self.dialog.as_ref(), cx);
+        let content = self.render_content(self.dialog.as_ref(), self.failure.as_ref(), cx);
+        let status = self
+            .dialog
+            .as_ref()
+            .map(|dialog| self.render_status(dialog, cx));
 
         v_flex()
             .size_full()
@@ -977,12 +925,29 @@ impl Render for DialogEditor {
             .bg(theme.background)
             .text_color(theme.foreground)
             .track_focus(&self.focus)
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
-            )
             .child(header)
             .child(content)
             .when_some(status, gpui_kit::ParentElement::child)
+    }
+}
+
+/// The control a visible row needs, or none for a note or switch.
+fn widget_kind(field: &DialogFieldSummary) -> Option<WidgetKind> {
+    match field.kind {
+        DialogFieldKind::Note | DialogFieldKind::Toggle => None,
+        // A `bits` list with no usable label is a raw number in disguise; the
+        // definition gives the tuner nothing to recognize, so the input shows
+        // the value instead of an empty picker.
+        DialogFieldKind::Select
+            if field
+                .options
+                .iter()
+                .any(|option| !option.label.trim().is_empty()) =>
+        {
+            Some(WidgetKind::Select)
+        }
+        _ if field.value.is_some() => Some(WidgetKind::Number),
+        _ => Some(WidgetKind::Text),
     }
 }
 
@@ -996,25 +961,89 @@ fn row_editable(field: &DialogFieldSummary) -> bool {
     field.writable && row_available(field)
 }
 
-/// The next row Enter can move to, skipping hidden and disabled rows.
-fn next_editable(fields: &[DialogFieldSummary], from: usize) -> Option<usize> {
-    fields
-        .iter()
-        .enumerate()
-        .skip(from + 1)
-        .find(|(_, field)| row_editable(field))
-        .map(|(index, _)| index)
+/// Keeps a typed value inside the range the definition accepts.
+fn clamp(value: f64, minimum: Option<f64>, maximum: Option<f64>) -> f64 {
+    let mut value = value;
+
+    if let Some(minimum) = minimum {
+        value = value.max(minimum);
+    }
+    if let Some(maximum) = maximum {
+        value = value.min(maximum);
+    }
+
+    value
 }
 
-/// The previous row an upward move can reach, skipping hidden and disabled rows.
-fn previous_editable(fields: &[DialogFieldSummary], from: usize) -> Option<usize> {
-    fields
-        .iter()
-        .enumerate()
-        .take(from)
-        .rev()
-        .find(|(_, field)| row_editable(field))
-        .map(|(index, _)| index)
+/// The raw value a switch position stores, honouring a flipped row.
+fn toggle_value(flip: bool, checked: bool) -> f64 {
+    if flip == checked { 0.0 } else { 1.0 }
+}
+
+/// The value a typed edit asks for, from the row's current value.
+///
+/// A bare number replaces the value; `+2`, `*3`, `/4` and `+10%` are the
+/// relative forms the table grid also accepts. `None` means the text is not an
+/// edit and the row keeps its value.
+fn edited_value(current: f64, text: &str) -> Option<f64> {
+    let (operation, amount) = parse_edit(text).ok().flatten()?;
+    let value = match operation {
+        EditOp::Set => amount,
+        EditOp::Add => current + amount,
+        EditOp::Multiply => current * amount,
+        EditOp::Divide => current / amount,
+        EditOp::Percent => current * (1.0 + amount / 100.0),
+    };
+
+    value.is_finite().then_some(value)
+}
+
+/// A read-only value when the control for a row is not available.
+fn fallback_value(field: &DialogFieldSummary, value: Option<f64>, cx: &App) -> AnyElement {
+    div()
+        .w_full()
+        .truncate()
+        .text_right()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(constant::value_text(field, value))
+        .into_any_element()
+}
+
+/// The subscription behind one numeric or text row.
+fn subscribe_input(
+    cx: &mut Context<'_, DialogEditor>,
+    index: usize,
+    state: &Entity<InputState>,
+    window: &mut Window,
+) -> Subscription {
+    cx.subscribe_in(
+        state,
+        window,
+        move |this, state, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.commit_input(index, state, window, cx);
+            }
+        },
+    )
+}
+
+/// The subscription behind one select row.
+fn subscribe_select(
+    cx: &mut Context<'_, DialogEditor>,
+    index: usize,
+    state: &Entity<SelectState<Vec<ConstantOption>>>,
+    window: &mut Window,
+) -> Subscription {
+    cx.subscribe_in(
+        state,
+        window,
+        move |this, _, event: &SelectEvent<Vec<ConstantOption>>, _, cx| {
+            if let SelectEvent::Confirm(Some(value)) = event {
+                this.commit_select(index, *value, cx);
+            }
+        },
+    )
 }
 
 /// The snapshot value of one variable, for echo reconciliation.
@@ -1029,26 +1058,38 @@ fn field_value(dialog: &DialogSummary, variable: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxtuner_core::GateState;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AppContext as _, Bounds, Entity, IntoElement, Point, Render, TestAppContext, Window,
+        WindowBounds, WindowOptions, div, size,
+    };
+    use oxtuner_core::{DialogFieldTone, GateState};
 
-    fn row(writable: bool, gates: GateState) -> DialogFieldSummary {
+    fn row(kind: DialogFieldKind, value: Option<f64>, options: usize) -> DialogFieldSummary {
         DialogFieldSummary {
             label: String::new(),
             variable: String::new(),
-            value: None,
+            value,
             text: None,
             units: String::new(),
             digits: 0,
             changed: false,
             display_only: false,
-            writable,
-            kind: DialogFieldKind::Value,
+            writable: true,
+            kind,
             section: String::new(),
             tone: DialogFieldTone::Normal,
-            options: std::sync::Arc::default(),
+            options: vec![
+                oxtuner_core::DialogSelectOption {
+                    value: 0,
+                    label: String::new(),
+                };
+                options
+            ]
+            .into(),
             visibility_expression: None,
             enable_expression: None,
-            gates,
+            gates: GateState::open(),
             help: None,
             minimum: None,
             maximum: None,
@@ -1060,27 +1101,332 @@ mod tests {
     }
 
     #[test]
-    fn hidden_and_disabled_rows_are_skipped() {
-        let open = GateState::open();
-        let hidden = GateState {
-            visible: false,
-            ..open
-        };
-        let disabled = GateState {
-            enabled: false,
-            ..open
-        };
-        let fields = vec![
-            row(true, hidden),
-            row(true, disabled),
-            row(false, open),
-            row(true, open),
-            row(true, open),
-        ];
+    fn definition_labels_choose_a_select_and_raw_values_choose_an_input() {
+        let mut labelled = row(DialogFieldKind::Select, Some(2.0), 0);
+        labelled.options = vec![oxtuner_core::DialogSelectOption {
+            value: 2,
+            label: "On".to_owned(),
+        }]
+        .into();
 
-        assert_eq!(next_editable(&fields, 0), Some(3));
-        assert_eq!(previous_editable(&fields, 4), Some(3));
-        assert_eq!(next_editable(&fields, 4), None);
-        assert_eq!(previous_editable(&fields, 0), None);
+        assert_eq!(widget_kind(&labelled), Some(WidgetKind::Select));
+        assert_eq!(
+            widget_kind(&row(DialogFieldKind::Value, Some(2.0), 0)),
+            Some(WidgetKind::Number)
+        );
+        assert_eq!(
+            widget_kind(&row(DialogFieldKind::Value, None, 0)),
+            Some(WidgetKind::Text)
+        );
+        assert_eq!(
+            widget_kind(&row(DialogFieldKind::Toggle, Some(1.0), 0)),
+            None
+        );
+        assert_eq!(widget_kind(&row(DialogFieldKind::Note, None, 0)), None);
+        assert_eq!(
+            widget_kind(&row(DialogFieldKind::Select, Some(2.0), 3)),
+            Some(WidgetKind::Number),
+            "an option list without labels is shown as the raw number"
+        );
+    }
+
+    #[test]
+    fn a_typed_value_stays_inside_the_definition_range() {
+        assert_eq!(clamp(30.0, Some(0.0), Some(25.5)), 25.5);
+        assert_eq!(clamp(-1.0, Some(0.0), None), 0.0);
+        assert_eq!(clamp(12.3, None, None), 12.3);
+    }
+
+    #[test]
+    fn a_typed_edit_applies_its_operation() {
+        assert_eq!(edited_value(10.0, "12"), Some(12.0));
+        assert_eq!(edited_value(10.0, "+2"), Some(12.0));
+        assert_eq!(edited_value(10.0, "*3"), Some(30.0));
+        assert_eq!(edited_value(10.0, "/4"), Some(2.5));
+        assert_eq!(edited_value(10.0, ""), None);
+        assert_eq!(edited_value(10.0, "nope"), None);
+        assert_eq!(
+            edited_value(10.0, "/0"),
+            None,
+            "division by zero is refused"
+        );
+
+        let percent = edited_value(10.0, "+10%").expect("a percentage is an edit");
+        assert!((percent - 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flipped_switch_stores_its_inverse() {
+        // A flipped row shows checked on raw zero and stores zero on checked.
+        assert_eq!(toggle_value(true, true), 0.0);
+        assert_eq!(toggle_value(true, false), 1.0);
+        assert_eq!(toggle_value(false, true), 1.0);
+        assert_eq!(toggle_value(false, false), 0.0);
+    }
+
+    #[test]
+    fn panels_keep_document_order_and_split_repeated_titles() {
+        let mut first = row(DialogFieldKind::Value, Some(1.0), 0);
+        first.section = "Alpha".to_owned();
+        let mut note = row(DialogFieldKind::Note, None, 0);
+        note.section = "Alpha".to_owned();
+        let mut second = row(DialogFieldKind::Value, Some(2.0), 0);
+        second.section = "Beta".to_owned();
+        let mut hidden = row(DialogFieldKind::Value, Some(3.0), 0);
+        hidden.section = "Alpha".to_owned();
+        hidden.gates.visible = false;
+        let mut third = row(DialogFieldKind::Value, Some(4.0), 0);
+        third.section = "Alpha".to_owned();
+
+        let groups = sections("Title", &[first, note, second, hidden, third]);
+
+        assert_eq!(groups.len(), 3, "a repeated title starts a new card");
+        assert_eq!(groups[0].title, "Alpha");
+        assert_eq!(groups[0].items, vec![0, 1]);
+        assert_eq!(groups[1].title, "Beta");
+        assert_eq!(groups[2].title, "Alpha");
+        assert_eq!(groups[2].items, vec![4], "the hidden row is left out");
+    }
+
+    #[test]
+    fn rows_at_the_dialog_top_take_the_dialog_title() {
+        let mut top = row(DialogFieldKind::Value, Some(1.0), 0);
+        top.section = String::new();
+
+        let groups = sections("Engine Constants", &[top]);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "Engine Constants");
+        assert_eq!(groups[0].items, vec![0]);
+    }
+
+    #[gpui_kit::test]
+    fn a_rejected_edit_drops_the_optimistic_value(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+            CoreService::show_dialog(cx, summary());
+        });
+
+        let editor = cx.update(|cx| cx.new(DialogEditor::new));
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.show(
+                    SharedString::from("Engine Constants"),
+                    Some("engine_constants"),
+                    cx,
+                );
+                editor.pending.insert("reqFuel".to_owned(), 99.0);
+            });
+        });
+
+        cx.update(|cx| CoreService::fail_for_test(cx, FailureCode::DialogEditRejected));
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|cx| editor.read(cx).pending.is_empty()),
+            "a refused edit must not stay optimistic"
+        );
+        assert!(
+            cx.update(|cx| editor.read(cx).force_sync),
+            "the next frame redraws the stored value"
+        );
+
+        // A later status change still carries the same rejection. It must not
+        // overwrite a keystroke the user made after that rejection.
+        cx.update(|cx| {
+            editor.update(cx, |editor, _| {
+                editor.force_sync = false;
+                editor.pending.insert("reqFuel".to_owned(), 42.0);
+            });
+        });
+        cx.update(|cx| CoreService::show_dialog(cx, summary()));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).pending.get("reqFuel").copied()),
+            Some(42.0),
+            "a stale rejection must not clear a newer edit"
+        );
+        assert!(
+            !cx.update(|cx| editor.read(cx).force_sync),
+            "a stale rejection must not force another sync"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_changed_power_cycle_setting_raises_a_notification(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+            notifications::init(cx);
+        });
+
+        let dialog = power_summary();
+        cx.update(|cx| CoreService::show_dialog(cx, dialog));
+
+        let editor = cx.update(|cx| cx.new(DialogEditor::new));
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.show(
+                    SharedString::from("Engine Constants"),
+                    Some("engine_constants"),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| CoreService::show_dialog(cx, power_summary()));
+        cx.run_until_parked();
+
+        let records = cx.update(|cx| notifications::records(cx));
+
+        assert_eq!(records.len(), 1, "the dialog raises one notice");
+        assert_eq!(records[0].severity(), NotificationSeverity::Warning);
+        assert_eq!(records[0].title(), "Power cycle");
+        assert_eq!(records[0].count(), 1, "a repeated status does not stack");
+    }
+
+    #[gpui_kit::test]
+    fn a_dialog_renders_a_card_for_each_panel(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+            CoreService::show_dialog(cx, summary());
+        });
+
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(1200.), px(800.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                |_window, cx| {
+                    let editor = cx.new(|cx| {
+                        let mut editor = DialogEditor::new(cx);
+                        editor.show(
+                            SharedString::from("Engine Constants"),
+                            Some("engine_constants"),
+                            cx,
+                        );
+                        editor
+                    });
+
+                    cx.new(|_| Host { editor })
+                },
+            )
+            .expect("open test window")
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("render the dialog frame");
+        cx.run_until_parked();
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+        assert!(
+            visual.debug_bounds("constant-board").is_some(),
+            "the constants board scrolls the cards"
+        );
+        assert!(
+            visual.debug_bounds("constant-row-0").is_some(),
+            "the numeric row draws"
+        );
+        assert!(
+            visual.debug_bounds("constant-row-1").is_none(),
+            "the note draws as an alert, not as a row"
+        );
+        assert!(
+            visual.debug_bounds("constant-row-2").is_some(),
+            "the select row draws"
+        );
+        assert!(
+            visual.debug_bounds("constant-row-3").is_some(),
+            "the second panel's switch row draws"
+        );
+    }
+
+    struct Host {
+        editor: Entity<DialogEditor>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+            div().size_full().child(self.editor.clone())
+        }
+    }
+
+    fn option(value: u32, label: &str) -> oxtuner_core::DialogSelectOption {
+        oxtuner_core::DialogSelectOption {
+            value,
+            label: label.to_owned(),
+        }
+    }
+
+    fn summary() -> DialogSummary {
+        let mut fuel = row(DialogFieldKind::Value, Some(12.3), 0);
+        fuel.label = "Required fuel".to_owned();
+        fuel.variable = "reqFuel".to_owned();
+        fuel.units = "ms".to_owned();
+        fuel.digits = 1;
+        fuel.section = "Injection".to_owned();
+        fuel.minimum = Some(0.0);
+        fuel.maximum = Some(25.5);
+        fuel.help = Some("Fuel delivered per cycle.".to_owned());
+
+        let mut note = row(DialogFieldKind::Note, None, 0);
+        note.label = "Outputs will not work if the wrong board is selected.".to_owned();
+        note.text = Some(note.label.clone());
+        note.tone = DialogFieldTone::Danger;
+        note.section = "Injection".to_owned();
+
+        let mut mode = row(DialogFieldKind::Select, Some(1.0), 0);
+        mode.label = "Injection mode".to_owned();
+        mode.variable = "injMode".to_owned();
+        mode.section = "Injection".to_owned();
+        mode.options = vec![
+            option(0, "Off"),
+            option(1, "Sequential"),
+            option(2, "Batch"),
+        ]
+        .into();
+
+        let mut sensor = row(DialogFieldKind::Toggle, Some(1.0), 0);
+        sensor.label = "Flex fuel sensor".to_owned();
+        sensor.variable = "flexEnabled".to_owned();
+        sensor.section = "Flex fuel".to_owned();
+
+        DialogSummary {
+            id: "engine_constants".to_owned(),
+            title: "Engine Constants".to_owned(),
+            layout: None,
+            fields: vec![fuel, note, mode, sensor],
+            changed: 0,
+            writable: true,
+            unavailable: Vec::new(),
+            topic_help: None,
+            help_links: Vec::new(),
+            presets: Vec::new(),
+            commands: Vec::new(),
+            widgets: Vec::new(),
+            tables: Vec::new(),
+            curves: Vec::new(),
+            unmodeled: Vec::new(),
+        }
+    }
+
+    fn power_summary() -> DialogSummary {
+        let mut dialog = summary();
+        dialog.fields[0].power_cycle = true;
+        dialog.fields[0].changed = true;
+        dialog
     }
 }

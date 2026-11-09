@@ -36,6 +36,7 @@ pub mod realtime;
 pub mod settings;
 pub mod state;
 pub mod theme;
+mod ui;
 
 /// Initialize GPUI Kit, the interface language, the keymap and the app-level
 /// action handlers. Call once inside `Application::run`, before creating any

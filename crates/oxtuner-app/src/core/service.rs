@@ -14,7 +14,7 @@ use super::event;
 use super::status::CoreStatus;
 
 #[cfg(test)]
-use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
+use oxtuner_core::{DialogSummary, Failure, FailureCode, SaveSummary, TableSummary};
 
 /// The core handle, its thread, and the last status.
 ///
@@ -99,6 +99,11 @@ impl CoreService {
     /// Installs a table snapshot, for editor tests.
     pub(crate) fn show_table(cx: &mut App, table: TableSummary) {
         cx.global_mut::<Self>().status.table = Some(table);
+    }
+
+    /// Installs a dialog snapshot, for editor tests.
+    pub(crate) fn show_dialog(cx: &mut App, dialog: DialogSummary) {
+        cx.global_mut::<Self>().status.dialog = Some(dialog);
     }
 
     /// Moves to another definition and drops the open snapshot, the way a

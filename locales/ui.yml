@@ -521,7 +521,7 @@ app:
     changed:
       en: '%{count} changed'
     hint:
-      en: Click a value to edit it. Enter saves and moves to the next row.
+      en: Edit a value and press Enter, or move to another field, to save it.
     empty:
       en: This dialog has no constants to edit.
     no_visible_fields:
@@ -530,14 +530,12 @@ app:
       en: Not available with the current settings
     no_value:
       en: '—'
-    toggle_on:
-      en: 'On'
-    toggle_off:
-      en: 'Off'
     unavailable_panels:
       en: 'Built-in panels this build cannot draw: %{names}'
     power_cycle:
       en: Power cycle
+    power_cycle_help:
+      en: This setting takes effect after the ECU has been power cycled.
     power_cycle_changed:
       en: Changed settings need an ECU power cycle before they take effect.
   cluster:
