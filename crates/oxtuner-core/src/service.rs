@@ -29,6 +29,7 @@ use oxtuner_project::{DefinitionSource, Project};
 use oxtuner_protocol::{Behavior, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
+use crate::gate::GateEvaluator;
 use crate::handle::{CoreHandle, EventStream, EventTx, Gate, SendFailure, StopFlag};
 use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
@@ -36,6 +37,7 @@ use crate::io_thread::{
 };
 use crate::journal::{self, Journal};
 use crate::link::PortChoice;
+use crate::menu::MenuNode;
 use crate::message::{
     AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, DefinitionSummary, DialogSummary,
     Envelope, Event, Failure, FailureCode, ImportSummary, JournalEntry, OpId, PortSummary,
@@ -410,6 +412,10 @@ pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
     clippy::needless_pass_by_value,
     reason = "the thread loop owns its channels and shared views for the life of the core"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the loop keeps the command, menu refresh and poll ordering in one place"
+)]
 fn run(
     commands: Rx<mpsc::Array<Envelope>>,
     events: EventTx,
@@ -426,6 +432,9 @@ fn run(
     let mut report = CoreReport::default();
     let mut session = Session::Empty;
     let mut live: Option<Live> = None;
+    // The last menu tree the core published, for change suppression.
+    let mut last_menu: Vec<MenuNode> = Vec::new();
+    let mut menu_dirty = false;
 
     // Every handle is gone (`Err`) also ends the loop, which is what makes a
     // dropped UI a shutdown rather than a leak.
@@ -456,6 +465,8 @@ fn run(
                 &history,
                 &log,
                 &mut report,
+                &mut last_menu,
+                &mut menu_dirty,
             );
             let took = op_started.elapsed();
 
@@ -468,8 +479,17 @@ fn run(
             report.handled += 1;
         }
 
+        if menu_dirty {
+            refresh_menu(&events, &session, &latest, &mut last_menu);
+            menu_dirty = false;
+        }
+
         // Replies and timers are serviced after every command and every wait,
         // so a poll or a reconnect never depends on another command arriving.
+        let connection_revision = live
+            .as_ref()
+            .map(|connection| connection.connection_revision);
+        let had_frame = latest.get().is_some();
         service_live(
             &mut live,
             &mut session,
@@ -482,6 +502,16 @@ fn run(
             &log,
             &mut report,
         );
+        let connection_changed = live
+            .as_ref()
+            .map(|connection| connection.connection_revision)
+            != connection_revision;
+        let first_frame = !had_frame && latest.get().is_some();
+
+        if menu_dirty || connection_changed || first_frame {
+            refresh_menu(&events, &session, &latest, &mut last_menu);
+            menu_dirty = false;
+        }
     }
 
     teardown(
@@ -629,6 +659,8 @@ fn handle(
     history: &ChartHistory,
     log: &LogStatus,
     report: &mut CoreReport,
+    last_menu: &mut Vec<MenuNode>,
+    menu_dirty: &mut bool,
 ) -> Outcome {
     let Envelope { op, command } = envelope;
 
@@ -792,6 +824,7 @@ fn handle(
         }
         Command::AdoptEcuImage => {
             adopt_ecu_image(op, session, events, report);
+            *menu_dirty = true;
             Outcome::Continue
         }
         Command::StartRealtime { interval_ms } => {
@@ -837,6 +870,7 @@ fn handle(
             connection.auto_poll = true;
             connection.start_polling(interval_ms);
             send(events, Event::RealtimeState { op, running: true });
+            *menu_dirty = true;
             Outcome::Continue
         }
         Command::StopRealtime => {
@@ -847,6 +881,7 @@ fn handle(
             });
             if running {
                 send(events, Event::RealtimeState { op, running: false });
+                *menu_dirty = true;
             } else {
                 send(
                     events,
@@ -960,30 +995,44 @@ fn handle(
             report,
             pages,
         ),
-        Command::RevertTune => revert_tune(op, session, journal_dir, events, report),
-        Command::RevertTarget { name } => {
-            revert_target(op, session, journal_dir, events, report, latest, &name)
+        Command::RevertTune => {
+            let outcome = revert_tune(op, session, journal_dir, events, report);
+            *menu_dirty = true;
+            outcome
         }
-        Command::ImportTune { path, consented } => import_tune(
-            op,
-            session,
-            journal_dir,
-            events,
-            report,
-            &path,
-            consented,
-            "import",
-        ),
-        Command::RestoreSnapshot { path } => import_tune(
-            op,
-            session,
-            journal_dir,
-            events,
-            report,
-            &path,
-            true,
-            "restore",
-        ),
+        Command::RevertTarget { name } => {
+            let outcome = revert_target(op, session, journal_dir, events, report, latest, &name);
+            *menu_dirty = true;
+            outcome
+        }
+        Command::ImportTune { path, consented } => {
+            let outcome = import_tune(
+                op,
+                session,
+                journal_dir,
+                events,
+                report,
+                &path,
+                consented,
+                "import",
+            );
+            *menu_dirty = true;
+            outcome
+        }
+        Command::RestoreSnapshot { path } => {
+            let outcome = import_tune(
+                op,
+                session,
+                journal_dir,
+                events,
+                report,
+                &path,
+                true,
+                "restore",
+            );
+            *menu_dirty = true;
+            outcome
+        }
         Command::ListSnapshots => {
             let Some(project) = session.project() else {
                 return refuse(
@@ -1076,6 +1125,7 @@ fn handle(
                     );
                     configure_history(history, &parsed);
                     *session = Session::Definition(Box::new(parsed));
+                    last_menu.clone_from(&summary.menu);
                     report.loads += 1;
                     send(events, Event::DefinitionLoaded { op, summary });
                 }
@@ -1104,7 +1154,19 @@ fn handle(
             match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
                     let cache_hit = project.definition_source() == DefinitionSource::Cache;
-                    let summary = ProjectSummary::from_project(&project);
+                    // The old session's frame belongs to another definition and
+                    // must be gone before the new menu is evaluated.
+                    teardown(
+                        live,
+                        session,
+                        safety,
+                        journal_dir,
+                        latest,
+                        events,
+                        history,
+                        log,
+                    );
+                    let summary = ProjectSummary::from_project(&project, latest.get().as_deref());
                     tracing::info!(
                         %op,
                         root = %summary.root.display(),
@@ -1116,18 +1178,9 @@ fn handle(
                         cache_hit,
                         "project opened"
                     );
-                    teardown(
-                        live,
-                        session,
-                        safety,
-                        journal_dir,
-                        latest,
-                        events,
-                        history,
-                        log,
-                    );
                     configure_history(history, project.definition());
                     *session = Session::Project(Box::new(project));
+                    last_menu.clone_from(&summary.definition.menu);
                     report.projects_opened += 1;
                     send(events, Event::ProjectOpened { op, summary });
                 }
@@ -1322,6 +1375,7 @@ fn handle(
                     },
                 ),
             }
+            *menu_dirty = true;
             Outcome::Continue
         }
         Command::EditAxis {
@@ -1421,6 +1475,7 @@ fn handle(
                     },
                 ),
             }
+            *menu_dirty = true;
             Outcome::Continue
         }
         Command::ReadDialog { name } => {
@@ -1541,6 +1596,7 @@ fn handle(
                     },
                 ),
             }
+            *menu_dirty = true;
             Outcome::Continue
         }
         Command::UnloadDefinition => {
@@ -1556,6 +1612,7 @@ fn handle(
                 log,
             );
             *session = Session::Empty;
+            last_menu.clear();
             history.configure(Vec::new());
             tracing::debug!(%op, had_session, "session unloaded");
             send(events, Event::DefinitionUnloaded { op });
@@ -2710,6 +2767,42 @@ fn refuse(
     Outcome::Continue
 }
 
+/// Re-evaluates the menu and publishes it only when the tree changed.
+///
+/// Menu gates read the working tune and the live frame. A tune edit or a
+/// connection change can therefore change the sidebar; evaluating on every
+/// command instead would add work to reads that cannot affect it.
+fn refresh_menu(
+    events: &EventTx,
+    session: &Session,
+    latest: &LatestFrame,
+    last_menu: &mut Vec<MenuNode>,
+) {
+    let Some(project) = session.project() else {
+        return;
+    };
+
+    let mut menu = crate::menu::build(project.definition());
+    let frame = latest.get();
+    let mut evaluator = GateEvaluator::new(project.definition(), project.tune(), frame.as_deref());
+    crate::menu::evaluate(&mut menu, &mut evaluator);
+
+    if menu == *last_menu {
+        return;
+    }
+
+    let unresolved: Vec<&str> = evaluator.unresolved().collect();
+    if !unresolved.is_empty() {
+        tracing::debug!(
+            unresolved = ?unresolved,
+            "menu gates could not be evaluated"
+        );
+    }
+
+    last_menu.clone_from(&menu);
+    send(events, Event::MenuChanged { menu });
+}
+
 /// Sends the derived tune status after a change.
 fn send_status(events: &EventTx, op: OpId, project: &Project) {
     send(
@@ -3124,6 +3217,10 @@ struct Live {
     page_bytes: BTreeMap<u8, Vec<u8>>,
     /// Whether every declared page was read and applied without skips.
     pages_complete: bool,
+    /// Bumped when the session starts, ends or reconnects, so the loop can
+    /// refresh menu gates that read live channels without threading a flag
+    /// through every reply handler.
+    connection_revision: u64,
     /// The first realtime frame's monotonic time, the chart/log time origin.
     first_frame: Option<Instant>,
     /// Monotonic seconds of the last decoded frame.
@@ -3176,6 +3273,7 @@ impl Live {
             log_columns: Vec::new(),
             page_bytes: BTreeMap::new(),
             pages_complete: false,
+            connection_revision: 0,
             first_frame: None,
             last_frame_time: 0.0,
         }
@@ -3339,6 +3437,7 @@ impl Live {
         };
         self.signature = signature;
         self.connected = true;
+        self.connection_revision = self.connection_revision.wrapping_add(1);
         self.reconnect = None;
         // A fresh handshake proves the link, not the page image: the app reads
         // every page next, and a write in between would act on stale RAM.
@@ -4889,6 +4988,7 @@ fn connection_lost(
 ) {
     tracing::warn!(%reason, "the ECU link was lost");
     live.connected = false;
+    live.connection_revision = live.connection_revision.wrapping_add(1);
     live.stop_polling();
     session.mark_unknown();
     latest.clear();
@@ -4940,6 +5040,7 @@ fn stop_for_disconnect(live: &mut Live) {
     live.stop_polling();
     live.reconnect = None;
     live.connected = false;
+    live.connection_revision = live.connection_revision.wrapping_add(1);
 }
 
 /// Applies a complete page read to the session's ECU image.

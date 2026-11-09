@@ -238,6 +238,14 @@ pub(crate) fn parse_menu(
             }
             "submenu" | "groupmenu" | "groupchildmenu" => {
                 let (target, label, conditions) = parse_menu_item(&fields);
+                // Speeduino writes a toolbar/menu index after the label
+                // (`subMenu = target, "Label", 9, { gate }`). It is metadata,
+                // not a gate slot; a bare `0` is the empty enable placeholder
+                // rusEFI uses and stays for the gate walker.
+                let conditions = conditions
+                    .into_iter()
+                    .filter(|condition| !is_non_zero_number(condition))
+                    .collect();
                 let kind = match lowered.as_str() {
                     "groupmenu" => MenuTargetKind::Group,
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
@@ -327,6 +335,10 @@ fn open_menu(definition: &mut Definition, fields: &[String], dialog: Option<&Str
 /// The space-separated form is detected by the quote in the first field, not by
 /// the field count: with a trailing condition it splits into two fields, and
 /// reading those as target and label would turn the condition into the label.
+fn is_non_zero_number(text: &str) -> bool {
+    text.trim().parse::<f64>().is_ok_and(|value| value != 0.0)
+}
+
 fn parse_menu_item(fields: &[String]) -> (String, String, Vec<String>) {
     if let Some(first) = fields.first()
         && let Some(start) = first.find('"')
@@ -478,6 +490,25 @@ mod tests {
             "a plain subMenu closes the group"
         );
         assert_eq!(menu.items[4].kind, MenuTargetKind::Panel);
+    }
+
+    #[test]
+    fn a_menu_index_after_the_label_is_not_a_gate_slot() {
+        let definition = parse(
+            "[MegaTune]\nsignature = \"x\"\n[Menu]\nmenu = \"Fuel\"\nsubMenu = trim, \"Trim\", 9, { nFuelChannels >= 5 }\nsubMenu = lambda, \"Lambda\", 0, { enabled }\n",
+        );
+
+        let menu = definition.menus.first().expect("menu");
+        assert_eq!(
+            menu.items[0].conditions,
+            vec!["{ nFuelChannels >= 5 }"],
+            "a non-zero menu index is metadata"
+        );
+        assert_eq!(
+            menu.items[1].conditions,
+            vec!["0", "{ enabled }"],
+            "a bare zero keeps the empty enable slot"
+        );
     }
 
     #[test]

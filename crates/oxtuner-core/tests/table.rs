@@ -970,7 +970,7 @@ dialog = helpParent, "Help Parent"
 [Menu]
 menuDialog = main
 menu = "Tuning"
-  subMenu = presDialog, "Presentation"
+  subMenu = presDialog, "Presentation", { limit > 5 }
 "#;
 
 const PRESENTATION_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
@@ -1420,6 +1420,51 @@ fn a_dialog_resolves_its_gates_against_the_working_tune() {
         .find(|command| command.label == "Ping")
         .expect("the command button is present");
     assert!(ping.gates.enabled, "limit = 10 passes `limit > 0`");
+}
+
+fn find_menu_node<'tree>(
+    nodes: &'tree [oxtuner_core::MenuNode],
+    label: &str,
+) -> Option<&'tree oxtuner_core::MenuNode> {
+    for node in nodes {
+        if node.label == label {
+            return Some(node);
+        }
+
+        if let Some(found) = find_menu_node(&node.children, label) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+#[test]
+fn editing_a_menu_gate_publishes_the_new_tree() {
+    let (_dir, core, _dialog) = read_pres_dialog("menu-change");
+
+    let op = core
+        .handle
+        .edit_scalar("presDialog", "limit", 0.0)
+        .expect("the scalar edit is queued");
+
+    let menu = loop {
+        match core.next() {
+            Event::DialogEdited { op: answered, .. } => assert_eq!(answered, op),
+            Event::MenuChanged { menu } => break menu,
+            other => panic!("unexpected event before the menu change: {other:?}"),
+        }
+    };
+
+    let presentation =
+        find_menu_node(&menu, "Presentation").expect("the gated menu item is carried");
+    assert!(presentation.visibility_expression.is_none());
+    assert_eq!(presentation.enable_expression.as_deref(), Some("limit > 5"));
+    assert!(
+        !presentation.gates.enabled,
+        "limit = 0 closes the menu gate"
+    );
+    assert!(!presentation.gates.unresolved);
 }
 
 #[test]

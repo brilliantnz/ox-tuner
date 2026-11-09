@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use oxtuner_datalog::LogSummary;
 use oxtuner_tune::TuneStatus;
 
+use crate::menu::MenuNode;
+
 use super::{
     BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, ImportSummary, JournalEntry,
     OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason, RevertSummary, SaveSummary,
@@ -67,6 +69,14 @@ pub enum Event {
         op: OpId,
         /// The dialog after the edit.
         dialog: DialogSummary,
+    },
+    /// A tune or connection change altered one or more menu gates.
+    ///
+    /// Only sent when the evaluated tree actually differs from the last one
+    /// the core published. The tree's gates already include every ancestor's.
+    MenuChanged {
+        /// The evaluated navigation tree.
+        menu: Vec<MenuNode>,
     },
     /// The serial ports the connect dialog can offer.
     PortsListed {
@@ -266,7 +276,10 @@ impl Event {
             | Self::DefinitionUnloaded { op }
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
-            Self::ConnectionLost { .. } | Self::Reconnected { .. } | Self::Stopped => None,
+            Self::MenuChanged { .. }
+            | Self::ConnectionLost { .. }
+            | Self::Reconnected { .. }
+            | Self::Stopped => None,
         }
     }
 }

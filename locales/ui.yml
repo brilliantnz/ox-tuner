@@ -108,6 +108,8 @@ app:
       en: Open a project or a definition to see its menu.
     no_menu:
       en: This definition declares no menus.
+    unavailable_for_settings:
+      en: Not available with the current settings
   explorer:
     kind_menu:
       en: Menu

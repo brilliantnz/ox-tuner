@@ -24,12 +24,13 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::tree::{TreeEntry, TreeState, tree};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, Styled as _, Window, div, px,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use oxtuner_core::{MenuNode, MenuNodeKind};
 
@@ -187,14 +188,17 @@ fn tree_row(
         node.map_or(IconName::File, |node| menu_node::icon(node.kind))
     };
     let missing = node.is_some_and(|node| node.kind == MenuNodeKind::Missing);
+    let unavailable = node.is_some_and(|node| !node.gates.visible || !node.gates.enabled);
     let touched = node.is_some_and(|node| touched(node, CoreService::dirty(cx)));
     let muted = cx.theme().muted_foreground;
     // A folder's icon is its disclosure state, not a kind, so only leaves take
     // the kind's colour.
     let icon_color = match node {
-        Some(node) if !is_folder => menu_node::icon_color(node.kind, cx),
+        Some(node) if !is_folder && !unavailable => menu_node::icon_color(node.kind, cx),
         _ => muted,
     };
+    let unavailable_reason =
+        unavailable.then(|| t!("app.primary_sidebar.unavailable_for_settings").to_string());
 
     let row_id: ElementId = SharedString::from(format!("tree-row-{}", entry.item().id)).into();
     let mut surface = h_flex()
@@ -214,7 +218,7 @@ fn tree_row(
                 .text_color(cx.theme().sidebar_accent_foreground)
                 .font_weight(FontWeight::MEDIUM)
         })
-        .when(!selected, |this| {
+        .when(!selected && !unavailable, |this| {
             this.hover(|this| {
                 this.bg(cx.theme().sidebar_accent.opacity(0.8))
                     .text_color(cx.theme().sidebar_accent_foreground)
@@ -227,10 +231,14 @@ fn tree_row(
                 .min_w_0()
                 .truncate()
                 .when(is_folder, |this| this.font_weight(FontWeight::SEMIBOLD))
-                .when(missing, |this| this.text_color(muted))
+                .when(missing || unavailable, |this| this.text_color(muted))
                 .child(entry.item().label.clone()),
         )
         .when(touched, |this| this.child(unsaved_dot(cx)));
+
+    if let Some(reason) = unavailable_reason {
+        surface = surface.tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx));
+    }
 
     if is_folder {
         let explorer = explorer.clone();
@@ -239,7 +247,7 @@ fn tree_row(
             cx.stop_propagation();
             explorer.update(cx, |explorer, cx| explorer.toggle_expanded(&id, cx));
         });
-    } else {
+    } else if !unavailable {
         let explorer = explorer.clone();
         let id = entry.item().id.to_string();
         surface = surface.on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
@@ -275,6 +283,7 @@ mod tests {
         AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, IntoElement, Render,
         TestAppContext, Window, WindowBounds, WindowOptions, div, px, size,
     };
+    use oxtuner_core::GateState;
     use oxtuner_core::{MenuNode, MenuNodeKind};
 
     struct Host {
@@ -303,8 +312,9 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: vec![MenuNode {
                 id: "menu:0/0".to_owned(),
                 label: "VE Table".to_owned(),
@@ -312,8 +322,9 @@ mod tests {
                 detail: None,
                 target: Some("veTableTbl".to_owned()),
                 embedded: None,
-                enabled: None,
-                visible: None,
+                enable_expression: None,
+                visibility_expression: None,
+                gates: GateState::default(),
                 children: Vec::new(),
             }],
         }]
@@ -365,8 +376,9 @@ mod tests {
             detail: None,
             target: Some("veTableTbl".to_owned()),
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
         let folder = MenuNode {
@@ -376,8 +388,9 @@ mod tests {
             detail: None,
             target: None,
             embedded: None,
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: vec![table.clone()],
         };
         let dialog = MenuNode {
@@ -387,8 +400,9 @@ mod tests {
             detail: None,
             target: Some("idleDialog".to_owned()),
             embedded: Some("veTableTbl".to_owned()),
-            enabled: None,
-            visible: None,
+            enable_expression: None,
+            visibility_expression: None,
+            gates: GateState::default(),
             children: Vec::new(),
         };
 
@@ -492,8 +506,9 @@ mod tests {
                 detail: None,
                 target: Some(format!("table{ix}")),
                 embedded: None,
-                enabled: None,
-                visible: None,
+                enable_expression: None,
+                visibility_expression: None,
+                gates: GateState::default(),
                 children: Vec::new(),
             })
             .collect();
