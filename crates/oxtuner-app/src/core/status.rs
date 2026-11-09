@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use gpui_kit::SharedString;
 use oxtuner_core::{
     BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, Failure, FailureCode,
-    ImportSummary, JournalEntry, LogSnapshot, LogSummary, MenuNode, OpId, PortChoice, PortSummary,
-    ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, TableSummary, TuneStatus,
-    WriteSummary,
+    ImportSummary, JournalEntry, LogSummary, MenuNode, OpId, PortChoice, PortSummary,
+    ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SessionLogSnapshot, TableSummary,
+    TuneStatus, WriteSummary,
 };
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
@@ -98,7 +98,7 @@ pub(crate) struct CoreStatus {
     /// A tune path waiting for the user's consent to import it.
     pub(crate) import_consent: Option<PathBuf>,
     /// The last stopped session log, for the output panel.
-    pub(crate) last_log: Option<LogSnapshot>,
+    pub(crate) last_log: Option<SessionLogSnapshot>,
     /// Moves when a definition or project is installed, so views can rebuild
     /// their channel lists.
     pub(crate) definition_revision: u64,
@@ -431,7 +431,7 @@ impl CoreStatus {
             Update::Snapshots(paths) => self.snapshots = paths,
             Update::Log { running, summary } => {
                 if let Some(summary) = summary {
-                    self.last_log = Some(LogSnapshot::new(
+                    self.last_log = Some(SessionLogSnapshot::new(
                         running,
                         Some(summary.path),
                         summary.frames,
@@ -440,7 +440,7 @@ impl CoreStatus {
                     ));
                 }
                 if running {
-                    self.last_log = Some(LogSnapshot::new(
+                    self.last_log = Some(SessionLogSnapshot::new(
                         true,
                         self.last_log.as_ref().and_then(|log| log.path.clone()),
                         0,

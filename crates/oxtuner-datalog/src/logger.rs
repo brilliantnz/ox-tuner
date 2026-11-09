@@ -72,7 +72,7 @@ struct StatusInner {
 /// A frozen copy of [`LogStatus`], for one render or one dialog.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LogSnapshot {
+pub struct SessionLogSnapshot {
     /// Whether the writer thread is accepting frames.
     pub running: bool,
     /// The file being written, when a log has been started.
@@ -99,7 +99,7 @@ pub struct LogSummary {
     pub bytes: u64,
 }
 
-impl LogSnapshot {
+impl SessionLogSnapshot {
     /// Builds a snapshot, for callers that keep their own copy (the app's
     /// output panel does, after a stop event).
     pub fn new(
@@ -155,8 +155,8 @@ impl LogStatus {
     }
 
     /// A frozen copy for rendering.
-    pub fn snapshot(&self) -> LogSnapshot {
-        LogSnapshot {
+    pub fn snapshot(&self) -> SessionLogSnapshot {
+        SessionLogSnapshot {
             running: self.is_running(),
             path: self.path(),
             frames: self.frames(),

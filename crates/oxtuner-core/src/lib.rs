@@ -106,7 +106,7 @@ pub use message::{
     ReferenceTableLimit, ReferenceTableSolution, ReferenceTableSummary, RejectReason,
     RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
 };
-pub use oxtuner_datalog::{LogColumn, LogSnapshot, LogStatus, LogSummary};
+pub use oxtuner_datalog::{LogColumn, LogStatus, LogSummary, SessionLogSnapshot};
 pub use realtime::{
     BlockingFrameWatch, FrameWatch, IndicatorReading, LatestFrame, LiveValue, RealtimeDecoder,
     RealtimeFrame,

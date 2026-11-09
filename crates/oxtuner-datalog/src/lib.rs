@@ -21,7 +21,7 @@ mod csv;
 mod logger;
 
 pub use csv::LogColumn;
-pub use logger::{LogSnapshot, LogStatus, LogSummary, Logger};
+pub use logger::{LogStatus, LogSummary, Logger, SessionLogSnapshot};
 
 #[cfg(test)]
 mod tests;
