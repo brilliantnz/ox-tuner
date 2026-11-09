@@ -26,7 +26,7 @@ use crossfire::{MTx, RecvTimeoutError, Rx, mpsc, spsc};
 use oxtuner_datalog::{LogColumn, LogStatus, Logger};
 use oxtuner_ini::Definition;
 use oxtuner_project::{DefinitionSource, Project};
-use oxtuner_protocol::{Behavior, LinkMode};
+use oxtuner_protocol::{BehaviorKind, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
 use crate::gate::GateEvaluator;
@@ -3459,7 +3459,7 @@ impl Live {
         replies: Rx<spsc::Array<IoReply>>,
         link: &PortChoice,
         definition: &Definition,
-        behavior: Behavior,
+        behavior: BehaviorKind,
         framing: LinkMode,
         standalone: Option<Box<Tune>>,
     ) -> Self {
@@ -3870,7 +3870,7 @@ fn connect(
         );
         return Outcome::Continue;
     };
-    let Some(behavior) = Behavior::select(definition) else {
+    let Some(behavior) = BehaviorKind::select(definition) else {
         send(
             events,
             Event::Failed {

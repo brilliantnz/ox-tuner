@@ -5,7 +5,7 @@
 //! failure is a real protocol failure, not a mock drifting from production.
 
 use oxtuner_ini::{Definition, SettingsContext};
-use oxtuner_protocol::{Behavior, LinkMode, MsProtocol, Protocol};
+use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp, SimTransport};
 use oxtuner_transport::{Transport, TransportError};
 
@@ -85,7 +85,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
 }
 
 fn protocol(definition: &Definition, link: LinkMode) -> MsProtocol {
-    let behavior = Behavior::select(definition).expect("a known family");
+    let behavior = BehaviorKind::select(definition).expect("a known family");
     MsProtocol::new(definition, behavior.as_dyn())
         .expect("the fixture is complete")
         .with_link_mode(link)
@@ -134,7 +134,7 @@ fn a_legacy_session_reads_writes_and_burns() {
 
     // Page 2 has no burn command: the behavior says so, and the protocol
     // refuses before touching the wire.
-    let behavior = Behavior::select(&definition).expect("a family");
+    let behavior = BehaviorKind::select(&definition).expect("a family");
     assert!(matches!(
         behavior.as_dyn().burn(&definition, 2),
         oxtuner_protocol::BurnPlan::NotBurnable { .. }
