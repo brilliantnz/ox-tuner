@@ -16,7 +16,7 @@ use crate::{
     error::LogError,
     file::{self, RunFile},
     filter::{self, FilterSetup},
-    record::LogSnapshot,
+    record::LogBufferSnapshot,
     store::{LogStore, StoreLayer},
 };
 
@@ -84,7 +84,7 @@ impl LogHandle {
     }
 
     /// A frozen copy of the ring, for one render.
-    pub fn snapshot(&self) -> LogSnapshot {
+    pub fn snapshot(&self) -> LogBufferSnapshot {
         self.store.snapshot()
     }
 }

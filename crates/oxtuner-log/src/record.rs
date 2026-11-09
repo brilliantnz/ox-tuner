@@ -83,7 +83,7 @@ impl LogRecord {
 /// A frozen copy of the in-memory ring for one render.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
-pub struct LogSnapshot {
+pub struct LogBufferSnapshot {
     /// Records oldest first.
     pub records: Vec<LogRecord>,
     /// Records evicted because the ring was full.

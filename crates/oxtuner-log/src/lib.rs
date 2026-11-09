@@ -31,5 +31,5 @@ mod store;
 pub use config::{FilePolicy, LogConfig, Profile};
 pub use error::LogError;
 pub use init::{LogControl, LogHandle, init};
-pub use record::{LogRecord, LogSnapshot};
+pub use record::{LogBufferSnapshot, LogRecord};
 pub use store::LogStore;
