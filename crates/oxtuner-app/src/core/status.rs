@@ -76,7 +76,7 @@ pub(crate) struct CoreStatus {
     pub(crate) test: Option<TestResult>,
     /// The connection request that is still being answered.
     pub(crate) pending_connect: Option<PortChoice>,
-    /// Whether the global write switch is on (S8).
+    /// Whether the global write switch is on.
     pub(crate) writes_enabled: bool,
     /// Why the write path is halted after a failed verification, until the user
     /// acknowledges it.
@@ -95,7 +95,7 @@ pub(crate) struct CoreStatus {
     pub(crate) journal: Option<JournalView>,
     /// The project's snapshots, after `ListSnapshots`.
     pub(crate) snapshots: Vec<PathBuf>,
-    /// A tune path waiting for the user's consent to import it (S9).
+    /// A tune path waiting for the user's consent to import it.
     pub(crate) import_consent: Option<PathBuf>,
     /// The last stopped session log, for the output panel.
     pub(crate) last_log: Option<LogSnapshot>,
@@ -230,6 +230,7 @@ pub(super) enum Update {
     },
     Written(WriteSummary),
     Burned(BurnSummary),
+    ControllerCommand,
     Imported(ImportSummary),
     Reverted(RevertSummary),
     TuneStatus(TuneStatus),
@@ -393,6 +394,12 @@ impl CoreStatus {
                 self.last_burn = Some(summary);
                 self.write_halted = None;
                 self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::ControllerCommand => {
+                self.failure = None;
+                // A raw command bypassed memory synchronization, so the ECU
+                // image is stale; open tables must read their states again.
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
             Update::Imported(summary) => {

@@ -1,6 +1,6 @@
 //! The UI-side handles: commands in, events out.
 //!
-//! Two endpoints, chosen for who is on each end (ADR-0005 rule 5, ADR-0019):
+//! Two endpoints, chosen for who is on each end:
 //!
 //! - **Commands** are a bounded **MPSC** queue: many `CoreHandle` clones, one
 //!   core thread. The sender is the blocking flavor but only ever `try_send`s:
@@ -67,14 +67,14 @@ pub(crate) enum SendFailure {
     Dropped,
 }
 
-/// The core's event producer. One instance, on the core thread (ADR-0019).
+/// The core's event producer. One instance, on the core thread.
 ///
 /// Delivery is lossless while the UI is reading: a full queue is waited on, so
 /// every accepted command really is answered. The wait is taken in
 /// [`EVENT_SLICE`] steps, and once [`StopFlag`] says shutdown has been accepted
 /// an event that still does not fit is dropped and counted rather than blocking
 /// the thread — otherwise a consumer that stopped reading could keep the core
-/// alive forever and hang quitting (ADR-0023).
+/// alive forever and hang quitting.
 pub(crate) struct EventTx {
     events: Tx<spsc::Array<Event>>,
     stop: Arc<StopFlag>,
@@ -337,6 +337,27 @@ impl CoreHandle {
         })
     }
 
+    /// Runs one `[ControllerCommands]` action from a dialog button.
+    ///
+    /// The reply is [`crate::Event::ControllerCommandRan`] or
+    /// [`crate::Event::Failed`]. The action passes the same safety gate as a
+    /// write, and the ECU image is stale after it succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn run_controller_command(
+        &self,
+        dialog: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Result<OpId, CoreError> {
+        self.send(Command::RunControllerCommand {
+            dialog: dialog.into(),
+            command: command.into(),
+        })
+    }
+
     /// Connects over a serial device or a link the application supplies.
     ///
     /// The reply is [`crate::Event::Connected`] or [`crate::Event::Failed`].
@@ -487,7 +508,7 @@ impl CoreHandle {
 
     /// Imports a `.msq` into the working image.
     ///
-    /// A different-signature tune needs `consented: true` (S9).
+    /// A different-signature tune needs `consented: true`.
     ///
     /// # Errors
     ///
@@ -524,7 +545,7 @@ impl CoreHandle {
         self.send(Command::ListSnapshots)
     }
 
-    /// Turns the global write switch on or off (S8).
+    /// Turns the global write switch on or off.
     ///
     /// # Errors
     ///
@@ -613,7 +634,7 @@ impl CoreHandle {
     /// stop flag is raised first, so a core blocked handing an answer to a UI
     /// that stopped reading can still reach this command; from that point on
     /// delivery is best effort and undelivered events are counted instead of
-    /// blocking the thread (ADR-0023).
+    /// blocking the thread.
     ///
     /// # Errors
     ///

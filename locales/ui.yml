@@ -380,6 +380,10 @@ app:
       en: Dialog could not be read
     failed_dialog_edit:
       en: Dialog edit was refused
+    failed_command_refused:
+      en: Controller command refused
+    failed_command:
+      en: Controller command failed
     failed_connect:
       en: Connection failed
     failed_test:
@@ -538,6 +542,20 @@ app:
       en: This setting takes effect after the ECU has been power cycled.
     power_cycle_changed:
       en: Changed settings need an ECU power cycle before they take effect.
+    actions:
+      en: Actions
+    run:
+      en: Run
+    command_sent:
+      en: Command sent
+    command_unknown:
+      en: The definition does not declare this command.
+    command_disabled:
+      en: This command is disabled by the current settings.
+    command_needs_connection:
+      en: Connect to the ECU to send this command.
+    command_needs_writes:
+      en: Enable writes to send this command.
   cluster:
     title:
       en: Cluster

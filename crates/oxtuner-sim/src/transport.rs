@@ -29,7 +29,7 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimConfig {
     /// Signature to answer with. `None` uses the definition's own, which is the
-    /// normal case; `Some` produces the S1 mismatch path.
+    /// normal case; `Some` produces the signature mismatch path.
     pub signature: Option<String>,
     /// Seed for the memory fill and the waveform's phase.
     pub seed: u64,
@@ -79,6 +79,8 @@ pub struct Counters {
     pub writes: u64,
     /// Burns.
     pub burns: u64,
+    /// `[ControllerCommands]` actions.
+    pub commands: u64,
     /// Realtime blocks.
     pub realtime: u64,
     /// Bytes written into pages.
@@ -461,6 +463,10 @@ impl SimTransport {
                 self.burn_pending_left = self.burn_pending_samples;
                 if framed { vec![0x04] } else { Vec::new() }
             }
+            Request::ControllerCommand => {
+                self.counters.commands += 1;
+                if framed { vec![0] } else { Vec::new() }
+            }
             Request::Crc {
                 page,
                 offset,
@@ -538,6 +544,7 @@ fn operation_of(request: &Request<'_>) -> SimOp {
         Request::Burn { .. } => SimOp::Burn,
         Request::Crc { .. } => SimOp::Crc,
         Request::Realtime { .. } => SimOp::Realtime,
+        Request::ControllerCommand => SimOp::ControllerCommand,
     }
 }
 

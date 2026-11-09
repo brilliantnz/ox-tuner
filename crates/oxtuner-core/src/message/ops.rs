@@ -91,7 +91,7 @@ pub enum Command {
     ///
     /// `settings` is the project's settings snapshot (`<settings>` in the
     /// `.msq`); `#if` branches and the protocol commands they rewrite are
-    /// resolved with it (ADR-0006). A definition that replaces an already
+    /// resolved with it. A definition that replaces an already
     /// loaded one is allowed — the core drops the old one.
     LoadDefinition {
         /// What to call the source in logs and the UI (usually a file name).
@@ -101,7 +101,7 @@ pub enum Command {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
-    /// Open a `TunerStudio` project folder in place (ADR-0007).
+    /// Open a `TunerStudio` project folder in place.
     ///
     /// The core reads the definition and the tune, owns both, and answers with
     /// [`super::Event::ProjectOpened`] — or [`super::Event::Failed`] when the folder is not a
@@ -118,7 +118,7 @@ pub enum Command {
     ///
     /// Only variables that differ from the baseline are touched, so an unedited
     /// tune stays byte-for-byte identical. A read-only session refuses with
-    /// [`super::FailureCode::TuneSaveFailed`] and the S1 reasons.
+    /// [`super::FailureCode::TuneSaveFailed`] and the read-only reasons.
     SaveTune,
     /// Read one table from the open project, shaped for the grid.
     ///
@@ -163,6 +163,24 @@ pub enum Command {
         name: String,
         /// Cells to write, in user units.
         edits: Vec<CellEdit>,
+    },
+    /// Run one `[ControllerCommands]` action from a dialog button.
+    ///
+    /// A controller command is a raw ECU action: it bypasses memory
+    /// synchronization, so the working image cannot assume the ECU still holds
+    /// what the last read saw. The core therefore requires the same gate as a
+    /// write and marks the ECU side stale after the command succeeds. Only an
+    /// explicit click sends it; nothing runs on open, close or edit.
+    ///
+    /// The reply is [`super::Event::ControllerCommandRan`] or
+    /// [`super::Event::Failed`] with
+    /// [`super::FailureCode::ControllerCommandRefused`] or
+    /// [`super::FailureCode::ControllerCommandFailed`].
+    RunControllerCommand {
+        /// Dialog the button was pressed in, for the echo.
+        dialog: String,
+        /// `[ControllerCommands]` name.
+        command: String,
     },
     /// Apply user-unit edits to one table's axis bins.
     ///
@@ -237,14 +255,16 @@ pub enum Command {
     /// values, reads the pages it will patch, writes only the variables that
     /// changed, reads them back and verifies the result. It never burns.
     /// `pages` is an optional restriction; an empty list means every page with
-    /// a change. S1, S2, S3, S6, S7 and S8 apply to this path.
+    /// a change. The write gate, clamping and read-back verification apply to
+    /// this path.
     WriteToRam {
         /// INI page numbers, or empty for every changed page.
         pages: Vec<u8>,
     },
     /// Burn RAM content to flash.
     ///
-    /// Only an explicit user command reaches this variant (S5: no auto-burn).
+    /// Only an explicit user command reaches this variant; nothing burns
+    /// automatically.
     /// The core snapshots the working image, burns the selected pages (or every
     /// burnable page), waits for the protocol's activation delay, reads the
     /// pages back and verifies them. The working image must already match ECU
@@ -255,14 +275,14 @@ pub enum Command {
     },
     /// Discard local edits and return to the file baseline.
     ///
-    /// A snapshot of the working image is written first (S4).
+    /// A snapshot of the working image is written first.
     RevertTune,
     /// Discard the local edits one table, curve or dialog owns.
     ///
     /// `name` is resolved like [`Self::ReadTable`]: a table id, a 3-D map id, a
     /// curve name, or a dialog name (whose embedded table goes with it). Every
     /// other target keeps its edits. A snapshot of the working image is
-    /// written first (S4). The reply is [`super::Event::TableEdited`] and/or
+    /// written first. The reply is [`super::Event::TableEdited`] and/or
     /// [`super::Event::DialogEdited`] with the target after the revert, plus
     /// [`super::Event::TuneStatusRead`].
     RevertTarget {
@@ -272,7 +292,7 @@ pub enum Command {
     /// Import another `.msq` into the working image.
     ///
     /// A tune whose signature differs from the loaded definition needs
-    /// `consented: true` (S9); without it the core refuses with
+    /// `consented: true`; without it the core refuses with
     /// [`super::FailureCode::ImportNeedsConsent`] and changes nothing.
     ImportTune {
         /// The `.msq` to import.
@@ -291,7 +311,7 @@ pub enum Command {
     },
     /// List the project's snapshots, oldest first.
     ListSnapshots,
-    /// Turn the global write path on or off (S8).
+    /// Turn the global write path on or off.
     ///
     /// Writes start disabled. Enabling is an explicit user choice; disabling is
     /// immediate and always allowed.
@@ -299,7 +319,7 @@ pub enum Command {
         /// Whether writes may run from now on.
         enabled: bool,
     },
-    /// Clear a halted write path after the user reviewed a failed write (S3).
+    /// Clear a halted write path after the user reviewed a failed write.
     AcknowledgeWriteFailure,
     /// Read the write journal for the open project.
     ReadJournal,
@@ -345,6 +365,7 @@ impl Command {
             Self::EditScalar { .. } => "edit-scalar",
             Self::EditTable { .. } => "edit-table",
             Self::EditAxis { .. } => "edit-axis",
+            Self::RunControllerCommand { .. } => "run-controller-command",
             Self::Connect { .. } => "connect",
             Self::TestConnection { .. } => "test-connection",
             Self::Disconnect => "disconnect",

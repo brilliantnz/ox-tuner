@@ -28,8 +28,8 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div, px, rems,
 };
 use oxtuner_core::{
-    DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode, GateState,
-    SaveSummary,
+    DialogCommand, DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode,
+    GateState, SaveSummary,
 };
 use oxtuner_ui::table::{EditOp, parse_edit};
 
@@ -666,6 +666,10 @@ impl DialogEditor {
             ));
         }
 
+        if let Some(actions) = command_card(dialog, cx) {
+            board = board.child(actions);
+        }
+
         if !dialog.unavailable.is_empty() {
             board = board.child(
                 div()
@@ -776,7 +780,8 @@ impl DialogEditor {
         let theme = cx.theme().clone();
 
         if let Some(dialog) = dialog {
-            let has_visible = dialog.fields.iter().any(|field| field.gates.visible);
+            let has_visible = dialog.fields.iter().any(|field| field.gates.visible)
+                || dialog.commands.iter().any(|command| command.gates.visible);
 
             if !has_visible && dialog.unavailable.is_empty() {
                 let message = if dialog.fields.is_empty() {
@@ -882,6 +887,101 @@ impl DialogEditor {
     }
 }
 
+/// The `commandButton` rows the definition declares, as one card.
+///
+/// A raw controller action is never run on open, close or edit; every button
+/// is a separate click. A button is muted when the definition does not declare
+/// the command, its gate is off, the session is read-only, or there is no
+/// connection or no write access to carry it.
+fn command_card(dialog: &DialogSummary, cx: &mut Context<'_, DialogEditor>) -> Option<AnyElement> {
+    let theme = cx.theme().clone();
+    let status = CoreService::status(cx);
+    let can_reach_ecu = status
+        .connection
+        .as_ref()
+        .is_some_and(|connection| !connection.read_only);
+    let writes_enabled = status.writes_enabled;
+
+    let rows: Vec<AnyElement> = dialog
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command.gates.visible)
+        .map(|(index, command)| {
+            let blocked =
+                command_block_reason(command, dialog.writable, can_reach_ecu, writes_enabled);
+            let message = show_message(command);
+            let dialog_id = dialog.id.clone();
+            let command_name = command.command.clone();
+
+            let mut button = Button::new(("dialog-command", index))
+                .label(t!("app.dialog.run"))
+                .ghost();
+
+            match blocked {
+                Some(reason) => {
+                    button = button.disabled(true).tooltip(reason);
+                }
+                None => {
+                    button = button.on_click(move |_, _, cx| {
+                        send_command(&dialog_id, &command_name, message.clone(), cx);
+                    });
+                }
+            }
+
+            h_flex()
+                .h(rems(3.5))
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .py_2()
+                .border_t_1()
+                .border_color(theme.border.opacity(0.5))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_sm()
+                        .child(command.label.clone()),
+                )
+                .child(button)
+                .into_any_element()
+        })
+        .collect();
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    Some(constant::card(
+        ("constant-actions", 0usize),
+        t!("app.dialog.actions"),
+        rows,
+        cx,
+    ))
+}
+
+/// Sends a command button's action and shows its declared message.
+fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut App) {
+    if crate::core::run_controller_command(dialog, command, cx)
+        && let Some(message) = message
+    {
+        notifications::publish(
+            NotificationDraft::new(
+                NotificationSeverity::Info,
+                t!("app.dialog.command_sent").to_string(),
+                message,
+            )
+            .key(NotificationKey::named(format!(
+                "dialog-command-{dialog}-{command}"
+            ))),
+            cx,
+        );
+    }
+}
+
 /// One card's rows, in document order.
 struct SectionGroup {
     title: String,
@@ -981,6 +1081,44 @@ fn row_available(field: &DialogFieldSummary) -> bool {
 /// Whether this session may start an edit on a row.
 fn row_editable(field: &DialogFieldSummary) -> bool {
     field.writable && row_available(field)
+}
+
+/// Why a command button cannot run, or `None` when it can.
+fn command_block_reason(
+    command: &DialogCommand,
+    writable: bool,
+    can_reach_ecu: bool,
+    writes_enabled: bool,
+) -> Option<SharedString> {
+    if !command.known {
+        return Some(t!("app.dialog.command_unknown").to_string().into());
+    }
+    if !command.gates.enabled {
+        return Some(t!("app.dialog.command_disabled").to_string().into());
+    }
+    if !writable {
+        return Some(t!("app.dialog.read_only").to_string().into());
+    }
+    if !can_reach_ecu {
+        return Some(t!("app.dialog.command_needs_connection").to_string().into());
+    }
+    if !writes_enabled {
+        return Some(t!("app.dialog.command_needs_writes").to_string().into());
+    }
+
+    None
+}
+
+/// The message a `showMessageOnClick` flag carries, when the row has one.
+fn show_message(command: &DialogCommand) -> Option<String> {
+    let (index, _) = command
+        .flags
+        .iter()
+        .enumerate()
+        .find(|(_, flag)| flag.eq_ignore_ascii_case("showMessageOnClick"))?;
+    let message = command.flags.get(index + 1)?.trim();
+
+    (!message.is_empty()).then(|| message.to_owned())
 }
 
 /// Keeps a typed value inside the range the definition accepts.
@@ -1149,6 +1287,62 @@ mod tests {
             widget_kind(&row(DialogFieldKind::Select, Some(2.0), 3)),
             Some(WidgetKind::Number),
             "an option list without labels is shown as the raw number"
+        );
+    }
+
+    fn command(known: bool, enabled: bool, flags: &[&str]) -> DialogCommand {
+        DialogCommand {
+            label: "Reboot".to_owned(),
+            command: "cmdReboot".to_owned(),
+            visibility_expression: None,
+            enable_expression: None,
+            gates: GateState {
+                visible: true,
+                enabled,
+                unresolved: false,
+            },
+            known,
+            flags: flags.iter().map(|flag| (*flag).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_command_button_names_why_it_cannot_run() {
+        assert!(
+            command_block_reason(&command(false, true, &[]), true, true, true)
+                .is_some_and(|reason| reason.contains("does not declare"))
+        );
+        assert!(
+            command_block_reason(&command(true, false, &[]), true, true, true)
+                .is_some_and(|reason| reason.contains("disabled"))
+        );
+        assert!(
+            command_block_reason(&command(true, true, &[]), false, true, true)
+                .is_some_and(|reason| reason.contains("Read-only"))
+        );
+        assert!(
+            command_block_reason(&command(true, true, &[]), true, false, true)
+                .is_some_and(|reason| reason.contains("Connect"))
+        );
+        assert!(
+            command_block_reason(&command(true, true, &[]), true, true, false)
+                .is_some_and(|reason| reason.contains("Enable writes"))
+        );
+        assert_eq!(
+            command_block_reason(&command(true, true, &[]), true, true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_message_flag_carries_the_text_after_it() {
+        let row = command(true, true, &["showMessageOnClick", "Controller restarted"]);
+
+        assert_eq!(show_message(&row).as_deref(), Some("Controller restarted"));
+        assert_eq!(show_message(&command(true, true, &[])), None);
+        assert_eq!(
+            show_message(&command(true, true, &["closeDialogOnClick"])),
+            None
         );
     }
 

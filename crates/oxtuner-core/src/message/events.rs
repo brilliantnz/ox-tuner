@@ -8,9 +8,9 @@ use oxtuner_tune::TuneStatus;
 use crate::menu::MenuNode;
 
 use super::{
-    BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, ImportSummary, JournalEntry,
-    OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason, RevertSummary, SaveSummary,
-    TableSummary, WriteSummary,
+    BurnSummary, ConnectionSummary, ControllerCommandSummary, DefinitionSummary, DialogSummary,
+    ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason,
+    RevertSummary, SaveSummary, TableSummary, WriteSummary,
 };
 
 /// A reply from the core.
@@ -69,6 +69,16 @@ pub enum Event {
         op: OpId,
         /// The dialog after the edit.
         dialog: DialogSummary,
+    },
+    /// One `[ControllerCommands]` action was sent.
+    ///
+    /// The ECU side is stale afterwards, because the action bypassed memory
+    /// synchronization; a page read restores the derived states.
+    ControllerCommandRan {
+        /// The command this answers.
+        op: OpId,
+        /// What was sent.
+        summary: ControllerCommandSummary,
     },
     /// A tune or connection change altered one or more menu gates.
     ///
@@ -178,7 +188,7 @@ pub enum Event {
         /// The derived state.
         status: TuneStatus,
     },
-    /// The global write switch changed (S8).
+    /// The global write switch changed.
     WriteAccessChanged {
         /// The command this answers.
         op: OpId,
@@ -255,6 +265,7 @@ impl Event {
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }
             | Self::DialogEdited { op, .. }
+            | Self::ControllerCommandRan { op, .. }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
             | Self::Connected { op, .. }
@@ -298,13 +309,13 @@ pub struct Failure {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureCode {
-    /// The bytes are not a definition this build can read (ADR-0006 rule 11:
-    /// an unsupported `iniSpecVersion` fails loudly rather than half-parsing).
+    /// The bytes are not a definition this build can read. An unsupported
+    /// `iniSpecVersion` fails loudly rather than half-parsing.
     DefinitionRejected,
     /// The folder is not an openable `TunerStudio` project, or a file in it could
     /// not be read or parsed.
     ProjectRejected,
-    /// The tune file could not be written, or the session is read-only (S1).
+    /// The tune file could not be written, or the session is read-only.
     TuneSaveFailed,
     /// There is no open tune to save (no project, or only a definition).
     NothingToSave,
@@ -318,6 +329,13 @@ pub enum FailureCode {
     DialogUnavailable,
     /// A scalar edit was not finite, not a scalar, or the session is read-only.
     DialogEditRejected,
+    /// A controller command was refused before any byte was sent: the
+    /// definition does not declare it, the session is not connected, writes are
+    /// off, the signature does not match, the path is halted after a failed
+    /// verification, or another operation owns the link.
+    ControllerCommandRefused,
+    /// A controller command was sent, but the wire failed before it finished.
+    ControllerCommandFailed,
     /// The port could not be opened, the definition has no message set, or a
     /// connection is already up.
     ConnectFailed,
@@ -335,9 +353,9 @@ pub enum FailureCode {
     /// Realtime polling was refused (no connection, or the definition has no
     /// realtime block).
     RealtimeRejected,
-    /// A write was refused before any byte was sent: writes are off (S8), the
-    /// signature does not match (S1), the path is halted after a failed
-    /// verification (S3), the session is not connected, or nothing changed.
+    /// A write was refused before any byte was sent: writes are off, the
+    /// signature does not match, the path is halted after a failed
+    /// verification, the session is not connected, or nothing changed.
     WriteRefused,
     /// A page write or its read-back verification failed. The ECU image is
     /// reloaded from the read-back and the write path halts until reviewed.
@@ -350,7 +368,7 @@ pub enum FailureCode {
     /// The tune could not be imported (unreadable, unparseable, wrong shape).
     ImportRejected,
     /// The imported tune has a different signature and the user has not
-    /// approved the import (S9).
+    /// approved the import.
     ImportNeedsConsent,
     /// The snapshot before a risky operation could not be written.
     SnapshotFailed,
@@ -376,6 +394,8 @@ impl FailureCode {
             Self::TableEditRejected => "table-edit-rejected",
             Self::DialogUnavailable => "dialog-unavailable",
             Self::DialogEditRejected => "dialog-edit-rejected",
+            Self::ControllerCommandRefused => "controller-command-refused",
+            Self::ControllerCommandFailed => "controller-command-failed",
             Self::ConnectFailed => "connect-failed",
             Self::TestFailed => "test-failed",
             Self::NotConnected => "not-connected",

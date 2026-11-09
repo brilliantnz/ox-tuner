@@ -45,6 +45,25 @@ pub struct BurnSummary {
     pub journal: Option<PathBuf>,
 }
 
+/// What one `[ControllerCommands]` action sent.
+///
+/// The counts are the definition's own command strings, not pages: a single
+/// action can carry several wire commands executed in order.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerCommandSummary {
+    /// Dialog the button was pressed in.
+    pub dialog: String,
+    /// `[ControllerCommands]` name.
+    pub command: String,
+    /// Command strings sent, in document order.
+    pub commands: usize,
+    /// Bytes written to the wire.
+    pub bytes: usize,
+    /// Bytes the ECU answered, when it answered.
+    pub replies: usize,
+}
+
 /// What reverting to the file baseline did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +100,7 @@ pub struct ImportSummary {
 pub struct JournalEntry {
     /// UTC time, RFC 3339.
     pub at: String,
-    /// `write`, `burn`, `revert`, `import` or `restore`.
+    /// `write`, `burn`, `controller-command`, `revert`, `import` or `restore`.
     pub operation: String,
     /// `begin` or `result`.
     pub phase: String,

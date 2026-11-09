@@ -1,5 +1,5 @@
 //! Fault injection: the failure modes the guardrails and the session must
-//! survive (ADR-0012).
+//! survive.
 //!
 //! A fault is armed for one kind of operation and fires a set number of times.
 //! Single-shot is the default because the interesting test is usually "fail
@@ -27,6 +27,8 @@ pub enum SimOp {
     Realtime,
     /// A page CRC read.
     Crc,
+    /// A `[ControllerCommands]` action.
+    ControllerCommand,
     /// The next operation of any kind.
     Any,
 }
@@ -41,6 +43,7 @@ impl SimOp {
             Self::Burn => "burn",
             Self::Realtime => "realtime",
             Self::Crc => "crc",
+            Self::ControllerCommand => "controller-command",
             Self::Any => "any",
         }
     }
@@ -54,6 +57,7 @@ impl SimOp {
             "burn" => Self::Burn,
             "realtime" => Self::Realtime,
             "crc" => Self::Crc,
+            "controller-command" | "command" => Self::ControllerCommand,
             "any" => Self::Any,
             _ => return None,
         })

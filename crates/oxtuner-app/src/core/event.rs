@@ -155,6 +155,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         ),
         Event::TuneWritten { summary, .. } => (Update::Written(summary), None),
         Event::TuneBurned { summary, .. } => (Update::Burned(summary), None),
+        Event::ControllerCommandRan { .. } => (Update::ControllerCommand, None),
         Event::TuneImported { summary, .. } => (Update::Imported(summary), None),
         Event::TuneReverted { summary, .. } => (Update::Reverted(summary), None),
         Event::TuneStatusRead { status, .. } => (Update::TuneStatus(status), None),
@@ -200,6 +201,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         | Update::PagesRead(_)
         | Update::Written(_)
         | Update::Burned(_)
+        | Update::ControllerCommand
         | Update::Imported(_)
         | Update::Reverted(_)
         | Update::Saved(_) => true,
