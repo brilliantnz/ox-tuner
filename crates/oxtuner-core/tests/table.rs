@@ -903,6 +903,11 @@ table = embTbl, embMap, "Embedded", 1
   yBins = yb, map
   zBins = zc
 
+[CurveEditor]
+curve = embCurve, "Embedded curve"
+  xBins = xb, rpm
+  yBins = yb
+
 [UserDefined]
 dialog = presDialog, "Presentation", border
   topicHelp = "https://example.com/engine-constants"
@@ -948,11 +953,12 @@ dialog = presDialog, "Presentation", border
   mysteryRow = nine, ten
   panel = gatedInner { show_inner }
   panel = gatedPanel, North, { limit > 0 }
-  panel = embTbl
+  panel = embCurve, {}, { limit > 50 }
   panel = std_ms3Rtc {rtc_mode}
 
 dialog = gatedInner, "Inner"
   field = "Inner plain", limit
+  panel = embTbl, {}, { limit > 5 }
 
 dialog = presetInner, "Preset Inner"
   field = "Between options"
@@ -1626,8 +1632,6 @@ fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
         dialog.widgets,
     );
 
-    assert_eq!(dialog.tables, vec!["embTbl"]);
-
     let algo = dialog
         .fields
         .iter()
@@ -1700,4 +1704,44 @@ fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
     assert_eq!(dialog.unmodeled.len(), 1);
     assert_eq!(dialog.unmodeled[0].keyword, "mysteryRow");
     assert_eq!(dialog.unmodeled[0].fields, vec!["nine", "ten"]);
+}
+
+#[test]
+fn a_dialog_carries_embedded_panel_gates() {
+    let (_dir, _core, dialog) = read_pres_dialog("dialog-embeds");
+
+    let table = dialog
+        .tables
+        .first()
+        .expect("the embedded table is carried");
+    assert_eq!(table.id, "embTbl");
+    assert_eq!(table.section, "Inner", "the embed keeps its panel title");
+    assert_eq!(
+        table.visibility_expression.as_deref(),
+        Some("limit > 5"),
+        "the embed keeps its own visibility gate"
+    );
+    assert_eq!(
+        table.enable_expression.as_deref(),
+        Some("show_inner"),
+        "the embed inherits the parent panel's enable gate"
+    );
+    assert!(
+        table.gates.visible,
+        "the working limit is 10, so the table stays visible"
+    );
+    assert!(
+        table.gates.unresolved,
+        "`show_inner` is unknown, so the inherited gate stays open"
+    );
+
+    let curve = dialog
+        .curves
+        .first()
+        .expect("the embedded curve is carried");
+    assert_eq!(curve.id, "embCurve");
+    assert!(
+        !curve.gates.visible,
+        "the working limit is 10, so the curve with `limit > 50` is hidden"
+    );
 }

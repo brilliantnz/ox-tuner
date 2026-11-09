@@ -156,12 +156,34 @@ pub struct DialogSummary {
     /// The core does not draw these yet; carrying them keeps a dialog that is
     /// mostly indicators (common in rusEFI definitions) from reading as empty.
     pub widgets: Vec<DialogWidget>,
-    /// Tables a panel embeds, in document order. The menu opens them as grids.
-    pub tables: Vec<String>,
-    /// Curves a panel embeds, in document order.
-    pub curves: Vec<String>,
+    /// Tables a panel embeds, in document order, with their panel gates.
+    ///
+    /// The grid opens these; they stay out of [`Self::fields`] because a grid
+    /// is not a row.
+    pub tables: Vec<DialogEmbed>,
+    /// Curves a panel embeds, in document order, with their panel gates.
+    pub curves: Vec<DialogEmbed>,
     /// Rows no summary covers yet, in document order.
     pub unmodeled: Vec<DialogUnmodeledRow>,
+}
+
+/// One table or curve a dialog panel embeds, with the gates it carries.
+///
+/// A `panel = veTable {enable}, {visible}` row keeps its condition here: the
+/// expressions stay raw and the state resolved, the same shape every other
+/// gated row uses, so the grid can respect them when the editor opens it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogEmbed {
+    /// Table id or curve name, as the definition spells it.
+    pub id: String,
+    /// The nested panel title the row came from, empty at the dialog's top.
+    pub section: String,
+    /// Visibility condition from the row (`{ … }`), as written.
+    pub visibility_expression: Option<String>,
+    /// Enable condition from the row (`{ … }`), as written.
+    pub enable_expression: Option<String>,
+    /// Whether the definition's gates let this embed appear and be edited.
+    pub gates: GateState,
 }
 
 /// One dialog row no summary covers yet, kept as data.
@@ -373,8 +395,8 @@ struct FinishedWalk {
     presets: Vec<DialogPreset>,
     commands: Vec<DialogCommand>,
     widgets: Vec<DialogWidget>,
-    tables: Vec<String>,
-    curves: Vec<String>,
+    tables: Vec<DialogEmbed>,
+    curves: Vec<DialogEmbed>,
     unmodeled: Vec<DialogUnmodeledRow>,
 }
 
@@ -397,8 +419,8 @@ struct RowWalk<'project> {
     pending_preset: Option<usize>,
     commands: Vec<DialogCommand>,
     widgets: Vec<DialogWidget>,
-    tables: Vec<String>,
-    curves: Vec<String>,
+    tables: Vec<DialogEmbed>,
+    curves: Vec<DialogEmbed>,
     unmodeled: Vec<DialogUnmodeledRow>,
     options_cache: HashMap<String, Arc<[DialogSelectOption]>>,
 }
@@ -435,6 +457,14 @@ impl FinishedWalk {
                 evaluator,
                 widget.visibility_expression.as_deref(),
                 widget.enable_expression.as_deref(),
+            );
+        }
+
+        for embed in self.tables.iter_mut().chain(self.curves.iter_mut()) {
+            embed.gates = resolve_gates(
+                evaluator,
+                embed.visibility_expression.as_deref(),
+                embed.enable_expression.as_deref(),
             );
         }
     }
@@ -478,7 +508,11 @@ impl<'project> RowWalk<'project> {
     }
 
     /// Records an embedded table or curve once, in document order.
-    fn record_embedded(&mut self, target: &str) {
+    ///
+    /// The panel row's gates are combined with the gates it inherits, so a
+    /// table inside a gated panel keeps the parent condition too. The first
+    /// occurrence wins when a dialog names the same embed twice.
+    fn record_embedded(&mut self, target: &str, section: &str, row: &DialogRow) {
         let definition = self.project.definition();
 
         if let Some(table) = definition
@@ -494,8 +528,9 @@ impl<'project> RowWalk<'project> {
             })
             .map(|table| table.id.clone())
         {
-            if !self.tables.iter().any(|id| id == &table) {
-                self.tables.push(table);
+            if !self.tables.iter().any(|embed| embed.id == table) {
+                let embed = self.embed_row(table, section, row);
+                self.tables.push(embed);
             }
             return;
         }
@@ -504,9 +539,23 @@ impl<'project> RowWalk<'project> {
             .curves
             .get_ci(target)
             .map(|curve| curve.name.clone())
-            && !self.curves.iter().any(|name| name == &curve)
+            && !self.curves.iter().any(|embed| embed.id == curve)
         {
-            self.curves.push(curve);
+            let embed = self.embed_row(curve, section, row);
+            self.curves.push(embed);
+        }
+    }
+
+    /// Builds one embed row with the panel's gates folded in.
+    fn embed_row(&self, id: String, section: &str, row: &DialogRow) -> DialogEmbed {
+        let panel = panel_gates(self.project, row);
+
+        DialogEmbed {
+            id,
+            section: section.to_owned(),
+            visibility_expression: and_gate(self.gates.visible.as_deref(), panel.visible),
+            enable_expression: and_gate(self.gates.enabled.as_deref(), panel.enabled),
+            gates: GateState::default(),
         }
     }
 
@@ -741,7 +790,7 @@ impl<'project> RowWalk<'project> {
             return;
         }
 
-        self.record_embedded(target);
+        self.record_embedded(target, section, row);
 
         if target.to_ascii_lowercase().starts_with("std_") {
             self.walk_std_panel(target, row);

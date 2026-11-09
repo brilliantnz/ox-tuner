@@ -270,10 +270,10 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
     );
 
     println!(
-        "fields: {}, tables: {:?}, curves: {:?}, widgets: {}, commands: {}, presets: {}",
+        "fields: {}, tables: {}, curves: {}, widgets: {}, commands: {}, presets: {}",
         dialog.fields.len(),
-        dialog.tables,
-        dialog.curves,
+        dialog.tables.len(),
+        dialog.curves.len(),
         dialog.widgets.len(),
         dialog.commands.len(),
         dialog.presets.len(),

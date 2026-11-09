@@ -23,9 +23,10 @@ mod ops;
 mod project;
 
 pub use editor::{
-    AxisSummary, CurveAxes, DialogCommand, DialogFieldKind, DialogFieldSummary, DialogFieldTone,
-    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
-    DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind, TableSummary,
+    AxisSummary, CurveAxes, DialogCommand, DialogEmbed, DialogFieldKind, DialogFieldSummary,
+    DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption,
+    DialogSelectOption, DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind,
+    TableSummary,
 };
 pub(crate) use editor::{expression_slot, order_gates, panel_target};
 pub use edits::{
