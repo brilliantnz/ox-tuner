@@ -28,7 +28,8 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div, px, rems,
 };
 use oxtuner_core::{
-    DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode, SaveSummary,
+    DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode, GateState,
+    SaveSummary,
 };
 use oxtuner_ui::table::{EditOp, parse_edit};
 
@@ -188,6 +189,27 @@ impl DialogEditor {
 
         self.publish_power_cycle_notice(cx);
         cx.notify();
+    }
+
+    /// The gate of the table or curve the open dialog embeds, when carried.
+    ///
+    /// A dialog that wraps a grid reads its snapshot even while the grid is in
+    /// front, so the panel can decide whether the definition still offers that
+    /// grid. `None` means the snapshot has not arrived or the dialog carries no
+    /// such embed; callers keep the grid available then.
+    pub(crate) fn embed_state(&self, target: &str) -> Option<GateState> {
+        let cached = self
+            .requested
+            .as_deref()
+            .and_then(|name| self.cache.get(name));
+        let dialog = self.dialog.as_ref().or(cached)?;
+
+        dialog
+            .tables
+            .iter()
+            .chain(dialog.curves.iter())
+            .find(|embed| embed.id.eq_ignore_ascii_case(target))
+            .map(|embed| embed.gates)
     }
 
     /// Drops the rows a different project or definition invalidates.
@@ -1198,6 +1220,49 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].title, "Engine Constants");
         assert_eq!(groups[0].items, vec![0]);
+    }
+
+    #[gpui_kit::test]
+    fn the_embed_gate_comes_from_the_open_dialog(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+
+            let mut dialog = summary();
+            dialog.tables.push(oxtuner_core::DialogEmbed {
+                id: "veTable1Tbl".to_owned(),
+                section: String::new(),
+                visibility_expression: Some("useVVT".to_owned()),
+                enable_expression: None,
+                gates: GateState {
+                    visible: false,
+                    enabled: true,
+                    unresolved: false,
+                },
+            });
+            CoreService::show_dialog(cx, dialog);
+        });
+
+        let editor = cx.update(|cx| cx.new(DialogEditor::new));
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.show(
+                    SharedString::from("Engine Constants"),
+                    Some("engine_constants"),
+                    cx,
+                );
+            });
+        });
+
+        let gates = cx
+            .update(|cx| editor.read(cx).embed_state("vetable1tbl"))
+            .expect("the embed is found by id, case-insensitively");
+        assert!(!gates.visible, "the hidden panel withdraws its grid");
+        assert!(
+            cx.update(|cx| editor.read(cx).embed_state("other"))
+                .is_none(),
+            "an embed the dialog does not carry keeps the grid available"
+        );
     }
 
     #[gpui_kit::test]

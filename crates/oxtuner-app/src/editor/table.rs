@@ -55,6 +55,12 @@ pub(crate) struct TableEditor {
     /// can move a value another dialog shows, so the cache drops then too.
     cache_revision: u64,
     flip_y: bool,
+    /// Whether the dialog panel that embeds this grid is enabled by its gates.
+    ///
+    /// A disabled panel keeps its grid visible but refuses edits, the same way
+    /// a disabled dialog row stays muted. Dialogs without an embed gate leave
+    /// this true.
+    embed_enabled: bool,
     _core: Subscription,
     _table: Subscription,
     _curve: Subscription,
@@ -101,6 +107,7 @@ impl TableEditor {
             definition_revision,
             cache_revision: 0,
             flip_y,
+            embed_enabled: true,
             _core,
             _table,
             _curve,
@@ -370,9 +377,39 @@ impl TableEditor {
             .then_some(model.selection().cursor.column)
     }
 
+    /// Whether the embedding dialog panel's gates allow edits.
+    ///
+    /// The grid stays visible and readable when the panel is disabled; only the
+    /// write path closes, and the toolbar shows its read-only banner.
+    pub(crate) fn set_embed_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
+        if self.embed_enabled == enabled {
+            return;
+        }
+        self.embed_enabled = enabled;
+
+        let Some(name) = self.requested.clone() else {
+            return;
+        };
+
+        let raw = CoreService::status(cx)
+            .table
+            .clone()
+            .filter(|table| table.id == name)
+            .or_else(|| self.cache.get(&name).cloned());
+
+        if let Some(table) = raw {
+            self.apply_table(table, cx);
+        }
+        cx.notify();
+    }
+
     /// Sets the grid and the curve from one snapshot, so the two views cannot
     /// disagree about which curve is open.
-    fn apply_table(&self, table: TableSummary, cx: &mut Context<'_, Self>) {
+    fn apply_table(&self, mut table: TableSummary, cx: &mut Context<'_, Self>) {
+        if !self.embed_enabled {
+            table.writable = false;
+        }
+
         self.sync_curve(&table, cx);
         self.table.update(cx, |grid, cx| grid.set_table(table, cx));
     }
@@ -1037,6 +1074,57 @@ mod tests {
             power_cycle: false,
             curve: None,
         }
+    }
+
+    #[gpui_kit::test]
+    fn a_disabled_embed_keeps_the_grid_readable_and_closes_its_writes(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            CoreService::install_without_core(cx);
+            CoreService::show_table(cx, summary());
+        });
+
+        let editor = cx.update(|cx| cx.new(TableEditor::new));
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| {
+                editor.show(SharedString::from("VE Table"), Some("veTableTbl"), cx);
+            });
+        });
+        assert!(
+            cx.update(|cx| editor.read(cx).table.read(cx).model().is_writable()),
+            "an ungated embed starts writable"
+        );
+
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| editor.set_embed_enabled(false, cx));
+        });
+
+        let (writable, cells) = cx.update(|cx| {
+            let editor = editor.read(cx);
+            let model = editor.table.read(cx).model();
+
+            (
+                model.is_writable(),
+                model.table().map(|table| table.cells.clone()),
+            )
+        });
+        assert!(
+            !writable,
+            "a disabled panel leaves the grid readable but not writable"
+        );
+        assert_eq!(
+            cells,
+            Some(vec![10.0, 20.0, 30.0, 40.0]),
+            "the values stay on screen"
+        );
+
+        cx.update(|cx| {
+            editor.update(cx, |editor, cx| editor.set_embed_enabled(true, cx));
+        });
+        assert!(
+            cx.update(|cx| editor.read(cx).table.read(cx).model().is_writable()),
+            "enabling the panel restores the write path"
+        );
     }
 
     #[gpui_kit::test]
