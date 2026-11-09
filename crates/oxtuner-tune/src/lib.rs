@@ -5,8 +5,7 @@
 //! shape and units. This crate owns that model and nothing else (ADR-0010):
 //!
 //! - **no I/O** — `.msq` files are `oxtuner-project`'s job;
-//! - **no wire** — write intents are data ([`WriteIntent`]); only the core
-//!   executes them (ADR-0008/0011);
+//! - **no wire** — the core owns every transport conversation;
 //! - **no UI** — GPUI lives in `oxtuner-ui`/`oxtuner-app` (ADR-0001).
 //!
 //! # Layers
@@ -74,7 +73,6 @@
 
 mod diff;
 mod images;
-mod intent;
 mod layout;
 mod page;
 mod tune;
@@ -85,7 +83,6 @@ pub use diff::TuneDiff;
 pub use images::{
     CellState, CellValue, Conflict, PageState, StateTable, TuneImages, TuneStatus, conflict_names,
 };
-pub use intent::{IntentError, PageSet, WriteIntent};
 pub use layout::{
     EntryShape, IssueSeverity, Layout, LayoutIssue, LayoutIssueKind, Owner, PageLayout,
     VariableSpec,

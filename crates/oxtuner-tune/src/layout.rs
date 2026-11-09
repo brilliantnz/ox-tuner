@@ -7,7 +7,7 @@
 //!
 //! - a value lookup is `O(1)` by name (ASCII-case-insensitive, like INI references);
 //! - a table cell is `O(1)` by `row × cols + column`;
-//! - a page is a pre-built list of variable indices, so write intents and
+//! - a page is a pre-built list of variable indices, so write planning and
 //!   state derivation never scan the whole tune.
 //!
 //! The layout is built from a [`Definition`] plus a lookup of **user-unit
