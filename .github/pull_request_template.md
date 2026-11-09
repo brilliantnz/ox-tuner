@@ -6,7 +6,7 @@
 
 <!-- List the important implementation details. Keep this focused on what reviewers need to understand. -->
 
-- 
+-
 
 ## Safety and compatibility
 
