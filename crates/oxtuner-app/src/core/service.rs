@@ -7,7 +7,7 @@ use std::sync::Arc;
 use gpui_kit::{App, Global};
 use oxtuner_core::{
     ChartHistory, CoreConfig, CoreHandle, CoreParts, CoreThread, Event, EventStream, FrameWatch,
-    LatestFrame, LogSnapshot, LogStatus, RealtimeFrame,
+    LatestFrame, LogStatus, RealtimeFrame, SessionLogSnapshot,
 };
 
 use super::event;
@@ -72,7 +72,7 @@ impl CoreService {
     }
 
     /// The live session log counters.
-    pub(crate) fn log(cx: &App) -> LogSnapshot {
+    pub(crate) fn log(cx: &App) -> SessionLogSnapshot {
         cx.global::<Self>().log_status.snapshot()
     }
 
