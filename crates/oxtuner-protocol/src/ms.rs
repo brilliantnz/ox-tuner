@@ -4,7 +4,7 @@
 //! signature query, page reads, writes, burns and the realtime block. Which
 //! command means what, the blocking factor, the delays and the reply sizes all
 //! come from the definition — the protocol itself contains no ECU-specific
-//! command letter (ADR-0006/0008).
+//! command letter.
 //!
 //! # Conversations are sequential
 //!

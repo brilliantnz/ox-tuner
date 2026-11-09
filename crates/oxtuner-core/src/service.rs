@@ -65,9 +65,9 @@ pub struct CoreConfig {
     /// quit path lossless, but it is not what bounds a stalled consumer: a
     /// long session keeps producing answers, so the queue can still fill. The
     /// stop flag is the guarantee — once shutdown is accepted, an event that
-    /// does not fit is dropped and counted instead of blocking (ADR-0023).
+    /// does not fit is dropped and counted instead of blocking.
     pub event_capacity: usize,
-    /// Whether the global write switch starts on (S8). Off unless the user
+    /// Whether the global write switch starts on. Off unless the user
     /// enabled it in the settings and the app passed that choice in.
     pub writes_enabled: bool,
     /// Where a standalone definition's write journal and logs live. A project
@@ -164,7 +164,7 @@ pub struct CoreReport {
     /// Log frames dropped because the writer queue was full.
     pub log_drops: u64,
     /// Events the UI never received because shutdown was already in progress
-    /// and it had stopped reading (ADR-0023).
+    /// and it had stopped reading.
     pub dropped_events: u64,
     /// Slowest command, measured from dequeue to reply.
     pub max_op_latency: Duration,
@@ -231,12 +231,11 @@ pub struct CoreParts {
     pub handle: CoreHandle,
     /// Events out. Single consumer by construction.
     pub events: EventStream,
-    /// The newest realtime frame, read without an event round trip (ADR-0014).
+    /// The newest realtime frame, read without an event round trip.
     pub latest: LatestFrame,
-    /// Wakes the UI when a newer frame is readable. Coalesced, never blocking
-    /// (ADR-0021).
+    /// Wakes the UI when a newer frame is readable. Coalesced, never blocking.
     pub frames: FrameWatch,
-    /// The bounded realtime history the charts read (ADR-0014/0015).
+    /// The bounded realtime history the charts read.
     pub history: ChartHistory,
     /// The session log's live counters, when one is running.
     pub log: LogStatus,
@@ -290,7 +289,7 @@ impl CoreThread {
             return CoreReport::default();
         };
         // Raise the flag first, and only then wait for room in the command
-        // queue (ADR-0023). The core thread may be blocked handing an answer to
+        // queue. The core thread may be blocked handing an answer to
         // a UI that stopped reading; raising the flag makes that wait bounded,
         // so the core returns to its loop and drains the command queue this
         // `Shutdown` is waiting on. Raising it afterwards would deadlock the two
@@ -531,7 +530,7 @@ fn run(
     gate.close();
 
     // Commands that were accepted while shutdown was racing them are answered
-    // explicitly — ADR-0005 rule 5: cancellation is never implicit.
+    // explicitly: cancellation is never implicit.
     while let Ok(envelope) = commands.try_recv() {
         if matches!(envelope.command, Command::Shutdown) {
             continue;
@@ -622,7 +621,7 @@ impl Session {
         self.project().map(|project| project.images().status())
     }
 
-    /// Everything unproven on the ECU side becomes unknown (ADR-0010).
+    /// Everything unproven on the ECU side becomes unknown.
     fn mark_unknown(&mut self) {
         if let Self::Project(project) = self {
             project.images_mut().mark_unknown();
@@ -1665,7 +1664,7 @@ fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
     (cells, variables)
 }
 
-/// Clamps every non-controller tune value that is about to be written (S2).
+/// Clamps every non-controller tune value that is about to be written.
 ///
 /// Edits are already clamped when they enter the core. An imported tune or a
 /// file written by another tool can still carry an out-of-range value, and the
@@ -1721,8 +1720,8 @@ fn clamp_working_changes(project: &mut Project) -> usize {
 /// This is a tune **sync**, not a replay of edit timestamps: it survives saving
 /// the `.msq` (which moves the file baseline) and an ECU that holds different
 /// values from the file. Controller-owned values are excluded — the ECU owns
-/// them, and writing a default over one is exactly the kind of damage S1–S10
-/// exists to prevent.
+/// them, and writing a default over one is exactly the kind of damage the
+/// write guardrails exist to prevent.
 fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize) {
     let working = project.images().working();
     let Some(ram) = project.images().ecu_ram() else {
@@ -1845,7 +1844,7 @@ fn adopt_ecu_image(
     Outcome::Continue
 }
 
-/// Runs one `[ControllerCommands]` action (ADR-0011).
+/// Runs one `[ControllerCommands]` action.
 ///
 /// A controller command is a raw ECU action, so it passes the same gate as a
 /// write even though it touches no tune value: connected, matching signature,
@@ -2017,7 +2016,7 @@ fn run_controller_command(
     Outcome::Continue
 }
 
-/// Starts a verified RAM write (S1–S3, S6–S8).
+/// Starts a verified RAM write.
 #[expect(
     clippy::too_many_arguments,
     reason = "the handler mirrors the fields of one protocol request"
@@ -2116,7 +2115,7 @@ fn write_to_ram(
     }
     let clamped = clamp_working_changes(project);
     if clamped > 0 {
-        tracing::info!(%op, clamped, "out-of-range values clamped before writing (S2)");
+        tracing::info!(%op, clamped, "out-of-range values clamped before writing");
     }
     let (changed_variables, changed_pages, _) = unsent_changes(project);
     if changed_variables.is_empty() || changed_pages.is_empty() {
@@ -2273,7 +2272,7 @@ fn write_to_ram(
     Outcome::Continue
 }
 
-/// Starts a verified burn (S3–S5, S7, S8).
+/// Starts a verified burn.
 #[expect(
     clippy::too_many_arguments,
     reason = "the handler mirrors the fields of one protocol request"
@@ -2547,7 +2546,7 @@ fn revert_tune(
     Outcome::Continue
 }
 
-/// Discards the edits one table, curve or dialog owns (S4).
+/// Discards the edits one table, curve or dialog owns.
 fn revert_target(
     op: OpId,
     session: &mut Session,
@@ -2575,7 +2574,7 @@ fn revert_target(
     };
 
     // Discarding is irreversible from the tune's side, so the working image is
-    // snapshotted first, exactly as a whole-tune revert does (S4).
+    // snapshotted first, exactly as a whole-tune revert does.
     let snapshot = match snapshot::write(project, "revert") {
         Ok(path) => path,
         Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
@@ -2669,7 +2668,7 @@ fn table_variables(table: &TableSummary) -> Vec<String> {
         .collect()
 }
 
-/// Imports one `.msq` into the working image (S4, S9).
+/// Imports one `.msq` into the working image.
 #[expect(
     clippy::too_many_arguments,
     reason = "the handler mirrors the fields of one protocol request"
@@ -2749,7 +2748,7 @@ fn import_tune(
                     code: FailureCode::ImportNeedsConsent,
                     message: format!(
                         "the tune in {} was written for a different ECU signature. Importing it \
-                         needs explicit consent (S9)",
+                         needs explicit consent",
                         path.display()
                     ),
                 },
@@ -3360,7 +3359,7 @@ enum TxnPhase {
 /// One write or burn, owned by the live session until it finishes.
 ///
 /// A transaction is the only path from a command to `IoOp::WritePages` or
-/// `IoOp::BurnPages`, which is what makes "no auto-burn" structural (S5).
+/// `IoOp::BurnPages`, which is what makes "no auto-burn" structural.
 #[derive(Debug)]
 struct WriteTxn {
     op: OpId,
@@ -4108,7 +4107,7 @@ fn advance_write(
                 // disagrees with them means the ECU moved since the last read:
                 // a read that raced the reboot, or a tune changed behind our
                 // back. Patching would put values over a tune we never saw, so
-                // stop and let the user read again (ADR-0010).
+                // stop and let the user read again.
                 let drifted: Vec<u8> = pages
                     .iter()
                     .filter(|read| {
@@ -5144,7 +5143,7 @@ fn on_reply(
             }
             latest.set(frame);
             // A wake, not an event: acquisition must never wait for the UI
-            // (ADR-0021). One pending token covers every frame that arrived
+            // One pending token covers every frame that arrived
             // since the last repaint.
             frames.wake();
             report.realtime_frames += 1;

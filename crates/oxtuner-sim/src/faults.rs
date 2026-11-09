@@ -1,5 +1,5 @@
 //! Fault injection: the failure modes the guardrails and the session must
-//! survive (ADR-0012).
+//! survive.
 //!
 //! A fault is armed for one kind of operation and fires a set number of times.
 //! Single-shot is the default because the interesting test is usually "fail

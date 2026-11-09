@@ -29,7 +29,7 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimConfig {
     /// Signature to answer with. `None` uses the definition's own, which is the
-    /// normal case; `Some` produces the S1 mismatch path.
+    /// normal case; `Some` produces the signature mismatch path.
     pub signature: Option<String>,
     /// Seed for the memory fill and the waveform's phase.
     pub seed: u64,

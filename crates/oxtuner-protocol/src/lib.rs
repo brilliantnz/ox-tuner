@@ -4,7 +4,7 @@
 //! [`oxtuner_transport::Transport`] and back again. Everything it needs about
 //! the firmware's message set comes from the frozen [`oxtuner_ini::Definition`] — command templates, page sizes, the blocking factor,
 //! delays and the realtime block — because that is where the user's own INI
-//! says how the ECU talks (ADR-0006, ADR-0008).
+//! says how the ECU talks.
 //!
 //! ```text
 //! Definition ──▶ MsProtocol ──▶ Transport ──▶ ECU
@@ -25,7 +25,7 @@
 //! # No retries
 //!
 //! The protocol never retries a conversation on its own. A timeout or a bad
-//! frame is reported; the caller decides what it means (ADR-0011 S6).
+//! frame is reported; the caller decides what it means.
 //!
 //! # Example
 //!
