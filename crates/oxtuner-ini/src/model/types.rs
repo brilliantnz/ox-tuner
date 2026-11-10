@@ -177,6 +177,18 @@ impl Number {
         }
     }
 
+    /// Folds the value against a full evaluation context.
+    ///
+    /// This is [`Self::evaluate`] plus arrays and definition-defined
+    /// functions, which presentation attributes such as
+    /// `{ getChannelScaleByOffset(6) }` need.
+    pub fn evaluate_with(&self, context: &mut dyn crate::expr::EvalContext) -> Option<f64> {
+        match self {
+            Self::Literal(value) => Some(*value),
+            Self::Expression { parsed, .. } => parsed.as_ref()?.evaluate_with(context),
+        }
+    }
+
     /// Whether this attribute has to be recomputed at runtime.
     pub fn is_dynamic(&self) -> bool {
         matches!(self, Self::Expression { .. })

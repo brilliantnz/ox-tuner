@@ -20,9 +20,21 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ConstantClass, DataType, Definition, Endianness, Number, Shape};
 
 use crate::IniPage;
+
+/// An [`EvalContext`] over a plain name lookup.
+struct FnContext<'a> {
+    lookup: &'a dyn Fn(&str) -> Option<f64>,
+}
+
+impl EvalContext for FnContext<'_> {
+    fn value(&mut self, name: &str) -> Option<f64> {
+        (self.lookup)(name)
+    }
+}
 
 /// FNV-1a over the ASCII-lowercased bytes.
 ///
@@ -309,6 +321,17 @@ impl TuneLayout {
     /// presentation expressions; pass `&|_| None` when no tune is loaded yet.
     /// Missing references are reported in [`Self::issues`], never guessed.
     pub fn build(definition: &Definition, values: &dyn Fn(&str) -> Option<f64>) -> Self {
+        let mut context = FnContext { lookup: values };
+        Self::build_with_context(definition, &mut context)
+    }
+
+    /// Builds the layout against a full evaluation context.
+    ///
+    /// Use this when presentation attributes need more than a plain name
+    /// lookup: arrays (`{ arrayValue(...) }`) and definition-defined functions
+    /// (`{ getChannelScaleByOffset(6) }`) only resolve through an
+    /// [`EvalContext`].
+    pub fn build_with_context(definition: &Definition, values: &mut dyn EvalContext) -> Self {
         let mut layout = Self {
             signature: definition.signature.clone(),
             endianness: definition.endianness,
@@ -335,7 +358,7 @@ impl TuneLayout {
         definition: &Definition,
         name: &str,
         constant: &oxtuner_ini::Constant,
-        values: &dyn Fn(&str) -> Option<f64>,
+        values: &mut dyn EvalContext,
     ) {
         let Some(page) = IniPage::new(constant.page) else {
             self.issues.push(LayoutIssue::new(
@@ -408,7 +431,7 @@ impl TuneLayout {
         definition: &Definition,
         name: &str,
         variable: &oxtuner_ini::PcVariable,
-        values: &dyn Fn(&str) -> Option<f64>,
+        values: &mut dyn EvalContext,
     ) {
         let Some(shape) = shape_of(&variable.shape) else {
             self.issues.push(LayoutIssue::new(
@@ -593,12 +616,12 @@ impl Attributes {
         minimum: Option<&Number>,
         maximum: Option<&Number>,
         digits: Option<&Number>,
-        values: &dyn Fn(&str) -> Option<f64>,
+        values: &mut dyn EvalContext,
     ) -> Self {
         let mut unresolved = None;
         let mut resolve = |number: Option<&Number>, attribute: &'static str| {
             let number = number?;
-            match number.literal().or_else(|| number.evaluate(values)) {
+            match number.literal().or_else(|| number.evaluate_with(values)) {
                 Some(value) if value.is_finite() => Some(value),
                 _ => {
                     unresolved.get_or_insert(attribute);
@@ -670,19 +693,21 @@ fn default_raw(
     definition: &Definition,
     name: &str,
     spec: &VariableSpec,
-    values: &dyn Fn(&str) -> Option<f64>,
+    values: &mut dyn EvalContext,
 ) -> f64 {
     if !spec.shape.is_numeric() {
         return 0.0;
     }
 
-    let resolve = |number: &Number| number.literal().or_else(|| number.evaluate(values));
+    let resolve = |number: &Number, values: &mut dyn EvalContext| {
+        number.literal().or_else(|| number.evaluate_with(values))
+    };
 
     if let Some(raw) = definition
         .extensions
         .raw_defaults
         .get_ci(name)
-        .and_then(resolve)
+        .and_then(|number| resolve(number, values))
     {
         return raw;
     }
@@ -691,7 +716,7 @@ fn default_raw(
         .extensions
         .defaults
         .get_ci(name)
-        .and_then(resolve)
+        .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {
         return conversion.raw;

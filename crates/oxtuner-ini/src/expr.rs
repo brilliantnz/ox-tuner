@@ -154,6 +154,16 @@ pub trait EvalContext {
     fn element(&mut self, name: &str, index: f64) -> Option<f64> {
         self.array_value(name, index)
     }
+
+    /// Resolves a definition-defined function the pure evaluator does not
+    /// implement, such as `getChannelScaleByOffset`.
+    ///
+    /// The default returns `None`, so an evaluator without definition context
+    /// leaves the call unresolved instead of guessing.
+    fn function(&mut self, name: &str, arguments: &[f64]) -> Option<f64> {
+        let _ = (name, arguments);
+        None
+    }
 }
 
 /// An [`EvalContext`] over a plain identifier lookup.
@@ -245,7 +255,7 @@ impl Expr {
                     .iter()
                     .map(|argument| argument.evaluate_with(context))
                     .collect::<Option<Vec<f64>>>()?;
-                evaluate_call(name, &values)?
+                evaluate_call(name, &values).or_else(|| context.function(name, &values))?
             }
         };
 
@@ -715,10 +725,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_context_supplied_function_folds_after_the_builtins() {
+        let expression =
+            Expr::parse("getChannelScaleByOffset(9) * 2").expect("the expression parses");
+        let mut context = TestContext::default();
+
+        // Without a context hook the call stays unresolved.
+        assert_eq!(expression.evaluate(&no_lookup), None);
+
+        context.function_name = "getChannelScaleByOffset";
+        context.function_result = Some(0.5);
+
+        assert_eq!(expression.evaluate_with(&mut context), Some(1.0));
+    }
+
     #[derive(Default)]
     struct TestContext {
         values: std::collections::HashMap<&'static str, f64>,
         arrays: std::collections::HashMap<&'static str, Vec<f64>>,
+        function_name: &'static str,
+        function_result: Option<f64>,
     }
 
     impl EvalContext for TestContext {
@@ -735,6 +762,13 @@ mod tests {
         fn array_value(&mut self, name: &str, index: f64) -> Option<f64> {
             let index = index.trunc() as usize;
             self.arrays.get(name)?.get(index).copied()
+        }
+
+        fn function(&mut self, name: &str, arguments: &[f64]) -> Option<f64> {
+            let _ = arguments;
+            (name == self.function_name)
+                .then_some(self.function_result)
+                .flatten()
         }
     }
 
