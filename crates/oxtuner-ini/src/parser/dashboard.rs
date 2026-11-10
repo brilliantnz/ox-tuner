@@ -21,7 +21,7 @@ pub(crate) fn parse_gauges(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        let fields = split_fields(&value);
+        let fields = split_fields(value);
 
         if key.eq_ignore_ascii_case("gaugeCategory") {
             category = fields
@@ -48,20 +48,20 @@ pub(crate) fn parse_gauges(
 
         let gauge = Gauge {
             category: category.clone(),
-            name: key.clone(),
-            channel: fields[0].clone(),
-            title: Text::parse(&fields[1]),
-            units: Text::parse(&fields[2]),
-            low: Number::parse(&fields[3]),
-            high: Number::parse(&fields[4]),
-            low_danger: Number::parse(&fields[5]),
-            low_warning: Number::parse(&fields[6]),
-            high_warning: Number::parse(&fields[7]),
-            high_danger: Number::parse(&fields[8]),
-            value_digits: Number::parse(&fields[9]),
+            name: key.to_owned(),
+            channel: fields[0].to_owned(),
+            title: Text::parse(fields[1]),
+            units: Text::parse(fields[2]),
+            low: Number::parse(fields[3]),
+            high: Number::parse(fields[4]),
+            low_danger: Number::parse(fields[5]),
+            low_warning: Number::parse(fields[6]),
+            high_warning: Number::parse(fields[7]),
+            high_danger: Number::parse(fields[8]),
+            value_digits: Number::parse(fields[9]),
             label_digits: fields
                 .get(10)
-                .map_or_else(|| Number::parse(&fields[9]), |field| Number::parse(field)),
+                .map_or_else(|| Number::parse(fields[9]), |field| Number::parse(field)),
             active: fields
                 .get(11)
                 .and_then(|field| crate::fields::expression_body(field))
@@ -103,7 +103,7 @@ pub(crate) fn parse_front_page(
         if let Some(rest) = lowered.strip_prefix("gauge")
             && let Ok(slot) = rest.parse::<u8>()
         {
-            let template = crate::fields::unquote(&value).to_owned();
+            let template = crate::fields::unquote(value).to_owned();
             definition
                 .front_page
                 .gauges
@@ -115,7 +115,7 @@ pub(crate) fn parse_front_page(
         }
 
         if lowered == "indicator" || lowered == "indicatortemplate" {
-            let fields = split_fields(&value);
+            let fields = split_fields(value);
             if fields.len() < 3 {
                 section.warn(
                     "bad-indicator",
@@ -125,10 +125,10 @@ pub(crate) fn parse_front_page(
                 continue;
             }
             definition.front_page.indicators.push(Indicator {
-                channel: crate::fields::unquote(&fields[0]).to_owned(),
-                off_label: crate::fields::unquote(&fields[1]).to_owned(),
-                on_label: crate::fields::unquote(&fields[2]).to_owned(),
-                colours: fields[3..].to_vec(),
+                channel: crate::fields::unquote(fields[0]).to_owned(),
+                off_label: crate::fields::unquote(fields[1]).to_owned(),
+                on_label: crate::fields::unquote(fields[2]).to_owned(),
+                colours: fields[3..].iter().map(|f| (*f).to_owned()).collect(),
                 template_only: lowered == "indicatortemplate",
                 line: *line,
             });
@@ -136,7 +136,7 @@ pub(crate) fn parse_front_page(
             continue;
         }
 
-        section.unrecognized_key(&key, *line);
+        section.unrecognized_key(key, *line);
     }
 }
 

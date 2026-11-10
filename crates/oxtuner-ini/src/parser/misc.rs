@@ -23,7 +23,7 @@ pub(crate) fn parse_extensions(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        let (name, rest) = split_reference(&value);
+        let (name, rest) = split_reference(value);
 
         match key.to_ascii_lowercase().as_str() {
             "defaultvalue" | "defaults" => {
@@ -93,15 +93,15 @@ pub(crate) fn parse_extensions(
                 section.understand(*line);
             }
             "ignoremissingbitoptions" => {
-                definition.extensions.ignore_missing_bit_options = is_true(&value);
+                definition.extensions.ignore_missing_bit_options = is_true(value);
                 section.understand(*line);
             }
             // The dialect's own key contains the typo; accept both spellings.
             "surpressconfigerrorverbiage" | "suppressconfigerrorverbiage" => {
-                definition.extensions.suppress_config_error_verbiage = is_true(&value);
+                definition.extensions.suppress_config_error_verbiage = is_true(value);
                 section.understand(*line);
             }
-            _ => section.unrecognized_key(&key, *line),
+            _ => section.unrecognized_key(key, *line),
         }
     }
 }
@@ -110,20 +110,21 @@ pub(crate) fn parse_extensions(
 fn split_reference(value: &str) -> (String, Option<String>) {
     let mut fields = split_fields(value);
     if fields.len() >= 2 {
-        let name = fields.remove(0);
+        let name = fields.remove(0).to_owned();
         return (name, Some(fields.join(", ")));
     }
     match value.split_once(char::is_whitespace) {
-        Some((name, rest)) if !rest.trim().is_empty() => {
-            (name.trim().to_owned(), Some(rest.trim().to_owned()))
-        }
-        _ => (value.trim().to_owned(), None),
+        Some((name, rest)) if !rest.trim_ascii().is_empty() => (
+            name.trim_ascii().to_owned(),
+            Some(rest.trim_ascii().to_owned()),
+        ),
+        _ => (value.trim_ascii().to_owned(), None),
     }
 }
 
 fn is_true(value: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        value.trim_ascii().to_ascii_lowercase().as_str(),
         "true" | "on" | "1" | "yes"
     )
 }
@@ -140,7 +141,7 @@ pub(crate) fn parse_controller_commands(
         };
 
         if key.eq_ignore_ascii_case("displayCommand") {
-            let fields = split_fields(&value);
+            let fields = split_fields(value);
             if let Some(name) = fields.first()
                 && let Some(command) = definition.controller_commands.get_mut(name)
             {
@@ -155,7 +156,7 @@ pub(crate) fn parse_controller_commands(
             continue;
         }
 
-        let commands: Vec<CommandTemplate> = split_fields(&value)
+        let commands: Vec<CommandTemplate> = split_fields(value)
             .iter()
             .map(|field| CommandTemplate::parse(field))
             .collect();
@@ -169,9 +170,9 @@ pub(crate) fn parse_controller_commands(
         }
 
         definition.controller_commands.insert(
-            &key,
+            key,
             ControllerCommand {
-                name: key.clone(),
+                name: key.to_owned(),
                 commands,
                 description: None,
                 line: *line,
@@ -194,10 +195,10 @@ pub(crate) fn parse_reference_tables(
             continue;
         };
         let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(&value);
+        let fields = split_fields(value);
 
         if lowered == "referencetable" {
-            let Some(name) = fields.first() else {
+            let Some(name) = fields.first().copied() else {
                 section.warn(
                     "bad-reference-table",
                     "`referenceTable =` needs a name",
@@ -208,7 +209,7 @@ pub(crate) fn parse_reference_tables(
             definition.reference_tables.insert(
                 name,
                 ReferenceTable {
-                    name: name.clone(),
+                    name: name.to_owned(),
                     title: fields
                         .get(1)
                         .map(|field| crate::fields::unquote(field).to_owned()),
@@ -216,7 +217,7 @@ pub(crate) fn parse_reference_tables(
                     ..ReferenceTable::default()
                 },
             );
-            current = Some(name.clone());
+            current = Some(name.to_owned());
             section.understand(*line);
             continue;
         }
@@ -226,7 +227,10 @@ pub(crate) fn parse_reference_tables(
             lowered.as_str(),
             "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
         ) {
-            definition.comms.raw.insert(key.clone(), value.clone());
+            definition
+                .comms
+                .raw
+                .insert(key.to_owned(), value.to_owned());
             section.understand(*line);
             continue;
         }
@@ -249,11 +253,11 @@ pub(crate) fn parse_reference_tables(
             &lowered,
             &fields,
             &name,
-            &key,
-            &value,
+            key,
+            value,
         );
         if !understood {
-            section.unrecognized_key(&key, *line);
+            section.unrecognized_key(key, *line);
             continue;
         }
         section.understand(*line);
@@ -268,7 +272,7 @@ fn apply_reference_table_key(
     table: &mut ReferenceTable,
     raw: &mut BTreeMap<String, String>,
     lowered: &str,
-    fields: &[String],
+    fields: &[&str],
     name: &str,
     key: &str,
     value: &str,
@@ -277,10 +281,10 @@ fn apply_reference_table_key(
         "tableidentifier" => {
             let mut index = 0usize;
             while index + 1 < fields.len() {
-                if let Some(id) = crate::fields::parse_u32(&fields[index]) {
+                if let Some(id) = crate::fields::parse_u32(fields[index]) {
                     table
                         .identifiers
-                        .push((id, crate::fields::unquote(&fields[index + 1]).to_owned()));
+                        .push((id, crate::fields::unquote(fields[index + 1]).to_owned()));
                 }
                 index += 2;
             }
@@ -305,13 +309,13 @@ fn apply_reference_table_key(
         }
         "tablelimits" => {
             if fields.len() >= 4
-                && let Some(id) = crate::fields::parse_u32(&fields[0])
+                && let Some(id) = crate::fields::parse_u32(fields[0])
             {
                 table.limits.push((
                     id,
-                    Number::parse(&fields[1]),
-                    Number::parse(&fields[2]),
-                    Number::parse(&fields[3]),
+                    Number::parse(fields[1]),
+                    Number::parse(fields[2]),
+                    Number::parse(fields[3]),
                 ));
             }
         }
@@ -321,7 +325,7 @@ fn apply_reference_table_key(
                     .first()
                     .map(|field| crate::fields::unquote(field).to_owned())
                     .unwrap_or_default(),
-                fields.get(1).cloned().unwrap_or_default(),
+                fields.get(1).map_or_else(String::new, |f| (*f).to_owned()),
             ));
         }
         // Generation helpers are kept verbatim until the calibration UI
@@ -353,7 +357,7 @@ pub(crate) fn parse_datalog(
             continue;
         };
         let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(&value);
+        let fields = split_fields(value);
 
         match lowered.as_str() {
             "category" => {
@@ -372,18 +376,18 @@ pub(crate) fn parse_datalog(
                     continue;
                 }
                 definition.datalog_entries.push(DatalogEntry {
-                    channel: crate::fields::unquote(&fields[0]).to_owned(),
-                    label: crate::fields::unquote(&fields[1]).to_owned(),
-                    value_type: Some(fields[2].clone()),
-                    format: fields[3].clone(),
-                    enable: fields.get(4).cloned(),
-                    lag: fields.get(5).cloned(),
+                    channel: crate::fields::unquote(fields[0]).to_owned(),
+                    label: crate::fields::unquote(fields[1]).to_owned(),
+                    value_type: Some(fields[2].to_owned()),
+                    format: fields[3].to_owned(),
+                    enable: fields.get(4).map(|f| (*f).to_owned()),
+                    lag: fields.get(5).map(|f| (*f).to_owned()),
                     category: category.clone(),
                     line: *line,
                 });
                 section.understand(*line);
             }
-            _ => section.unrecognized_key(&key, *line),
+            _ => section.unrecognized_key(key, *line),
         }
     }
 }

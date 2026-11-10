@@ -173,9 +173,9 @@ fn split_sections(lines: &[LogicalLine]) -> Vec<RawSection<'_>> {
 }
 
 fn section_header(text: &str) -> Option<&str> {
-    let text = text.trim();
+    let text = text.trim_ascii();
     let inner = text.strip_prefix('[')?.strip_suffix(']')?;
-    Some(inner.trim())
+    Some(inner.trim_ascii())
 }
 
 fn dispatch(
@@ -214,7 +214,7 @@ fn dispatch(
                     definition
                         .comms
                         .raw
-                        .insert(key.trim().to_owned(), value.trim().to_owned());
+                        .insert(key.trim_ascii().to_owned(), value.trim_ascii().to_owned());
                     section.understand(*line);
                 } else {
                     section.unrecognized_line(*line, text);
@@ -316,7 +316,7 @@ impl SectionParser {
     pub(crate) fn unrecognized_line(&mut self, line: u32, text: &str) {
         self.note(
             "unrecognized-line",
-            format!("unrecognized line `{}`", text.trim()),
+            format!("unrecognized line `{}`", text.trim_ascii()),
             line,
         );
     }
@@ -354,14 +354,14 @@ impl SectionParser {
 }
 
 /// Convenience used by every section parser: count the entry, then decide.
-pub(crate) fn entry_line(
+pub(crate) fn entry_line<'a>(
     section: &mut SectionParser,
     line: u32,
-    text: &str,
-) -> Option<(String, String)> {
+    text: &'a str,
+) -> Option<(&'a str, &'a str)> {
     section.count_entry();
     if let Some((key, value)) = crate::fields::split_assignment(text) {
-        Some((key.trim().to_owned(), value.trim().to_owned()))
+        Some((key, value))
     } else {
         section.unrecognized_line(line, text);
         None

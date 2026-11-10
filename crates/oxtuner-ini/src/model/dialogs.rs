@@ -54,7 +54,7 @@ pub enum RowKind {
 impl RowKind {
     /// Maps a dialog row keyword.
     pub fn parse(keyword: &str) -> Self {
-        match keyword.trim().to_ascii_lowercase().as_str() {
+        match keyword.trim_ascii().to_ascii_lowercase().as_str() {
             "field" => Self::Field,
             "displayonlyfield" => Self::DisplayOnlyField,
             "checkbox" => Self::Checkbox,

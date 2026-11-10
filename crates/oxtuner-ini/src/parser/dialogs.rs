@@ -26,32 +26,32 @@ pub(crate) fn parse_setting_groups(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        let fields = split_fields(&value);
+        let fields = split_fields(value);
         let lowered = key.to_ascii_lowercase();
 
         match lowered.as_str() {
             "settinggroup" => {
-                let Some(name) = fields.first() else {
+                let Some(name) = fields.first().copied() else {
                     section.warn("bad-setting-group", "`settingGroup =` needs a name", *line);
                     continue;
                 };
                 let label = fields.get(1).map_or_else(
-                    || name.clone(),
+                    || (*name).to_owned(),
                     |field| crate::fields::unquote(field).to_owned(),
                 );
                 definition.setting_groups.insert(
-                    name,
+                    name.to_owned(),
                     SettingGroup {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         label,
                         options: Vec::new(),
                     },
                 );
-                current = Some(name.clone());
+                current = Some(name.to_owned());
                 section.understand(*line);
             }
             "settingoption" => {
-                let Some(name) = fields.first() else {
+                let Some(name) = fields.first().copied() else {
                     section.warn(
                         "bad-setting-option",
                         "`settingOption =` needs a name",
@@ -60,7 +60,7 @@ pub(crate) fn parse_setting_groups(
                     continue;
                 };
                 let label = fields.get(1).map_or_else(
-                    || name.clone(),
+                    || (*name).to_owned(),
                     |field| crate::fields::unquote(field).to_owned(),
                 );
                 let Some(group_name) = current.as_deref() else {
@@ -73,13 +73,13 @@ pub(crate) fn parse_setting_groups(
                 };
                 if let Some(group) = definition.setting_groups.get_mut(group_name) {
                     group.options.push(SettingOption {
-                        name: name.clone(),
+                        name: name.to_owned(),
                         label,
                     });
                     section.understand(*line);
                 }
             }
-            _ => section.unrecognized_key(&key, *line),
+            _ => section.unrecognized_key(key, *line),
         }
     }
 }
@@ -109,12 +109,12 @@ pub(crate) fn parse_dialogs(
             let (_, value) = assignment.unwrap_or_default();
             let fields = split_fields(value);
 
-            let Some(name) = fields.first() else {
+            let Some(name) = fields.first().copied() else {
                 section.warn("bad-dialog", "`dialog =` needs a name", *line);
                 continue;
             };
             let dialog = Dialog {
-                name: name.clone(),
+                name: name.to_owned(),
                 title: fields
                     .get(1)
                     .map(|field| crate::fields::unquote(field).to_owned()),
@@ -122,7 +122,7 @@ pub(crate) fn parse_dialogs(
                 rows: Vec::new(),
                 line: *line,
             };
-            current = Some(name.clone());
+            current = Some(name.to_owned());
             if definition.dialogs.insert(name, dialog).is_some() {
                 section.error(
                     "duplicate-name",
@@ -135,8 +135,8 @@ pub(crate) fn parse_dialogs(
         }
 
         let (keyword, fields) = match assignment {
-            Some((key, value)) => (key.trim().to_owned(), split_fields(value)),
-            None => (text.trim().to_owned(), Vec::new()),
+            Some((key, value)) => (key.trim_ascii().to_owned(), split_fields(value)),
+            None => (text.trim_ascii().to_owned(), Vec::new()),
         };
         let kind = RowKind::parse(&keyword);
 
@@ -147,7 +147,9 @@ pub(crate) fn parse_dialogs(
             kind,
             RowKind::IndicatorPanel | RowKind::ReadoutPanel | RowKind::LiveGraph
         ) {
-            let name = fields.first().cloned().unwrap_or_else(|| keyword.clone());
+            let name = fields
+                .first()
+                .map_or_else(|| keyword.clone(), |f| (*f).to_owned());
             let container = Dialog {
                 name: name.clone(),
                 title: fields
@@ -164,7 +166,10 @@ pub(crate) fn parse_dialogs(
         let Some(name) = current.as_deref() else {
             section.warn(
                 "orphan-dialog-row",
-                format!("`{}` appears before any `dialog =` entry", text.trim()),
+                format!(
+                    "`{}` appears before any `dialog =` entry",
+                    text.trim_ascii()
+                ),
                 *line,
             );
             continue;
@@ -178,7 +183,7 @@ pub(crate) fn parse_dialogs(
             dialog.rows.push(DialogRow {
                 kind,
                 keyword,
-                fields,
+                fields: fields.iter().map(|field| (*field).to_owned()).collect(),
                 line: *line,
             });
         }
@@ -202,7 +207,7 @@ pub(crate) fn parse_menu(
         section.count_entry();
         let Some((key, value)) = crate::fields::split_assignment(text) else {
             // `std_separator` is a bare keyword.
-            if text.trim().eq_ignore_ascii_case("std_separator")
+            if text.trim_ascii().eq_ignore_ascii_case("std_separator")
                 && let Some(menu) = index.and_then(|index| definition.menus.get_mut(index))
             {
                 menu.items.push(MenuItem {
@@ -297,13 +302,18 @@ pub(crate) fn parse_menu(
 }
 
 /// Selects the menu with this title, creating it when it is new.
-fn open_menu(definition: &mut Definition, fields: &[String], dialog: Option<&String>) -> usize {
+fn open_menu(definition: &mut Definition, fields: &[&str], dialog: Option<&String>) -> usize {
     let title = fields
         .first()
         .map(|field| crate::fields::unquote(field).to_owned())
         .unwrap_or_default();
 
-    let conditions = fields.get(1..).unwrap_or_default().to_vec();
+    let conditions = fields
+        .get(1..)
+        .unwrap_or_default()
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect();
 
     if let Some(position) = definition
         .menus
@@ -336,28 +346,42 @@ fn open_menu(definition: &mut Definition, fields: &[String], dialog: Option<&Str
 /// the field count: with a trailing condition it splits into two fields, and
 /// reading those as target and label would turn the condition into the label.
 fn is_non_zero_number(text: &str) -> bool {
-    text.trim().parse::<f64>().is_ok_and(|value| value != 0.0)
+    text.trim_ascii()
+        .parse::<f64>()
+        .is_ok_and(|value| value != 0.0)
 }
 
-fn parse_menu_item(fields: &[String]) -> (String, String, Vec<String>) {
+fn parse_menu_item(fields: &[&str]) -> (String, String, Vec<String>) {
     if let Some(first) = fields.first()
         && let Some(start) = first.find('"')
     {
-        let target = first[..start].trim().to_owned();
-        let label = crate::fields::unquote(first[start..].trim()).to_owned();
-        return (target, label, fields[1..].to_vec());
+        let target = first[..start].trim_ascii().to_owned();
+        let label = crate::fields::unquote(first[start..].trim_ascii()).to_owned();
+        return (
+            target,
+            label,
+            fields[1..]
+                .iter()
+                .map(|field| (*field).to_owned())
+                .collect(),
+        );
     }
 
     if fields.len() >= 2 {
         return (
-            fields[0].clone(),
-            crate::fields::unquote(&fields[1]).to_owned(),
-            fields[2..].to_vec(),
+            fields[0].to_owned(),
+            crate::fields::unquote(fields[1]).to_owned(),
+            fields[2..]
+                .iter()
+                .map(|field| (*field).to_owned())
+                .collect(),
         );
     }
 
     (
-        fields.first().cloned().unwrap_or_default(),
+        fields
+            .first()
+            .map_or_else(String::new, |field| (*field).to_owned()),
         String::new(),
         Vec::new(),
     )
@@ -375,7 +399,7 @@ pub(crate) fn parse_context_help(
         };
         definition
             .context_help
-            .insert(&key, crate::fields::unquote(&value).to_owned());
+            .insert(key, crate::fields::unquote(value).to_owned());
         section.understand(*line);
     }
 }
@@ -391,11 +415,11 @@ pub(crate) fn parse_key_actions(
             continue;
         };
         if !key.eq_ignore_ascii_case("showPanel") {
-            section.unrecognized_key(&key, *line);
+            section.unrecognized_key(key, *line);
             continue;
         }
-        let fields = split_fields(&value);
-        let Some(dialog) = fields.last() else {
+        let fields = split_fields(value);
+        let Some(dialog) = fields.last().copied() else {
             section.warn("bad-key-action", "`showPanel` needs a dialog name", *line);
             continue;
         };
@@ -513,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_space_separated_menu_item_still_yields_a_target_and_label() {
-        let (target, label, conditions) = parse_menu_item(&["veTable1Tbl \"VE Table\"".to_owned()]);
+        let (target, label, conditions) = parse_menu_item(&["veTable1Tbl \"VE Table\""]);
 
         assert_eq!(target, "veTable1Tbl");
         assert_eq!(label, "VE Table");
@@ -527,10 +551,7 @@ mod tests {
     fn a_space_separated_menu_item_keeps_its_trailing_condition() {
         // The real Speeduino INI writes this form; splitting on the comma must
         // not turn `{ useDwellMap }` into the label.
-        let fields = vec![
-            "dwell_tblMap \"Dwell Map\"".to_owned(),
-            "{ useDwellMap }".to_owned(),
-        ];
+        let fields = ["dwell_tblMap \"Dwell Map\"", "{ useDwellMap }"];
         let (target, label, conditions) = parse_menu_item(&fields);
 
         assert_eq!(target, "dwell_tblMap");

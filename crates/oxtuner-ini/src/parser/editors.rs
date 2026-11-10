@@ -48,9 +48,9 @@ pub(crate) fn parse_tables(
                 .and_then(|page| u8::try_from(page).ok());
 
             current = Some(Table {
-                id: fields[0].clone(),
-                map_id: Some(fields[1].clone()),
-                title: Text::parse(&fields[2]),
+                id: fields[0].to_owned(),
+                map_id: Some(fields[1].to_owned()),
+                title: Text::parse(fields[2]),
                 page,
                 x_bins: None,
                 y_bins: None,
@@ -78,7 +78,7 @@ pub(crate) fn parse_tables(
             "xbins" => table.x_bins = Some(parse_axis(&fields)),
             "ybins" => table.y_bins = Some(parse_axis(&fields)),
             "zbins" => {
-                table.z_bins = fields.first().cloned();
+                table.z_bins = fields.first().map(|field| (*field).to_owned());
             }
             "xylabels" => table.xy_labels = fields.iter().map(|field| Text::parse(field)).collect(),
             "updownlabel" => {
@@ -145,8 +145,10 @@ fn insert_table(definition: &mut Definition, section: &mut SectionParser, table:
 }
 
 /// `xBins = array[, trackingChannel][, readOnly]`.
-fn parse_axis(fields: &[String]) -> Axis {
-    let array = fields.first().cloned().unwrap_or_default();
+fn parse_axis(fields: &[&str]) -> Axis {
+    let array = fields
+        .first()
+        .map_or_else(String::new, |field| (*field).to_owned());
     let channel = fields
         .get(1)
         .map(|field| crate::fields::unquote(field).to_owned());
@@ -184,16 +186,16 @@ pub(crate) fn parse_curves(
                 insert_curve(definition, section, curve);
             }
             section.understand(*line);
-            let Some(name) = fields.first() else {
+            let Some(name) = fields.first().copied() else {
                 section.warn("bad-curve", "`curve =` needs a name", *line);
                 continue;
             };
             current = Some(Curve {
-                name: name.clone(),
+                name: name.to_owned(),
                 title: fields
                     .get(1)
                     .map(|field| Text::parse(field))
-                    .unwrap_or(Text::Literal(name.clone())),
+                    .unwrap_or(Text::Literal(name.to_owned())),
                 column_labels: Vec::new(),
                 x_axis: Vec::new(),
                 y_axis: Vec::new(),
@@ -282,7 +284,7 @@ fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve:
 
 fn is_true(value: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        value.trim_ascii().to_ascii_lowercase().as_str(),
         "true" | "on" | "1" | "yes"
     )
 }

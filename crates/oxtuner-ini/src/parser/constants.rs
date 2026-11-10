@@ -5,7 +5,6 @@
 //! in one flat list. The parser therefore decides per
 //! line whether it is an entry (`scalar, U08, …`) or a setting (`nPages = 15`).
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -14,7 +13,7 @@ use crate::model::{
     BitOption, CommsSettings, Constant, ConstantClass, ConstantFlags, DataType, Definition,
     Dimension, Endianness, Number, Offset, Page, PcVariable, Shape, Text,
 };
-use crate::preprocess::Expander;
+use crate::preprocess::{Expander, Fields};
 
 use super::SectionParser;
 
@@ -49,24 +48,24 @@ pub(crate) fn parse_identification(
 
         match key.to_ascii_lowercase().as_str() {
             "signature" => {
-                crate::fields::unquote(&value).clone_into(&mut definition.signature);
+                crate::fields::unquote(value).clone_into(&mut definition.signature);
                 definition.signature_section.clone_from(&section.name);
                 section.understand(*line);
             }
             "querycommand" => {
-                definition.query_command = Some(CommandTemplate::parse(&value));
+                definition.query_command = Some(CommandTemplate::parse(value));
                 section.understand(*line);
             }
             "versioninfo" => {
-                definition.version_info = Some(crate::fields::unquote(&value).to_owned());
+                definition.version_info = Some(crate::fields::unquote(value).to_owned());
                 section.understand(*line);
             }
             "iniversion" => {
-                definition.ini_version = Some(crate::fields::unquote(&value).to_owned());
+                definition.ini_version = Some(crate::fields::unquote(value).to_owned());
                 section.understand(*line);
             }
             "inispecversion" => {
-                match crate::fields::parse_f64(&value) {
+                match crate::fields::parse_f64(value) {
                     Some(version) => definition.spec_version = Some(version),
                     None => section.warn(
                         "bad-spec-version",
@@ -78,7 +77,10 @@ pub(crate) fn parse_identification(
             }
             _ => {
                 // Everything else is a tunable the model keeps verbatim.
-                definition.comms.raw.insert(key.clone(), value.clone());
+                definition
+                    .comms
+                    .raw
+                    .insert(key.to_owned(), value.to_owned());
                 section.understand(*line);
             }
         }
@@ -338,8 +340,8 @@ pub(crate) fn parse_constants(
 /// Whether the expanded field list is a calibration entry rather than a section
 /// setting. Both a known class and a known data type are required, so a typo'd
 /// key with a scalar value stays a setting instead of becoming a bogus constant.
-fn is_constant_entry(fields: &[Cow<'_, str>]) -> bool {
-    match (fields.first(), fields.get(1)) {
+fn is_constant_entry(fields: &Fields<'_>) -> bool {
+    match (fields.get(0), fields.get(1)) {
         (Some(class), Some(data_type)) => {
             ConstantClass::parse(class).is_some() && DataType::parse(data_type).is_some()
         }
@@ -429,7 +431,7 @@ fn parse_comms_key(
 
 fn is_on(value: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        value.trim_ascii().to_ascii_lowercase().as_str(),
         "on" | "true" | "1" | "yes"
     )
 }
@@ -448,8 +450,8 @@ struct Entry<'a> {
     raw: &'a str,
     /// The entry's fields as written, before `$define` expansion. Only the
     /// option list needs them: it is what identifies a shared table.
-    raw_fields: &'a [String],
-    fields: Vec<Cow<'a, str>>,
+    raw_fields: &'a [&'a str],
+    fields: Fields<'a>,
     page: u8,
 }
 
@@ -469,11 +471,11 @@ fn parse_constant(
         fields,
         page,
     } = entry;
-    let Some(class) = fields.first().and_then(|field| ConstantClass::parse(field)) else {
-        unreachable!("callers check the class first");
+    let Some(class) = fields.get(0).and_then(ConstantClass::parse) else {
+        return false;
     };
-    let Some(data_type) = fields.get(1).and_then(|field| DataType::parse(field)) else {
-        unreachable!("callers check the data type first");
+    let Some(data_type) = fields.get(1).and_then(DataType::parse) else {
+        return false;
     };
 
     // A `string` entry may omit its offset entirely (`string, ASCII, 20`), so
@@ -579,8 +581,8 @@ struct EntryAttributes {
 
 /// The fields and cursor shared while reading one entry's attributes.
 struct AttributeContext<'a, 'b> {
-    fields: &'a [Cow<'b, str>],
-    raw_fields: &'a [String],
+    fields: &'a Fields<'b>,
+    raw_fields: &'a [&'a str],
     key: &'a str,
     line: u32,
     index: usize,
@@ -628,7 +630,8 @@ fn parse_entry_attributes(
             attributes.shape = shape;
             attributes.options = option_tables.table(
                 shared_define(context.raw_fields, context.index),
-                &context.fields[context.index..],
+                context.fields,
+                context.index,
             );
         }
         ConstantClass::Array | ConstantClass::OddArray => {
@@ -649,8 +652,10 @@ fn parse_entry_attributes(
                 );
                 return None;
             };
-            let (units, numbers) =
-                split_numbers(&context.fields[context.index..], &mut context.flags);
+            let (units, numbers) = split_numbers(
+                context.fields.iter().skip(context.index),
+                &mut context.flags,
+            );
             attributes.shape = shape;
             attributes.units = units;
             attributes.scale = numbers.first().cloned();
@@ -660,9 +665,8 @@ fn parse_entry_attributes(
             attributes.digits = numbers.get(4).cloned();
         }
         ConstantClass::String => {
-            let tail = &context.fields[context.index..];
-            let (shape, _) = parse_string_shape(tail);
-            for field in tail {
+            let (shape, _) = parse_string_shape(context.fields.iter().skip(context.index));
+            for field in context.fields.iter().skip(context.index) {
                 if is_keyword(field) {
                     apply_keyword(&mut context.flags, field);
                 }
@@ -670,8 +674,10 @@ fn parse_entry_attributes(
             attributes.shape = shape;
         }
         ConstantClass::Scalar => {
-            let (units, numbers) =
-                split_numbers(&context.fields[context.index..], &mut context.flags);
+            let (units, numbers) = split_numbers(
+                context.fields.iter().skip(context.index),
+                &mut context.flags,
+            );
             attributes.units = units;
             attributes.scale = numbers.first().cloned();
             attributes.translate = numbers.get(1).cloned();
@@ -687,7 +693,10 @@ fn parse_entry_attributes(
 
 /// Splits the trailing fields of a scalar/array entry into units and the numeric
 /// attributes, collecting storage keywords as it goes.
-fn split_numbers(fields: &[Cow<'_, str>], flags: &mut ConstantFlags) -> (Text, Vec<Number>) {
+fn split_numbers<'a>(
+    fields: impl IntoIterator<Item = &'a str>,
+    flags: &mut ConstantFlags,
+) -> (Text, Vec<Number>) {
     let mut units = Text::Literal(String::new());
     let mut numbers = Vec::new();
     let mut seen_units = false;
@@ -709,12 +718,12 @@ fn split_numbers(fields: &[Cow<'_, str>], flags: &mut ConstantFlags) -> (Text, V
 }
 
 fn looks_like_offset(field: &str) -> bool {
-    let field = field.trim();
+    let field = field.trim_ascii();
     !field.starts_with('"') && !field.starts_with('[') && !field.starts_with('{')
 }
 
 fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) -> Offset {
-    let lowered = field.trim().to_ascii_lowercase();
+    let lowered = field.trim_ascii().to_ascii_lowercase();
     match lowered.as_str() {
         "nextoffset" => return Offset::Next,
         "lastoffset" => return Offset::Last,
@@ -745,19 +754,19 @@ fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) 
 }
 
 fn parse_bit_shape(field: &str) -> Option<Shape> {
-    let inner = field.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let inner = field.trim_ascii().strip_prefix('[')?.strip_suffix(']')?;
     let (range, shift) = match inner.split_once('+') {
-        Some((range, shift)) => (range, shift.trim().parse::<u8>().ok()?),
+        Some((range, shift)) => (range, shift.trim_ascii().parse::<u8>().ok()?),
         None => (inner, 0),
     };
     let (low, high) = range.split_once(':')?;
-    let low: u8 = low.trim().parse().ok()?;
-    let high: u8 = high.trim().parse().ok()?;
+    let low: u8 = low.trim_ascii().parse().ok()?;
+    let high: u8 = high.trim_ascii().parse().ok()?;
     (low <= high).then_some(Shape::Bits { low, high, shift })
 }
 
 fn parse_array_shape(field: &str) -> Option<Shape> {
-    let inner = field.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let inner = field.trim_ascii().strip_prefix('[')?.strip_suffix(']')?;
     match inner.split_once(['x', 'X']) {
         Some((cols, rows)) => Some(Shape::Table {
             cols: parse_dimension(cols)?,
@@ -768,7 +777,7 @@ fn parse_array_shape(field: &str) -> Option<Shape> {
 }
 
 fn parse_dimension(field: &str) -> Option<Dimension> {
-    let field = field.trim();
+    let field = field.trim_ascii();
     if let Some(value) = crate::fields::parse_u32(field) {
         return Some(Dimension::Fixed(value));
     }
@@ -778,24 +787,26 @@ fn parse_dimension(field: &str) -> Option<Dimension> {
         .map(Dimension::Expression)
 }
 
-fn parse_string_shape(fields: &[Cow<'_, str>]) -> (Shape, usize) {
+fn parse_string_shape<'a>(fields: impl IntoIterator<Item = &'a str>) -> (Shape, usize) {
+    let mut fields = fields.into_iter();
     let length = fields
-        .first()
-        .and_then(|field| parse_dimension(field))
+        .next()
+        .and_then(parse_dimension)
         .unwrap_or(Dimension::Fixed(0));
-    let columns = fields.get(1).and_then(|field| parse_dimension(field));
-    (Shape::Text { length, columns }, fields.len().min(2))
+    let columns = fields.next().and_then(parse_dimension);
+    let used = 1 + usize::from(columns.is_some());
+    (Shape::Text { length, columns }, used)
 }
 
 fn is_keyword(field: &str) -> bool {
     matches!(
-        field.trim().to_ascii_lowercase().as_str(),
+        field.trim_ascii().to_ascii_lowercase().as_str(),
         "nomsqsave" | "controllerpriority" | "readonly"
     )
 }
 
 fn apply_keyword(flags: &mut ConstantFlags, field: &str) {
-    match field.trim().to_ascii_lowercase().as_str() {
+    match field.trim_ascii().to_ascii_lowercase().as_str() {
         "nomsqsave" => flags.no_msq_save = true,
         "controllerpriority" | "readonly" => flags.controller_priority = true,
         _ => {}
@@ -815,14 +826,19 @@ struct OptionTables {
 }
 
 impl OptionTables {
-    fn table(&mut self, define: Option<String>, fields: &[Cow<'_, str>]) -> Arc<[BitOption]> {
+    fn table(
+        &mut self,
+        define: Option<String>,
+        fields: &Fields<'_>,
+        index: usize,
+    ) -> Arc<[BitOption]> {
         let Some(define) = define else {
-            return parse_bit_options(fields);
+            return parse_bit_options(fields.iter().skip(index));
         };
         if let Some(table) = self.by_define.get(&define) {
             return Arc::clone(table);
         }
-        let table = parse_bit_options(fields);
+        let table = parse_bit_options(fields.iter().skip(index));
         self.by_define.insert(define, Arc::clone(&table));
         table
     }
@@ -835,26 +851,30 @@ impl OptionTables {
 /// fields before it expand one-to-one for every entry this applies to, so
 /// `raw.len() == index + 1` means the list is the expansion of the last field
 /// and nothing else.
-fn shared_define(raw_fields: &[String], index: usize) -> Option<String> {
+fn shared_define(raw_fields: &[&str], index: usize) -> Option<String> {
     if raw_fields.len() != index.checked_add(1)? {
         return None;
     }
-    let name = raw_fields.last()?.trim().strip_prefix('$')?.trim();
+    let name = raw_fields
+        .last()?
+        .trim_ascii()
+        .strip_prefix('$')?
+        .trim_ascii();
     (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_ascii_lowercase())
 }
 
-fn parse_bit_options(fields: &[Cow<'_, str>]) -> Arc<[BitOption]> {
+fn parse_bit_options<'a>(fields: impl IntoIterator<Item = &'a str>) -> Arc<[BitOption]> {
     let mut options = Vec::new();
     let mut next_value: u32 = 0;
 
     for field in fields {
-        let field = field.trim();
+        let field = field.trim_ascii();
         if field.is_empty() {
             continue;
         }
         let (value, label) = match field.split_once('=') {
             Some((value, label)) => (
-                value.trim().parse::<u32>().ok(),
+                value.trim_ascii().parse::<u32>().ok(),
                 crate::fields::unquote(label).to_owned(),
             ),
             None => (None, crate::fields::unquote(field).to_owned()),
@@ -882,12 +902,17 @@ pub(crate) fn parse_pc_variables(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        let fields = expander.expand(&split_fields(&value));
+        let raw_fields = split_fields(value);
+        let fields = expander.expand(&raw_fields);
         if fields.is_empty() {
             continue;
         }
 
-        let lowered = fields[0].trim().to_ascii_lowercase();
+        let lowered = fields
+            .get(0)
+            .unwrap_or_default()
+            .trim_ascii()
+            .to_ascii_lowercase();
         if lowered == "channelvalueonconnect" || lowered == "continuouschannelvalue" {
             let channel = fields
                 .get(1)
@@ -895,7 +920,7 @@ pub(crate) fn parse_pc_variables(
                 .unwrap_or_default();
             let is_connect = lowered == "channelvalueonconnect";
             let variable = PcVariable {
-                name: key.clone(),
+                name: key.to_owned(),
                 class: ConstantClass::Scalar,
                 data_type: DataType::F32,
                 shape: Shape::Scalar,
@@ -904,7 +929,7 @@ pub(crate) fn parse_pc_variables(
                 channel_value_on_connect: is_connect.then(|| channel.clone()),
                 continuous_channel_value: (!is_connect).then_some(channel),
                 line: *line,
-                raw: value.clone(),
+                raw: value.to_owned(),
             };
             insert_variable(definition, section, variable, *line);
             section.understand(*line);
@@ -916,19 +941,16 @@ pub(crate) fn parse_pc_variables(
                 "unknown-class",
                 format!(
                     "`{key}` starts with {:?}, which is not a PC variable class",
-                    fields[0]
+                    fields.get(0).unwrap_or_default()
                 ),
                 *line,
             );
             continue;
         };
-        let Some(data_type) = fields.get(1).and_then(|field| DataType::parse(field)) else {
+        let Some(data_type) = fields.get(1).and_then(DataType::parse) else {
             section.warn(
                 "unknown-type",
-                format!(
-                    "`{key}` has data type {:?}",
-                    fields.get(1).map_or("", AsRef::as_ref)
-                ),
+                format!("`{key}` has data type {:?}", fields.get(1).unwrap_or("")),
                 *line,
             );
             continue;
@@ -937,12 +959,12 @@ pub(crate) fn parse_pc_variables(
         let mut index = 2usize;
         let shape = match class {
             ConstantClass::Bits => {
-                let shape = fields.get(index).and_then(|field| parse_bit_shape(field));
+                let shape = fields.get(index).and_then(parse_bit_shape);
                 index += 1;
                 shape.unwrap_or(Shape::Scalar)
             }
             ConstantClass::Array | ConstantClass::OddArray => {
-                let shape = fields.get(index).and_then(|field| parse_array_shape(field));
+                let shape = fields.get(index).and_then(parse_array_shape);
                 index += 1;
                 shape.unwrap_or(Shape::Scalar)
             }
@@ -950,7 +972,7 @@ pub(crate) fn parse_pc_variables(
         };
 
         let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
-            parse_bit_options(&fields[index..])
+            parse_bit_options(fields.iter().skip(index))
         } else {
             Arc::from([])
         };
@@ -959,11 +981,11 @@ pub(crate) fn parse_pc_variables(
         } else {
             fields
                 .get(index)
-                .map_or(Text::Literal(String::new()), |field| Text::parse(field))
+                .map_or(Text::Literal(String::new()), Text::parse)
         };
 
         let variable = PcVariable {
-            name: key.clone(),
+            name: key.to_owned(),
             class,
             data_type,
             shape,
@@ -972,7 +994,7 @@ pub(crate) fn parse_pc_variables(
             channel_value_on_connect: None,
             continuous_channel_value: None,
             line: *line,
-            raw: value.clone(),
+            raw: value.to_owned(),
         };
         insert_variable(definition, section, variable, *line);
         section.understand(*line);

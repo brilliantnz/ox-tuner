@@ -60,17 +60,17 @@ impl SettingsContext {
     /// "last directive read" behaviour of the dialect.
     pub(crate) fn declare(&mut self, name: &str, active: bool) {
         self.declared
-            .insert(name.trim().to_ascii_lowercase(), active);
+            .insert(name.trim_ascii().to_ascii_lowercase(), active);
     }
 
     /// Records that the file asked whether a flag was set.
     pub(crate) fn note_tested(&mut self, name: &str) {
-        self.tested.insert(name.trim().to_ascii_lowercase());
+        self.tested.insert(name.trim_ascii().to_ascii_lowercase());
     }
 
     /// Resolves one flag through the precedence order.
     pub fn is_active(&self, name: &str) -> bool {
-        let key = name.trim().to_ascii_lowercase();
+        let key = name.trim_ascii().to_ascii_lowercase();
         if let Some(value) = self.overrides.get(&key) {
             return *value;
         }
