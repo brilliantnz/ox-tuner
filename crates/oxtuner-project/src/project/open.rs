@@ -11,7 +11,9 @@ use crate::flags;
 use crate::load::{self};
 use crate::msq::Msq;
 
-use super::{CONFIG_DIR, MAIN_DEFINITION, Project, ProjectError, TUNE_FILE};
+use super::{
+    CONFIG_DIR, MAIN_DEFINITION, PC_VALUES_FILE, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE,
+};
 
 impl Project {
     /// Opens a `TunerStudio` project folder in place.
@@ -82,8 +84,10 @@ impl Project {
 
         // The snapshot records the flags the tune was written with. Parsing the
         // definition under different flags would interpret the file through a
-        // different shape than the one that produced it.
-        let settings = snapshot_settings(&msq);
+        // different shape than the one that produced it. The project's own
+        // properties sit between the INI defaults and that snapshot.
+        let files = read_project_files(&config);
+        let settings = snapshot_settings(&msq, &files.settings);
         let (definition, definition_source) = {
             let _span = tracing::debug_span!("project_definition_load").entered();
             load_definition(
@@ -96,10 +100,19 @@ impl Project {
         }?;
         let definition_ms = elapsed_ms(&mut phase);
 
-        let loaded = {
+        let mut loaded = {
             let _span = tracing::debug_span!("project_tune_load").entered();
             load::load(&msq, &definition)
         };
+        if let Some(values) = &files.pc_values {
+            load::apply_pc_overrides(
+                &mut loaded.tune,
+                &loaded.layout,
+                &definition,
+                values,
+                &mut loaded.report,
+            );
+        }
         let images = TuneImages::from_working(loaded.tune);
         let tune_ms = elapsed_ms(&mut phase);
 
@@ -175,7 +188,7 @@ impl Project {
         };
         let msq_ms = elapsed_ms(&mut phase);
 
-        let settings = snapshot_settings(&msq);
+        let settings = snapshot_settings(&msq, &[]);
         let base = definition_path.parent().unwrap_or(Path::new("."));
         let (definition, definition_source) = {
             let _span = tracing::debug_span!("project_definition_load").entered();
@@ -350,10 +363,84 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
 /// The settings context a tune's `<settings>` snapshot describes.
 ///
 /// Starts from the INI's own declarations (inside [`SettingsContext::new`]) and
-/// applies the snapshot as overrides, so a flag the file names wins while an
-/// unmentioned flag keeps the definition's default.
-fn snapshot_settings(msq: &Msq) -> SettingsContext {
-    SettingsContext::new().with_overrides(settings_overrides(&msq.settings()))
+/// applies overrides in the order the project defines them: the project's
+/// `project.properties` first, then the tune's `<settings>` snapshot, which
+/// wins on a duplicate flag. A flag the file names wins; an unmentioned flag
+/// keeps the definition's default.
+fn snapshot_settings(msq: &Msq, project: &[(String, bool)]) -> SettingsContext {
+    let mut overrides = project.to_vec();
+    overrides.extend(settings_overrides(&msq.settings()));
+
+    SettingsContext::new().with_overrides(overrides)
+}
+
+/// The optional files a project keeps beside its definition.
+#[derive(Debug, Default)]
+struct ProjectFiles {
+    /// Flags from `project.properties` (`ecuSettings=...`).
+    settings: Vec<(String, bool)>,
+    /// Per-project PC variable values, when the file is present and readable.
+    pc_values: Option<Msq>,
+}
+
+/// Reads `project.properties` and `pcVariableValues.msq` when they exist.
+///
+/// Both are optional: a project without them opens exactly as before. A
+/// malformed PC values file is logged and skipped rather than blocking the
+/// tune, because it is not calibration data.
+fn read_project_files(config: &Path) -> ProjectFiles {
+    let mut files = ProjectFiles::default();
+
+    if let Ok(bytes) = fs::read(config.join(PROPERTIES_FILE)) {
+        files.settings = property_overrides(&String::from_utf8_lossy(&bytes));
+    }
+
+    let path = config.join(PC_VALUES_FILE);
+    if let Ok(bytes) = fs::read(&path) {
+        match Msq::parse(&bytes) {
+            Ok(msq) => files.pc_values = Some(msq),
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                %error,
+                "the project PC variable values could not be parsed and were skipped"
+            ),
+        }
+    }
+
+    files
+}
+
+/// Maps a `project.properties` text to setting overrides.
+///
+/// Only `ecuSettings` matters: its value is a `|`-separated list of active
+/// names, with the same `_ON` / `_OFF` suffix convention the `.msq` snapshot
+/// uses.
+fn property_overrides(text: &str) -> Vec<(String, bool)> {
+    let mut overrides = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("ecuSettings") {
+            continue;
+        }
+
+        for item in value.split('|') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            overrides.push(flags::state(item));
+        }
+    }
+
+    overrides
 }
 
 /// Maps a `<settings>` snapshot to preprocessor overrides.
