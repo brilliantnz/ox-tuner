@@ -186,32 +186,37 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
         }
 
         let key = entry.name.to_ascii_lowercase();
-        let mut tokens = entry.value.split_whitespace();
-        let Some(first) = tokens.next() else {
-            continue;
-        };
-        let second = tokens.next();
+        let written = entry.value.trim();
 
-        // An array has more than one token and feeds `arrayValue`; a single
-        // token is a scalar and takes the cheaper path below.
-        if second.is_some() {
-            let mut array = Vec::new();
-            let mut valid = true;
+        // A quoted value is one value, never an array, even when its label
+        // contains spaces (`"Open Loop"`). Only an unquoted multi-token value
+        // can be an array.
+        if !is_quoted(written) {
+            let mut tokens = written.split_whitespace();
+            let Some(first) = tokens.next() else {
+                continue;
+            };
+            let second = tokens.next();
 
-            for token in std::iter::once(first).chain(second).chain(tokens) {
-                if let Ok(value) = token.parse::<f64>() {
-                    array.push(value);
-                } else {
-                    valid = false;
-                    break;
+            if second.is_some() {
+                let mut array = Vec::new();
+                let mut valid = true;
+
+                for token in std::iter::once(first).chain(second).chain(tokens) {
+                    if let Ok(value) = token.parse::<f64>() {
+                        array.push(value);
+                    } else {
+                        valid = false;
+                        break;
+                    }
                 }
-            }
 
-            if valid {
-                values.arrays.insert(key, array);
-            }
+                if valid {
+                    values.arrays.insert(key, array);
+                }
 
-            continue;
+                continue;
+            }
         }
 
         let text = unquote(&entry.value);
@@ -1169,5 +1174,49 @@ viaIndex = array, U08, 8, [3], "", { alpha[1] }, 0, 0, 255, 0
         let images = TuneImages::from_working(loaded.tune);
         assert_eq!(images.overall_state(), CellState::Unknown);
         assert!(images.status().unsaved.is_empty());
+    }
+
+    const LIMIT_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+boostType = bits, U08, 0, [0:0], "Open Loop", "Closed Loop"
+boostTable = array, U08, 4, [2x2], "", 2.0, 0.0, 0, {boostTableLimit}, 0
+
+[OutputChannels]
+ochGetCommand = "r\$tsCanId\x30%2o%2c"
+ochBlockSize = 16
+boostTableLimit = { boostType == 0 ? 100.0 : 511 }
+"#;
+
+    const LIMIT_MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="boostType">"Open Loop"</constant>
+        <constant cols="2" rows="2" name="boostTable">8 10 12 14</constant>
+    </page>
+</msq>"#;
+
+    #[test]
+    fn a_limit_channel_over_a_bit_label_resolves() {
+        let definition = parse_str(LIMIT_DEFINITION, &SettingsContext::new()).expect("parses");
+        let loaded = load(&Msq::parse(LIMIT_MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| !issue.message.contains("presentation attribute")),
+            "{:?}",
+            loaded.report.warnings
+        );
+
+        let spec = loaded.layout.variable("boostTable").unwrap();
+        assert_eq!(spec.maximum, Some(100.0));
     }
 }
