@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
-    BlockingEventStream, Command, CoreConfig, CoreError, CoreHandle, CoreThread, DefinitionView,
-    Event, OpId, start,
+    BlockingEventStream, CoreCommand, CoreConfig, CoreError, CoreHandle, CoreThread,
+    DefinitionCommand, DefinitionView, Event, OpId, start,
 };
 
 /// How long a test waits for an event before failing. Generous: CI machines are
@@ -132,11 +132,11 @@ fn the_settings_snapshot_decides_the_protocol_commands() {
     compatible.set_override("COMMS_COMPAT", true);
     let op = core
         .handle
-        .send(Command::LoadDefinition {
+        .execute(CoreCommand::Definition(DefinitionCommand::Load {
             label: "compat.ini".to_owned(),
             bytes: SPEEDUINO_LIKE.as_bytes().to_vec(),
             settings: compatible,
-        })
+        }))
         .expect("queued");
     let event = core.next();
 
@@ -226,14 +226,14 @@ fn every_accepted_command_is_answered_exactly_once_under_concurrent_producers() 
             let mut refused = 0usize;
             for index in 0..200 {
                 let command = if index % 3 == 0 {
-                    Command::UnloadDefinition
+                    CoreCommand::Definition(DefinitionCommand::Unload)
                 } else {
-                    Command::load_definition(
+                    CoreCommand::load_definition(
                         format!("w{worker}-{index}.ini"),
                         SPEEDUINO_LIKE.as_bytes(),
                     )
                 };
-                match handle.send(command) {
+                match handle.execute(command) {
                     Ok(op) => accepted.push(op),
                     Err(CoreError::QueueFull) => refused += 1,
                     Err(other) => panic!("unexpected send error: {other}"),
@@ -427,8 +427,8 @@ fn a_slow_consumer_backpressures_the_core_without_losing_answers() {
     let mut refused = 0usize;
     for index in 0..200 {
         let command =
-            Command::load_definition(format!("slow-{index}.ini"), SPEEDUINO_LIKE.as_bytes());
-        match core.handle.send(command) {
+            CoreCommand::load_definition(format!("slow-{index}.ini"), SPEEDUINO_LIKE.as_bytes());
+        match core.handle.execute(command) {
             Ok(op) => accepted.push(op),
             Err(CoreError::QueueFull) => refused += 1,
             Err(other) => panic!("unexpected send error: {other}"),

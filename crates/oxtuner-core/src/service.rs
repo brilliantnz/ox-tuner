@@ -1,7 +1,7 @@
 //! The core thread: one owner of the loaded definition, one command loop.
 //!
 //! ```text
-//! UI ──Command──▶ [commands queue] ──▶ core thread ──▶ [events queue] ──Event──▶ UI
+//! UI ──CommandRequest──▶ [commands queue] ──▶ core thread ──▶ [events queue] ──Event──▶ UI
 //!                                       owns the session
 //! ```
 //!
@@ -30,7 +30,7 @@ use oxtuner_protocol::{BehaviorKind, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
 use crate::contract::{
-    AxisEdit, BurnReport, CellEdit, Command, ConnectionView, ControllerActionReport,
+    AxisEdit, BurnReport, CellEdit, CommandRequest, ConnectionView, ControllerActionReport,
     DefinitionView, DialogView, Envelope, Event, Failure, FailureCode, ImportReport, JournalEntry,
     OpId, PortView, ProjectView, ReadReport, RevertReport, SaveReport, SignatureVerdict, TableView,
     WriteReport,
@@ -201,7 +201,7 @@ const JOIN_WAIT: Duration = Duration::from_secs(5);
 /// How often the abandoned-thread wait checks whether the core has finished.
 const JOIN_POLL: Duration = Duration::from_millis(10);
 
-/// Queues a [`Command::Shutdown`], waiting up to [`SHUTDOWN_WAIT`] for room.
+/// Queues a [`CommandRequest::Shutdown`], waiting up to [`SHUTDOWN_WAIT`] for room.
 ///
 /// Returns whether the core will see the command (or is already gone).
 pub(crate) fn send_shutdown(
@@ -211,7 +211,7 @@ pub(crate) fn send_shutdown(
     match commands.send_timeout(
         Envelope {
             op,
-            command: Command::Shutdown,
+            command: CommandRequest::Shutdown,
         },
         SHUTDOWN_WAIT,
     ) {
@@ -251,7 +251,7 @@ impl std::fmt::Debug for CoreParts {
 
 /// Owns the core thread and joins it on drop.
 ///
-/// Dropping is a safe shutdown: it queues [`Command::Shutdown`], raises the stop
+/// Dropping is a safe shutdown: it queues [`CommandRequest::Shutdown`], raises the stop
 /// flag so a full event queue cannot hold the thread, and joins, so a forgotten
 /// core is stopped and reaped and [`CoreThread::join`] returns its report. One
 /// policy is explicit rather than pretty: a core that refuses shutdown is
@@ -532,7 +532,7 @@ fn run(
     // Commands that were accepted while shutdown was racing them are answered
     // explicitly: cancellation is never implicit.
     while let Ok(envelope) = commands.try_recv() {
-        if matches!(envelope.command, Command::Shutdown) {
+        if matches!(envelope.command, CommandRequest::Shutdown) {
             continue;
         }
         report.rejected += 1;
@@ -664,11 +664,11 @@ fn handle(
     let Envelope { op, command } = envelope;
 
     match command {
-        Command::Shutdown => {
+        CommandRequest::Shutdown => {
             tracing::debug!(%op, "shutdown requested");
             Outcome::Stop
         }
-        Command::ListPorts => {
+        CommandRequest::ListPorts => {
             match io_thread::list_ports() {
                 Ok(ports) => {
                     let summary: Vec<PortView> = ports
@@ -698,16 +698,16 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::Connect { port, framing } => {
+        CommandRequest::Connect { port, framing } => {
             if let Some(definition) = session.definition() {
                 configure_history(history, definition);
             }
             connect(op, session, live, events, report, &port, framing, false)
         }
-        Command::TestConnection { port, framing } => {
+        CommandRequest::TestConnection { port, framing } => {
             connect(op, session, live, events, report, &port, framing, true)
         }
-        Command::Disconnect => {
+        CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {
                 send(
                     events,
@@ -755,7 +755,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::ReadAll => {
+        CommandRequest::ReadAll => {
             let Some(connection) = live.as_mut() else {
                 send(
                     events,
@@ -828,12 +828,12 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::AdoptEcuImage => {
+        CommandRequest::AdoptEcuImage => {
             adopt_ecu_image(op, session, events, report);
             *menu_dirty = true;
             Outcome::Continue
         }
-        Command::StartRealtime { interval_ms } => {
+        CommandRequest::StartRealtime { interval_ms } => {
             let Some(connection) = live.as_mut() else {
                 send(
                     events,
@@ -879,7 +879,7 @@ fn handle(
             *menu_dirty = true;
             Outcome::Continue
         }
-        Command::StopRealtime => {
+        CommandRequest::StopRealtime => {
             let running = live.as_mut().is_some_and(|connection| {
                 connection.auto_poll = false;
                 connection.stop_polling();
@@ -902,7 +902,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::SetWritesEnabled { enabled } => {
+        CommandRequest::SetWritesEnabled { enabled } => {
             safety.set_writes_enabled(enabled);
             let connection = live
                 .as_ref()
@@ -918,14 +918,14 @@ fn handle(
             );
             Outcome::Continue
         }
-        Command::AcknowledgeWriteFailure => {
+        CommandRequest::AcknowledgeWriteFailure => {
             let was_halted = safety.halted().is_some();
             safety.clear_halt();
             tracing::info!(%op, was_halted, "write failure acknowledged");
             send(events, Event::WriteFailureAcknowledged { op });
             Outcome::Continue
         }
-        Command::RefreshTuneStatus => {
+        CommandRequest::RefreshTuneStatus => {
             match session.tune_status() {
                 Some(status) => {
                     send(events, Event::TuneStatusRead { op, status });
@@ -943,7 +943,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::ReadJournal => {
+        CommandRequest::ReadJournal => {
             let Some(journal) = session.journal(journal_dir) else {
                 send(
                     events,
@@ -981,7 +981,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::WriteToRam { pages } => write_to_ram(
+        CommandRequest::WriteToRam { pages } => write_to_ram(
             op,
             session,
             live,
@@ -991,7 +991,7 @@ fn handle(
             report,
             pages,
         ),
-        Command::BurnToFlash { pages } => burn_to_flash(
+        CommandRequest::BurnToFlash { pages } => burn_to_flash(
             op,
             session,
             live,
@@ -1001,17 +1001,17 @@ fn handle(
             report,
             pages,
         ),
-        Command::RevertTune => {
+        CommandRequest::RevertTune => {
             let outcome = revert_tune(op, session, journal_dir, events, report);
             *menu_dirty = true;
             outcome
         }
-        Command::RevertTarget { name } => {
+        CommandRequest::RevertTarget { name } => {
             let outcome = revert_target(op, session, journal_dir, events, report, latest, &name);
             *menu_dirty = true;
             outcome
         }
-        Command::ImportTune { path, consented } => {
+        CommandRequest::ImportTune { path, consented } => {
             let outcome = import_tune(
                 op,
                 session,
@@ -1025,7 +1025,7 @@ fn handle(
             *menu_dirty = true;
             outcome
         }
-        Command::RestoreSnapshot { path } => {
+        CommandRequest::RestoreSnapshot { path } => {
             let outcome = import_tune(
                 op,
                 session,
@@ -1039,7 +1039,7 @@ fn handle(
             *menu_dirty = true;
             outcome
         }
-        Command::ListSnapshots => {
+        CommandRequest::ListSnapshots => {
             let Some(project) = session.project() else {
                 return refuse(
                     events,
@@ -1053,9 +1053,11 @@ fn handle(
             send(events, Event::SnapshotsListed { op, paths });
             Outcome::Continue
         }
-        Command::StartLog { directory } => start_log(op, live, events, report, &directory, log),
-        Command::StopLog => stop_log(op, live, events, report),
-        Command::SaveTrace { path } => {
+        CommandRequest::StartLog { directory } => {
+            start_log(op, live, events, report, &directory, log)
+        }
+        CommandRequest::StopLog => stop_log(op, live, events, report),
+        CommandRequest::SaveTrace { path } => {
             let Some(connection) = live.as_mut() else {
                 send(
                     events,
@@ -1099,7 +1101,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::LoadDefinition {
+        CommandRequest::LoadDefinition {
             label,
             bytes,
             settings,
@@ -1152,7 +1154,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::OpenProject { path } => {
+        CommandRequest::OpenProject { path } => {
             // Reading and parsing happen here, on the core thread: the UI must
             // never wait on a project's INI and `.msq`.
             let _span =
@@ -1207,7 +1209,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::SaveTune => {
+        CommandRequest::SaveTune => {
             match session {
                 Session::Project(project) => match project.save() {
                     Ok(outcome) => {
@@ -1260,7 +1262,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::ReadTable { name } => {
+        CommandRequest::ReadTable { name } => {
             let Session::Project(project) = session else {
                 send(
                     events,
@@ -1302,7 +1304,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::EditTable { name, mut edits } => {
+        CommandRequest::EditTable { name, mut edits } => {
             let Session::Project(project) = session else {
                 send(
                     events,
@@ -1384,7 +1386,7 @@ fn handle(
             *menu_dirty = true;
             Outcome::Continue
         }
-        Command::EditAxis {
+        CommandRequest::EditAxis {
             table,
             axis,
             mut edits,
@@ -1484,7 +1486,7 @@ fn handle(
             *menu_dirty = true;
             Outcome::Continue
         }
-        Command::ReadDialog { name } => {
+        CommandRequest::ReadDialog { name } => {
             let Session::Project(project) = session else {
                 send(
                     events,
@@ -1526,7 +1528,7 @@ fn handle(
             }
             Outcome::Continue
         }
-        Command::EditScalar {
+        CommandRequest::EditScalar {
             dialog,
             name,
             mut value,
@@ -1605,7 +1607,7 @@ fn handle(
             *menu_dirty = true;
             Outcome::Continue
         }
-        Command::RunControllerCommand { dialog, command } => {
+        CommandRequest::RunControllerCommand { dialog, command } => {
             let outcome = run_controller_command(
                 op,
                 session,
@@ -1620,7 +1622,7 @@ fn handle(
             *menu_dirty = true;
             outcome
         }
-        Command::UnloadDefinition => {
+        CommandRequest::UnloadDefinition => {
             let had_session = !matches!(session, Session::Empty);
             teardown(
                 live,

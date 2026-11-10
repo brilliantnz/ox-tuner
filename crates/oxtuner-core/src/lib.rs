@@ -9,7 +9,7 @@
 //! ADR-0005).
 //!
 //! ```text
-//!            Command / OpId                    Event
+//!            CoreCommand / OpId                Event
 //!   UI ───────────────────────▶ [core thread] ───────────────────────▶ UI
 //!                                   │ owns the
 //!                          Definition / Project
@@ -90,15 +90,16 @@ mod snapshot;
 mod view;
 
 pub use contract::{
-    AxisEdit, AxisKind, AxisView, BurnReport, CellEdit, Command, ConnectionView,
-    ControllerActionReport, CurveAxes, DefinitionView, DialogAction, DialogEmbed, DialogField,
-    DialogFieldKind, DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment,
-    DialogPresetOption, DialogSelectOption, DialogUnmodeledRow, DialogView, DialogWidget,
-    DialogWidgetKind, Event, Failure, FailureCode, FrontPageGauge, GateState, GaugeTemplate,
-    ImportReport, IndicatorSpec, JournalEntry, KeyActionInfo, OpId, PortView, ProjectView,
+    AxisEdit, AxisKind, AxisView, BurnReport, CellEdit, ConnectionView, ControllerActionReport,
+    CoreCommand, CurveAxes, DefinitionCommand, DefinitionView, DialogAction, DialogEmbed,
+    DialogField, DialogFieldKind, DialogFieldTone, DialogHelpLink, DialogPreset,
+    DialogPresetAssignment, DialogPresetOption, DialogSelectOption, DialogUnmodeledRow, DialogView,
+    DialogWidget, DialogWidgetKind, EcuCommand, Event, Failure, FailureCode, FrontPageGauge,
+    GateState, GaugeTemplate, ImportReport, IndicatorSpec, JournalCommand, JournalEntry,
+    KeyActionInfo, LifecycleCommand, LogCommand, OpId, PortView, ProjectCommand, ProjectView,
     ReadReport, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
-    ReferenceTableView, RejectReason, RevertReport, SaveReport, SignatureVerdict, TableView,
-    WriteReport,
+    ReferenceTableView, RejectReason, RevertReport, SafetyCommand, SaveReport, SignatureVerdict,
+    TableView, TuneCommand, WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
@@ -114,7 +115,7 @@ pub use realtime::{
 };
 pub use service::{CoreConfig, CoreError, CoreParts, CoreReport, CoreThread, start};
 
-/// Re-exported so callers can build [`Command::LoadDefinition`] without adding
+/// Re-exported so callers can build [`DefinitionCommand::Load`] without adding
 /// a dependency on `oxtuner-ini` themselves — and so a [`CustomLink`]
 /// implementation can name the definition it is handed.
 pub use oxtuner_ini::{Definition, SettingsContext};
