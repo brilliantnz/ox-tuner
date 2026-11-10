@@ -12,12 +12,12 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use oxtuner_core::{AxisSummary, CellState, TableSummary};
+use oxtuner_core::{AxisView, CellState, TableView};
 use oxtuner_ui::table::{CellPos, TableModel};
 
 /// A 32x32 table snapshot, the largest grid the editor draws.
-fn table() -> TableSummary {
-    let axis = |name: &str| AxisSummary {
+fn table() -> TableView {
+    let axis = |name: &str| AxisView {
         name: name.to_owned(),
         label: name.to_owned(),
         units: String::new(),
@@ -29,7 +29,7 @@ fn table() -> TableSummary {
         values: (0..32).map(|index| f64::from(index) * 500.0).collect(),
     };
 
-    TableSummary {
+    TableView {
         id: "veTable".to_owned(),
         name: "veTable".to_owned(),
         title: "VE Table".to_owned(),
