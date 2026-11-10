@@ -36,7 +36,7 @@ pub(super) fn run_controller_command(
             "connect to the ECU before sending a controller command",
         );
     };
-    if connection.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
+    if connection.txns.write_tx.is_some() || connection.pending_kind(PendingKind::Write) {
         return refuse(
             events,
             report,
@@ -54,7 +54,7 @@ pub(super) fn run_controller_command(
             "a page read is running; send the command after it finishes",
         );
     }
-    if connection.command_tx.is_some() || connection.pending_kind(PendingKind::Command) {
+    if connection.txns.command_tx.is_some() || connection.pending_kind(PendingKind::Command) {
         return refuse(
             events,
             report,
@@ -95,8 +95,8 @@ pub(super) fn run_controller_command(
 
     let read_only = project.report().read_only_reasons().join("; ");
     if let Err(reason) = safety.gate(
-        connection.connected,
-        connection.verdict == SignatureVerdict::Match,
+        connection.connection.connected,
+        connection.connection.verdict == SignatureVerdict::Match,
         true,
         (!read_only.is_empty()).then_some(read_only.as_str()),
     ) {
@@ -122,8 +122,8 @@ pub(super) fn run_controller_command(
         at: journal::timestamp(),
         operation: "controller-command".to_owned(),
         phase: "begin".to_owned(),
-        port: connection.link_label.clone(),
-        signature: connection.signature.clone(),
+        port: connection.connection.link_label.clone(),
+        signature: connection.connection.signature.clone(),
         pages: "all".to_owned(),
         cells: 0,
         variables: 0,
@@ -149,7 +149,7 @@ pub(super) fn run_controller_command(
             "the session closed before the command started",
         );
     };
-    connection.command_tx = Some(CommandTxn {
+    connection.txns.command_tx = Some(CommandTxn {
         dialog: dialog.to_owned(),
         name: name.to_owned(),
         journal,
@@ -201,7 +201,7 @@ pub(super) fn write_to_ram(
             "connect to the ECU before writing",
         );
     };
-    if connection.write_tx.is_some() {
+    if connection.txns.write_tx.is_some() {
         return refuse(
             events,
             report,
@@ -239,8 +239,8 @@ pub(super) fn write_to_ram(
     };
     let read_only = project.report().read_only_reasons().join("; ");
     if let Err(reason) = safety.gate(
-        connection.connected,
-        connection.verdict == SignatureVerdict::Match,
+        connection.connection.connected,
+        connection.connection.verdict == SignatureVerdict::Match,
         true,
         (!read_only.is_empty()).then_some(read_only.as_str()),
     ) {
@@ -261,7 +261,7 @@ pub(super) fn write_to_ram(
             "read the ECU into the tune image before writing (the session does this after connecting)",
         );
     }
-    if !connection.pages_complete {
+    if !connection.images.pages_complete {
         return refuse(
             events,
             report,
@@ -368,8 +368,8 @@ pub(super) fn write_to_ram(
         at: journal::timestamp(),
         operation: "write".to_owned(),
         phase: "begin".to_owned(),
-        port: connection.link_label.clone(),
-        signature: connection.signature.clone(),
+        port: connection.connection.link_label.clone(),
+        signature: connection.connection.signature.clone(),
         pages: journal::pages_label(&targets),
         cells,
         variables,
@@ -457,7 +457,7 @@ pub(super) fn burn_to_flash(
             "connect to the ECU before burning",
         );
     };
-    if connection.write_tx.is_some() {
+    if connection.txns.write_tx.is_some() {
         return refuse(
             events,
             report,
@@ -495,14 +495,14 @@ pub(super) fn burn_to_flash(
     };
     let read_only = project.report().read_only_reasons().join("; ");
     if let Err(reason) = safety.gate(
-        connection.connected,
-        connection.verdict == SignatureVerdict::Match,
+        connection.connection.connected,
+        connection.connection.verdict == SignatureVerdict::Match,
         true,
         (!read_only.is_empty()).then_some(read_only.as_str()),
     ) {
         return refuse(events, report, op, FailureCode::BurnRefused, &reason);
     }
-    if !connection.pages_complete {
+    if !connection.images.pages_complete {
         return refuse(
             events,
             report,
@@ -585,8 +585,8 @@ pub(super) fn burn_to_flash(
         at: journal::timestamp(),
         operation: "burn".to_owned(),
         phase: "begin".to_owned(),
-        port: connection.link_label.clone(),
-        signature: connection.signature.clone(),
+        port: connection.connection.link_label.clone(),
+        signature: connection.connection.signature.clone(),
         pages: journal::pages_label(&targets),
         cells: 0,
         variables: 0,
@@ -666,7 +666,7 @@ pub(super) fn advance_write(
     log: &LogStatus,
     report: &mut CoreReport,
 ) {
-    let Some(mut transaction) = live.write_tx.take() else {
+    let Some(mut transaction) = live.txns.write_tx.take() else {
         tracing::warn!(%op, "a write reply arrived without a transaction");
         return;
     };
@@ -686,7 +686,8 @@ pub(super) fn advance_write(
                 let drifted: Vec<u8> = pages
                     .iter()
                     .filter(|read| {
-                        live.page_bytes
+                        live.images
+                            .page_bytes
                             .get(&read.page)
                             .is_some_and(|known| known != &read.bytes)
                     })
@@ -697,7 +698,7 @@ pub(super) fn advance_write(
                     .map(|read| (read.page, read.bytes.clone()))
                     .collect();
                 for read in &pages {
-                    live.page_bytes.insert(read.page, read.bytes.clone());
+                    live.images.page_bytes.insert(read.page, read.bytes.clone());
                 }
                 if !drifted.is_empty() {
                     let action = match transaction.kind {
@@ -882,11 +883,11 @@ pub(super) fn advance_write(
                         }
 
                         transaction.phase = TxnPhase::Write;
-                        live.write_tx = Some(transaction);
+                        live.txns.write_tx = Some(transaction);
                         if let Err(error) =
                             live.request(op, PendingKind::Write, IoOp::WritePages { pages: writes })
                         {
-                            let Some(transaction) = live.write_tx.take() else {
+                            let Some(transaction) = live.txns.write_tx.take() else {
                                 return;
                             };
                             fail_transaction(
@@ -997,11 +998,11 @@ pub(super) fn advance_write(
                             transaction.pages.clone()
                         };
                         transaction.phase = TxnPhase::Burn;
-                        live.write_tx = Some(transaction);
+                        live.txns.write_tx = Some(transaction);
                         if let Err(error) =
                             live.request(op, PendingKind::Write, IoOp::BurnPages { pages })
                         {
-                            let Some(transaction) = live.write_tx.take() else {
+                            let Some(transaction) = live.txns.write_tx.take() else {
                                 return;
                             };
                             fail_transaction(
@@ -1037,7 +1038,7 @@ pub(super) fn advance_write(
             }
             TxnPhase::Write | TxnPhase::Burn | TxnPhase::BurnWait => {
                 tracing::warn!(%op, "an unexpected page read arrived during a transaction");
-                live.write_tx = Some(transaction);
+                live.txns.write_tx = Some(transaction);
             }
         },
         IoOutcome::Written { pages, bytes } => {
@@ -1051,11 +1052,11 @@ pub(super) fn advance_write(
             // empty first, or the link may close over an unfinished save.
             transaction.burned = transaction.burned.saturating_add(pages);
             transaction.phase = TxnPhase::BurnWait;
-            live.write_tx = Some(transaction);
+            live.txns.write_tx = Some(transaction);
             live.begin_burn_wait();
-            if live.burn_wait.is_none() {
+            if live.txns.burn_wait.is_none() {
                 // No realtime block to sample: nothing to wait on.
-                let Some(transaction) = live.write_tx.take() else {
+                let Some(transaction) = live.txns.write_tx.take() else {
                     return;
                 };
                 start_verify(live, op, transaction, session, safety, events, report);
@@ -1063,16 +1064,20 @@ pub(super) fn advance_write(
         }
         IoOutcome::Realtime { block } => {
             if transaction.phase == TxnPhase::BurnWait {
-                let Some(wait) = live.burn_wait else {
+                let Some(wait) = live.txns.burn_wait else {
                     tracing::warn!(%op, "a burn check arrived without a wait");
-                    live.write_tx = Some(transaction);
+                    live.txns.write_tx = Some(transaction);
                     return;
                 };
                 let queued = wait.observed
-                    && live.decoder.channel_raw(&block, BURN_PENDING_CHANNEL) != Some(0.0);
+                    && live
+                        .telemetry
+                        .decoder
+                        .channel_raw(&block, BURN_PENDING_CHANNEL)
+                        != Some(0.0);
                 if queued {
                     if Instant::now() >= wait.deadline {
-                        live.burn_wait = None;
+                        live.txns.burn_wait = None;
                         fail_transaction(
                             live,
                             transaction,
@@ -1092,23 +1097,23 @@ pub(super) fn advance_write(
                     }
                     let mut wait = wait;
                     wait.next_at = Instant::now() + BURN_POLL_INTERVAL;
-                    live.burn_wait = Some(wait);
-                    live.write_tx = Some(transaction);
+                    live.txns.burn_wait = Some(wait);
+                    live.txns.write_tx = Some(transaction);
                     return;
                 }
-                live.burn_wait = None;
+                live.txns.burn_wait = None;
                 if transaction.burned < transaction.pages.len() {
                     // The next page goes out only after this one's save is
                     // accounted for.
                     let page = transaction.pages[transaction.burned];
                     transaction.phase = TxnPhase::Burn;
-                    live.write_tx = Some(transaction);
+                    live.txns.write_tx = Some(transaction);
                     if let Err(error) = live.request(
                         op,
                         PendingKind::Write,
                         IoOp::BurnPages { pages: vec![page] },
                     ) {
-                        let Some(transaction) = live.write_tx.take() else {
+                        let Some(transaction) = live.txns.write_tx.take() else {
                             return;
                         };
                         fail_transaction(
@@ -1128,7 +1133,7 @@ pub(super) fn advance_write(
                 start_verify(live, op, transaction, session, safety, events, report);
             } else {
                 tracing::warn!(%op, "an unexpected realtime block arrived during a transaction");
-                live.write_tx = Some(transaction);
+                live.txns.write_tx = Some(transaction);
             }
         }
         IoOutcome::Failed(failure) => {
@@ -1154,7 +1159,7 @@ pub(super) fn advance_write(
         }
         other => {
             tracing::warn!(%op, ?other, "an unexpected reply arrived during a transaction");
-            live.write_tx = Some(transaction);
+            live.txns.write_tx = Some(transaction);
         }
     }
 }
@@ -1171,9 +1176,9 @@ pub(super) fn start_verify(
 ) {
     transaction.phase = TxnPhase::Verify;
     let pages = transaction.pages.clone();
-    live.write_tx = Some(transaction);
+    live.txns.write_tx = Some(transaction);
     if let Err(error) = live.request(op, PendingKind::Write, IoOp::ReadPages { pages }) {
-        let Some(transaction) = live.write_tx.take() else {
+        let Some(transaction) = live.txns.write_tx.take() else {
             return;
         };
         fail_transaction(
@@ -1336,7 +1341,7 @@ pub(super) fn apply_verified_write(
         .set_ecu_ram(image)
         .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
     project.images_mut().clear_write_failures();
-    live.page_bytes.extend(
+    live.images.page_bytes.extend(
         transaction
             .readback
             .iter()
@@ -1473,8 +1478,8 @@ pub(super) fn record_result(transaction: &WriteTxn, live: &Live, result: &str, d
         at: journal::timestamp(),
         operation: transaction.kind.journal_name().to_owned(),
         phase: "result".to_owned(),
-        port: live.link_label.clone(),
-        signature: live.signature.clone(),
+        port: live.connection.link_label.clone(),
+        signature: live.connection.signature.clone(),
         pages: journal::pages_label(&transaction.pages),
         cells: transaction.cells,
         variables: transaction.variables,
@@ -1497,8 +1502,8 @@ pub(super) fn record_command_result(
         at: journal::timestamp(),
         operation: "controller-command".to_owned(),
         phase: "result".to_owned(),
-        port: live.link_label.clone(),
-        signature: live.signature.clone(),
+        port: live.connection.link_label.clone(),
+        signature: live.connection.signature.clone(),
         pages: "all".to_owned(),
         cells: 0,
         variables: 0,
@@ -1515,7 +1520,7 @@ pub(super) fn record_command_result(
 
 /// Closes a controller command's journal after a failure.
 pub(super) fn finish_command_failed(live: &mut Live, detail: &str) {
-    let Some(transaction) = live.command_tx.take() else {
+    let Some(transaction) = live.txns.command_tx.take() else {
         return;
     };
     record_command_result(&transaction, live, "failed", detail);
