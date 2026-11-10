@@ -576,6 +576,15 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
             .iter()
             .any(|issue| issue.kind == IssueKind::OrphanValue)
     );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| !issue.message.contains("presentation attribute")),
+        "every presentation attribute must resolve on the reference project: {:?}",
+        project.report().warnings
+    );
 }
 
 #[test]
@@ -629,6 +638,15 @@ fn a_reference_project_opens_and_round_trips() {
             .warnings
             .iter()
             .any(|issue| issue.kind == IssueKind::OrphanValue)
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| !issue.message.contains("presentation attribute")),
+        "every presentation attribute must resolve on the reference project: {:?}",
+        project.report().warnings
     );
 
     let outcome = project.save().expect("an unedited reference project saves");
