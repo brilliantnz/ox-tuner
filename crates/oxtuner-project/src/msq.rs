@@ -275,7 +275,7 @@ impl Msq {
     /// The numbered calibration pages, in `number` order.
     ///
     /// A `<page>` without a numeric `number` attribute is not a calibration
-    /// page and is skipped here; [`Self::pc_pages`] reports those.
+    /// page and is skipped here; [`Self::pc_page_count`] reports those.
     pub fn pages(&self) -> Vec<PageHeader> {
         let mut pages: Vec<PageHeader> = self
             .page_elements()

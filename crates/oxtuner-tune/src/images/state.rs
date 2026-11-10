@@ -129,7 +129,12 @@ pub(super) fn aggregate(states: impl Iterator<Item = CellState>) -> CellState {
 #[derive(Debug, Clone)]
 pub struct StateTable {
     layout: Arc<TuneLayout>,
-    cells: Vec<Vec<CellState>>,
+    /// Every cell state, in one buffer with one region per variable. A
+    /// definition with hundreds of variables otherwise pays a heap allocation
+    /// per variable, and the grid reads the cells in an inner loop.
+    cells: Vec<CellState>,
+    /// Where each variable's region starts, plus one final end offset.
+    offsets: Vec<usize>,
     pages: Vec<PageState>,
     overall: CellState,
 }
@@ -138,16 +143,22 @@ impl StateTable {
     /// Derives the whole table from the images.
     pub fn build(images: &TuneImages) -> Self {
         let layout = Arc::clone(&images.layout);
-        let cells: Vec<Vec<CellState>> = layout
-            .variables()
-            .iter()
-            .enumerate()
-            .map(|(variable, spec)| {
-                (0..spec.element_count())
-                    .map(|index| images.state_at(variable, index))
-                    .collect()
-            })
-            .collect();
+        let variables = layout.variables();
+
+        let mut offsets = Vec::with_capacity(variables.len() + 1);
+        let mut total = 0usize;
+        for spec in variables {
+            offsets.push(total);
+            total += spec.element_count();
+        }
+        offsets.push(total);
+
+        let mut cells = Vec::with_capacity(total);
+        for (variable, spec) in variables.iter().enumerate() {
+            for index in 0..spec.element_count() {
+                cells.push(images.state_at(variable, index));
+            }
+        }
 
         let pages = {
             let diff = diff_values(&layout, images.baseline.values(), images.working.values());
@@ -171,6 +182,7 @@ impl StateTable {
         Self {
             layout,
             cells,
+            offsets,
             pages,
             overall,
         }
@@ -195,7 +207,11 @@ impl StateTable {
                 row,
                 column,
             })?;
-        Ok(self.cells[variable][index])
+        // Both vectors are built from the same `variables()` pass, and `index`
+        // comes from the shape's own bounds check, so the offset arithmetic
+        // cannot leave the buffer.
+        let offset = self.offsets[variable];
+        Ok(self.cells[offset + index])
     }
 
     /// The state of one page.
@@ -215,10 +231,6 @@ impl StateTable {
 
     /// Cells in a given state, for the status tooltip.
     pub fn count(&self, state: CellState) -> usize {
-        self.cells
-            .iter()
-            .flat_map(|cells| cells.iter())
-            .filter(|cell| **cell == state)
-            .count()
+        self.cells.iter().filter(|cell| **cell == state).count()
     }
 }
