@@ -494,6 +494,9 @@ mod tests {
     /// without owning the scroll area, so a rename shows up here first.
     const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn the_scroll_area_reaches_the_column_edge(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
