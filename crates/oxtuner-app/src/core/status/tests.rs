@@ -256,6 +256,7 @@ fn a_page_read_moves_the_tune_revision_but_a_disconnect_keeps_the_read() {
         constants: 817,
         skipped: 0,
         signature_verified: true,
+        conflicts: Vec::new(),
     }));
     assert_eq!(status.tune_revision, 1);
     assert_eq!(status.pages_read.as_ref().map(|read| read.pages), Some(15));

@@ -221,8 +221,23 @@ pub struct ConnectionView {
     pub realtime_block: Option<u16>,
 }
 
+/// One cell the ECU and the working image disagree about.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictReport {
+    /// Variable name.
+    pub name: String,
+    /// Table row, or zero for a scalar.
+    pub row: usize,
+    /// Table column, or zero for a scalar.
+    pub column: usize,
+    /// The value the user is working with.
+    pub working: String,
+    /// The value the ECU read back.
+    pub ecu: String,
+}
+
 /// What a full page read did.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadReport {
     /// Pages read.
     pub pages: usize,
@@ -234,4 +249,6 @@ pub struct ReadReport {
     pub skipped: usize,
     /// Whether the signature matched when the read started.
     pub signature_verified: bool,
+    /// Cells that differ from the working image after a re-read.
+    pub conflicts: Vec<ConflictReport>,
 }

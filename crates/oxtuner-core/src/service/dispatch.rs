@@ -314,6 +314,9 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
+        CommandRequest::ResolveConflicts { resolution } => {
+            resolve_conflicts(op, session, journal_dir, events, report, resolution)
+        }
         CommandRequest::ReadJournal => {
             let Some(journal) = session.journal(journal_dir) else {
                 send(

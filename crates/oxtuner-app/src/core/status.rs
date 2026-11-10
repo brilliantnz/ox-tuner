@@ -230,6 +230,7 @@ pub(super) enum Update {
     Written(WriteReport),
     Burned(BurnReport),
     ControllerActionRan,
+    ConflictsResolved,
     Imported(ImportReport),
     Reverted(RevertReport),
     TuneStatus(TuneStatus),
@@ -392,6 +393,13 @@ impl CoreStatus {
             Update::Burned(summary) => {
                 self.last_burn = Some(summary);
                 self.write_halted = None;
+                self.failure = None;
+                self.tune_revision = self.tune_revision.wrapping_add(1);
+            }
+            Update::ConflictsResolved => {
+                if let Some(read) = &mut self.pages_read {
+                    read.conflicts.clear();
+                }
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }

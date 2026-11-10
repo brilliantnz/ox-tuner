@@ -321,6 +321,11 @@ pub(crate) enum CommandRequest {
     ReadJournal,
     /// Refresh the derived tune status (unsaved, not sent, not burned).
     RefreshTuneStatus,
+    /// Resolve cells that differ from the ECU.
+    ResolveConflicts {
+        /// Which values win.
+        resolution: ConflictResolution,
+    },
     /// Start a CSV session log in `directory`.
     ///
     /// The core names the file, writes the definition's channel order and
@@ -489,6 +494,24 @@ pub enum TuneCommand {
     AdoptEcuImage,
     /// Refresh the derived tune status.
     RefreshStatus,
+    /// Resolve cells that differ from the ECU.
+    ResolveConflicts {
+        /// Which values win.
+        resolution: ConflictResolution,
+    },
+}
+
+/// How to resolve cells that differ between the working image and the ECU.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the resolution set is closed"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictResolution {
+    /// Replace the working values with the ECU read-back.
+    UseEcu,
+    /// Keep the working values and clear the conflict marks.
+    KeepWorking,
 }
 
 /// ECU and link requests.
@@ -623,6 +646,7 @@ impl CoreCommand {
             Self::Tune(TuneCommand::RestoreSnapshot { .. }) => "restore-snapshot",
             Self::Tune(TuneCommand::AdoptEcuImage) => "adopt-ecu-image",
             Self::Tune(TuneCommand::RefreshStatus) => "refresh-tune-status",
+            Self::Tune(TuneCommand::ResolveConflicts { .. }) => "resolve-conflicts",
             Self::Ecu(EcuCommand::Connect { .. }) => "connect",
             Self::Ecu(EcuCommand::TestConnection { .. }) => "test-connection",
             Self::Ecu(EcuCommand::Disconnect) => "disconnect",
@@ -687,6 +711,9 @@ impl From<CoreCommand> for CommandRequest {
             }
             CoreCommand::Tune(TuneCommand::AdoptEcuImage) => Self::AdoptEcuImage,
             CoreCommand::Tune(TuneCommand::RefreshStatus) => Self::RefreshTuneStatus,
+            CoreCommand::Tune(TuneCommand::ResolveConflicts { resolution }) => {
+                Self::ResolveConflicts { resolution }
+            }
             CoreCommand::Ecu(EcuCommand::Connect { port, framing }) => {
                 Self::Connect { port, framing }
             }

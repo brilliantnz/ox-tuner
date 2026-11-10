@@ -30,10 +30,10 @@ use oxtuner_protocol::{BehaviorKind, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
 use crate::contract::{
-    AxisEdit, BurnReport, CellEdit, CommandRequest, ConnectionView, ControllerActionReport,
-    DefinitionView, DialogView, Envelope, Event, Failure, FailureCode, ImportReport, JournalEntry,
-    OpId, PortView, ProjectView, ReadReport, RevertReport, SaveReport, SignatureVerdict, TableView,
-    WriteReport,
+    AxisEdit, BurnReport, CellEdit, CommandRequest, ConflictResolution, ConnectionView,
+    ControllerActionReport, DefinitionView, DialogView, Envelope, Event, Failure, FailureCode,
+    ImportReport, JournalEntry, OpId, PortView, ProjectView, ReadReport, RevertReport, SaveReport,
+    SignatureVerdict, TableView, WriteReport,
 };
 use crate::gate::GateEvaluator;
 use crate::handle::{CoreHandle, EventStream, EventTx, Gate, SendFailure, StopFlag};
