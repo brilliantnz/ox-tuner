@@ -497,7 +497,7 @@ impl DialogEditor {
         let Some(current) = self.value(dialog, index) else {
             return;
         };
-        let Some(value) = edited_value(current, &text) else {
+        let Some(value) = edited_value_with_hex(current, &text, field.hex) else {
             return;
         };
 
@@ -664,6 +664,26 @@ impl DialogEditor {
 
         if let Some(actions) = command_card(dialog, cx) {
             board = board.child(actions);
+        }
+
+        if let Some(help) = help_card(dialog, cx) {
+            board = board.child(help);
+        }
+
+        if !dialog.unmodeled.is_empty() {
+            let names = dialog
+                .unmodeled
+                .iter()
+                .map(|row| row.keyword.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            board = board.child(
+                div()
+                    .px_4()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t!("app.dialog.unmodeled", names = names)),
+            );
         }
 
         if !dialog.unavailable.is_empty() {
@@ -978,6 +998,76 @@ fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut A
     }
 }
 
+/// Help links declared by the dialog, as one card.
+fn help_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Option<AnyElement> {
+    let mut rows = Vec::new();
+
+    if let Some(topic) = dialog.topic_help.as_deref() {
+        rows.push(help_row(
+            "topic",
+            t!("app.dialog.topic_help").to_string(),
+            topic,
+            cx,
+        ));
+    }
+
+    for (index, link) in dialog.help_links.iter().enumerate() {
+        let label = if link.title.trim().is_empty() {
+            link.topic.clone()
+        } else {
+            link.title.clone()
+        };
+        rows.push(help_row(&format!("link-{index}"), label, &link.topic, cx));
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    Some(constant::card(
+        ("constant-help", 0usize),
+        t!("app.dialog.help"),
+        rows,
+        cx,
+    ))
+}
+
+/// One help row: a URL opens in the browser, a topic id stays read-only.
+fn help_row(id: &str, label: String, topic: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let opens = topic.starts_with("http://") || topic.starts_with("https://");
+
+    let mut row = h_flex()
+        .h(rems(3.5))
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_4()
+        .py_2()
+        .border_t_1()
+        .border_color(theme.border.opacity(0.5))
+        .child(div().min_w_0().flex_1().truncate().text_sm().child(label));
+
+    if opens {
+        let url = topic.to_owned();
+        row = row.child(
+            Button::new(SharedString::from(format!("dialog-help-{id}")))
+                .label(t!("app.dialog.open_help"))
+                .ghost()
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        );
+    } else {
+        row = row.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(topic.to_owned()),
+        );
+    }
+
+    row.into_any_element()
+}
+
 /// One card's rows, in document order.
 struct SectionGroup {
     title: String,
@@ -1141,6 +1231,26 @@ fn toggle_value(flip: bool, checked: bool) -> f64 {
 /// A bare number replaces the value; `+2`, `*3`, `/4` and `+10%` are the
 /// relative forms the table grid also accepts. `None` means the text is not an
 /// edit and the row keeps its value.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "hex rows are integer constants; the parsed value is a small bit pattern"
+)]
+fn edited_value_with_hex(current: f64, text: &str, hex: bool) -> Option<f64> {
+    if hex {
+        let trimmed = text.trim();
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            && let Ok(value) = i64::from_str_radix(hex, 16)
+        {
+            return Some(value as f64);
+        }
+    }
+
+    edited_value(current, text)
+}
+
 fn edited_value(current: f64, text: &str) -> Option<f64> {
     let (operation, amount) = parse_edit(text).ok().flatten()?;
     let value = match operation {
@@ -1340,6 +1450,18 @@ mod tests {
             show_message(&command(true, true, &["closeDialogOnClick"])),
             None
         );
+    }
+
+    #[test]
+    fn hex_rows_display_and_parse_their_value() {
+        let mut row = row(DialogFieldKind::Value, Some(31.0), 0);
+        row.hex = true;
+        assert_eq!(
+            crate::ui::constant::value_text(&row, Some(31.0)).as_ref(),
+            "0x1F"
+        );
+        assert_eq!(edited_value_with_hex(0.0, "0x1F", true), Some(31.0));
+        assert_eq!(edited_value_with_hex(10.0, "+2", true), Some(12.0));
     }
 
     #[test]

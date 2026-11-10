@@ -542,6 +542,14 @@ app:
       en: This setting takes effect after the ECU has been power cycled.
     power_cycle_changed:
       en: Changed settings need an ECU power cycle before they take effect.
+    help:
+      en: Help
+    topic_help:
+      en: Topic help
+    open_help:
+      en: Open
+    unmodeled:
+      en: 'Rows this build does not model yet: %{names}'
     actions:
       en: Actions
     run:

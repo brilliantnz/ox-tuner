@@ -167,8 +167,24 @@ pub(crate) fn value_text(field: &DialogField, value: Option<f64>) -> SharedStrin
                 .clone()
                 .map_or_else(|| t!("app.dialog.no_value"), SharedString::from)
         },
-        |value| number_text(value, field.digits).into(),
+        |value| {
+            if field.hex {
+                hex_text(value).into()
+            } else {
+                number_text(value, field.digits).into()
+            }
+        },
     )
+}
+
+/// `0x1F`, for a row with `displayInHex`.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "hex rows are integer constants; the rounded value is displayed as a bit pattern"
+)]
+pub(crate) fn hex_text(value: f64) -> String {
+    format!("0x{:X}", value.round() as i64)
 }
 
 /// `14.7`, with the definition's decimal digits.
