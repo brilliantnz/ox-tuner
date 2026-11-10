@@ -23,7 +23,7 @@ use std::{
 
 use crossfire::{AsyncRx, MTx, Rx, SendTimeoutError, TrySendError, Tx, mpsc, spsc};
 
-use crate::message::{CellEdit, Command, Envelope, Event, OpId};
+use crate::contract::{CellEdit, Command, Envelope, Event, OpId};
 use crate::service::CoreError;
 
 /// How long one attempt to hand an event to the UI may wait before the core
@@ -294,8 +294,8 @@ impl CoreHandle {
     pub fn edit_axis(
         &self,
         table: impl Into<String>,
-        axis: crate::message::AxisKind,
-        edits: Vec<crate::message::AxisEdit>,
+        axis: crate::contract::AxisKind,
+        edits: Vec<crate::contract::AxisEdit>,
     ) -> Result<OpId, CoreError> {
         self.send(Command::EditAxis {
             table: table.into(),
@@ -339,7 +339,7 @@ impl CoreHandle {
 
     /// Runs one `[ControllerCommands]` action from a dialog button.
     ///
-    /// The reply is [`crate::Event::ControllerCommandRan`] or
+    /// The reply is [`crate::Event::ControllerActionRan`] or
     /// [`crate::Event::Failed`]. The action passes the same safety gate as a
     /// write, and the ECU image is stale after it succeeds.
     ///

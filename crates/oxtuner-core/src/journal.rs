@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::message::JournalEntry;
+use crate::contract::JournalEntry;
 
 /// Rotate when the file passes this size.
 pub(crate) const MAX_JOURNAL_BYTES: u64 = 512 * 1024;

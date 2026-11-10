@@ -86,21 +86,21 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     }
 
     let (update, remember) = match event {
-        Event::DefinitionLoaded { summary, .. } => {
-            tracing::info!(signature = %summary.signature, "definition loaded");
-            (Update::Loaded(summary), None)
+        Event::DefinitionLoaded { view, .. } => {
+            tracing::info!(signature = %view.signature, "definition loaded");
+            (Update::Loaded(view), None)
         }
-        Event::ProjectOpened { summary, .. } => {
+        Event::ProjectOpened { view, .. } => {
             tracing::info!(
-                root = %summary.root.display(),
-                signature = %summary.definition.signature,
-                read_only = summary.read_only,
+                root = %view.root.display(),
+                signature = %view.definition.signature,
+                read_only = view.read_only,
                 "project opened"
             );
             // Remember the folder only after the core opened it: the recent
             // list must not gain paths that turned out not to be projects.
-            let root = summary.root.clone();
-            (Update::Opened(summary), Some(root))
+            let root = view.root.clone();
+            (Update::Opened(view), Some(root))
         }
         Event::TuneSaved { outcome, .. } => {
             tracing::info!(
@@ -139,12 +139,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             None,
         ),
         Event::MenuChanged { menu } => (Update::Menu(menu), None),
-        Event::ConnectionTested { summary, .. } => (Update::Tested(summary), None),
-        Event::Connected { summary, .. } => (Update::Connected(summary), None),
-        Event::Reconnected { summary } => (Update::Reconnected(summary), None),
+        Event::ConnectionTested { view, .. } => (Update::Tested(view), None),
+        Event::Connected { view, .. } => (Update::Connected(view), None),
+        Event::Reconnected { view } => (Update::Reconnected(view), None),
         Event::ConnectionLost { reason } => (Update::LinkLost(reason), None),
         Event::Disconnected { .. } => (Update::Disconnected, None),
-        Event::PagesRead { summary, .. } => (Update::PagesRead(summary), None),
+        Event::PagesRead { report, .. } => (Update::PagesRead(report), None),
         Event::EcuAdopted { .. } => (Update::EcuAdopted, None),
         Event::RealtimeState { running, .. } => (Update::Realtime(running), None),
         Event::TraceSaved { path, frames, .. } => (
@@ -153,11 +153,11 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             },
             None,
         ),
-        Event::TuneWritten { summary, .. } => (Update::Written(summary), None),
-        Event::TuneBurned { summary, .. } => (Update::Burned(summary), None),
-        Event::ControllerCommandRan { .. } => (Update::ControllerCommand, None),
-        Event::TuneImported { summary, .. } => (Update::Imported(summary), None),
-        Event::TuneReverted { summary, .. } => (Update::Reverted(summary), None),
+        Event::TuneWritten { report, .. } => (Update::Written(report), None),
+        Event::TuneBurned { report, .. } => (Update::Burned(report), None),
+        Event::ControllerActionRan { .. } => (Update::ControllerActionRan, None),
+        Event::TuneImported { report, .. } => (Update::Imported(report), None),
+        Event::TuneReverted { report, .. } => (Update::Reverted(report), None),
         Event::TuneStatusRead { status, .. } => (Update::TuneStatus(status), None),
         Event::WriteAccessChanged {
             writes_enabled,
@@ -176,8 +176,8 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         }
         Event::SnapshotsListed { paths, .. } => (Update::Snapshots(paths), None),
         Event::LogState {
-            running, summary, ..
-        } => (Update::Log { running, summary }, None),
+            running, report, ..
+        } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
         Event::PortsListed { .. } | Event::Rejected { .. } | Event::Stopped => {
@@ -201,7 +201,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         | Update::PagesRead(_)
         | Update::Written(_)
         | Update::Burned(_)
-        | Update::ControllerCommand
+        | Update::ControllerActionRan
         | Update::Imported(_)
         | Update::Reverted(_)
         | Update::Saved(_) => true,

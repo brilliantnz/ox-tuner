@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oxtuner_core::{
-    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, DefinitionSummary, DialogFieldKind,
-    DialogFieldTone, DialogSummary, Event, ProjectSummary, start,
+    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, DefinitionView, DialogFieldKind,
+    DialogFieldTone, DialogView, Event, ProjectView, start,
 };
 use oxtuner_ini::{SettingsContext, parse_bytes};
 
@@ -84,13 +84,13 @@ impl Harness {
         }
     }
 
-    fn load_definition(&self, bytes: &[u8]) -> DefinitionSummary {
+    fn load_definition(&self, bytes: &[u8]) -> DefinitionView {
         self.handle
             .load_definition("speeduino.ini", bytes)
             .expect("the load is queued");
         let event = self.events.recv_timeout(WAIT).expect("an event arrives");
 
-        let Event::DefinitionLoaded { summary, .. } = event else {
+        let Event::DefinitionLoaded { view: summary, .. } = event else {
             panic!("expected a definition load, got {event:?}");
         };
 
@@ -103,7 +103,7 @@ struct RealProject {
     handle: CoreHandle,
     _thread: CoreThread,
     events: BlockingEventStream,
-    summary: ProjectSummary,
+    summary: ProjectView,
 }
 
 impl RealProject {
@@ -138,7 +138,7 @@ impl RealProject {
         parts.handle.open_project(&dir).expect("the open is queued");
 
         let event = events.recv_timeout(WAIT).expect("an event arrives");
-        let Event::ProjectOpened { summary, .. } = event else {
+        let Event::ProjectOpened { view: summary, .. } = event else {
             panic!("expected a project open, got {event:?}");
         };
 
@@ -151,11 +151,11 @@ impl RealProject {
         }
     }
 
-    fn summary(&self) -> &ProjectSummary {
+    fn summary(&self) -> &ProjectView {
         &self.summary
     }
 
-    fn read_dialog(&self, name: &str) -> DialogSummary {
+    fn read_dialog(&self, name: &str) -> DialogView {
         self.handle.read_dialog(name).expect("the read is queued");
         let event = self.events.recv_timeout(WAIT).expect("an event arrives");
 
@@ -275,7 +275,7 @@ fn a_real_engine_constants_dialog_flattens_every_panel() {
         dialog.tables.len(),
         dialog.curves.len(),
         dialog.widgets.len(),
-        dialog.commands.len(),
+        dialog.actions.len(),
         dialog.presets.len(),
     );
 }

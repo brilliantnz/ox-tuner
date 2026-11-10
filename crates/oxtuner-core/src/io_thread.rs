@@ -628,7 +628,7 @@ fn send(replies: &crossfire::Tx<spsc::Array<IoReply>>, reply: IoReply) {
 
 /// The request id type, so a caller cannot confuse it with an [`OpId`].
 ///
-/// [`OpId`]: crate::message::OpId
+/// [`OpId`]: crate::contract::OpId
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RequestId(pub(crate) u64);
 

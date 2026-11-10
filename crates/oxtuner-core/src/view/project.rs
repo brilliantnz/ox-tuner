@@ -1,87 +1,16 @@
-//! Project and definition snapshots the UI names what is open with.
-
-use std::path::PathBuf;
-
 use oxtuner_ini::{Definition, Number, Severity};
 use oxtuner_project::Project;
 
+use crate::contract::frontpage::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
+use crate::contract::project::{
+    ConnectionView, DefinitionView, ProjectView, ReadReport, ReferenceTableIdentifier,
+    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
+};
+use crate::contract::{KeyActionInfo, SignatureVerdict};
 use crate::gate::GateEvaluator;
-use crate::menu::MenuNode;
 use crate::realtime::RealtimeFrame;
 
-use super::{FrontPageGauge, GaugeSummary, IndicatorSummary};
-
-/// One hidden-dialog hotkey from `[KeyActions]`, as the UI lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyActionSummary {
-    /// Keys in order, as written.
-    pub keys: String,
-    /// Dialog the keys open.
-    pub dialog: String,
-}
-
-/// One sensor calibration table from `[ReferenceTables]`.
-///
-/// Calibration screens (thermistor/AFR) are future work; this carries the
-/// table's discovery data and solution list so they arrive with the
-/// definition instead of needing `oxtuner-ini` types later.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReferenceTableSummary {
-    /// Table name.
-    pub name: String,
-    /// Display title, when stated.
-    pub title: Option<String>,
-    /// Target table identifiers and labels.
-    pub identifiers: Vec<ReferenceTableIdentifier>,
-    /// Number of translated elements, when stated.
-    pub adc_count: Option<u32>,
-    /// Element width in bytes, when stated.
-    pub bytes_per_adc: Option<u32>,
-    /// Scale applied before writing, when the definition states a literal.
-    pub scale: Option<f64>,
-    /// Optional start offset.
-    pub start_offset: Option<u32>,
-    /// Per-identifier write limits, in document order.
-    pub limits: Vec<ReferenceTableLimit>,
-    /// Solution labels and expressions, as written.
-    pub solutions: Vec<ReferenceTableSolution>,
-    /// Source line, for a diagnostic or a tooltip.
-    pub line: u32,
-}
-
-/// One target of a [`ReferenceTableSummary`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReferenceTableIdentifier {
-    /// Target table identifier.
-    pub id: u32,
-    /// Target label.
-    pub label: String,
-}
-
-/// One write limit of a [`ReferenceTableSummary`]: identifier, min, max,
-/// default, in the definition's order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReferenceTableLimit {
-    /// Target table identifier.
-    pub identifier: u32,
-    /// Minimum value, when the definition states a literal.
-    pub minimum: Option<f64>,
-    /// Maximum value, when the definition states a literal.
-    pub maximum: Option<f64>,
-    /// Default for railed values, when the definition states a literal.
-    pub default: Option<f64>,
-}
-
-/// One solution of a [`ReferenceTableSummary`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReferenceTableSolution {
-    /// Solution label.
-    pub label: String,
-    /// Solution expression, as written.
-    pub expression: String,
-}
-
-impl ReferenceTableSummary {
+impl ReferenceTableView {
     /// Shapes one parsed calibration table for the UI.
     pub(crate) fn of(table: &oxtuner_ini::ReferenceTable) -> Self {
         Self {
@@ -124,55 +53,7 @@ impl ReferenceTableSummary {
     }
 }
 
-/// Deliberately small and `Clone`: the core keeps the full [`Definition`];
-/// the UI only needs enough to name what it is looking at.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DefinitionSummary {
-    /// The label the load command carried.
-    pub label: String,
-    /// Firmware signature.
-    pub signature: String,
-    /// `iniSpecVersion`, when the file declares one.
-    pub spec_version: Option<f64>,
-    /// Calibration pages.
-    pub pages: usize,
-    /// Calibration constants.
-    pub constants: usize,
-    /// PC-side variables.
-    pub pc_variables: usize,
-    /// Realtime channels.
-    pub channels: usize,
-    /// 2-D tables.
-    pub tables: usize,
-    /// 1-D curves.
-    pub curves: usize,
-    /// Gauge templates from `[GaugeConfigurations]`, in definition order.
-    pub gauges: Vec<GaugeSummary>,
-    /// Dashboard slots from `[FrontPage]`, in slot order.
-    pub front_page_gauges: Vec<FrontPageGauge>,
-    /// Hidden-dialog hotkeys from `[KeyActions]`, in definition order.
-    pub key_actions: Vec<KeyActionSummary>,
-    /// Sensor calibration tables from `[ReferenceTables]`, in definition order.
-    pub reference_tables: Vec<ReferenceTableSummary>,
-    /// Sections kept as raw data, by name.
-    pub unsupported: Vec<String>,
-    /// Dialogs.
-    pub dialogs: usize,
-    /// `[FrontPage]` indicators, in definition order.
-    pub indicators: Vec<IndicatorSummary>,
-    /// The navigation tree the primary sidebar draws, in definition order.
-    pub menu: Vec<MenuNode>,
-    /// Share of entries that became model data, 0–100.
-    pub coverage_percent: f64,
-    /// Parse errors recorded while loading.
-    pub errors: usize,
-    /// Parse warnings recorded while loading.
-    pub warnings: usize,
-    /// `#if` flags active for this load, sorted.
-    pub active_flags: Vec<String>,
-}
-
-impl DefinitionSummary {
+impl DefinitionView {
     /// Builds the UI-facing summary of a parsed definition.
     pub fn new(label: impl Into<String>, definition: &Definition) -> Self {
         let severity = |wanted: Severity| {
@@ -198,12 +79,12 @@ impl DefinitionSummary {
             channels: definition.channels.len(),
             tables: definition.tables.len(),
             curves: definition.curves.len(),
-            gauges: definition.gauges.iter().map(GaugeSummary::of).collect(),
+            gauges: definition.gauges.iter().map(GaugeTemplate::of).collect(),
             front_page_gauges: front_page_gauges(definition),
             key_actions: definition
                 .key_actions
                 .iter()
-                .map(|action| KeyActionSummary {
+                .map(|action| KeyActionInfo {
                     keys: action.keys.clone(),
                     dialog: action.dialog.clone(),
                 })
@@ -211,7 +92,7 @@ impl DefinitionSummary {
             reference_tables: definition
                 .reference_tables
                 .values()
-                .map(ReferenceTableSummary::of)
+                .map(ReferenceTableView::of)
                 .collect(),
             unsupported: definition
                 .unsupported
@@ -224,7 +105,7 @@ impl DefinitionSummary {
                 .indicators
                 .iter()
                 .filter(|indicator| !indicator.template_only)
-                .map(|indicator| IndicatorSummary {
+                .map(|indicator| IndicatorSpec {
                     expression: indicator.channel.clone(),
                     off_label: indicator.off_label.clone(),
                     on_label: indicator.on_label.clone(),
@@ -260,43 +141,7 @@ fn front_page_gauges(definition: &Definition) -> Vec<FrontPageGauge> {
         .collect()
 }
 
-/// An open project, shaped for the UI rather than for the file layer.
-///
-/// Deliberately small and `Clone`: the core keeps the [`Project`] (definition,
-/// tune images, `.msq` document); the UI only needs enough to name what is open,
-/// explain read-only mode and show the load gate's findings.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectSummary {
-    /// The project folder, or the tune's folder in standalone mode.
-    pub root: PathBuf,
-    /// The tune file that was read (and will be written).
-    pub tune_path: PathBuf,
-    /// The definition file the tune was interpreted with.
-    pub definition_path: PathBuf,
-    /// Whether this is a project folder (as opposed to standalone).
-    pub in_project: bool,
-    /// The definition, summarised like a standalone load.
-    pub definition: DefinitionSummary,
-    /// Whether saving is refused (S1).
-    pub read_only: bool,
-    /// Why the tune opened read-only, joined once for display.
-    ///
-    /// `None` for a writable project, so the editor never allocates in the
-    /// normal case. The individual reasons stay available in
-    /// [`ProjectSummary::read_only_reasons`].
-    pub read_only_reason: Option<String>,
-    /// Why the tune opened read-only, for the editor and output panel that
-    /// explain it.
-    pub read_only_reasons: Vec<String>,
-    /// Values copied from the tune into the model.
-    pub loaded: usize,
-    /// Values left at their definition default (absent from the tune).
-    pub skipped: usize,
-    /// Non-fatal findings, ready for the output panel.
-    pub warnings: Vec<String>,
-}
-
-impl ProjectSummary {
+impl ProjectView {
     /// Builds the UI-facing summary of an open project.
     ///
     /// The menu is evaluated here because its gates depend on the tune. A
@@ -319,7 +164,7 @@ impl ProjectSummary {
             .collect();
         let read_only_reason = report.is_read_only().then(|| read_only_reasons.join("; "));
 
-        let mut definition = DefinitionSummary::new(label, project.definition());
+        let mut definition = DefinitionView::new(label, project.definition());
         let mut evaluator = GateEvaluator::new(project.definition(), project.tune(), live);
         crate::menu::evaluate(&mut definition.menu, &mut evaluator);
 
@@ -351,94 +196,16 @@ impl ProjectSummary {
     }
 }
 
-/// One serial port the connect dialog can offer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortSummary {
-    /// Device path.
-    pub name: String,
-    /// The label to show (the path itself: `serial2` reports no product
-    /// description).
-    pub label: String,
-}
-
-/// How the ECU's signature compared with the definition's.
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "a signature either matches or it does not; there is no third verdict"
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureVerdict {
-    /// Exactly the definition's signature.
-    Match,
-    /// Different text: the session is read-only (S1).
-    Mismatch,
-}
-
-impl SignatureVerdict {
-    /// A stable code for logs and the UI.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Match => "match",
-            Self::Mismatch => "mismatch",
-        }
-    }
-}
-
-/// What the core is connected to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionSummary {
-    /// Device path, or the custom link's label.
-    pub port: String,
-    /// Whether the link came from the application rather than a serial port.
-    pub custom: bool,
-    /// The signature the ECU reported.
-    pub signature: String,
-    /// The signature the definition expects.
-    pub definition_signature: String,
-    /// Whether they match.
-    pub verdict: SignatureVerdict,
-    /// Whether this session refuses writes (S1).
-    pub read_only: bool,
-    /// Why, when it does.
-    pub read_only_reason: Option<String>,
-    /// Whether the global write switch is on (S8). Off by default.
-    pub writes_enabled: bool,
-    /// The `EcuBehavior` that claimed the definition.
-    pub behavior: String,
-    /// Framing in use: `legacy` or `envelope`.
-    pub framing: &'static str,
-    /// Pages the definition declares.
-    pub pages: usize,
-    /// The realtime block size, when the definition declares one.
-    pub realtime_block: Option<u16>,
-}
-
-impl ConnectionSummary {
+impl ConnectionView {
     /// The ECU and the definition disagree, or the definition cannot be
-    /// confirmed; the session is read-only either way (S1).
+    /// confirmed; the session is read-only either way.
     #[must_use]
     pub fn is_mismatched(&self) -> bool {
         self.verdict == SignatureVerdict::Mismatch
     }
 }
 
-/// What a full page read did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadAllSummary {
-    /// Pages read.
-    pub pages: usize,
-    /// Bytes read from the ECU.
-    pub bytes: usize,
-    /// Constants taken from those bytes.
-    pub constants: usize,
-    /// Constants that could not be placed (an unresolved address or shape).
-    pub skipped: usize,
-    /// Whether the signature matched when the read started.
-    pub signature_verified: bool,
-}
-
-impl ReadAllSummary {
+impl ReadReport {
     /// Whether every declared page and cell was read.
     #[must_use]
     pub fn is_complete(&self) -> bool {
@@ -451,10 +218,12 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    use crate::{Command, Event, OpId, SaveSummary};
+    use std::path::PathBuf;
 
-    fn summary() -> DefinitionSummary {
-        DefinitionSummary {
+    use crate::{Command, Event, OpId, SaveReport};
+
+    fn summary() -> DefinitionView {
+        DefinitionView {
             label: "test.ini".to_owned(),
             signature: "speeduino 202501".to_owned(),
             spec_version: Some(3.78),
@@ -498,7 +267,7 @@ gauge2 = missingGauge
         )
         .expect("the fixture parses");
 
-        let summary = DefinitionSummary::new("test.ini", &definition);
+        let summary = DefinitionView::new("test.ini", &definition);
 
         assert_eq!(summary.gauges.len(), 1);
         let gauge = &summary.gauges[0];
@@ -540,7 +309,7 @@ showPanel = C, T, someDialog
         )
         .expect("the fixture parses");
 
-        let summary = DefinitionSummary::new("test.ini", &definition);
+        let summary = DefinitionView::new("test.ini", &definition);
 
         assert_eq!(summary.reference_tables.len(), 1);
         let table = &summary.reference_tables[0];
@@ -575,7 +344,7 @@ indicatorTemplate = { running }, \"Off\", \"On\", white, black, green, black
         )
         .expect("the fixture parses");
 
-        let summary = DefinitionSummary::new("test.ini", &definition);
+        let summary = DefinitionView::new("test.ini", &definition);
 
         assert_eq!(summary.indicators.len(), 1, "templates stay out");
         assert_eq!(
@@ -599,7 +368,7 @@ indicatorTemplate = { running }, \"Off\", \"On\", white, black, green, black
         assert_eq!(
             Event::DefinitionLoaded {
                 op,
-                summary: summary()
+                view: summary()
             }
             .op(),
             Some(op)
@@ -607,7 +376,7 @@ indicatorTemplate = { running }, \"Off\", \"On\", white, black, green, black
         assert_eq!(
             Event::TuneSaved {
                 op,
-                outcome: SaveSummary {
+                outcome: SaveReport {
                     path: PathBuf::from("CurrentTune.msq"),
                     cells: 0,
                 },

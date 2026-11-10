@@ -14,7 +14,7 @@ use std::{
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, JournalEntry,
-    LatestFrame, OpId, ProjectSummary, start,
+    LatestFrame, OpId, ProjectView, start,
 };
 use oxtuner_project::TUNE_FILE;
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
@@ -160,15 +160,15 @@ impl Harness {
         }
     }
 
-    fn open(&self, path: &Path) -> ProjectSummary {
+    fn open(&self, path: &Path) -> ProjectView {
         let op = self.handle.open_project(path).expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
-            Event::ProjectOpened { summary, .. } => summary,
+            Event::ProjectOpened { view: summary, .. } => summary,
             other => panic!("expected a project open, got {other:?}"),
         }
     }
 
-    fn connect(&self, config: SimConfig) -> oxtuner_core::ConnectionSummary {
+    fn connect(&self, config: SimConfig) -> oxtuner_core::ConnectionView {
         self.connect_with(config, None)
     }
 
@@ -176,13 +176,13 @@ impl Harness {
         &self,
         config: SimConfig,
         framing: Option<oxtuner_core::LinkMode>,
-    ) -> oxtuner_core::ConnectionSummary {
+    ) -> oxtuner_core::ConnectionView {
         let op = self
             .handle
             .connect(support::simulator_with(config), framing)
             .expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
-            Event::Connected { summary, .. } => summary,
+            Event::Connected { view: summary, .. } => summary,
             other => panic!("expected a connection, got {other:?}"),
         }
     }
@@ -190,7 +190,9 @@ impl Harness {
     fn read_all(&self) {
         let op = self.handle.read_all().expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
-            Event::PagesRead { summary, .. } => {
+            Event::PagesRead {
+                report: summary, ..
+            } => {
                 assert_eq!(summary.skipped, 0, "every constant must be placed");
             }
             other => panic!("expected a page read, got {other:?}"),
@@ -251,7 +253,7 @@ impl Harness {
         }
     }
 
-    fn table(&self) -> oxtuner_core::TableSummary {
+    fn table(&self) -> oxtuner_core::TableView {
         let op = self.handle.read_table("veTable").expect("queued");
         match self.wait(|event| event.op() == Some(op)) {
             Event::TableRead { table, .. } => table,
@@ -290,7 +292,10 @@ fn a_write_round_trips_and_reads_back_verified() {
 
     let event = core.write();
 
-    let Event::TuneWritten { summary, .. } = event else {
+    let Event::TuneWritten {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a verified write, got {event:?}");
     };
     assert!(summary.verified);
@@ -346,7 +351,10 @@ fn an_ecu_value_outside_the_declared_range_is_left_alone() {
     assert_eq!(core.status().pending_write.cells, 0);
 
     core.edit_cell(77.0);
-    let Event::TuneWritten { summary, .. } = core.write() else {
+    let Event::TuneWritten {
+        report: summary, ..
+    } = core.write()
+    else {
         panic!("expected a verified write");
     };
     assert!(summary.verified);
@@ -393,7 +401,10 @@ fn a_page_that_moved_under_the_writer_is_refused() {
     // Nothing reached the controller: a fresh read still holds the old tune, so
     // the edit is still one cell away and the next write verifies.
     core.read_all();
-    let Event::TuneWritten { summary, .. } = core.write() else {
+    let Event::TuneWritten {
+        report: summary, ..
+    } = core.write()
+    else {
         panic!("the write after a fresh read must succeed");
     };
     assert!(summary.verified);
@@ -439,7 +450,10 @@ fn taking_the_ecu_image_makes_the_next_write_one_cell() {
         "one edit must add exactly one unsent cell"
     );
 
-    let Event::TuneWritten { summary, .. } = core.write() else {
+    let Event::TuneWritten {
+        report: summary, ..
+    } = core.write()
+    else {
         panic!("expected a verified write");
     };
     assert!(summary.verified);
@@ -508,7 +522,10 @@ fn a_burn_follows_a_verified_write_and_is_journaled() {
 
     let started = Instant::now();
     let event = core.burn();
-    let Event::TuneBurned { summary, .. } = event else {
+    let Event::TuneBurned {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a verified burn, got {event:?}");
     };
     assert!(
@@ -657,7 +674,10 @@ fn revert_snapshots_first_and_restores_the_baseline() {
 
     let op = core.handle.revert_tune().expect("queued");
     let event = core.wait(|event| event.op() == Some(op));
-    let Event::TuneReverted { summary, .. } = event else {
+    let Event::TuneReverted {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a revert, got {event:?}");
     };
     assert_eq!(summary.cells, 1);
@@ -696,7 +716,10 @@ fn importing_a_different_signature_needs_consent() {
 
     let op = core.handle.import_tune(&other, true).expect("queued");
     let event = core.wait(|event| event.op() == Some(op));
-    let Event::TuneImported { summary, .. } = event else {
+    let Event::TuneImported {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected an import, got {event:?}");
     };
     assert!(summary.consented);
@@ -895,7 +918,7 @@ fn a_controller_command_is_refused_while_writes_are_off() {
 
     let (kind, message) = failure(&core.run_command("cmdPing"));
 
-    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert_eq!(kind, FailureCode::ControllerActionRefused);
     assert!(message.contains("writes are disabled"), "{message}");
     assert!(
         core.journal().1.is_empty(),
@@ -916,7 +939,10 @@ fn a_controller_command_marks_the_ecu_image_stale() {
 
     let event = core.run_command("cmdPing");
 
-    let Event::ControllerCommandRan { summary, .. } = event else {
+    let Event::ControllerActionRan {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a controller command, got {event:?}");
     };
     assert_eq!(summary.command, "cmdPing");
@@ -954,7 +980,10 @@ fn a_controller_command_sends_every_string_in_order() {
 
     let event = core.run_command("cmdChain");
 
-    let Event::ControllerCommandRan { summary, .. } = event else {
+    let Event::ControllerActionRan {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a controller command, got {event:?}");
     };
     assert_eq!(summary.commands, 2);
@@ -973,7 +1002,10 @@ fn a_controller_command_runs_on_the_envelope_link() {
 
     let event = core.run_command("cmdPing");
 
-    let Event::ControllerCommandRan { summary, .. } = event else {
+    let Event::ControllerActionRan {
+        report: summary, ..
+    } = event
+    else {
         panic!("expected a controller command, got {event:?}");
     };
     assert_eq!(summary.command, "cmdPing");
@@ -995,7 +1027,7 @@ fn an_unknown_controller_command_is_refused() {
 
     let (kind, message) = failure(&core.run_command("cmdMissing"));
 
-    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert_eq!(kind, FailureCode::ControllerActionRefused);
     assert!(message.contains("not declared"), "{message}");
 
     core.close();
@@ -1014,7 +1046,7 @@ fn a_controller_command_is_refused_on_a_signature_mismatch() {
 
     let (kind, message) = failure(&core.run_command("cmdPing"));
 
-    assert_eq!(kind, FailureCode::ControllerCommandRefused);
+    assert_eq!(kind, FailureCode::ControllerActionRefused);
     assert!(message.contains("read-only"), "{message}");
 
     core.close();

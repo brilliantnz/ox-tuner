@@ -14,7 +14,7 @@ use oxtuner_ini::expr::{EvalContext, Expr};
 use oxtuner_ini::{ChannelKind, Definition};
 use oxtuner_tune::Tune;
 
-use crate::message::GateState;
+use crate::contract::GateState;
 use crate::realtime::RealtimeFrame;
 
 /// How one gate expression resolved.

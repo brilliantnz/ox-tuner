@@ -34,9 +34,9 @@ use std::{
 };
 
 use oxtuner_core::{
-    BlockingEventStream, BurnSummary, CellEdit, ConnectionSummary, CoreConfig, CoreHandle,
-    CoreReport, CoreThread, Event, JournalEntry, LinkMode, OpId, PortChoice, ProjectSummary,
-    ReadAllSummary, TableSummary, TuneStatus, WriteSummary, start,
+    BlockingEventStream, BurnReport, CellEdit, ConnectionView, CoreConfig, CoreHandle, CoreReport,
+    CoreThread, Event, JournalEntry, LinkMode, OpId, PortChoice, ProjectView, ReadReport,
+    TableView, TuneStatus, WriteReport, start,
 };
 
 const WAIT: Duration = Duration::from_secs(120);
@@ -83,29 +83,31 @@ impl Harness {
         }
     }
 
-    fn open(&self, path: PathBuf) -> ProjectSummary {
+    fn open(&self, path: PathBuf) -> ProjectView {
         let op = self.handle.open_project(path).expect("queued");
         match self.wait("project open", |event| event.op() == Some(op)) {
-            Event::ProjectOpened { summary, .. } => summary,
+            Event::ProjectOpened { view: summary, .. } => summary,
             other => panic!("expected a project open, got {other:?}"),
         }
     }
 
-    fn connect(&self, port: &str, framing: Option<LinkMode>) -> ConnectionSummary {
+    fn connect(&self, port: &str, framing: Option<LinkMode>) -> ConnectionView {
         let op = self
             .handle
             .connect(PortChoice::serial(port, 115_200), framing)
             .expect("queued");
         match self.wait("connect", |event| event.op() == Some(op)) {
-            Event::Connected { summary, .. } => summary,
+            Event::Connected { view: summary, .. } => summary,
             other => panic!("expected a connection, got {other:?}"),
         }
     }
 
-    fn read_all(&self) -> ReadAllSummary {
+    fn read_all(&self) -> ReadReport {
         let op = self.handle.read_all().expect("queued");
         match self.wait("page read", |event| event.op() == Some(op)) {
-            Event::PagesRead { summary, .. } => summary,
+            Event::PagesRead {
+                report: summary, ..
+            } => summary,
             other => panic!("expected a page read, got {other:?}"),
         }
     }
@@ -126,7 +128,7 @@ impl Harness {
         }
     }
 
-    fn table(&self) -> TableSummary {
+    fn table(&self) -> TableView {
         let op = self.handle.read_table(TABLE).expect("queued");
         match self.wait("table read", |event| event.op() == Some(op)) {
             Event::TableRead { table, .. } => table,
@@ -145,18 +147,22 @@ impl Harness {
         }
     }
 
-    fn write(&self) -> WriteSummary {
+    fn write(&self) -> WriteReport {
         let op = self.handle.write_to_ram(Vec::new()).expect("queued");
         match self.wait("write", |event| event.op() == Some(op)) {
-            Event::TuneWritten { summary, .. } => summary,
+            Event::TuneWritten {
+                report: summary, ..
+            } => summary,
             other => panic!("expected a write, got {other:?}"),
         }
     }
 
-    fn burn(&self) -> BurnSummary {
+    fn burn(&self) -> BurnReport {
         let op = self.handle.burn_to_flash(Vec::new()).expect("queued");
         match self.wait("burn", |event| event.op() == Some(op)) {
-            Event::TuneBurned { summary, .. } => summary,
+            Event::TuneBurned {
+                report: summary, ..
+            } => summary,
             other => panic!("expected a burn, got {other:?}"),
         }
     }

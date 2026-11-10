@@ -29,6 +29,12 @@ use oxtuner_project::{DefinitionSource, Project};
 use oxtuner_protocol::{BehaviorKind, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
 
+use crate::contract::{
+    AxisEdit, BurnReport, CellEdit, Command, ConnectionView, ControllerActionReport,
+    DefinitionView, DialogView, Envelope, Event, Failure, FailureCode, ImportReport, JournalEntry,
+    OpId, PortView, ProjectView, ReadReport, RevertReport, SaveReport, SignatureVerdict, TableView,
+    WriteReport,
+};
 use crate::gate::GateEvaluator;
 use crate::handle::{CoreHandle, EventStream, EventTx, Gate, SendFailure, StopFlag};
 use crate::history::{ChannelInfo, ChartHistory};
@@ -38,12 +44,6 @@ use crate::io_thread::{
 use crate::journal::{self, Journal};
 use crate::link::PortChoice;
 use crate::menu::MenuNode;
-use crate::message::{
-    AxisEdit, BurnSummary, CellEdit, Command, ConnectionSummary, ControllerCommandSummary,
-    DefinitionSummary, DialogSummary, Envelope, Event, Failure, FailureCode, ImportSummary,
-    JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary,
-    SignatureVerdict, TableSummary, WriteSummary,
-};
 use crate::realtime::{FrameNotify, FrameWatch, LatestFrame, RealtimeDecoder, RealtimeFrame};
 use crate::safety::{Safety, clamp_user};
 use crate::snapshot;
@@ -540,7 +540,7 @@ fn run(
             &events,
             Event::Rejected {
                 op: envelope.op,
-                reason: crate::message::RejectReason::ShuttingDown,
+                reason: crate::contract::RejectReason::ShuttingDown,
             },
         );
     }
@@ -671,9 +671,9 @@ fn handle(
         Command::ListPorts => {
             match io_thread::list_ports() {
                 Ok(ports) => {
-                    let summary: Vec<PortSummary> = ports
+                    let summary: Vec<PortView> = ports
                         .into_iter()
-                        .map(|port| PortSummary {
+                        .map(|port| PortView {
                             label: port.label().to_owned(),
                             name: port.name,
                         })
@@ -1106,7 +1106,7 @@ fn handle(
         } => {
             match oxtuner_ini::parse_bytes(&bytes, &settings) {
                 Ok(parsed) => {
-                    let summary = DefinitionSummary::new(label, &parsed);
+                    let summary = DefinitionView::new(label, &parsed);
                     tracing::info!(
                         %op,
                         label = %summary.label,
@@ -1133,7 +1133,7 @@ fn handle(
                     *session = Session::Definition(Box::new(parsed));
                     last_menu.clone_from(&summary.menu);
                     report.loads += 1;
-                    send(events, Event::DefinitionLoaded { op, summary });
+                    send(events, Event::DefinitionLoaded { op, view: summary });
                 }
                 Err(error) => {
                     tracing::warn!(%op, %label, %error, "definition rejected");
@@ -1172,7 +1172,7 @@ fn handle(
                         history,
                         log,
                     );
-                    let summary = ProjectSummary::from_project(&project, latest.get().as_deref());
+                    let summary = ProjectView::from_project(&project, latest.get().as_deref());
                     tracing::info!(
                         %op,
                         root = %summary.root.display(),
@@ -1188,7 +1188,7 @@ fn handle(
                     *session = Session::Project(Box::new(project));
                     last_menu.clone_from(&summary.definition.menu);
                     report.projects_opened += 1;
-                    send(events, Event::ProjectOpened { op, summary });
+                    send(events, Event::ProjectOpened { op, view: summary });
                 }
                 Err(error) => {
                     tracing::warn!(%op, path = %path.display(), %error, "project rejected");
@@ -1222,7 +1222,7 @@ fn handle(
                             events,
                             Event::TuneSaved {
                                 op,
-                                outcome: SaveSummary {
+                                outcome: SaveReport {
                                     path: outcome.path,
                                     cells: outcome.cells,
                                 },
@@ -1275,7 +1275,7 @@ fn handle(
                 return Outcome::Continue;
             };
 
-            match TableSummary::from_project(project, &name) {
+            match TableView::from_project(project, &name) {
                 Ok(table) => {
                     tracing::debug!(
                         %op,
@@ -1360,7 +1360,7 @@ fn handle(
                 }
             }
 
-            match TableSummary::from_project(project, &name) {
+            match TableView::from_project(project, &name) {
                 Ok(table) => {
                     tracing::debug!(
                         %op,
@@ -1403,7 +1403,7 @@ fn handle(
                 return Outcome::Continue;
             };
 
-            let variable = match TableSummary::axis_variable(project, &table, axis) {
+            let variable = match TableView::axis_variable(project, &table, axis) {
                 Ok(variable) => variable,
                 Err(message) => {
                     send(
@@ -1459,7 +1459,7 @@ fn handle(
                 }
             }
 
-            match TableSummary::from_project(project, &table) {
+            match TableView::from_project(project, &table) {
                 Ok(table) => {
                     tracing::debug!(
                         %op,
@@ -1500,7 +1500,7 @@ fn handle(
             };
 
             let frame = latest.get();
-            match DialogSummary::from_project(project, &name, frame.as_deref()) {
+            match DialogView::from_project(project, &name, frame.as_deref()) {
                 Ok(dialog) => {
                     tracing::debug!(
                         %op,
@@ -1581,7 +1581,7 @@ fn handle(
             }
 
             let frame = latest.get();
-            match DialogSummary::from_project(project, &dialog, frame.as_deref()) {
+            match DialogView::from_project(project, &dialog, frame.as_deref()) {
                 Ok(dialog) => {
                     tracing::debug!(
                         %op,
@@ -1875,7 +1875,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "connect to the ECU before sending a controller command",
         );
     };
@@ -1884,7 +1884,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "a write or burn is running; send the command after it finishes",
         );
     }
@@ -1893,7 +1893,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "a page read is running; send the command after it finishes",
         );
     }
@@ -1902,7 +1902,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "a controller command is already running",
         );
     }
@@ -1912,7 +1912,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "open a project before sending a controller command",
         );
     };
@@ -1921,7 +1921,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             &format!("`{name}` is not declared in [ControllerCommands]"),
         );
     };
@@ -1931,7 +1931,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             &format!("`{name}` declares no command string"),
         );
     }
@@ -1947,7 +1947,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             reason.as_str(),
         );
     }
@@ -1988,7 +1988,7 @@ fn run_controller_command(
             events,
             report,
             op,
-            FailureCode::ControllerCommandRefused,
+            FailureCode::ControllerActionRefused,
             "the session closed before the command started",
         );
     };
@@ -2006,7 +2006,7 @@ fn run_controller_command(
             Event::Failed {
                 op,
                 failure: Failure {
-                    code: FailureCode::ControllerCommandRefused,
+                    code: FailureCode::ControllerActionRefused,
                     message: error.to_string(),
                 },
             },
@@ -2527,7 +2527,7 @@ fn revert_tune(
         events,
         Event::TuneReverted {
             op,
-            summary: RevertSummary {
+            report: RevertReport {
                 cells: diff.cells,
                 snapshot: Some(snapshot),
             },
@@ -2592,10 +2592,10 @@ fn revert_target(
     // Echo every face the name has, so an open editor and the unsaved marks
     // both see the baseline again: a dialog carries its constants and the map
     // it embeds, and each is reported separately.
-    if let Ok(table) = TableSummary::from_project(project, name) {
+    if let Ok(table) = TableView::from_project(project, name) {
         send(events, Event::TableEdited { op, table });
     }
-    if let Ok(dialog) = DialogSummary::from_project(project, name, latest.get().as_deref()) {
+    if let Ok(dialog) = DialogView::from_project(project, name, latest.get().as_deref()) {
         send(events, Event::DialogEdited { op, dialog });
     }
     send_status(events, op, project);
@@ -2617,7 +2617,7 @@ fn revert_target(
 ///
 /// A table owns its cells and both axis bins. A dialog owns its constant
 /// variables, plus the table it embeds when it has one. The two lookups are not
-/// alternatives: [`TableSummary::from_project`] resolves a dialog name to the
+/// alternatives: [`TableView::from_project`] resolves a dialog name to the
 /// map inside it, so a dialog that embeds a table matches both and must give up
 /// both sets of variables.
 ///
@@ -2627,11 +2627,11 @@ fn revert_target(
 fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String> {
     let mut variables = Vec::new();
 
-    if let Ok(table) = TableSummary::from_project(project, name) {
+    if let Ok(table) = TableView::from_project(project, name) {
         variables.extend(table_variables(&table));
     }
 
-    if let Ok(dialog) = DialogSummary::from_project(project, name, None) {
+    if let Ok(dialog) = DialogView::from_project(project, name, None) {
         variables.extend(
             dialog
                 .fields
@@ -2642,7 +2642,7 @@ fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String
 
         if let Some(embedded) =
             crate::menu::embedded_target(&dialog.id, project.definition(), &mut HashSet::new())
-            && let Ok(table) = TableSummary::from_project(project, &embedded.id)
+            && let Ok(table) = TableView::from_project(project, &embedded.id)
         {
             variables.extend(table_variables(&table));
         }
@@ -2660,7 +2660,7 @@ fn target_variables(project: &Project, name: &str) -> Result<Vec<String>, String
 }
 
 /// The cell variable and axis bins one table summary reads from.
-fn table_variables(table: &TableSummary) -> Vec<String> {
+fn table_variables(table: &TableView) -> Vec<String> {
     [&table.name, &table.x_axis.name, &table.y_axis.name]
         .into_iter()
         .filter(|variable| !variable.is_empty())
@@ -2784,7 +2784,7 @@ fn import_tune(
         events,
         Event::TuneImported {
             op,
-            summary: ImportSummary {
+            report: ImportReport {
                 path: path.to_owned(),
                 cells,
                 variables,
@@ -2874,7 +2874,7 @@ fn start_log(
                 Event::LogState {
                     op,
                     running: true,
-                    summary: None,
+                    report: None,
                 },
             );
         }
@@ -2934,7 +2934,7 @@ fn stop_log(
                 Event::LogState {
                     op,
                     running: false,
-                    summary: Some(summary),
+                    report: Some(summary),
                 },
             );
         }
@@ -3632,9 +3632,9 @@ impl Live {
     }
 
     /// The summary to show for this session.
-    fn summary(&self, writes_enabled: bool) -> ConnectionSummary {
+    fn summary(&self, writes_enabled: bool) -> ConnectionView {
         let read_only = self.verdict == SignatureVerdict::Mismatch;
-        ConnectionSummary {
+        ConnectionView {
             port: self.link_label.clone(),
             custom: self.custom_link,
             signature: self.signature.clone(),
@@ -4694,7 +4694,7 @@ fn succeed_transaction(
                 events,
                 Event::TuneWritten {
                     op: transaction.op,
-                    summary: WriteSummary {
+                    report: WriteReport {
                         pages: transaction.pages.len(),
                         cells: transaction.cells,
                         variables: transaction.variables,
@@ -4716,7 +4716,7 @@ fn succeed_transaction(
                 events,
                 Event::TuneBurned {
                     op: transaction.op,
-                    summary: BurnSummary {
+                    report: BurnReport {
                         pages: transaction.pages.len(),
                         verified: true,
                         snapshot: transaction.snapshot.clone(),
@@ -5006,7 +5006,7 @@ fn on_reply(
                     events,
                     Event::ConnectionTested {
                         op: pending.op,
-                        summary,
+                        view: summary,
                     },
                 );
                 // A probe is not a session: its port is released at once.
@@ -5023,7 +5023,7 @@ fn on_reply(
                 events,
                 Event::Connected {
                     op: pending.op,
-                    summary,
+                    view: summary,
                 },
             );
             true
@@ -5089,7 +5089,7 @@ fn on_reply(
                         events,
                         Event::PagesRead {
                             op: pending.op,
-                            summary,
+                            report: summary,
                         },
                     );
                 }
@@ -5164,7 +5164,7 @@ fn on_reply(
                     Event::Failed {
                         op: pending.op,
                         failure: Failure {
-                            code: FailureCode::ControllerCommandFailed,
+                            code: FailureCode::ControllerActionFailed,
                             message: "the controller command lost its transaction record"
                                 .to_owned(),
                         },
@@ -5179,7 +5179,7 @@ fn on_reply(
             session.mark_unknown();
             live.polled();
 
-            let summary = ControllerCommandSummary {
+            let summary = ControllerActionReport {
                 dialog: transaction.dialog,
                 command: transaction.name,
                 commands: sent.commands,
@@ -5195,9 +5195,9 @@ fn on_reply(
             );
             send(
                 events,
-                Event::ControllerCommandRan {
+                Event::ControllerActionRan {
                     op: pending.op,
-                    summary,
+                    report: summary,
                 },
             );
             true
@@ -5222,7 +5222,7 @@ fn on_reply(
                 verdict = summary.verdict.as_str(),
                 "ECU reconnected"
             );
-            send(events, Event::Reconnected { summary });
+            send(events, Event::Reconnected { view: summary });
             true
         }
         (PendingKind::Reconnect, IoOutcome::Failed(failure)) => {
@@ -5287,7 +5287,7 @@ fn failure_code(kind: PendingKind) -> FailureCode {
         PendingKind::Realtime => FailureCode::RealtimeRejected,
         PendingKind::Trace => FailureCode::TraceFailed,
         PendingKind::Write => FailureCode::WriteFailed,
-        PendingKind::Command => FailureCode::ControllerCommandFailed,
+        PendingKind::Command => FailureCode::ControllerActionFailed,
         PendingKind::Disconnect | PendingKind::Reconnect => FailureCode::NotConnected,
     }
 }
@@ -5363,8 +5363,8 @@ fn commit_pages(
     session: &mut Session,
     live: &mut Live,
     pages: &[PageRead],
-) -> Result<ReadAllSummary, String> {
-    let mut summary = ReadAllSummary {
+) -> Result<ReadReport, String> {
+    let mut summary = ReadReport {
         pages: 0,
         bytes: 0,
         constants: 0,

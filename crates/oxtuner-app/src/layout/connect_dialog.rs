@@ -28,9 +28,7 @@ use gpui_kit::{
     IntoElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
     div, px,
 };
-use oxtuner_core::{
-    ConnectionSummary, FailureCode, LinkMode, PortChoice, PortSummary, SignatureVerdict,
-};
+use oxtuner_core::{ConnectionView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict};
 
 use crate::core::{self, CoreService, TestResult};
 use crate::i18n::t;
@@ -86,7 +84,7 @@ impl DialogModel {
     }
 
     /// The chosen port, if the current mode has one.
-    fn port_choice(&self, ports: &[PortSummary], baud: u32) -> Option<PortChoice> {
+    fn port_choice(&self, ports: &[PortView], baud: u32) -> Option<PortChoice> {
         match self.mode {
             Mode::Simulator => Some(crate::link::simulator()),
             Mode::Serial => {
@@ -516,7 +514,7 @@ fn section(title: String, body: AnyElement, muted: gpui_kit::Hsla) -> AnyElement
 )]
 fn session_status(
     cx: &App,
-    connection: Option<&ConnectionSummary>,
+    connection: Option<&ConnectionView>,
     link_lost: Option<&str>,
     testing: Option<&str>,
     test: Option<&TestResult>,

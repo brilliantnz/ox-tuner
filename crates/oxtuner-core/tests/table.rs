@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use oxtuner_core::{
     BlockingEventStream, CellEdit, CoreConfig, CoreHandle, CoreThread, DialogFieldKind,
-    DialogFieldTone, DialogPresetAssignment, DialogSummary, DialogWidgetKind, Event, FailureCode,
-    OpId, TableSummary, start,
+    DialogFieldTone, DialogPresetAssignment, DialogView, DialogWidgetKind, Event, FailureCode,
+    OpId, TableView, start,
 };
 use oxtuner_project::TUNE_FILE;
 
@@ -145,7 +145,7 @@ impl Harness {
         op
     }
 
-    fn read(&self, name: &str) -> (OpId, TableSummary) {
+    fn read(&self, name: &str) -> (OpId, TableView) {
         let op = self.handle.read_table(name).expect("the read is queued");
         match self.next() {
             Event::TableRead {
@@ -1144,7 +1144,7 @@ fn a_dialog_carries_options_conditions_help_and_topic_help() {
     );
 }
 
-fn read_pres_dialog(label: &str) -> (TempDir, Harness, DialogSummary) {
+fn read_pres_dialog(label: &str) -> (TempDir, Harness, DialogView) {
     let dir = TempDir::with_definition(label, PRESENTATION_DEFINITION, PRESENTATION_TUNE);
     let core = Harness::start();
     core.open(dir.path());
@@ -1421,7 +1421,7 @@ fn a_dialog_resolves_its_gates_against_the_working_tune() {
     assert!(preset.gates.enabled, "limit = 10 passes `limit > 0`");
 
     let ping = dialog
-        .commands
+        .actions
         .iter()
         .find(|command| command.label == "Ping")
         .expect("the command button is present");
@@ -1590,7 +1590,7 @@ fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
     );
 
     let ping = dialog
-        .commands
+        .actions
         .iter()
         .find(|command| command.label == "Ping")
         .expect("a command button is carried");
@@ -1598,7 +1598,7 @@ fn a_dialog_carries_help_links_presets_commands_widgets_and_embeds() {
     assert!(ping.known);
     assert_eq!(ping.enable_expression.as_deref(), Some("limit > 0"));
     let ghost = dialog
-        .commands
+        .actions
         .iter()
         .find(|command| command.label == "Ghost")
         .expect("an unknown command is carried");
@@ -1662,13 +1662,13 @@ fn a_dialog_carries_widgets_embeds_kinds_and_flags() {
     assert!(hex.hex);
 
     let reboot = dialog
-        .commands
+        .actions
         .iter()
         .find(|command| command.label == "Reboot")
         .expect("a flagged button is carried");
     assert_eq!(reboot.flags, vec!["closeDialogOnClick"]);
     let notify = dialog
-        .commands
+        .actions
         .iter()
         .find(|command| command.label == "Notify")
         .expect("a message button is carried");

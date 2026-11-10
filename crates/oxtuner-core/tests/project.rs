@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oxtuner_core::{
-    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId,
-    ProjectSummary, SaveSummary, start,
+    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId, ProjectView,
+    SaveReport, start,
 };
 use oxtuner_project::TUNE_FILE;
 
@@ -149,9 +149,9 @@ impl Harness {
     }
 }
 
-fn opened(event: &Event) -> &ProjectSummary {
+fn opened(event: &Event) -> &ProjectView {
     match event {
-        Event::ProjectOpened { summary, .. } => summary,
+        Event::ProjectOpened { view: summary, .. } => summary,
         other => panic!("expected a project open, got {other:?}"),
     }
 }
@@ -211,7 +211,7 @@ fn saving_an_unedited_project_writes_nothing_and_keeps_the_file_identical() {
     let Event::TuneSaved { outcome, .. } = &event else {
         panic!("expected a save, got {event:?}");
     };
-    let expected = SaveSummary {
+    let expected = SaveReport {
         path: dir.path().join(TUNE_FILE),
         cells: 0,
     };

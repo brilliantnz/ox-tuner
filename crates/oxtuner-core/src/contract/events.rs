@@ -2,15 +2,15 @@
 
 use std::path::PathBuf;
 
-use oxtuner_datalog::LogSummary;
+use oxtuner_datalog::SessionLogReport;
 use oxtuner_tune::TuneStatus;
 
 use crate::menu::MenuNode;
 
 use super::{
-    BurnSummary, ConnectionSummary, ControllerCommandSummary, DefinitionSummary, DialogSummary,
-    ImportSummary, JournalEntry, OpId, PortSummary, ProjectSummary, ReadAllSummary, RejectReason,
-    RevertSummary, SaveSummary, TableSummary, WriteSummary,
+    BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, ImportReport,
+    JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason, RevertReport, SaveReport,
+    TableView, WriteReport,
 };
 
 /// A reply from the core.
@@ -25,7 +25,7 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// What the definition contains.
-        summary: DefinitionSummary,
+        view: DefinitionView,
     },
     /// A project is open and owned by the core: definition, tune images and the
     /// load gate's findings.
@@ -33,52 +33,52 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// What the project contains.
-        summary: ProjectSummary,
+        view: ProjectView,
     },
     /// The open project's tune file was rewritten.
     TuneSaved {
         /// The command this answers.
         op: OpId,
         /// What the save rewrote.
-        outcome: SaveSummary,
+        outcome: SaveReport,
     },
     /// A table was read from the open project.
     TableRead {
         /// The command this answers.
         op: OpId,
         /// The table as the grid will show it.
-        table: TableSummary,
+        table: TableView,
     },
     /// A table edit was accepted; `table` is the state after it.
     TableEdited {
         /// The command this answers.
         op: OpId,
         /// The table after the edit.
-        table: TableSummary,
+        table: TableView,
     },
     /// A dialog was read from the open project.
     DialogRead {
         /// The command this answers.
         op: OpId,
         /// The dialog as the editor will show it.
-        dialog: DialogSummary,
+        dialog: DialogView,
     },
     /// A scalar edit was accepted; `dialog` is the state after it.
     DialogEdited {
         /// The command this answers.
         op: OpId,
         /// The dialog after the edit.
-        dialog: DialogSummary,
+        dialog: DialogView,
     },
     /// One `[ControllerCommands]` action was sent.
     ///
     /// The ECU side is stale afterwards, because the action bypassed memory
     /// synchronization; a page read restores the derived states.
-    ControllerCommandRan {
+    ControllerActionRan {
         /// The command this answers.
         op: OpId,
         /// What was sent.
-        summary: ControllerCommandSummary,
+        report: ControllerActionReport,
     },
     /// A tune or connection change altered one or more menu gates.
     ///
@@ -93,7 +93,7 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// The available ports.
-        ports: Vec<PortSummary>,
+        ports: Vec<PortView>,
     },
     /// A [`super::Command::TestConnection`] read a signature.
     ///
@@ -103,14 +103,14 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// What the test found.
-        summary: ConnectionSummary,
+        view: ConnectionView,
     },
     /// The ECU answered and the session is up.
     Connected {
         /// The command this answers.
         op: OpId,
         /// The live session.
-        summary: ConnectionSummary,
+        view: ConnectionView,
     },
     /// The connection was closed on request.
     Disconnected {
@@ -122,7 +122,7 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// What the read covered.
-        summary: ReadAllSummary,
+        report: ReadReport,
     },
     /// The ECU image became the working tune, so the editor shows what the
     /// controller holds.
@@ -151,28 +151,28 @@ pub enum Event {
         /// The command this answers.
         op: OpId,
         /// What was written.
-        summary: WriteSummary,
+        report: WriteReport,
     },
     /// RAM was burned to flash and read back.
     TuneBurned {
         /// The command this answers.
         op: OpId,
         /// What was burned.
-        summary: BurnSummary,
+        report: BurnReport,
     },
     /// Local edits were discarded, after a snapshot.
     TuneReverted {
         /// The command this answers.
         op: OpId,
         /// What was reverted.
-        summary: RevertSummary,
+        report: RevertReport,
     },
     /// Another tune was imported into the working image.
     TuneImported {
         /// The command this answers.
         op: OpId,
         /// What was imported.
-        summary: ImportSummary,
+        report: ImportReport,
     },
     /// The project's snapshots, oldest first.
     SnapshotsListed {
@@ -195,7 +195,7 @@ pub enum Event {
         /// Whether writes are now enabled.
         writes_enabled: bool,
         /// The live session's summary after the change, when one is open.
-        connection: Option<ConnectionSummary>,
+        connection: Option<ConnectionView>,
     },
     /// A halted write path was cleared after review.
     WriteFailureAcknowledged {
@@ -218,7 +218,7 @@ pub enum Event {
         /// Whether logging is running.
         running: bool,
         /// What a stopped log wrote.
-        summary: Option<LogSummary>,
+        report: Option<SessionLogReport>,
     },
     /// The link died; the core is either reconnecting or waiting for a command.
     ConnectionLost {
@@ -228,7 +228,7 @@ pub enum Event {
     /// The link came back and the ECU answered again.
     Reconnected {
         /// The live session.
-        summary: ConnectionSummary,
+        view: ConnectionView,
     },
     /// The loaded definition (and tune, if a project was open) was dropped.
     DefinitionUnloaded {
@@ -265,7 +265,7 @@ impl Event {
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }
             | Self::DialogEdited { op, .. }
-            | Self::ControllerCommandRan { op, .. }
+            | Self::ControllerActionRan { op, .. }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
             | Self::Connected { op, .. }
@@ -333,9 +333,9 @@ pub enum FailureCode {
     /// definition does not declare it, the session is not connected, writes are
     /// off, the signature does not match, the path is halted after a failed
     /// verification, or another operation owns the link.
-    ControllerCommandRefused,
+    ControllerActionRefused,
     /// A controller command was sent, but the wire failed before it finished.
-    ControllerCommandFailed,
+    ControllerActionFailed,
     /// The port could not be opened, the definition has no message set, or a
     /// connection is already up.
     ConnectFailed,
@@ -394,8 +394,8 @@ impl FailureCode {
             Self::TableEditRejected => "table-edit-rejected",
             Self::DialogUnavailable => "dialog-unavailable",
             Self::DialogEditRejected => "dialog-edit-rejected",
-            Self::ControllerCommandRefused => "controller-command-refused",
-            Self::ControllerCommandFailed => "controller-command-failed",
+            Self::ControllerActionRefused => "controller-command-refused",
+            Self::ControllerActionFailed => "controller-command-failed",
             Self::ConnectFailed => "connect-failed",
             Self::TestFailed => "test-failed",
             Self::NotConnected => "not-connected",

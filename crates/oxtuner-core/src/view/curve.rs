@@ -1,24 +1,4 @@
-//! The fixed axis frame a curve draws against.
-
-/// The fixed axis frame of a curve, from its definition.
-///
-/// A curve's plot is drawn against these limits rather than against the
-/// values, so a point near the top of the range stays near the top while it
-/// is dragged. The frame is also what tells the UI that a one-row table is a
-/// curve rather than a table with a single row.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CurveAxes {
-    /// Left edge of the X axis.
-    pub x_min: f64,
-    /// Right edge of the X axis.
-    pub x_max: f64,
-    /// Bottom edge of the Y axis.
-    pub y_min: f64,
-    /// Top edge of the Y axis.
-    pub y_max: f64,
-    /// Intervals the Y axis aims for.
-    pub divisions: usize,
-}
+use crate::contract::editor::curve::CurveAxes;
 
 /// Smallest division count the frame draws.
 const MIN_DIVISIONS: f64 = 2.0;
@@ -55,7 +35,7 @@ fn division_count(value: f64) -> usize {
 /// The definition's `xAxis` and `yAxis` are literals in every definition seen
 /// so far. A definition that leaves them out, or writes an expression, still
 /// gets a curve: the frame then hugs the bins and cells themselves.
-pub(super) fn curve_axes(curve: &oxtuner_ini::Curve, x_values: &[f64], cells: &[f64]) -> CurveAxes {
+pub(crate) fn curve_axes(curve: &oxtuner_ini::Curve, x_values: &[f64], cells: &[f64]) -> CurveAxes {
     let (x_min, x_max) = axis_range(&curve.x_axis, x_values);
     let (y_min, y_max) = axis_range(&curve.y_axis, cells);
     let divisions = curve

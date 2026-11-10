@@ -61,7 +61,7 @@ pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) 
 
     send(
         cx,
-        FailureCode::ControllerCommandRefused,
+        FailureCode::ControllerActionRefused,
         "run-controller-command",
         move |handle| handle.run_controller_command(dialog, command),
     )

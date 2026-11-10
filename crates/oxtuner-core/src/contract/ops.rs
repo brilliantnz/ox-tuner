@@ -172,10 +172,10 @@ pub enum Command {
     /// write and marks the ECU side stale after the command succeeds. Only an
     /// explicit click sends it; nothing runs on open, close or edit.
     ///
-    /// The reply is [`super::Event::ControllerCommandRan`] or
+    /// The reply is [`super::Event::ControllerActionRan`] or
     /// [`super::Event::Failed`] with
-    /// [`super::FailureCode::ControllerCommandRefused`] or
-    /// [`super::FailureCode::ControllerCommandFailed`].
+    /// [`super::FailureCode::ControllerActionRefused`] or
+    /// [`super::FailureCode::ControllerActionFailed`].
     RunControllerCommand {
         /// Dialog the button was pressed in, for the echo.
         dialog: String,
@@ -185,7 +185,7 @@ pub enum Command {
     /// Apply user-unit edits to one table's axis bins.
     ///
     /// `table` is the table id (or its 3-D map id, or a curve name — anything
-    /// `TableSummary::from_project` resolves). Every edit is validated before
+    /// `TableView::from_project` resolves). Every edit is validated before
     /// any bin is stored. The reply is [`super::Event::TableEdited`] with the table
     /// after the edit, or [`super::Event::Failed`] with
     /// [`super::FailureCode::TableEditRejected`].
@@ -216,7 +216,7 @@ pub enum Command {
     ///
     /// Only the definition's `queryCommand` is sent — no page read, no write.
     /// The reply is [`super::Event::ConnectionTested`] with the same
-    /// [`super::ConnectionSummary`] a real connection would report, or a failure with
+    /// [`super::ConnectionView`] a real connection would report, or a failure with
     /// [`super::FailureCode::TestFailed`]. A live connection must be closed first.
     TestConnection {
         /// Where the bytes go.

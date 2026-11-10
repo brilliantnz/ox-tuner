@@ -5,8 +5,6 @@
 //! `editor/*`. A gauge template reference inside a dialog stays a
 //! [`DialogWidget`]; the template it names lives here.
 
-use oxtuner_ini::Gauge;
-
 /// The load result, shaped for the UI rather than for the parser.
 ///
 /// One `[FrontPage]` indicator as the interface sees it.
@@ -14,7 +12,7 @@ use oxtuner_ini::Gauge;
 /// The labels are definition text and stay untranslated. The expression is the
 /// source the core evaluates, kept for a future tooltip and for support.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndicatorSummary {
+pub struct IndicatorSpec {
     /// The expression source, as the definition wrote it.
     pub expression: String,
     /// The label while the expression is zero.
@@ -50,7 +48,7 @@ pub struct FrontPageGauge {
 /// states a literal; expressions and `auto` yield `None` and the app falls
 /// back to witnessed data.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GaugeSummary {
+pub struct GaugeTemplate {
     /// Template name.
     pub name: String,
     /// Category the template belongs to, when the file groups them.
@@ -84,27 +82,4 @@ pub struct GaugeSummary {
     pub active: Option<String>,
     /// Source line, for a diagnostic or a tooltip.
     pub line: u32,
-}
-
-impl GaugeSummary {
-    /// Shapes one parsed template for the UI.
-    pub(crate) fn of(template: &Gauge) -> Self {
-        Self {
-            name: template.name.clone(),
-            category: template.category.clone(),
-            channel: template.channel.clone(),
-            title: template.title.to_string(),
-            units: template.units.to_string(),
-            low: template.low.literal(),
-            high: template.high.literal(),
-            low_danger: template.low_danger.literal(),
-            low_warning: template.low_warning.literal(),
-            high_warning: template.high_warning.literal(),
-            high_danger: template.high_danger.literal(),
-            value_digits: template.value_digits.literal(),
-            label_digits: template.label_digits.literal(),
-            active: template.active_source.clone(),
-            line: template.line,
-        }
-    }
 }

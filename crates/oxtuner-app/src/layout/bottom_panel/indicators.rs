@@ -10,7 +10,7 @@ use gpui_kit::{
     AnyElement, App, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
     Window, div,
 };
-use oxtuner_core::{IndicatorReading, IndicatorSummary};
+use oxtuner_core::{IndicatorReading, IndicatorSpec};
 use oxtuner_ui::indicator::{IndicatorState, IndicatorStrip, IndicatorView};
 
 use crate::core::CoreService;
@@ -58,7 +58,7 @@ impl RenderOnce for Indicators {
 /// becomes unavailable. The shortest list wins, so a mismatch never shows a
 /// stale label as a current state.
 fn indicator_views(
-    indicators: &[IndicatorSummary],
+    indicators: &[IndicatorSpec],
     readings: &[IndicatorReading],
 ) -> Vec<IndicatorView> {
     indicators
@@ -87,7 +87,7 @@ fn indicator_views(
 /// The definition already declares the indicators, so there is something
 /// useful to show while the link is idle. The cards make no live claim; the
 /// first frame replaces them with the evaluated state.
-fn idle_views(indicators: &[IndicatorSummary]) -> Vec<IndicatorView> {
+fn idle_views(indicators: &[IndicatorSpec]) -> Vec<IndicatorView> {
     indicators
         .iter()
         .map(|indicator| {
@@ -113,8 +113,8 @@ mod tests {
     use super::*;
     use oxtuner_ui::indicator::IndicatorTone;
 
-    fn indicator(off_label: &str, on_label: &str) -> IndicatorSummary {
-        IndicatorSummary {
+    fn indicator(off_label: &str, on_label: &str) -> IndicatorSpec {
+        IndicatorSpec {
             expression: String::new(),
             off_label: off_label.to_owned(),
             on_label: on_label.to_owned(),

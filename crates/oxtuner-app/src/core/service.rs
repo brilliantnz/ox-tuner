@@ -14,7 +14,7 @@ use super::event;
 use super::status::CoreStatus;
 
 #[cfg(test)]
-use oxtuner_core::{DialogSummary, Failure, FailureCode, SaveSummary, TableSummary};
+use oxtuner_core::{DialogView, Failure, FailureCode, SaveReport, TableView};
 
 /// The core handle, its thread, and the last status.
 ///
@@ -97,12 +97,12 @@ impl CoreService {
     }
 
     /// Installs a table snapshot, for editor tests.
-    pub(crate) fn show_table(cx: &mut App, table: TableSummary) {
+    pub(crate) fn show_table(cx: &mut App, table: TableView) {
         cx.global_mut::<Self>().status.table = Some(table);
     }
 
     /// Installs a dialog snapshot, for editor tests.
-    pub(crate) fn show_dialog(cx: &mut App, dialog: DialogSummary) {
+    pub(crate) fn show_dialog(cx: &mut App, dialog: DialogView) {
         cx.global_mut::<Self>().status.dialog = Some(dialog);
     }
 
@@ -118,7 +118,7 @@ impl CoreService {
     /// Records a landed save, for view tests.
     pub(crate) fn save_for_test(cx: &mut App) {
         let status = &mut cx.global_mut::<Self>().status;
-        status.last_save = Some(SaveSummary {
+        status.last_save = Some(SaveReport {
             path: "/projects/test/CurrentTune.msq".into(),
             cells: 1,
         });

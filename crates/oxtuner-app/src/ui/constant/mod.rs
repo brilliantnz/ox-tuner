@@ -32,7 +32,7 @@ use gpui_kit::{
     AnyElement, App, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, div, px,
 };
-use oxtuner_core::{DialogFieldKind, DialogFieldSummary, DialogFieldTone};
+use oxtuner_core::{DialogField, DialogFieldKind, DialogFieldTone};
 
 use crate::i18n::t;
 
@@ -85,7 +85,7 @@ pub(crate) fn card(
 
 /// One field's label column: label, context help, power-cycle mark, metadata.
 pub(crate) fn field_label(
-    field: &DialogFieldSummary,
+    field: &DialogField,
     index: usize,
     available: bool,
     cx: &App,
@@ -138,7 +138,7 @@ pub(crate) fn field_label(
 }
 
 /// A note as a banner, at the row the definition put it.
-pub(crate) fn note(index: usize, field: &DialogFieldSummary, cx: &App) -> AnyElement {
+pub(crate) fn note(index: usize, field: &DialogField, cx: &App) -> AnyElement {
     let text = field.text.clone().unwrap_or_else(|| field.label.clone());
     let alert = match field.tone {
         DialogFieldTone::Danger => Alert::error(("constant-note", index), text),
@@ -159,7 +159,7 @@ pub(crate) fn note(index: usize, field: &DialogFieldSummary, cx: &App) -> AnyEle
 }
 
 /// The value a numeric input shows, formatted to the definition's digits.
-pub(crate) fn value_text(field: &DialogFieldSummary, value: Option<f64>) -> SharedString {
+pub(crate) fn value_text(field: &DialogField, value: Option<f64>) -> SharedString {
     value.map_or_else(
         || {
             field
@@ -200,7 +200,7 @@ pub(crate) fn option_value(value: Option<f64>) -> Option<u32> {
 }
 
 /// The row's accepted display range, when the definition gives one.
-fn meta(field: &DialogFieldSummary) -> Option<SharedString> {
+fn meta(field: &DialogField) -> Option<SharedString> {
     if field.kind == DialogFieldKind::Note {
         return None;
     }
@@ -221,7 +221,7 @@ fn meta(field: &DialogFieldSummary) -> Option<SharedString> {
 
 /// `10–18 AFR`, `≤ 250 kPa`, or just the units when the definition gives no
 /// bounds.
-fn range_hint(field: &DialogFieldSummary) -> Option<String> {
+fn range_hint(field: &DialogField) -> Option<String> {
     let units = field.units.trim();
 
     match (field.minimum, field.maximum) {
@@ -359,8 +359,8 @@ mod tests {
     use oxtuner_core::GateState;
     use std::sync::Arc;
 
-    fn field(kind: DialogFieldKind, value: Option<f64>) -> DialogFieldSummary {
-        DialogFieldSummary {
+    fn field(kind: DialogFieldKind, value: Option<f64>) -> DialogField {
+        DialogField {
             label: String::new(),
             variable: "reqFuel".to_owned(),
             value,
