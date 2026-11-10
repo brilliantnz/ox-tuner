@@ -567,10 +567,17 @@ fn load_entry(
             }
 
             if let Some((found, low, high)) = clamped {
+                let range = match (low.is_finite(), high.is_finite()) {
+                    (true, true) => format!("{low}..{high}"),
+                    (true, false) => format!("the declared minimum {low}"),
+                    (false, true) => format!("the declared maximum {high}"),
+                    (false, false) => "its declared range".to_owned(),
+                };
+
                 report.warn(
                     IssueKind::ValueClamped,
                     format!(
-                        "`{}` = {found} is outside the declared range {low}..{high}; it was clamped",
+                        "`{}` = {found} is outside {range}; it was clamped",
                         spec.name
                     ),
                 );
