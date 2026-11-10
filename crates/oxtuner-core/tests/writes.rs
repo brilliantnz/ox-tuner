@@ -290,6 +290,13 @@ fn failure(event: &Event) -> (FailureCode, String) {
     }
 }
 
+#[path = "writes/burn.rs"]
+mod burn;
+#[path = "writes/conflict.rs"]
+mod conflict;
+#[path = "writes/controller_action.rs"]
+mod controller_action;
+
 #[test]
 fn a_write_round_trips_and_reads_back_verified() {
     let dir = TempDir::new("verified");
@@ -511,56 +518,6 @@ fn a_write_is_clamped_to_the_definition_range() {
 }
 
 #[test]
-fn a_burn_follows_a_verified_write_and_is_journaled() {
-    let dir = TempDir::new("burn");
-    // The virtual board keeps reporting a queued EEPROM write for two reads,
-    // the way a real one answers a burn before it touches flash. The burn may
-    // only be reported verified once that bit clears.
-    let config = SimConfig {
-        burn_pending_samples: 2,
-        ..SimConfig::default()
-    };
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(config);
-    core.read_all();
-    core.edit_cell(66.0);
-
-    let event = core.write();
-    assert!(matches!(event, Event::TuneWritten { .. }), "{event:?}");
-
-    let started = Instant::now();
-    let event = core.burn();
-    let Event::TuneBurned {
-        report: summary, ..
-    } = event
-    else {
-        panic!("expected a verified burn, got {event:?}");
-    };
-    assert!(
-        started.elapsed() >= Duration::from_millis(500),
-        "the burn waited for the queued EEPROM write, not just for the reply"
-    );
-    assert!(summary.verified);
-    assert!(summary.snapshot.as_ref().is_some_and(|path| path.exists()));
-
-    let (_, entries) = core.journal();
-    let burns: Vec<&JournalEntry> = entries
-        .iter()
-        .filter(|entry| entry.operation == "burn")
-        .collect();
-    assert_eq!(burns.len(), 2, "burn begin and result");
-    assert_eq!(burns[1].result, "ok");
-
-    assert!(
-        fs::read_dir(dir.snapshots()).expect("snapshots").count() >= 2,
-        "the write and the burn each snapshot first"
-    );
-
-    core.close();
-}
-
-#[test]
 fn writes_are_off_by_default_and_the_switch_gates_them() {
     let dir = TempDir::new("off");
     let core = Harness::start(false);
@@ -655,26 +612,6 @@ fn a_partial_write_fails_verification_and_halts_the_path() {
 }
 
 #[test]
-fn burning_before_writing_the_edit_is_refused() {
-    let dir = TempDir::new("burn-order");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-    core.edit_cell(55.0);
-
-    let (kind, message) = failure(&core.burn());
-    assert_eq!(kind, FailureCode::BurnRefused);
-    assert!(message.contains("not in ECU RAM"), "{message}");
-
-    // No burn reached the wire, so the journal has no burn entry.
-    let (_, entries) = core.journal();
-    assert!(entries.iter().all(|entry| entry.operation != "burn"));
-
-    core.close();
-}
-
-#[test]
 fn revert_snapshots_first_and_restores_the_baseline() {
     let dir = TempDir::new("revert");
     let core = Harness::start(true);
@@ -759,27 +696,6 @@ fn a_bad_import_is_reported_and_leaves_the_tune_alone() {
 
     let table = core.table();
     assert_eq!(table.cells[0], 10.0);
-
-    core.close();
-}
-
-#[test]
-fn no_edit_or_read_ever_burns() {
-    let dir = TempDir::new("no-auto-burn");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-    core.edit_cell(22.0);
-    let _ = core.write();
-    let _ = core.table();
-
-    let (_, entries) = core.journal();
-    assert!(entries.iter().all(|entry| entry.operation == "write"));
-    assert!(
-        entries.iter().all(|entry| entry.operation != "burn"),
-        "nothing but an explicit burn command may burn (S5)"
-    );
 
     core.close();
 }
@@ -896,212 +812,11 @@ fn snapshots_are_listed_through_the_core() {
 }
 
 #[test]
-fn burn_without_a_connection_is_refused() {
-    let dir = TempDir::new("not-connected");
-    let core = Harness::start(true);
-    core.open(dir.path());
-
-    let (kind, _) = failure(&core.burn());
-    assert_eq!(kind, FailureCode::BurnRefused);
-
-    core.close();
-}
-
-#[test]
 fn a_write_without_a_project_is_refused() {
     let core = Harness::start(true);
     let op: OpId = core.handle.write_to_ram(Vec::new()).expect("queued");
     let (kind, _) = failure(&core.wait(|event| event.op() == Some(op)));
     assert_eq!(kind, FailureCode::WriteRefused);
-
-    core.close();
-}
-
-#[test]
-fn a_controller_command_is_refused_while_writes_are_off() {
-    let dir = TempDir::new("command-writes-off");
-    let core = Harness::start(false);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-
-    let (kind, message) = failure(&core.run_command("cmdPing"));
-
-    assert_eq!(kind, FailureCode::ControllerActionRefused);
-    assert!(message.contains("writes are disabled"), "{message}");
-    assert!(
-        core.journal().1.is_empty(),
-        "a refused command must not reach the journal"
-    );
-
-    core.close();
-}
-
-#[test]
-fn a_controller_command_marks_the_ecu_image_stale() {
-    let dir = TempDir::new("command-stale");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-    assert_ne!(core.table().states[0], oxtuner_core::CellState::Unknown);
-
-    let event = core.run_command("cmdPing");
-
-    let Event::ControllerActionRan {
-        report: summary, ..
-    } = event
-    else {
-        panic!("expected a controller command, got {event:?}");
-    };
-    assert_eq!(summary.command, "cmdPing");
-    assert_eq!(summary.dialog, "engineDialog");
-    assert_eq!(summary.commands, 1);
-    assert_eq!(summary.bytes, 1);
-
-    assert_eq!(
-        core.table().states[0],
-        oxtuner_core::CellState::Unknown,
-        "a raw controller action bypasses memory synchronization"
-    );
-
-    let (_, entries) = core.journal();
-    assert_eq!(entries.len(), 2, "begin and result");
-    assert_eq!(entries[0].operation, "controller-command");
-    assert_eq!(entries[0].phase, "begin");
-    assert_eq!(entries[1].phase, "result");
-    assert_eq!(entries[1].result, "ok");
-
-    // A fresh read makes the ECU image authoritative again.
-    core.read_all();
-    assert_ne!(core.table().states[0], oxtuner_core::CellState::Unknown);
-
-    core.close();
-}
-
-#[test]
-fn a_controller_command_sends_every_string_in_order() {
-    let dir = TempDir::new("command-chain");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-
-    let event = core.run_command("cmdChain");
-
-    let Event::ControllerActionRan {
-        report: summary, ..
-    } = event
-    else {
-        panic!("expected a controller command, got {event:?}");
-    };
-    assert_eq!(summary.commands, 2);
-    assert_eq!(summary.bytes, 2, "each string is one byte on a legacy link");
-
-    core.close();
-}
-
-#[test]
-fn a_controller_command_runs_on_the_envelope_link() {
-    let dir = TempDir::new("command-envelope");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect_with(SimConfig::default(), Some(oxtuner_core::LinkMode::Envelope));
-    core.read_all();
-
-    let event = core.run_command("cmdPing");
-
-    let Event::ControllerActionRan {
-        report: summary, ..
-    } = event
-    else {
-        panic!("expected a controller command, got {event:?}");
-    };
-    assert_eq!(summary.command, "cmdPing");
-    assert!(
-        summary.bytes > 1,
-        "an envelope command carries its frame on the wire"
-    );
-
-    core.close();
-}
-
-#[test]
-fn an_unknown_controller_command_is_refused() {
-    let dir = TempDir::new("command-unknown");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-
-    let (kind, message) = failure(&core.run_command("cmdMissing"));
-
-    assert_eq!(kind, FailureCode::ControllerActionRefused);
-    assert!(message.contains("not declared"), "{message}");
-
-    core.close();
-}
-
-#[test]
-fn a_controller_command_is_refused_on_a_signature_mismatch() {
-    let dir = TempDir::new("command-read-only");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig {
-        signature: Some("another firmware".to_owned()),
-        ..SimConfig::default()
-    });
-    core.read_all();
-
-    let (kind, message) = failure(&core.run_command("cmdPing"));
-
-    assert_eq!(kind, FailureCode::ControllerActionRefused);
-    assert!(message.contains("read-only"), "{message}");
-
-    core.close();
-}
-
-#[test]
-fn a_re_read_after_a_local_edit_reports_a_conflict() {
-    let dir = TempDir::new("conflict");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-    core.adopt();
-    core.edit_cell(77.0);
-
-    let report = core.read_all();
-    assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
-    assert_eq!(report.conflicts[0].name, "veTable");
-
-    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::KeepWorking);
-    assert!(
-        matches!(event, Event::ConflictsResolved { .. }),
-        "{event:?}"
-    );
-    assert_eq!(core.table().cells[0], 77.0);
-
-    core.close();
-}
-
-#[test]
-fn resolving_with_the_ecu_values_restores_the_read_back() {
-    let dir = TempDir::new("conflict-use-ecu");
-    let core = Harness::start(true);
-    core.open(dir.path());
-    core.connect(SimConfig::default());
-    core.read_all();
-    core.adopt();
-    core.edit_cell(77.0);
-    core.read_all();
-
-    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::UseEcu);
-    assert!(
-        matches!(event, Event::ConflictsResolved { .. }),
-        "{event:?}"
-    );
-    assert_ne!(core.table().cells[0], 77.0);
 
     core.close();
 }
