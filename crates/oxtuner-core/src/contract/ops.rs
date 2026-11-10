@@ -81,12 +81,8 @@ pub struct AxisEdit {
 }
 
 /// A request from the UI.
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "the UI and the core compile together, so the command set is closed"
-)]
 #[derive(Debug)]
-pub enum Command {
+pub(crate) enum CommandRequest {
     /// Parse `bytes` and take ownership of the resulting definition.
     ///
     /// `settings` is the project's settings snapshot (`<settings>` in the
@@ -343,53 +339,382 @@ pub enum Command {
     Shutdown,
 }
 
-impl Command {
+impl CommandRequest {
     /// A definition load against the default settings context.
-    pub fn load_definition(label: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn load_definition(label: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
         Self::LoadDefinition {
             label: label.into(),
             bytes: bytes.into(),
             settings: SettingsContext::new(),
         }
     }
+}
+
+/// A request from the UI, grouped by the resource it acts on.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum CoreCommand {
+    /// Start or stop the core itself.
+    Lifecycle(LifecycleCommand),
+    /// Load or drop a definition.
+    Definition(DefinitionCommand),
+    /// Open or save a project.
+    Project(ProjectCommand),
+    /// Read or edit tune values.
+    Tune(TuneCommand),
+    /// Talk to the ECU or act on the live link.
+    Ecu(EcuCommand),
+    /// Change the write safety policy.
+    Safety(SafetyCommand),
+    /// Read the write journal.
+    Journal(JournalCommand),
+    /// Start or stop the session log.
+    Log(LogCommand),
+}
+
+/// Lifecycle requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum LifecycleCommand {
+    /// Stop the core. No command is accepted after this one is read.
+    Shutdown,
+}
+
+/// Definition requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum DefinitionCommand {
+    /// Parse bytes and take ownership of the definition.
+    Load {
+        /// What to call the source in logs and the UI.
+        label: String,
+        /// The definition file bytes.
+        bytes: Vec<u8>,
+        /// Settings the `#if` branches resolve against.
+        settings: SettingsContext,
+    },
+    /// Drop the loaded definition and tune.
+    Unload,
+}
+
+/// Project requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum ProjectCommand {
+    /// Open a project folder.
+    Open {
+        /// The project folder.
+        path: PathBuf,
+    },
+    /// Write changed values back to the tune file.
+    Save,
+    /// List the project snapshots, oldest first.
+    ListSnapshots,
+}
+
+/// Tune requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum TuneCommand {
+    /// Read one table.
+    ReadTable {
+        /// Table id, map id, curve name or cell variable.
+        name: String,
+    },
+    /// Read one dialog.
+    ReadDialog {
+        /// Dialog name.
+        name: String,
+    },
+    /// Apply one scalar edit.
+    EditScalar {
+        /// Dialog the edit came from.
+        dialog: String,
+        /// Variable to write.
+        name: String,
+        /// New value in user units.
+        value: f64,
+    },
+    /// Apply cell edits to one table.
+    EditTable {
+        /// The cell variable.
+        name: String,
+        /// Cells to write.
+        edits: Vec<CellEdit>,
+    },
+    /// Apply bin edits to one table axis.
+    EditAxis {
+        /// Table id, map id or curve name.
+        table: String,
+        /// Which axis.
+        axis: AxisKind,
+        /// Bins to write.
+        edits: Vec<AxisEdit>,
+    },
+    /// Discard local edits and return to the file baseline.
+    RevertTune,
+    /// Discard the edits one target owns.
+    RevertTarget {
+        /// Table id, curve name or dialog name.
+        name: String,
+    },
+    /// Import another `.msq`.
+    ImportTune {
+        /// The file to import.
+        path: PathBuf,
+        /// Whether the user approved a different-signature import.
+        consented: bool,
+    },
+    /// Restore one of the project snapshots.
+    RestoreSnapshot {
+        /// The snapshot file.
+        path: PathBuf,
+    },
+    /// Take the confirmed ECU image as the working tune.
+    AdoptEcuImage,
+    /// Refresh the derived tune status.
+    RefreshStatus,
+}
+
+/// ECU and link requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum EcuCommand {
+    /// Connect using the loaded definition.
+    Connect {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing override.
+        framing: Option<LinkMode>,
+    },
+    /// Read a signature without opening a session.
+    TestConnection {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing override.
+        framing: Option<LinkMode>,
+    },
+    /// Close the connection.
+    Disconnect,
+    /// Read every declared page.
+    ReadAll,
+    /// Start periodic realtime polling.
+    StartRealtime {
+        /// Milliseconds between blocks.
+        interval_ms: u32,
+    },
+    /// Stop periodic realtime polling.
+    StopRealtime,
+    /// Save the session trace.
+    SaveTrace {
+        /// Where to write the trace.
+        path: PathBuf,
+    },
+    /// Send changed working values to ECU RAM.
+    WriteRam {
+        /// Page numbers, or empty for every changed page.
+        pages: Vec<u8>,
+    },
+    /// Burn RAM content to flash.
+    BurnFlash {
+        /// Page numbers, or empty for every burnable page.
+        pages: Vec<u8>,
+    },
+    /// Run one `[ControllerCommands]` action.
+    RunController {
+        /// Dialog the button came from.
+        dialog: String,
+        /// Action name.
+        command: String,
+    },
+    /// List the serial ports.
+    ListPorts,
+}
+
+/// Safety policy requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum SafetyCommand {
+    /// Turn the global write path on or off.
+    SetWritesEnabled {
+        /// Whether writes may run.
+        enabled: bool,
+    },
+    /// Clear a halted write path after review.
+    AcknowledgeWriteFailure,
+}
+
+/// Journal requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum JournalCommand {
+    /// Read the write journal.
+    Read,
+}
+
+/// Session log requests.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the UI and the core compile together, so the command set is closed"
+)]
+#[derive(Debug, Clone)]
+pub enum LogCommand {
+    /// Start a CSV session log.
+    Start {
+        /// Where the session file is created.
+        directory: PathBuf,
+    },
+    /// Stop the session log.
+    Stop,
+}
+
+impl CoreCommand {
+    /// A definition load against the default settings context.
+    pub fn load_definition(label: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Definition(DefinitionCommand::Load {
+            label: label.into(),
+            bytes: bytes.into(),
+            settings: SettingsContext::new(),
+        })
+    }
 
     /// A stable name for logs. Never contains user data.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::LoadDefinition { .. } => "load-definition",
-            Self::OpenProject { .. } => "open-project",
-            Self::SaveTune => "save-tune",
-            Self::ReadTable { .. } => "read-table",
-            Self::ReadDialog { .. } => "read-dialog",
-            Self::EditScalar { .. } => "edit-scalar",
-            Self::EditTable { .. } => "edit-table",
-            Self::EditAxis { .. } => "edit-axis",
-            Self::RunControllerCommand { .. } => "run-controller-command",
-            Self::Connect { .. } => "connect",
-            Self::TestConnection { .. } => "test-connection",
-            Self::Disconnect => "disconnect",
-            Self::ReadAll => "read-all",
-            Self::AdoptEcuImage => "adopt-ecu-image",
-            Self::StartRealtime { .. } => "start-realtime",
-            Self::StopRealtime => "stop-realtime",
-            Self::SaveTrace { .. } => "save-trace",
-            Self::WriteToRam { .. } => "write-to-ram",
-            Self::BurnToFlash { .. } => "burn-to-flash",
-            Self::RevertTune => "revert-tune",
-            Self::RevertTarget { .. } => "revert-target",
-            Self::ImportTune { .. } => "import-tune",
-            Self::RestoreSnapshot { .. } => "restore-snapshot",
-            Self::ListSnapshots => "list-snapshots",
-            Self::SetWritesEnabled { .. } => "set-writes-enabled",
-            Self::AcknowledgeWriteFailure => "acknowledge-write-failure",
-            Self::ReadJournal => "read-journal",
-            Self::RefreshTuneStatus => "refresh-tune-status",
-            Self::StartLog { .. } => "start-log",
-            Self::StopLog => "stop-log",
-            Self::ListPorts => "list-ports",
-            Self::UnloadDefinition => "unload-definition",
-            Self::Shutdown => "shutdown",
+            Self::Lifecycle(LifecycleCommand::Shutdown) => "shutdown",
+            Self::Definition(DefinitionCommand::Load { .. }) => "load-definition",
+            Self::Definition(DefinitionCommand::Unload) => "unload-definition",
+            Self::Project(ProjectCommand::Open { .. }) => "open-project",
+            Self::Project(ProjectCommand::Save) => "save-tune",
+            Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
+            Self::Tune(TuneCommand::ReadTable { .. }) => "read-table",
+            Self::Tune(TuneCommand::ReadDialog { .. }) => "read-dialog",
+            Self::Tune(TuneCommand::EditScalar { .. }) => "edit-scalar",
+            Self::Tune(TuneCommand::EditTable { .. }) => "edit-table",
+            Self::Tune(TuneCommand::EditAxis { .. }) => "edit-axis",
+            Self::Tune(TuneCommand::RevertTune) => "revert-tune",
+            Self::Tune(TuneCommand::RevertTarget { .. }) => "revert-target",
+            Self::Tune(TuneCommand::ImportTune { .. }) => "import-tune",
+            Self::Tune(TuneCommand::RestoreSnapshot { .. }) => "restore-snapshot",
+            Self::Tune(TuneCommand::AdoptEcuImage) => "adopt-ecu-image",
+            Self::Tune(TuneCommand::RefreshStatus) => "refresh-tune-status",
+            Self::Ecu(EcuCommand::Connect { .. }) => "connect",
+            Self::Ecu(EcuCommand::TestConnection { .. }) => "test-connection",
+            Self::Ecu(EcuCommand::Disconnect) => "disconnect",
+            Self::Ecu(EcuCommand::ReadAll) => "read-all",
+            Self::Ecu(EcuCommand::StartRealtime { .. }) => "start-realtime",
+            Self::Ecu(EcuCommand::StopRealtime) => "stop-realtime",
+            Self::Ecu(EcuCommand::SaveTrace { .. }) => "save-trace",
+            Self::Ecu(EcuCommand::WriteRam { .. }) => "write-to-ram",
+            Self::Ecu(EcuCommand::BurnFlash { .. }) => "burn-to-flash",
+            Self::Ecu(EcuCommand::RunController { .. }) => "run-controller-command",
+            Self::Ecu(EcuCommand::ListPorts) => "list-ports",
+            Self::Safety(SafetyCommand::SetWritesEnabled { .. }) => "set-writes-enabled",
+            Self::Safety(SafetyCommand::AcknowledgeWriteFailure) => "acknowledge-write-failure",
+            Self::Journal(JournalCommand::Read) => "read-journal",
+            Self::Log(LogCommand::Start { .. }) => "start-log",
+            Self::Log(LogCommand::Stop) => "stop-log",
+        }
+    }
+}
+
+impl From<CoreCommand> for CommandRequest {
+    fn from(command: CoreCommand) -> Self {
+        match command {
+            CoreCommand::Lifecycle(LifecycleCommand::Shutdown) => Self::Shutdown,
+            CoreCommand::Definition(DefinitionCommand::Load {
+                label,
+                bytes,
+                settings,
+            }) => Self::LoadDefinition {
+                label,
+                bytes,
+                settings,
+            },
+            CoreCommand::Definition(DefinitionCommand::Unload) => Self::UnloadDefinition,
+            CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
+            CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
+            CoreCommand::Project(ProjectCommand::ListSnapshots) => Self::ListSnapshots,
+            CoreCommand::Tune(TuneCommand::ReadTable { name }) => Self::ReadTable { name },
+            CoreCommand::Tune(TuneCommand::ReadDialog { name }) => Self::ReadDialog { name },
+            CoreCommand::Tune(TuneCommand::EditScalar {
+                dialog,
+                name,
+                value,
+            }) => Self::EditScalar {
+                dialog,
+                name,
+                value,
+            },
+            CoreCommand::Tune(TuneCommand::EditTable { name, edits }) => {
+                Self::EditTable { name, edits }
+            }
+            CoreCommand::Tune(TuneCommand::EditAxis { table, axis, edits }) => {
+                Self::EditAxis { table, axis, edits }
+            }
+            CoreCommand::Tune(TuneCommand::RevertTune) => Self::RevertTune,
+            CoreCommand::Tune(TuneCommand::RevertTarget { name }) => Self::RevertTarget { name },
+            CoreCommand::Tune(TuneCommand::ImportTune { path, consented }) => {
+                Self::ImportTune { path, consented }
+            }
+            CoreCommand::Tune(TuneCommand::RestoreSnapshot { path }) => {
+                Self::RestoreSnapshot { path }
+            }
+            CoreCommand::Tune(TuneCommand::AdoptEcuImage) => Self::AdoptEcuImage,
+            CoreCommand::Tune(TuneCommand::RefreshStatus) => Self::RefreshTuneStatus,
+            CoreCommand::Ecu(EcuCommand::Connect { port, framing }) => {
+                Self::Connect { port, framing }
+            }
+            CoreCommand::Ecu(EcuCommand::TestConnection { port, framing }) => {
+                Self::TestConnection { port, framing }
+            }
+            CoreCommand::Ecu(EcuCommand::Disconnect) => Self::Disconnect,
+            CoreCommand::Ecu(EcuCommand::ReadAll) => Self::ReadAll,
+            CoreCommand::Ecu(EcuCommand::StartRealtime { interval_ms }) => {
+                Self::StartRealtime { interval_ms }
+            }
+            CoreCommand::Ecu(EcuCommand::StopRealtime) => Self::StopRealtime,
+            CoreCommand::Ecu(EcuCommand::SaveTrace { path }) => Self::SaveTrace { path },
+            CoreCommand::Ecu(EcuCommand::WriteRam { pages }) => Self::WriteToRam { pages },
+            CoreCommand::Ecu(EcuCommand::BurnFlash { pages }) => Self::BurnToFlash { pages },
+            CoreCommand::Ecu(EcuCommand::RunController { dialog, command }) => {
+                Self::RunControllerCommand { dialog, command }
+            }
+            CoreCommand::Ecu(EcuCommand::ListPorts) => Self::ListPorts,
+            CoreCommand::Safety(SafetyCommand::SetWritesEnabled { enabled }) => {
+                Self::SetWritesEnabled { enabled }
+            }
+            CoreCommand::Safety(SafetyCommand::AcknowledgeWriteFailure) => {
+                Self::AcknowledgeWriteFailure
+            }
+            CoreCommand::Journal(JournalCommand::Read) => Self::ReadJournal,
+            CoreCommand::Log(LogCommand::Start { directory }) => Self::StartLog { directory },
+            CoreCommand::Log(LogCommand::Stop) => Self::StopLog,
         }
     }
 }
@@ -414,12 +739,12 @@ impl RejectReason {
 
 /// One command plus the id it will be answered under.
 ///
-/// Internal to the crate: senders wrap a [`Command`], receivers unwrap it. A
+/// Internal to the crate: senders wrap a [`CommandRequest`], receivers unwrap it. A
 /// command never reaches the core without an id, so "answered exactly once
 /// while reading" is a property of the type rather than a convention; after
 /// shutdown starts a missing answer is counted as dropped.
 #[derive(Debug)]
 pub(crate) struct Envelope {
     pub(crate) op: OpId,
-    pub(crate) command: Command,
+    pub(crate) command: CommandRequest,
 }

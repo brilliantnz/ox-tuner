@@ -220,7 +220,8 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::{Command, Event, OpId, SaveReport};
+    use crate::contract::CommandRequest;
+    use crate::{Event, OpId, SaveReport};
 
     fn summary() -> DefinitionView {
         DefinitionView {
@@ -389,9 +390,9 @@ indicatorTemplate = { running }, \"Off\", \"On\", white, black, green, black
 
     #[test]
     fn a_command_constructed_from_bytes_uses_the_default_settings() {
-        let Command::LoadDefinition {
+        let CommandRequest::LoadDefinition {
             label, settings, ..
-        } = Command::load_definition("test.ini", vec![0x5B])
+        } = CommandRequest::load_definition("test.ini", vec![0x5B])
         else {
             panic!("wrong variant");
         };

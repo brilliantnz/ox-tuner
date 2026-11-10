@@ -34,8 +34,11 @@ pub use edits::{
 pub use events::{Event, Failure, FailureCode};
 pub use frontpage::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 pub use gates::GateState;
-pub(crate) use ops::Envelope;
-pub use ops::{AxisEdit, AxisKind, CellEdit, Command, OpId, RejectReason};
+pub use ops::{
+    AxisEdit, AxisKind, CellEdit, CoreCommand, DefinitionCommand, EcuCommand, JournalCommand,
+    LifecycleCommand, LogCommand, OpId, ProjectCommand, RejectReason, SafetyCommand, TuneCommand,
+};
+pub(crate) use ops::{CommandRequest, Envelope};
 pub use project::{
     ConnectionView, DefinitionView, KeyActionInfo, PortView, ProjectView, ReadReport,
     ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
