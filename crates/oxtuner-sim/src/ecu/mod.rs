@@ -10,25 +10,18 @@
 use std::collections::HashMap;
 
 use oxtuner_ini::{ChannelKind, CommandTemplate, Definition};
-use oxtuner_protocol::{CommandPattern, page_identifier};
+use oxtuner_protocol::CommandPattern;
+
+mod controller;
+mod pages;
+
+pub(crate) use pages::PageEcu;
 
 use crate::SimError;
 
 /// One page's commands.
 #[derive(Debug, Clone)]
-pub(crate) struct PageEcu {
-    pub(crate) number: u8,
-    pub(crate) size: usize,
-    /// The raw two-byte `%2i` identifier this page answers to.
-    pub(crate) identifier: [u8; 2],
-    pub(crate) read: Option<CommandPattern>,
-    pub(crate) write: Option<CommandPattern>,
-    pub(crate) burn: Option<CommandPattern>,
-    pub(crate) crc: Option<CommandPattern>,
-}
 
-/// The realtime command.
-#[derive(Debug, Clone)]
 pub(crate) struct RealtimeEcu {
     pub(crate) pattern: CommandPattern,
     pub(crate) block_size: usize,
@@ -80,7 +73,7 @@ pub(crate) struct SimEcu {
 }
 
 /// One command pattern with the definition's variables resolved.
-fn pattern_for(
+pub(super) fn pattern_for(
     command: &CommandTemplate,
     variables: &HashMap<String, u8>,
     force_big_endian: bool,
@@ -88,51 +81,6 @@ fn pattern_for(
     CommandPattern::new(command, force_big_endian, &|name| {
         variables.get(&name.to_ascii_lowercase()).copied()
     })
-}
-
-/// Every page's commands, in definition order.
-fn build_pages(
-    definition: &Definition,
-    variables: &HashMap<String, u8>,
-    force_big_endian: bool,
-) -> Vec<PageEcu> {
-    let pattern = |command: &CommandTemplate| pattern_for(command, variables, force_big_endian);
-
-    definition
-        .pages
-        .iter()
-        .map(|page| PageEcu {
-            number: page.number,
-            size: usize::try_from(page.size).unwrap_or(0),
-            identifier: page_identifier(page.number, page.identifier.as_ref(), &|name| {
-                variables.get(&name.to_ascii_lowercase()).copied()
-            }),
-            read: page
-                .read_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
-            write: page
-                .chunk_write
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .or(page
-                    .value_write
-                    .as_ref()
-                    .filter(|command| !command.is_empty()))
-                .and_then(pattern),
-            burn: page
-                .burn_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
-            crc: page
-                .crc_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
-        })
-        .collect()
 }
 
 impl SimEcu {
@@ -181,7 +129,7 @@ impl SimEcu {
                 })
             });
 
-        let pages = build_pages(definition, &variables, force_big_endian);
+        let pages = pages::build_pages(definition, &variables, force_big_endian);
 
         if query.is_none() && pages.iter().all(|page| page.read.is_none()) {
             return Err(SimError {
@@ -193,14 +141,7 @@ impl SimEcu {
             });
         }
 
-        let mut controller = Vec::new();
-        for (_, action) in definition.controller_commands.iter() {
-            for command in &action.commands {
-                if let Some(pattern) = pattern(command) {
-                    controller.push(pattern);
-                }
-            }
-        }
+        let controller = controller::build_controller(definition, &variables, force_big_endian);
 
         Ok(Self {
             signature: signature.into_bytes(),
@@ -236,7 +177,7 @@ impl SimEcu {
         for page in &self.pages {
             if let Some(pattern) = &page.read
                 && let Some(matched) = pattern.capture(bytes)
-                && names_page(&matched, page)
+                && pages::names_page(&matched, page)
             {
                 return Some(Request::ReadPage {
                     page: page.number,
@@ -246,7 +187,7 @@ impl SimEcu {
             }
             if let Some(pattern) = &page.write
                 && let Some(matched) = pattern.capture(bytes)
-                && names_page(&matched, page)
+                && pages::names_page(&matched, page)
             {
                 return Some(Request::WritePage {
                     page: page.number,
@@ -256,13 +197,13 @@ impl SimEcu {
             }
             if let Some(pattern) = &page.burn
                 && let Some(matched) = pattern.capture(bytes)
-                && names_page(&matched, page)
+                && pages::names_page(&matched, page)
             {
                 return Some(Request::Burn { page: page.number });
             }
             if let Some(pattern) = &page.crc
                 && let Some(matched) = pattern.capture(bytes)
-                && names_page(&matched, page)
+                && pages::names_page(&matched, page)
             {
                 return Some(Request::Crc {
                     page: page.number,
@@ -282,18 +223,7 @@ impl SimEcu {
     }
 }
 
-/// Whether the command's raw `%2i` pair is this page's identifier.
-///
-/// A command without `%2i` applies to the page whose command matched; the loop
-/// already selected it.
-fn names_page(matched: &oxtuner_protocol::PatternMatch<'_>, page: &PageEcu) -> bool {
-    matched
-        .identifier
-        .is_none_or(|identifier| identifier == page.identifier)
-}
-
-/// The `$name` substitutions the definition resolves, keyed lowercase.
-fn variables(definition: &Definition) -> HashMap<String, u8> {
+pub(super) fn variables(definition: &Definition) -> HashMap<String, u8> {
     let mut variables = HashMap::with_capacity(definition.pc_variables.len());
     for (name, _) in definition.pc_variables.iter() {
         if let Some(value) = definition.command_variable(name) {
