@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use oxtuner_project::Project;
-use oxtuner_tune::CellState;
+use oxtuner_tune::{CellState, StateTable};
 
 use crate::contract::AxisKind;
 use crate::contract::editor::table::{AxisView, TableView};
@@ -125,6 +125,7 @@ impl TableView {
 
         let tune = project.tune();
         let baseline = project.images().baseline();
+        let state_table = StateTable::build(project.images());
         let mut cells = Vec::with_capacity(cols.saturating_mul(rows));
         let mut states = Vec::with_capacity(cols.saturating_mul(rows));
         let mut changed = Vec::with_capacity(cols.saturating_mul(rows));
@@ -140,9 +141,8 @@ impl TableView {
                 maximum = maximum.max(value);
                 cells.push(value);
                 states.push(
-                    project
-                        .images()
-                        .cell_state(cells_name, row, column)
+                    state_table
+                        .cell(cells_name, row, column)
                         .unwrap_or(CellState::Unknown),
                 );
                 let edited = matches!(
@@ -221,6 +221,7 @@ impl TableView {
 
         let tune = project.tune();
         let baseline = project.images().baseline();
+        let state_table = StateTable::build(project.images());
         let mut cells = Vec::with_capacity(points);
         let mut states = Vec::with_capacity(points);
         let mut changed = Vec::with_capacity(points);
@@ -235,9 +236,8 @@ impl TableView {
             maximum = maximum.max(value);
             cells.push(value);
             states.push(
-                project
-                    .images()
-                    .cell_state(cells_name, 0, index)
+                state_table
+                    .cell(cells_name, 0, index)
                     .unwrap_or(CellState::Unknown),
             );
             let edited = matches!(
