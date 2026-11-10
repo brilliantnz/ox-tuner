@@ -820,3 +820,22 @@ fn a_write_without_a_project_is_refused() {
 
     core.close();
 }
+
+#[test]
+fn an_array_element_edit_reaches_its_index() {
+    let dir = TempDir::new("array-element");
+    let core = Harness::start(true);
+    core.open(dir.path());
+
+    let op = core
+        .handle
+        .edit_scalar_at("engineDialog", "veTable", Some(1), 123.0)
+        .expect("queued");
+    let event = core.wait(|event| event.op() == Some(op));
+    assert!(matches!(event, Event::DialogEdited { .. }), "{event:?}");
+
+    let table = core.table();
+    assert_eq!(table.cells[1], 123.0);
+
+    core.close();
+}

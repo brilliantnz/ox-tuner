@@ -905,6 +905,7 @@ pub(super) fn handle(
         CommandRequest::EditScalar {
             dialog,
             name,
+            index,
             mut value,
         } => {
             let Session::Project(project) = session else {
@@ -921,7 +922,7 @@ pub(super) fn handle(
                 return Outcome::Continue;
             };
 
-            if let Err(message) = validate_scalar_edit(project, &name, value) {
+            if let Err(message) = validate_scalar_edit(project, &name, index, value) {
                 tracing::debug!(%op, variable = %name, %message, "scalar edit rejected");
                 send(
                     events,
@@ -941,7 +942,10 @@ pub(super) fn handle(
                 value = clamped;
             }
 
-            if let Err(error) = project.tune_mut().set_user_at(&name, 0, value) {
+            if let Err(error) = project
+                .tune_mut()
+                .set_user_at(&name, index.unwrap_or(0), value)
+            {
                 tracing::error!(%op, variable = %name, %error, "a validated scalar edit failed");
                 send(
                     events,
@@ -1226,6 +1230,7 @@ pub(super) fn validate_axis_edits(
 pub(super) fn validate_scalar_edit(
     project: &Project,
     name: &str,
+    index: Option<usize>,
     value: f64,
 ) -> Result<(), String> {
     if project.is_read_only() {
@@ -1246,10 +1251,14 @@ pub(super) fn validate_scalar_edit(
     if !spec.shape.is_numeric() {
         return Err(format!("`{name}` holds text, not numbers"));
     }
-    if !spec.shape.is_scalar() {
-        return Err(format!(
-            "`{name}` is an array; edit it from its table or curve"
-        ));
+    match index {
+        Some(index) if index >= spec.element_count() => {
+            return Err(format!("`{name}` has no element at index {index}"));
+        }
+        None if !spec.shape.is_scalar() => {
+            return Err(format!("`{name}` is an array; edit one of its elements"));
+        }
+        _ => {}
     }
     if spec.scale.is_none() || spec.translate.is_none() {
         return Err(format!(

@@ -145,6 +145,8 @@ pub(crate) enum CommandRequest {
         dialog: String,
         /// Variable to write.
         name: String,
+        /// Array element, or `None` for a scalar.
+        index: Option<usize>,
         /// New value, in user units.
         value: f64,
     },
@@ -452,6 +454,8 @@ pub enum TuneCommand {
         dialog: String,
         /// Variable to write.
         name: String,
+        /// Array element, or `None` for a scalar.
+        index: Option<usize>,
         /// New value in user units.
         value: f64,
     },
@@ -689,10 +693,12 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Tune(TuneCommand::EditScalar {
                 dialog,
                 name,
+                index,
                 value,
             }) => Self::EditScalar {
                 dialog,
                 name,
+                index,
                 value,
             },
             CoreCommand::Tune(TuneCommand::EditTable { name, edits }) => {

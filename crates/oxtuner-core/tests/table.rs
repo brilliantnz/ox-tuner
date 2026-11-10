@@ -1299,8 +1299,8 @@ fn a_dialog_resolves_glued_bare_and_conditional_gates() {
     assert_eq!(element.index, Some(2));
     assert_eq!(element.value, Some(3.0));
     assert!(
-        !element.writable,
-        "`EditScalar` cannot store an array element yet"
+        element.writable,
+        "an array element is editable through its index"
     );
 
     let slider = dialog
