@@ -34,7 +34,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{MenuNode, MenuNodeKind, SaveSummary};
+use oxtuner_core::{MenuNode, MenuNodeKind, SaveReport};
 use oxtuner_ui::dock::{
     BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, InsertTarget, Panel,
     PanelId, PanelStyle, panel_handle,
@@ -104,7 +104,7 @@ struct PendingClose {
     panel: PanelId,
     /// The save already seen when the button was clicked. A different
     /// [`CoreService`] save means this one finished.
-    saved: Option<SaveSummary>,
+    saved: Option<SaveReport>,
     /// The failure serial seen when the button was clicked. A different value
     /// means a command failed after the save was asked for.
     failure_serial: u64,

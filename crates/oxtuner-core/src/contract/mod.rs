@@ -1,6 +1,6 @@
 //! The core's message vocabulary.
 //!
-//! These types are the whole UI↔core contract (`docs/architecture/ui-core/contract.md`).
+//! These types are the whole UI↔core contract.
 //! Two rules shape them:
 //!
 //! - **Commands carry what the core needs, never a borrowed view of UI state.**
@@ -12,34 +12,32 @@
 //!   [`Event::TuneSaved`], [`Event::TableRead`], [`Event::TableEdited`],
 //!   [`Event::DefinitionUnloaded`], [`Event::Failed`] or [`Event::Rejected`] —
 //!   never twice. After shutdown is accepted an event that does not fit may be
-//!   dropped and counted instead of blocking the quit (ADR-0023).
+//!   dropped and counted instead of blocking the quit.
 
-mod editor;
+pub(crate) mod editor;
 mod edits;
 mod events;
-mod frontpage;
+pub(crate) mod frontpage;
 mod gates;
 mod ops;
-mod project;
+pub(crate) mod project;
 
 pub use editor::{
-    AxisSummary, CurveAxes, DialogCommand, DialogEmbed, DialogFieldKind, DialogFieldSummary,
-    DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption,
-    DialogSelectOption, DialogSummary, DialogUnmodeledRow, DialogWidget, DialogWidgetKind,
-    TableSummary,
+    AxisView, CurveAxes, DialogAction, DialogEmbed, DialogField, DialogFieldKind, DialogFieldTone,
+    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
+    DialogUnmodeledRow, DialogView, DialogWidget, DialogWidgetKind, TableView,
 };
-pub(crate) use editor::{expression_slot, order_gates, panel_target};
 pub use edits::{
-    BurnSummary, ControllerCommandSummary, ImportSummary, JournalEntry, RevertSummary, SaveSummary,
-    WriteSummary,
+    BurnReport, ControllerActionReport, ImportReport, JournalEntry, RevertReport, SaveReport,
+    WriteReport,
 };
 pub use events::{Event, Failure, FailureCode};
-pub use frontpage::{FrontPageGauge, GaugeSummary, IndicatorSummary};
+pub use frontpage::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 pub use gates::GateState;
 pub(crate) use ops::Envelope;
 pub use ops::{AxisEdit, AxisKind, CellEdit, Command, OpId, RejectReason};
 pub use project::{
-    ConnectionSummary, DefinitionSummary, KeyActionSummary, PortSummary, ProjectSummary,
-    ReadAllSummary, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
-    ReferenceTableSummary, SignatureVerdict,
+    ConnectionView, DefinitionView, KeyActionInfo, PortView, ProjectView, ReadReport,
+    ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
+    SignatureVerdict,
 };

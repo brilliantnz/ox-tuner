@@ -104,7 +104,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
         .handle
         .connect(PortChoice::serial(port, 115_200), framing)
         .expect("queued");
-    let Event::Connected { summary, .. } =
+    let Event::Connected { view: summary, .. } =
         harness.wait(|event| matches!(event, Event::Connected { .. }))
     else {
         unreachable!()
@@ -118,7 +118,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
     assert!(!summary.read_only, "the bench ECU must match its INI");
 
     harness.handle.read_all().expect("queued");
-    let Event::PagesRead { summary: read, .. } =
+    let Event::PagesRead { report: read, .. } =
         harness.wait(|event| matches!(event, Event::PagesRead { .. }))
     else {
         unreachable!()
@@ -253,7 +253,7 @@ fn the_bench_test_connection_reads_only_the_signature() {
         .handle
         .test_connection(PortChoice::serial(port.clone(), 115_200), None)
         .expect("queued");
-    let Event::ConnectionTested { summary, .. } =
+    let Event::ConnectionTested { view: summary, .. } =
         harness.wait(|event| matches!(event, Event::ConnectionTested { .. }))
     else {
         unreachable!()

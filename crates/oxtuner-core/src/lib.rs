@@ -21,8 +21,8 @@
 //! # Guarantees
 //!
 //! - **One owner.** The definition and the tune are moved into the core thread
-//!   and dropped there. Callers receive a [`DefinitionSummary`] or a
-//!   [`ProjectSummary`], never the data.
+//!   and dropped there. Callers receive a [`DefinitionView`] or a
+//!   [`ProjectView`], never the data.
 //! - **Answered exactly once while the UI is reading.** [`CoreHandle::send`]
 //!   returns the [`OpId`] the reply will carry; every accepted command produces
 //!   exactly one `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` /
@@ -66,15 +66,16 @@
 //!     .expect("queued");
 //!
 //! let event = events.recv_timeout(Duration::from_secs(5)).expect("an answer");
-//! let Event::DefinitionLoaded { op: answered, summary } = event else {
+//! let Event::DefinitionLoaded { op: answered, view } = event else {
 //!     panic!("expected a load");
 //! };
 //! assert_eq!(answered, op);
-//! assert_eq!(summary.signature, "speeduino 202501");
+//! assert_eq!(view.signature, "speeduino 202501");
 //!
 //! core.thread.join();
 //! ```
 
+mod contract;
 mod gate;
 mod handle;
 mod history;
@@ -82,12 +83,23 @@ mod io_thread;
 mod journal;
 mod link;
 mod menu;
-mod message;
 mod realtime;
 mod safety;
 mod service;
 mod snapshot;
+mod view;
 
+pub use contract::{
+    AxisEdit, AxisKind, AxisView, BurnReport, CellEdit, Command, ConnectionView,
+    ControllerActionReport, CurveAxes, DefinitionView, DialogAction, DialogEmbed, DialogField,
+    DialogFieldKind, DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment,
+    DialogPresetOption, DialogSelectOption, DialogUnmodeledRow, DialogView, DialogWidget,
+    DialogWidgetKind, Event, Failure, FailureCode, FrontPageGauge, GateState, GaugeTemplate,
+    ImportReport, IndicatorSpec, JournalEntry, KeyActionInfo, OpId, PortView, ProjectView,
+    ReadReport, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
+    ReferenceTableView, RejectReason, RevertReport, SaveReport, SignatureVerdict, TableView,
+    WriteReport,
+};
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
     ChannelInfo, ChartHistory, HistoryStats, NearestSample, Sample, SeriesPoints, TimeWindow,
@@ -95,18 +107,7 @@ pub use history::{
 };
 pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
-pub use message::{
-    AxisEdit, AxisKind, AxisSummary, BurnSummary, CellEdit, Command, ConnectionSummary,
-    ControllerCommandSummary, CurveAxes, DefinitionSummary, DialogCommand, DialogEmbed,
-    DialogFieldKind, DialogFieldSummary, DialogFieldTone, DialogHelpLink, DialogPreset,
-    DialogPresetAssignment, DialogPresetOption, DialogSelectOption, DialogSummary,
-    DialogUnmodeledRow, DialogWidget, DialogWidgetKind, Event, Failure, FailureCode,
-    FrontPageGauge, GateState, GaugeSummary, ImportSummary, IndicatorSummary, JournalEntry,
-    KeyActionSummary, OpId, PortSummary, ProjectSummary, ReadAllSummary, ReferenceTableIdentifier,
-    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableSummary, RejectReason,
-    RevertSummary, SaveSummary, SignatureVerdict, TableSummary, WriteSummary,
-};
-pub use oxtuner_datalog::{LogColumn, LogStatus, LogSummary, SessionLogSnapshot};
+pub use oxtuner_datalog::{LogColumn, LogStatus, SessionLogReport, SessionLogSnapshot};
 pub use realtime::{
     BlockingFrameWatch, FrameWatch, IndicatorReading, LatestFrame, LiveValue, RealtimeDecoder,
     RealtimeFrame,

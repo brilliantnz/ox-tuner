@@ -7,7 +7,7 @@
 //! definition actually declares become rows, so one registry serves Speeduino,
 //! `MegaSquirt` and rusEFI definitions without per-ECU code. A name with no
 //! usable candidate resolves to nothing and the caller keeps the
-//! [`DialogSummary::unavailable`](super::dialog::DialogSummary::unavailable)
+//! [`DialogView::unavailable`](crate::contract::DialogView::unavailable)
 //! name instead.
 //!
 //! Labels are plain functional words ("Cylinder Count"), not copied artwork.

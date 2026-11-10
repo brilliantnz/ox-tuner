@@ -23,7 +23,7 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Point, Render, Styled as _, Subscription, TestAppContext,
     Window, WindowBounds, WindowOptions, div, px, size,
 };
-use oxtuner_core::{AxisKind, AxisSummary, CellState, TableSummary};
+use oxtuner_core::{AxisKind, AxisView, CellState, TableView};
 
 use super::RealtimePoint;
 use super::geometry::{AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
@@ -41,9 +41,9 @@ impl Render for Host {
     }
 }
 
-fn table(rows: usize, columns: usize) -> TableSummary {
+fn table(rows: usize, columns: usize) -> TableView {
     let cells = (0..rows * columns).map(|value| value as f64).collect();
-    TableSummary {
+    TableView {
         id: "veTableTbl".to_owned(),
         name: "veTable".to_owned(),
         title: "VE Table".to_owned(),
@@ -54,7 +54,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
         cells,
         states: vec![CellState::Unknown; rows * columns],
         changed: vec![false; rows * columns],
-        x_axis: AxisSummary {
+        x_axis: AxisView {
             name: "rpmBins".to_owned(),
             label: "RPM".to_owned(),
             units: "rpm".to_owned(),
@@ -65,7 +65,7 @@ fn table(rows: usize, columns: usize) -> TableSummary {
             power_cycle: false,
             values: (0..columns).map(|value| value as f64 * 500.0).collect(),
         },
-        y_axis: AxisSummary {
+        y_axis: AxisView {
             name: "mapBins".to_owned(),
             label: "MAP".to_owned(),
             units: "kPa".to_owned(),

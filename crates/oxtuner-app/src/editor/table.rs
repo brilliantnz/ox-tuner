@@ -20,7 +20,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Window, div, px,
 };
-use oxtuner_core::{Failure, FailureCode, SaveSummary, TableSummary};
+use oxtuner_core::{Failure, FailureCode, SaveReport, TableView};
 use oxtuner_ui::curve::{Curve, CurveEvent, CurveSnapshot};
 use oxtuner_ui::table::{BulkOp, CellPos, GridAction, Table, TableEvent};
 
@@ -39,12 +39,12 @@ pub(crate) struct TableEditor {
     /// The table id the selection asked for.
     requested: Option<String>,
     /// Last save seen, so its echo refreshes the "changed" marks.
-    last_save: Option<SaveSummary>,
+    last_save: Option<SaveReport>,
     /// The failure that stopped this table from appearing or saving.
     failure: Option<Failure>,
     /// Snapshots by table id, so a table that was open once draws on the next
     /// click instead of waiting for the core to answer again.
-    cache: HashMap<String, TableSummary>,
+    cache: HashMap<String, TableView>,
     /// The project the cache belongs to, so another folder starts clean.
     project_root: Option<PathBuf>,
     /// The definition revision the open grid was read under. A project switch
@@ -405,7 +405,7 @@ impl TableEditor {
 
     /// Sets the grid and the curve from one snapshot, so the two views cannot
     /// disagree about which curve is open.
-    fn apply_table(&self, mut table: TableSummary, cx: &mut Context<'_, Self>) {
+    fn apply_table(&self, mut table: TableView, cx: &mut Context<'_, Self>) {
         if !self.embed_enabled {
             table.writable = false;
         }
@@ -438,7 +438,7 @@ impl TableEditor {
 
     /// Feeds one snapshot to the curve, or clears it when the open snapshot is
     /// an ordinary table.
-    fn sync_curve(&self, table: &TableSummary, cx: &mut Context<'_, Self>) {
+    fn sync_curve(&self, table: &TableView, cx: &mut Context<'_, Self>) {
         let snapshot = table
             .curve
             .is_some()
@@ -485,16 +485,12 @@ impl TableEditor {
         clippy::too_many_lines,
         reason = "one header render lays out the axes, corner and controls together"
     )]
-    fn render_header(
-        &self,
-        table: Option<&TableSummary>,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    fn render_header(&self, table: Option<&TableView>, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let title: SharedString =
             table.map_or_else(|| self.label.clone(), |table| table.title.clone().into());
         let power_cycle = t!("app.table.power_cycle");
-        let axis_caption = |axis: &oxtuner_core::AxisSummary| {
+        let axis_caption = |axis: &oxtuner_core::AxisView| {
             if axis.power_cycle {
                 format!("{} ({power_cycle})", axis.caption())
             } else {
@@ -550,7 +546,7 @@ impl TableEditor {
         ] = bulk;
         let [rebin_x, rebin_y] = rebin;
 
-        let changed = table.map_or(0, oxtuner_core::TableSummary::changed_cells);
+        let changed = table.map_or(0, oxtuner_core::TableView::changed_cells);
         let operations_button = Button::new("table-operations")
             .label(t!("app.table.operations"))
             .compact()
@@ -848,7 +844,7 @@ impl TableEditor {
         clippy::too_many_lines,
         reason = "the status line combines cursor, selection, change and failure facts"
     )]
-    fn render_status(&self, table: &TableSummary, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_status(&self, table: &TableView, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let model = self.table.read(cx).model();
         let cursor = model.selection().cursor;
@@ -1028,12 +1024,12 @@ fn format_value(value: f64, digits: u8) -> String {
 #[cfg(test)]
 mod tests {
     use gpui_kit::TestAppContext;
-    use oxtuner_core::{AxisSummary, CellState, TableSummary};
+    use oxtuner_core::{AxisView, CellState, TableView};
 
     use super::*;
 
-    fn summary() -> TableSummary {
-        TableSummary {
+    fn summary() -> TableView {
+        TableView {
             id: "veTableTbl".to_owned(),
             name: "veTable".to_owned(),
             title: "VE Table".to_owned(),
@@ -1044,7 +1040,7 @@ mod tests {
             cells: vec![10.0, 20.0, 30.0, 40.0],
             states: vec![CellState::Unknown; 4],
             changed: vec![false; 4],
-            x_axis: AxisSummary {
+            x_axis: AxisView {
                 name: "rpmBins".to_owned(),
                 label: "RPM".to_owned(),
                 units: "rpm".to_owned(),
@@ -1055,7 +1051,7 @@ mod tests {
                 power_cycle: false,
                 values: vec![1000.0, 2000.0],
             },
-            y_axis: AxisSummary {
+            y_axis: AxisView {
                 name: "mapBins".to_owned(),
                 label: "MAP".to_owned(),
                 units: "kPa".to_owned(),

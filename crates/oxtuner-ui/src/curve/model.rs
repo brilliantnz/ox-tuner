@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use oxtuner_core::{TableSummary, nice_ticks, padded_range};
+use oxtuner_core::{TableView, nice_ticks, padded_range};
 
 /// One plotted point.
 #[non_exhaustive]
@@ -94,7 +94,7 @@ impl CurveSnapshot {
     /// carries the current values but not the definition's axis limits, so a
     /// caller that has them should add [`Self::with_x_range`] and
     /// [`Self::with_y_range`].
-    pub fn from_table(table: &TableSummary) -> Option<Self> {
+    pub fn from_table(table: &TableView) -> Option<Self> {
         if table.rows != 1 || table.cols == 0 {
             return None;
         }

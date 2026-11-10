@@ -28,8 +28,8 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div, px, rems,
 };
 use oxtuner_core::{
-    DialogCommand, DialogFieldKind, DialogFieldSummary, DialogSummary, Failure, FailureCode,
-    GateState, SaveSummary,
+    DialogAction, DialogField, DialogFieldKind, DialogView, Failure, FailureCode, GateState,
+    SaveReport,
 };
 use oxtuner_ui::table::{EditOp, parse_edit};
 
@@ -58,14 +58,14 @@ pub(crate) struct DialogEditor {
     requested: Option<String>,
     /// Last seen snapshot. The editor owns it instead of reading the status in
     /// render, because a repaint would otherwise replace the row being edited.
-    dialog: Option<DialogSummary>,
+    dialog: Option<DialogView>,
     /// Last save seen, so its echo refreshes the "changed" marks.
-    last_save: Option<SaveSummary>,
+    last_save: Option<SaveReport>,
     /// The failure that stopped this dialog from appearing or saving.
     failure: Option<Failure>,
     /// Snapshots by dialog id, so a dialog that was open once draws on the next
     /// click instead of waiting for the core to answer again.
-    cache: HashMap<String, DialogSummary>,
+    cache: HashMap<String, DialogView>,
     /// The project the cache belongs to, so another folder starts clean.
     project_root: Option<PathBuf>,
     /// The definition revision the open rows were read under. A project switch
@@ -389,7 +389,7 @@ impl DialogEditor {
     }
 
     /// The displayed value of one field, optimistic edits first.
-    fn value(&self, dialog: &DialogSummary, index: usize) -> Option<f64> {
+    fn value(&self, dialog: &DialogView, index: usize) -> Option<f64> {
         let field = dialog.fields.get(index)?;
 
         self.pending.get(&field.variable).copied().or(field.value)
@@ -578,11 +578,7 @@ impl DialogEditor {
         }
     }
 
-    fn render_header(
-        &self,
-        dialog: Option<&DialogSummary>,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
+    fn render_header(&self, dialog: Option<&DialogView>, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let title: SharedString =
             dialog.map_or_else(|| self.label.clone(), |dialog| dialog.title.clone().into());
@@ -633,7 +629,7 @@ impl DialogEditor {
     }
 
     /// The panel cards, in document order.
-    fn render_board(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_board(&self, dialog: &DialogView, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let groups = sections(&dialog.title, &dialog.fields);
 
@@ -689,9 +685,9 @@ impl DialogEditor {
     /// One row: label and metadata on the leading edge, control on the trailing.
     fn render_field(
         &self,
-        dialog: &DialogSummary,
+        dialog: &DialogView,
         index: usize,
-        field: &DialogFieldSummary,
+        field: &DialogField,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -773,7 +769,7 @@ impl DialogEditor {
 
     fn render_content(
         &self,
-        dialog: Option<&DialogSummary>,
+        dialog: Option<&DialogView>,
         failure: Option<&Failure>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
@@ -781,7 +777,7 @@ impl DialogEditor {
 
         if let Some(dialog) = dialog {
             let has_visible = dialog.fields.iter().any(|field| field.gates.visible)
-                || dialog.commands.iter().any(|command| command.gates.visible);
+                || dialog.actions.iter().any(|command| command.gates.visible);
 
             if !has_visible && dialog.unavailable.is_empty() {
                 let message = if dialog.fields.is_empty() {
@@ -846,7 +842,7 @@ impl DialogEditor {
         }
     }
 
-    fn render_status(&self, dialog: &DialogSummary, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_status(&self, dialog: &DialogView, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let changed = dialog.changed + self.pending.len();
 
@@ -893,7 +889,7 @@ impl DialogEditor {
 /// is a separate click. A button is muted when the definition does not declare
 /// the command, its gate is off, the session is read-only, or there is no
 /// connection or no write access to carry it.
-fn command_card(dialog: &DialogSummary, cx: &mut Context<'_, DialogEditor>) -> Option<AnyElement> {
+fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Option<AnyElement> {
     let theme = cx.theme().clone();
     let status = CoreService::status(cx);
     let can_reach_ecu = status
@@ -903,7 +899,7 @@ fn command_card(dialog: &DialogSummary, cx: &mut Context<'_, DialogEditor>) -> O
     let writes_enabled = status.writes_enabled;
 
     let rows: Vec<AnyElement> = dialog
-        .commands
+        .actions
         .iter()
         .enumerate()
         .filter(|(_, command)| command.gates.visible)
@@ -994,7 +990,7 @@ struct SectionGroup {
 /// the reading order the definition chose. A title that appears twice with
 /// another panel between them is two cards, not one, so the grouping follows
 /// runs of equal titles instead of collecting by title.
-fn sections(dialog_title: &str, fields: &[DialogFieldSummary]) -> Vec<SectionGroup> {
+fn sections(dialog_title: &str, fields: &[DialogField]) -> Vec<SectionGroup> {
     let mut groups: Vec<SectionGroup> = Vec::new();
     let mut current: Option<&str> = None;
 
@@ -1054,7 +1050,7 @@ impl Render for DialogEditor {
 }
 
 /// The control a visible row needs, or none for a note or switch.
-fn widget_kind(field: &DialogFieldSummary) -> Option<WidgetKind> {
+fn widget_kind(field: &DialogField) -> Option<WidgetKind> {
     match field.kind {
         DialogFieldKind::Note | DialogFieldKind::Toggle => None,
         // A `bits` list with no usable label is a raw number in disguise; the
@@ -1074,18 +1070,18 @@ fn widget_kind(field: &DialogFieldSummary) -> Option<WidgetKind> {
 }
 
 /// Whether the definition currently shows a row and lets it accept edits.
-fn row_available(field: &DialogFieldSummary) -> bool {
+fn row_available(field: &DialogField) -> bool {
     field.gates.visible && field.gates.enabled
 }
 
 /// Whether this session may start an edit on a row.
-fn row_editable(field: &DialogFieldSummary) -> bool {
+fn row_editable(field: &DialogField) -> bool {
     field.writable && row_available(field)
 }
 
 /// Why a command button cannot run, or `None` when it can.
 fn command_block_reason(
-    command: &DialogCommand,
+    command: &DialogAction,
     writable: bool,
     can_reach_ecu: bool,
     writes_enabled: bool,
@@ -1110,7 +1106,7 @@ fn command_block_reason(
 }
 
 /// The message a `showMessageOnClick` flag carries, when the row has one.
-fn show_message(command: &DialogCommand) -> Option<String> {
+fn show_message(command: &DialogAction) -> Option<String> {
     let (index, _) = command
         .flags
         .iter()
@@ -1159,7 +1155,7 @@ fn edited_value(current: f64, text: &str) -> Option<f64> {
 }
 
 /// A read-only value when the control for a row is not available.
-fn fallback_value(field: &DialogFieldSummary, value: Option<f64>, cx: &App) -> AnyElement {
+fn fallback_value(field: &DialogField, value: Option<f64>, cx: &App) -> AnyElement {
     div()
         .w_full()
         .truncate()
@@ -1207,7 +1203,7 @@ fn subscribe_select(
 }
 
 /// The snapshot value of one variable, for echo reconciliation.
-fn field_value(dialog: &DialogSummary, variable: &str) -> Option<f64> {
+fn field_value(dialog: &DialogView, variable: &str) -> Option<f64> {
     dialog
         .fields
         .iter()
@@ -1225,8 +1221,8 @@ mod tests {
     };
     use oxtuner_core::{DialogFieldTone, GateState};
 
-    fn row(kind: DialogFieldKind, value: Option<f64>, options: usize) -> DialogFieldSummary {
-        DialogFieldSummary {
+    fn row(kind: DialogFieldKind, value: Option<f64>, options: usize) -> DialogField {
+        DialogField {
             label: String::new(),
             variable: String::new(),
             value,
@@ -1290,8 +1286,8 @@ mod tests {
         );
     }
 
-    fn command(known: bool, enabled: bool, flags: &[&str]) -> DialogCommand {
-        DialogCommand {
+    fn command(known: bool, enabled: bool, flags: &[&str]) -> DialogAction {
+        DialogAction {
             label: "Reboot".to_owned(),
             command: "cmdReboot".to_owned(),
             visibility_expression: None,
@@ -1630,7 +1626,7 @@ mod tests {
         }
     }
 
-    fn summary() -> DialogSummary {
+    fn summary() -> DialogView {
         let mut fuel = row(DialogFieldKind::Value, Some(12.3), 0);
         fuel.label = "Required fuel".to_owned();
         fuel.variable = "reqFuel".to_owned();
@@ -1663,7 +1659,7 @@ mod tests {
         sensor.variable = "flexEnabled".to_owned();
         sensor.section = "Flex fuel".to_owned();
 
-        DialogSummary {
+        DialogView {
             id: "engine_constants".to_owned(),
             title: "Engine Constants".to_owned(),
             layout: None,
@@ -1674,7 +1670,7 @@ mod tests {
             topic_help: None,
             help_links: Vec::new(),
             presets: Vec::new(),
-            commands: Vec::new(),
+            actions: Vec::new(),
             widgets: Vec::new(),
             tables: Vec::new(),
             curves: Vec::new(),
@@ -1682,7 +1678,7 @@ mod tests {
         }
     }
 
-    fn power_summary() -> DialogSummary {
+    fn power_summary() -> DialogView {
         let mut dialog = summary();
         dialog.fields[0].power_cycle = true;
         dialog.fields[0].changed = true;

@@ -22,11 +22,11 @@ use crate::i18n::t;
 /// a hidden retry is diagnostic detail, not news.
 pub(crate) fn for_event(event: &Event, link_was_lost: Option<&str>) -> Option<NotificationDraft> {
     match event {
-        Event::ProjectOpened { summary, .. } if summary.read_only => {
-            Some(read_only(summary.read_only_reason.as_deref()))
+        Event::ProjectOpened { view, .. } if view.read_only => {
+            Some(read_only(view.read_only_reason.as_deref()))
         }
-        Event::Connected { summary, .. } if summary.read_only => {
-            Some(read_only(summary.read_only_reason.as_deref()))
+        Event::Connected { view, .. } if view.read_only => {
+            Some(read_only(view.read_only_reason.as_deref()))
         }
         Event::ConnectionLost { reason } => Some(
             NotificationDraft::new(
@@ -37,39 +37,39 @@ pub(crate) fn for_event(event: &Event, link_was_lost: Option<&str>) -> Option<No
             .key(NotificationKey::named("connection-lost"))
             .action(NotificationAction::OpenDiagnostics { filter: None }),
         ),
-        Event::Reconnected { summary } if link_was_lost.is_some() => Some(
+        Event::Reconnected { view } if link_was_lost.is_some() => Some(
             NotificationDraft::new(
                 NotificationSeverity::Info,
                 t!("app.notifications.link_restored_title").to_string(),
                 t!(
                     "app.notifications.link_restored_body",
-                    port = &summary.port,
-                    signature = &summary.signature,
+                    port = &view.port,
+                    signature = &view.signature,
                 )
                 .to_string(),
             )
             .key(NotificationKey::named("connection-restored")),
         ),
-        Event::TuneWritten { op, summary } if summary.verified => Some(
+        Event::TuneWritten { op, report } if report.verified => Some(
             NotificationDraft::new(
                 NotificationSeverity::Success,
                 t!("app.notifications.write_done_title").to_string(),
                 t!(
                     "app.notifications.write_done_body",
-                    pages = summary.pages.to_string(),
-                    cells = summary.cells.to_string(),
+                    pages = report.pages.to_string(),
+                    cells = report.cells.to_string(),
                 )
                 .to_string(),
             )
             .key(NotificationKey::op(op.get())),
         ),
-        Event::TuneBurned { op, summary } if summary.verified => Some(
+        Event::TuneBurned { op, report } if report.verified => Some(
             NotificationDraft::new(
                 NotificationSeverity::Success,
                 t!("app.notifications.burn_done_title").to_string(),
                 t!(
                     "app.notifications.burn_done_body",
-                    pages = summary.pages.to_string(),
+                    pages = report.pages.to_string(),
                 )
                 .to_string(),
             )
@@ -142,8 +142,8 @@ fn failure_title(code: FailureCode) -> String {
         FailureCode::TableEditRejected => t!("app.notifications.failed_table_edit"),
         FailureCode::DialogUnavailable => t!("app.notifications.failed_dialog"),
         FailureCode::DialogEditRejected => t!("app.notifications.failed_dialog_edit"),
-        FailureCode::ControllerCommandRefused => t!("app.notifications.failed_command_refused"),
-        FailureCode::ControllerCommandFailed => t!("app.notifications.failed_command"),
+        FailureCode::ControllerActionRefused => t!("app.notifications.failed_command_refused"),
+        FailureCode::ControllerActionFailed => t!("app.notifications.failed_command"),
         FailureCode::ConnectFailed => t!("app.notifications.failed_connect"),
         FailureCode::TestFailed => t!("app.notifications.failed_test"),
         FailureCode::NotConnected => t!("app.notifications.failed_not_connected"),
@@ -217,15 +217,15 @@ mod tests {
     #[test]
     fn a_reconnect_is_only_announced_after_a_visible_loss() {
         let event = Event::Reconnected {
-            summary: connection_summary(),
+            view: connection_summary(),
         };
 
         assert!(for_event(&event, None).is_none());
         assert!(for_event(&event, Some("the cable was pulled")).is_some());
     }
 
-    fn connection_summary() -> oxtuner_core::ConnectionSummary {
-        oxtuner_core::ConnectionSummary {
+    fn connection_summary() -> oxtuner_core::ConnectionView {
+        oxtuner_core::ConnectionView {
             port: "/dev/tty.usbmodem1".into(),
             custom: false,
             signature: "speeduino-2024".into(),

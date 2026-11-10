@@ -5,8 +5,8 @@
 
 use super::*;
 
-fn summary() -> DefinitionSummary {
-    DefinitionSummary {
+fn summary() -> DefinitionView {
+    DefinitionView {
         label: "speeduino.ini".to_owned(),
         signature: "speeduino 202501".to_owned(),
         spec_version: Some(3.78),
@@ -31,8 +31,8 @@ fn summary() -> DefinitionSummary {
     }
 }
 
-fn project() -> ProjectSummary {
-    ProjectSummary {
+fn project() -> ProjectView {
+    ProjectView {
         root: std::path::PathBuf::from("/projects/roadster"),
         tune_path: std::path::PathBuf::from("/projects/roadster/CurrentTune.msq"),
         definition_path: std::path::PathBuf::from(
@@ -56,8 +56,8 @@ fn failure(code: FailureCode) -> Failure {
     }
 }
 
-fn dialog() -> DialogSummary {
-    DialogSummary {
+fn dialog() -> DialogView {
+    DialogView {
         id: "engine".to_owned(),
         title: "Engine".to_owned(),
         fields: Vec::new(),
@@ -68,7 +68,7 @@ fn dialog() -> DialogSummary {
         layout: None,
         help_links: Vec::new(),
         presets: Vec::new(),
-        commands: Vec::new(),
+        actions: Vec::new(),
         widgets: Vec::new(),
         tables: Vec::new(),
         curves: Vec::new(),
@@ -92,7 +92,7 @@ fn only_an_edit_or_a_save_moves_the_tune_revision() {
     });
     assert_eq!(status.tune_revision, 1);
 
-    status.apply(Update::Saved(SaveSummary {
+    status.apply(Update::Saved(SaveReport {
         path: "/projects/roadster/CurrentTune.msq".into(),
         cells: 3,
     }));
@@ -131,7 +131,7 @@ fn a_snapshot_marks_and_clears_its_target() {
     assert_eq!(status.dirty.len(), 1);
 
     // Saving rebases the whole tune, so every mark goes.
-    status.apply(Update::Saved(SaveSummary {
+    status.apply(Update::Saved(SaveReport {
         path: "/projects/roadster/CurrentTune.msq".into(),
         cells: 4,
     }));
@@ -171,7 +171,7 @@ fn a_save_is_shown_until_the_next_failure() {
     let mut status = CoreStatus::default();
     status.apply(Update::Opened(project()));
 
-    status.apply(Update::Saved(SaveSummary {
+    status.apply(Update::Saved(SaveReport {
         path: std::path::PathBuf::from("/projects/roadster/CurrentTune.msq"),
         cells: 3,
     }));
@@ -201,8 +201,8 @@ fn a_failure_keeps_the_project_that_is_still_open() {
     );
 }
 
-fn connection() -> ConnectionSummary {
-    ConnectionSummary {
+fn connection() -> ConnectionView {
+    ConnectionView {
         port: "/dev/cu.usbmodem21201".to_owned(),
         custom: false,
         signature: "speeduino 202501".to_owned(),
@@ -250,7 +250,7 @@ fn a_page_read_moves_the_tune_revision_but_a_disconnect_keeps_the_read() {
     let mut status = CoreStatus::default();
     status.apply(Update::Connected(connection()));
 
-    status.apply(Update::PagesRead(ReadAllSummary {
+    status.apply(Update::PagesRead(ReadReport {
         pages: 15,
         bytes: 3408,
         constants: 817,

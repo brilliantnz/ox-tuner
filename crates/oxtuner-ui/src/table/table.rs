@@ -1,14 +1,14 @@
 //! The reusable tune table.
 //!
 //! One component serves every value table: the tune editor today, and any
-//! future surface that shows a `TableSummary`. It owns only view state —
+//! future surface that shows a `TableView`. It owns only view state —
 //! selection, cursor, the in-progress edit, the scroll position — and reads
 //! values from [`TableModel`], a plain-Rust state that is tested without a
 //! window (ADR-0013, ADR-0020).
 //!
 //! The table never writes tune values. A committed edit becomes a
 //! [`TableEvent::EditRequested`], the owner sends it to the core, and the
-//! echoed [`oxtuner_core::TableSummary`] clears the optimistic value. That
+//! echoed [`oxtuner_core::TableView`] clears the optimistic value. That
 //! keeps the core the only owner of the tune while the cell still changes in
 //! the same frame the key was pressed.
 //!
@@ -47,7 +47,7 @@ use gpui_kit::{
     canvas, div, point, px, rgb,
 };
 
-use oxtuner_core::{CellEdit, TableSummary};
+use oxtuner_core::{CellEdit, TableView};
 
 use super::cell::{CellEditing, TableCell};
 use super::geometry::{
@@ -264,7 +264,7 @@ impl Table {
     }
 
     /// Replaces the snapshot and repaints.
-    pub fn set_table(&mut self, table: TableSummary, cx: &mut Context<'_, Self>) {
+    pub fn set_table(&mut self, table: TableView, cx: &mut Context<'_, Self>) {
         self.model.set_table(table);
         self.ensure_cursor_visible();
         cx.notify();

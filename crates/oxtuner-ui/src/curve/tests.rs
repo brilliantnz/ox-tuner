@@ -21,7 +21,7 @@ use gpui_kit::{
     ParentElement as _, Pixels, Point, Render, Styled as _, Subscription, TestAppContext, Window,
     WindowBounds, WindowOptions, div, point, px, size,
 };
-use oxtuner_core::{AxisSummary, CellEdit, CellState, CurveAxes, TableSummary};
+use oxtuner_core::{AxisView, CellEdit, CellState, CurveAxes, TableView};
 
 use super::model::{CurveModel, CurvePoint, CurveSnapshot, curve_ticks, format_tick, tick_step};
 use super::{Curve, CurveEvent};
@@ -450,8 +450,8 @@ fn with_value(snapshot: CurveSnapshot, index: usize, value: f64) -> CurveSnapsho
     next
 }
 
-fn curve_table() -> TableSummary {
-    TableSummary {
+fn curve_table() -> TableView {
+    TableView {
         id: "dwell_correction_curve".to_owned(),
         name: "dwellRates".to_owned(),
         title: "Dwell voltage correction".to_owned(),
@@ -462,7 +462,7 @@ fn curve_table() -> TableSummary {
         cells: vec![250.0, 220.0, 100.0],
         states: vec![CellState::Unknown; 3],
         changed: vec![false; 3],
-        x_axis: AxisSummary {
+        x_axis: AxisView {
             name: "brvBins".to_owned(),
             label: "Voltage".to_owned(),
             units: "V".to_owned(),
@@ -473,7 +473,7 @@ fn curve_table() -> TableSummary {
             power_cycle: false,
             values: vec![6.0, 8.0, 16.0],
         },
-        y_axis: AxisSummary {
+        y_axis: AxisView {
             name: "dwellRates".to_owned(),
             label: "Dwell".to_owned(),
             units: "%".to_owned(),
@@ -500,7 +500,7 @@ fn curve_table() -> TableSummary {
     }
 }
 
-fn two_row_table() -> TableSummary {
+fn two_row_table() -> TableView {
     let mut table = curve_table();
     table.rows = 2;
     table.cells = vec![250.0, 220.0, 100.0, 90.0, 80.0, 70.0];

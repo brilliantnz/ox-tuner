@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::SharedString;
 use oxtuner_core::{
-    BurnSummary, ConnectionSummary, DefinitionSummary, DialogSummary, Failure, FailureCode,
-    ImportSummary, JournalEntry, LogSummary, MenuNode, OpId, PortChoice, PortSummary,
-    ProjectSummary, ReadAllSummary, RevertSummary, SaveSummary, SessionLogSnapshot, TableSummary,
-    TuneStatus, WriteSummary,
+    BurnReport, ConnectionView, DefinitionView, DialogView, Failure, FailureCode, ImportReport,
+    JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport, RevertReport,
+    SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus, WriteReport,
 };
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
@@ -20,9 +19,9 @@ use oxtuner_core::{
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CoreStatus {
     /// A definition loaded on its own (no tune file).
-    pub(crate) definition: Option<DefinitionSummary>,
+    pub(crate) definition: Option<DefinitionView>,
     /// The project the core currently owns, when one is open.
-    pub(crate) project: Option<ProjectSummary>,
+    pub(crate) project: Option<ProjectView>,
     /// The project folder the UI asked to open and is waiting for.
     ///
     /// Transient view state, never persisted and never part of the project
@@ -34,11 +33,11 @@ pub(crate) struct CoreStatus {
     /// filesystem; it starts false because no check has failed yet.
     pub(crate) project_missing: bool,
     /// The last successful save, shown until the next open or failure.
-    pub(crate) last_save: Option<SaveSummary>,
+    pub(crate) last_save: Option<SaveReport>,
     /// The table the UI last read, kept until another table replaces it.
-    pub(crate) table: Option<TableSummary>,
+    pub(crate) table: Option<TableView>,
     /// The dialog the UI last read, kept until another dialog replaces it.
-    pub(crate) dialog: Option<DialogSummary>,
+    pub(crate) dialog: Option<DialogView>,
     /// Definition targets (table or dialog ids) whose last snapshot reported
     /// cells that differ from the file baseline.
     ///
@@ -57,17 +56,17 @@ pub(crate) struct CoreStatus {
     /// can tell that copies it kept are no longer trustworthy.
     pub(crate) tune_revision: u64,
     /// The ECU session, when one is up.
-    pub(crate) connection: Option<ConnectionSummary>,
+    pub(crate) connection: Option<ConnectionView>,
     /// Why the link died, until a reconnect succeeds.
     pub(crate) link_lost: Option<String>,
     /// The last complete page read.
-    pub(crate) pages_read: Option<ReadAllSummary>,
+    pub(crate) pages_read: Option<ReadReport>,
     /// Whether realtime polling is running.
     pub(crate) realtime: bool,
     /// The last saved session trace.
     pub(crate) last_trace: Option<TraceSaved>,
     /// The serial ports the last scan found.
-    pub(crate) ports: Vec<PortSummary>,
+    pub(crate) ports: Vec<PortView>,
     /// Whether a port scan is running.
     pub(crate) scanning: bool,
     /// The port a signature test is running against.
@@ -84,13 +83,13 @@ pub(crate) struct CoreStatus {
     /// The derived write state after the last read, edit or write.
     pub(crate) tune_status: Option<TuneStatus>,
     /// The last verified RAM write.
-    pub(crate) last_write: Option<WriteSummary>,
+    pub(crate) last_write: Option<WriteReport>,
     /// The last verified burn.
-    pub(crate) last_burn: Option<BurnSummary>,
+    pub(crate) last_burn: Option<BurnReport>,
     /// The last import or snapshot restore.
-    pub(crate) last_import: Option<ImportSummary>,
+    pub(crate) last_import: Option<ImportReport>,
     /// The last revert.
-    pub(crate) last_revert: Option<RevertSummary>,
+    pub(crate) last_revert: Option<RevertReport>,
     /// The project's write journal, after `ReadJournal`.
     pub(crate) journal: Option<JournalView>,
     /// The project's snapshots, after `ListSnapshots`.
@@ -139,7 +138,7 @@ pub(crate) struct TestResult {
     /// The port the test ran against.
     pub(crate) port: String,
     /// The summary, or the failure message.
-    pub(crate) outcome: Result<ConnectionSummary, String>,
+    pub(crate) outcome: Result<ConnectionView, String>,
 }
 
 /// A saved session trace, for the output panel.
@@ -153,7 +152,7 @@ pub(crate) struct TraceSaved {
 
 impl CoreStatus {
     /// The definition to name, whether it came from a project or on its own.
-    pub(crate) fn definition(&self) -> Option<&DefinitionSummary> {
+    pub(crate) fn definition(&self) -> Option<&DefinitionView> {
         self.project
             .as_ref()
             .map(|project| &project.definition)
@@ -205,45 +204,45 @@ impl CoreStatus {
     }
 }
 pub(super) enum Update {
-    Loaded(DefinitionSummary),
-    Tested(ConnectionSummary),
-    Opened(ProjectSummary),
-    Saved(SaveSummary),
+    Loaded(DefinitionView),
+    Tested(ConnectionView),
+    Opened(ProjectView),
+    Saved(SaveReport),
     Table {
-        table: Box<TableSummary>,
+        table: Box<TableView>,
         edited: bool,
     },
     Dialog {
-        dialog: DialogSummary,
+        dialog: DialogView,
         edited: bool,
     },
     Menu(Vec<MenuNode>),
-    Connected(ConnectionSummary),
-    Reconnected(ConnectionSummary),
+    Connected(ConnectionView),
+    Reconnected(ConnectionView),
     LinkLost(String),
     Disconnected,
-    PagesRead(ReadAllSummary),
+    PagesRead(ReadReport),
     EcuAdopted,
     Realtime(bool),
     Trace {
         saved: TraceSaved,
     },
-    Written(WriteSummary),
-    Burned(BurnSummary),
-    ControllerCommand,
-    Imported(ImportSummary),
-    Reverted(RevertSummary),
+    Written(WriteReport),
+    Burned(BurnReport),
+    ControllerActionRan,
+    Imported(ImportReport),
+    Reverted(RevertReport),
     TuneStatus(TuneStatus),
     WriteAccess {
         enabled: bool,
-        connection: Option<ConnectionSummary>,
+        connection: Option<ConnectionView>,
     },
     Acknowledged,
     Journal(JournalView),
     Snapshots(Vec<PathBuf>),
     Log {
         running: bool,
-        summary: Option<LogSummary>,
+        report: Option<SessionLogReport>,
     },
     Unloaded,
     Failed(Failure),
@@ -396,7 +395,7 @@ impl CoreStatus {
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
-            Update::ControllerCommand => {
+            Update::ControllerActionRan => {
                 self.failure = None;
                 // A raw command bypassed memory synchronization, so the ECU
                 // image is stale; open tables must read their states again.
@@ -429,14 +428,14 @@ impl CoreStatus {
             Update::Acknowledged => self.write_halted = None,
             Update::Journal(view) => self.journal = Some(view),
             Update::Snapshots(paths) => self.snapshots = paths,
-            Update::Log { running, summary } => {
-                if let Some(summary) = summary {
+            Update::Log { running, report } => {
+                if let Some(report) = report {
                     self.last_log = Some(SessionLogSnapshot::new(
                         running,
-                        Some(summary.path),
-                        summary.frames,
-                        summary.dropped,
-                        summary.bytes,
+                        Some(report.path),
+                        report.frames,
+                        report.dropped,
+                        report.bytes,
                     ));
                 }
                 if running {

@@ -18,8 +18,9 @@ use std::collections::{HashMap, HashSet};
 
 use oxtuner_ini::{Curve, Definition, Menu, MenuItem, MenuTargetKind, RowKind, Shape, Table};
 
+use crate::contract::GateState;
 use crate::gate::{GateEvaluator, resolve_gates};
-use crate::message::{GateState, expression_slot, order_gates, panel_target};
+use crate::view::dialog::{expression_slot, order_gates, panel_target};
 
 /// What a node in the navigation tree is.
 #[expect(

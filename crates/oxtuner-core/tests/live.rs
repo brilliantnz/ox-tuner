@@ -103,9 +103,9 @@ impl Harness {
         self.wait(|event| matches!(event, Event::DefinitionLoaded { .. }));
     }
 
-    fn wait_connected(&self) -> oxtuner_core::ConnectionSummary {
+    fn wait_connected(&self) -> oxtuner_core::ConnectionView {
         match self.wait(|event| matches!(event, Event::Connected { .. })) {
-            Event::Connected { summary, .. } => summary,
+            Event::Connected { view: summary, .. } => summary,
             _ => unreachable!(),
         }
     }
@@ -181,8 +181,9 @@ fn read_all_reports_every_declared_page() {
     harness.wait_connected();
 
     harness.handle.read_all().expect("queued");
-    let Event::PagesRead { summary, .. } =
-        harness.wait(|event| matches!(event, Event::PagesRead { .. }))
+    let Event::PagesRead {
+        report: summary, ..
+    } = harness.wait(|event| matches!(event, Event::PagesRead { .. }))
     else {
         unreachable!()
     };
@@ -250,7 +251,7 @@ fn a_lost_link_is_reported_and_the_core_reconnects() {
     harness.wait(|event| matches!(event, Event::ConnectionLost { .. }));
 
     // The core retries with backoff and reports the ECU again.
-    let Event::Reconnected { summary } =
+    let Event::Reconnected { view: summary } =
         harness.wait(|event| matches!(event, Event::Reconnected { .. }))
     else {
         unreachable!()
@@ -447,7 +448,7 @@ fn a_test_connection_reads_the_signature_and_releases_the_port() {
         .handle
         .test_connection(support::simulator(), None)
         .expect("queued");
-    let Event::ConnectionTested { summary, .. } =
+    let Event::ConnectionTested { view: summary, .. } =
         harness.wait(|event| matches!(event, Event::ConnectionTested { .. }))
     else {
         unreachable!()
@@ -481,7 +482,7 @@ fn a_test_connection_reports_a_mismatched_signature_as_read_only() {
             None,
         )
         .expect("queued");
-    let Event::ConnectionTested { summary, .. } =
+    let Event::ConnectionTested { view: summary, .. } =
         harness.wait(|event| matches!(event, Event::ConnectionTested { .. }))
     else {
         unreachable!()

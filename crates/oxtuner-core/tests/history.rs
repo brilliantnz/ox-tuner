@@ -229,7 +229,7 @@ fn a_session_log_writes_the_definition_order_and_stops_cleanly() {
     let op = core.handle.stop_log().expect("queued");
     let Event::LogState {
         running: false,
-        summary: Some(summary),
+        report: Some(summary),
         ..
     } = core.wait_for_op(op)
     else {

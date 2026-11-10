@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
-    BlockingEventStream, Command, CoreConfig, CoreError, CoreHandle, CoreThread, DefinitionSummary,
+    BlockingEventStream, Command, CoreConfig, CoreError, CoreHandle, CoreThread, DefinitionView,
     Event, OpId, start,
 };
 
@@ -91,9 +91,9 @@ impl Harness {
     }
 }
 
-fn summary_of(event: &Event) -> &DefinitionSummary {
+fn summary_of(event: &Event) -> &DefinitionView {
     match event {
-        Event::DefinitionLoaded { summary, .. } => summary,
+        Event::DefinitionLoaded { view: summary, .. } => summary,
         other => panic!("expected a definition load, got {other:?}"),
     }
 }

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use oxtuner_core::{AxisEdit, AxisKind, CellEdit, CellState, TableSummary};
+use oxtuner_core::{AxisEdit, AxisKind, CellEdit, CellState, TableView};
 
 /// How many displayed rows PageUp/PageDown move.
 pub const PAGE_ROWS: usize = 10;
@@ -280,7 +280,7 @@ const HISTORY_LIMIT: usize = 100;
 
 /// The table grid's model.
 pub struct TableModel {
-    table: Option<TableSummary>,
+    table: Option<TableView>,
     selection: Selection,
     editing: Option<Editing>,
     axis_editing: Option<AxisEditing>,
@@ -342,7 +342,7 @@ impl TableModel {
     /// Replaces the snapshot. A different table resets selection and edit state;
     /// the same table (an echo after an edit) keeps the cursor where it is and
     /// drops only the optimistic values the core has confirmed.
-    pub fn set_table(&mut self, table: TableSummary) {
+    pub fn set_table(&mut self, table: TableView) {
         let same_table = self.table.as_ref().map(|current| &current.id) == Some(&table.id);
         if same_table {
             self.pending.retain(|(row, column), pending| {
@@ -405,7 +405,7 @@ impl TableModel {
     }
 
     /// The rendered snapshot.
-    pub fn table(&self) -> Option<&TableSummary> {
+    pub fn table(&self) -> Option<&TableView> {
         self.table.as_ref()
     }
 
@@ -1825,9 +1825,9 @@ fn nearest_bin(bins: &[f64], value: f64) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn table(rows: usize, columns: usize) -> TableSummary {
+    fn table(rows: usize, columns: usize) -> TableView {
         let cells = (0..rows * columns).map(|value| value as f64).collect();
-        TableSummary {
+        TableView {
             id: "veTable".to_owned(),
             name: "veTable".to_owned(),
             title: "VE Table".to_owned(),
@@ -1838,7 +1838,7 @@ mod tests {
             cells,
             states: vec![CellState::Unknown; rows * columns],
             changed: vec![false; rows * columns],
-            x_axis: oxtuner_core::AxisSummary {
+            x_axis: oxtuner_core::AxisView {
                 name: "rpmBins".to_owned(),
                 label: "RPM".to_owned(),
                 units: "rpm".to_owned(),
@@ -1849,7 +1849,7 @@ mod tests {
                 power_cycle: false,
                 values: (0..columns).map(|value| value as f64 * 500.0).collect(),
             },
-            y_axis: oxtuner_core::AxisSummary {
+            y_axis: oxtuner_core::AxisView {
                 name: "mapBins".to_owned(),
                 label: "MAP".to_owned(),
                 units: "kPa".to_owned(),
@@ -2207,7 +2207,7 @@ mod tests {
         assert!(!model.begin_axis_edit(AxisKind::X, 0));
     }
 
-    fn table_with(rows: usize, columns: usize, cells: &[f64], digits: u8) -> TableSummary {
+    fn table_with(rows: usize, columns: usize, cells: &[f64], digits: u8) -> TableView {
         let mut summary = table(rows, columns);
         summary.cells = cells.to_vec();
         summary.digits = digits;

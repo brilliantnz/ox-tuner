@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a successful [`super::Command::SaveTune`] wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SaveSummary {
+pub struct SaveReport {
     /// The tune file that was rewritten.
     pub path: PathBuf,
     /// Number of values that changed and were written.
@@ -16,7 +16,7 @@ pub struct SaveSummary {
 /// What a verified RAM write did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriteSummary {
+pub struct WriteReport {
     /// Pages written.
     pub pages: usize,
     /// Cells whose values changed and were sent.
@@ -34,7 +34,7 @@ pub struct WriteSummary {
 /// What a verified burn did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BurnSummary {
+pub struct BurnReport {
     /// Pages burned.
     pub pages: usize,
     /// Whether the read-back matched RAM after the burn.
@@ -51,7 +51,7 @@ pub struct BurnSummary {
 /// action can carry several wire commands executed in order.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ControllerCommandSummary {
+pub struct ControllerActionReport {
     /// Dialog the button was pressed in.
     pub dialog: String,
     /// `[ControllerCommands]` name.
@@ -67,7 +67,7 @@ pub struct ControllerCommandSummary {
 /// What reverting to the file baseline did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevertSummary {
+pub struct RevertReport {
     /// Cells that were restored.
     pub cells: usize,
     /// The snapshot taken before the revert.
@@ -77,14 +77,14 @@ pub struct RevertSummary {
 /// What importing another tune did.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportSummary {
+pub struct ImportReport {
     /// The file that was imported.
     pub path: PathBuf,
     /// Cells whose working values changed.
     pub cells: usize,
     /// Variables those cells belong to.
     pub variables: usize,
-    /// Whether the import was approved despite a signature difference (S9).
+    /// Whether the import was approved despite a signature difference.
     pub consented: bool,
     /// The snapshot taken before the import.
     pub snapshot: Option<PathBuf>,
