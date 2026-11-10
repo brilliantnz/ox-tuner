@@ -14,8 +14,8 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_core::{
-    AxisSummary, ChannelInfo, ChartHistory, DefinitionSummary, RealtimeDecoder, Sample,
-    SettingsContext, TableSummary, decimate,
+    AxisView, ChannelInfo, ChartHistory, DefinitionView, RealtimeDecoder, Sample, SettingsContext,
+    TableView, decimate,
 };
 
 const INI: &str = "\
@@ -52,8 +52,8 @@ fn definition() -> oxtuner_ini::Definition {
 }
 
 /// A 16x16 table snapshot, the shape the grid renders.
-fn table() -> TableSummary {
-    let axis = |name: &str| AxisSummary {
+fn table() -> TableView {
+    let axis = |name: &str| AxisView {
         name: name.to_owned(),
         label: name.to_owned(),
         units: String::new(),
@@ -65,7 +65,7 @@ fn table() -> TableSummary {
         values: vec![0.0; 16],
     };
 
-    TableSummary {
+    TableView {
         id: "veTable".to_owned(),
         name: "veTable".to_owned(),
         title: "VE Table".to_owned(),
@@ -93,7 +93,7 @@ fn bench_definition_summary(criterion: &mut Criterion) {
 
     criterion.bench_function("core_definition_summary_synthetic", |bencher| {
         bencher.iter(|| {
-            black_box(DefinitionSummary::new(
+            black_box(DefinitionView::new(
                 black_box("mainController.ini"),
                 black_box(&definition),
             ))

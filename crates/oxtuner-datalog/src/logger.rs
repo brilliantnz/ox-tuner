@@ -88,7 +88,7 @@ pub struct SessionLogSnapshot {
 /// What a finished log wrote.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogSummary {
+pub struct SessionLogReport {
     /// The CSV file.
     pub path: PathBuf,
     /// Frames written.
@@ -277,9 +277,9 @@ impl Logger {
     ///
     /// Returns the writer thread's final I/O error, including a panic in the
     /// thread.
-    pub fn stop(mut self) -> io::Result<LogSummary> {
+    pub fn stop(mut self) -> io::Result<SessionLogReport> {
         self.finish()?;
-        Ok(LogSummary {
+        Ok(SessionLogReport {
             path: self.path.clone(),
             frames: self.status.frames(),
             dropped: self.status.dropped(),
