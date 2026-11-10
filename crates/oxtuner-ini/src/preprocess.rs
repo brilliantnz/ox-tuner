@@ -60,18 +60,66 @@ impl Preprocessed {
     /// define's fields.
     pub fn expand_fields(&self, fields: &[String]) -> Vec<String> {
         let expander = self.expander();
-        expander
-            .expand(fields)
-            .into_iter()
-            .map(Cow::into_owned)
-            .collect()
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        expander.expand(&fields).iter().map(str::to_owned).collect()
     }
 
     /// [`Preprocessed::expand_fields`], also returning undefined references.
     pub fn expand_reporting(&self, fields: &[String]) -> (Vec<String>, Vec<String>) {
         let expander = self.expander();
-        let (values, undefined) = expander.expand_reporting(fields);
-        (values.into_iter().map(Cow::into_owned).collect(), undefined)
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let (values, undefined) = expander.expand_reporting(&fields);
+        (values.iter().map(str::to_owned).collect(), undefined)
+    }
+}
+
+/// An expanded field list: literal fields plus an optional borrowed tail.
+///
+/// A trailing `$define` stays a borrowed slice of the define's resolved fields
+/// instead of being copied into the list. Speeduino's CAN address define has
+/// 65 536 fields and nineteen entries reference it, so copying it into every
+/// entry cost nineteen megabytes of allocation per parse.
+#[derive(Debug)]
+pub struct Fields<'a> {
+    prefix: Vec<Cow<'a, str>>,
+    tail: Option<&'a [&'a str]>,
+}
+
+impl Fields<'_> {
+    /// Number of fields.
+    pub fn len(&self) -> usize {
+        self.prefix.len() + self.tail.map_or(0, <[&str]>::len)
+    }
+
+    /// Whether the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// One field by position, borrowed.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        if index < self.prefix.len() {
+            return self.prefix.get(index).map(AsRef::as_ref);
+        }
+        let offset = index.checked_sub(self.prefix.len())?;
+        self.tail?.get(offset).copied()
+    }
+
+    /// The fields from `index` on, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.prefix
+            .iter()
+            .map(AsRef::as_ref)
+            .chain(self.tail.unwrap_or_default().iter().copied())
+    }
+}
+
+#[cfg(test)]
+impl Fields<'static> {
+    /// A list made only of owned fields, for tests that build the expected
+    /// expansion by hand.
+    pub fn from_owned(prefix: Vec<Cow<'static, str>>) -> Self {
+        Self { prefix, tail: None }
     }
 }
 
@@ -102,49 +150,55 @@ impl<'a> Expander<'a> {
     /// demand and copying the result into every reference made `[Constants]`
     /// dominate the whole parse.
     pub fn new(defines: &'a BTreeMap<String, Vec<String>>) -> Self {
-        let mut resolved = BTreeMap::new();
+        let mut resolved: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
         let mut stack = Vec::new();
         for name in defines.keys() {
             stack.clear();
-            if let Some(fields) = resolve(defines, &mut resolved, name, &mut stack, 0) {
-                resolved.insert(name.clone(), fields);
-            }
+            resolve(defines, &mut resolved, name, &mut stack, 0);
         }
         Self { resolved }
     }
 
     /// Expanded fields.
-    pub fn expand<'s>(&'s self, fields: &[String]) -> Vec<Cow<'s, str>> {
+    pub fn expand<'s>(&'s self, fields: &'s [&'s str]) -> Fields<'s> {
         self.expand_reporting(fields).0
     }
 
     /// Expanded fields plus the names that could not be resolved.
-    pub fn expand_reporting<'s>(&'s self, fields: &[String]) -> (Vec<Cow<'s, str>>, Vec<String>) {
+    pub fn expand_reporting<'s>(&'s self, fields: &'s [&'s str]) -> (Fields<'s>, Vec<String>) {
         let mut undefined = Vec::new();
         let mut expanded = Vec::with_capacity(fields.len());
         let mut index = 0usize;
+        let mut tail: Option<&'s [&'a str]> = None;
 
         while index < fields.len() {
-            let field = &fields[index];
+            let field = fields[index];
             index += 1;
 
             let Some(name) = field.strip_prefix('$').map(str::trim) else {
-                expanded.push(Cow::Owned(field.clone()));
+                expanded.push(Cow::Borrowed(field));
                 continue;
             };
             if name.is_empty() || name.contains(char::is_whitespace) {
-                expanded.push(Cow::Owned(field.clone()));
+                expanded.push(Cow::Borrowed(field));
                 continue;
             }
 
-            if let Some(values) = lookup(&self.resolved, name).map(|(_, values)| values) {
-                // Per-index overrides follow the reference:
-                // `$PINLIST, 1="INVALID", 2="STEPPER"`.
-                if fields
+            if let Some(values) = lookup(&self.resolved, name).map(|(_, values)| &**values) {
+                let has_override = fields
                     .get(index)
                     .and_then(|field| parse_index_override(field))
-                    .is_some()
-                {
+                    .is_some();
+
+                // A trailing define with no per-index override stays borrowed.
+                if index == fields.len() && !has_override {
+                    tail = Some(values);
+                    continue;
+                }
+
+                // Per-index overrides follow the reference:
+                // `$PINLIST, 1="INVALID", 2="STEPPER"`.
+                if has_override {
                     let mut values: Vec<Cow<'s, str>> =
                         values.iter().copied().map(Cow::Borrowed).collect();
                     while let Some(override_field) = fields.get(index) {
@@ -162,11 +216,17 @@ impl<'a> Expander<'a> {
                 }
             } else {
                 undefined.push(name.to_owned());
-                expanded.push(Cow::Owned(field.clone()));
+                expanded.push(Cow::Borrowed(field));
             }
         }
 
-        (expanded, undefined)
+        (
+            Fields {
+                prefix: expanded,
+                tail,
+            },
+            undefined,
+        )
     }
 }
 
@@ -184,13 +244,13 @@ fn resolve<'a>(
     name: &str,
     stack: &mut Vec<&'a String>,
     depth: usize,
-) -> Option<Vec<&'a str>> {
+) -> Option<()> {
     if depth > 32 {
         return None;
     }
     let (key, _) = lookup(defines, name)?;
-    if let Some(fields) = resolved.get(key.as_str()) {
-        return Some(fields.clone());
+    if resolved.contains_key(key.as_str()) {
+        return Some(());
     }
     if stack.contains(&key) {
         // A cycle in `#define` nesting: refuse rather than loop.
@@ -202,15 +262,18 @@ fn resolve<'a>(
     for field in &defines[key.as_str()] {
         match field.strip_prefix('$').map(str::trim) {
             Some(nested) if !nested.is_empty() => {
-                fields.extend(resolve(defines, resolved, nested, stack, depth + 1)?);
+                resolve(defines, resolved, nested, stack, depth + 1);
+                let (nested_key, _) = lookup(defines, nested)?;
+                let nested_fields = resolved.get(nested_key.as_str())?;
+                fields.extend(nested_fields.iter().copied());
             }
             _ => fields.push(field.as_str()),
         }
     }
     stack.pop();
 
-    resolved.insert(key.clone(), fields.clone());
-    Some(fields)
+    resolved.insert(key.clone(), fields);
+    Some(())
 }
 
 /// The entry a `$name` reference names, with the key it is stored under.
@@ -221,14 +284,14 @@ fn lookup<'a, V>(map: &'a BTreeMap<String, V>, name: &str) -> Option<(&'a String
     if let Some(entry) = map.get_key_value(name) {
         return Some(entry);
     }
-    let lowered = name.trim().to_ascii_lowercase();
+    let lowered = name.trim_ascii().to_ascii_lowercase();
     map.get_key_value(lowered.as_str())
 }
 
 fn parse_index_override(field: &str) -> Option<(usize, String)> {
     let (index, value) = field.split_once('=')?;
-    let position: usize = index.trim().parse().ok()?;
-    let value = value.trim();
+    let position: usize = index.trim_ascii().parse().ok()?;
+    let value = value.trim_ascii();
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         Some((position, value.to_owned()))
     } else {
@@ -250,12 +313,18 @@ pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
 fn strip_line_comments(raw: &str) -> String {
     match crate::fields::split_assignment(raw) {
         Some((key, value)) => {
-            let key = strip_comment(key).trim();
-            let value = strip_comment(value).trim();
+            let key = strip_comment(key).trim_ascii();
+            let value = strip_comment(value).trim_ascii();
             if key.is_empty() {
                 String::new()
             } else {
-                format!("{key} = {value}")
+                // `format!` was measurably slower here: this runs once per
+                // physical line of every definition.
+                let mut joined = String::with_capacity(key.len() + value.len() + 3);
+                joined.push_str(key);
+                joined.push_str(" = ");
+                joined.push_str(value);
+                joined
             }
         }
         None => strip_comment(raw).to_owned(),
@@ -291,7 +360,7 @@ pub fn preprocess(
         // Comments come off first: `;#if CONN_SLOW` in a real rusEFI INI is a
         // commented-out directive, not a directive.
         let cleaned = strip_line_comments(raw);
-        let content = cleaned.trim();
+        let content = cleaned.trim_ascii();
         if content.is_empty() {
             continue;
         }
@@ -322,7 +391,7 @@ pub fn preprocess(
             && preprocessed
                 .lines
                 .last()
-                .is_some_and(|previous| previous.text.trim_end().ends_with(','));
+                .is_some_and(|previous| previous.text.trim_ascii_end().ends_with(','));
 
         if continuation {
             if let Some(previous) = preprocessed.lines.last_mut() {
@@ -391,7 +460,7 @@ fn handle_directive(
     fatal: &mut Vec<Diagnostic>,
 ) {
     let (name, rest) = match directive.split_once(char::is_whitespace) {
-        Some((name, rest)) => (name, rest.trim()),
+        Some((name, rest)) => (name, rest.trim_ascii()),
         None => (directive, ""),
     };
     let name = name.to_ascii_lowercase();
@@ -514,8 +583,8 @@ fn handle_active_directive(
     match name {
         "define" => {
             let (define_name, value) = match rest.split_once('=') {
-                Some((define_name, value)) => (define_name.trim(), value.trim()),
-                None => (rest.trim(), ""),
+                Some((define_name, value)) => (define_name.trim_ascii(), value.trim_ascii()),
+                None => (rest.trim_ascii(), ""),
             };
             if define_name.is_empty() {
                 preprocessed.diagnostics.push(Diagnostic::new(
@@ -527,9 +596,10 @@ fn handle_active_directive(
                 ));
                 return;
             }
-            preprocessed
-                .defines
-                .insert(define_name.to_ascii_lowercase(), split_fields(value));
+            preprocessed.defines.insert(
+                define_name.to_ascii_lowercase(),
+                split_fields(value).into_iter().map(str::to_owned).collect(),
+            );
         }
         "set" | "unset" => {
             for flag in rest.split_whitespace() {
@@ -790,7 +860,11 @@ mod tests {
 
         let (_, value) =
             crate::fields::split_assignment(&output.lines[1].text).expect("assignment");
-        let expanded = output.expand_fields(&split_fields(value));
+        let value = split_fields(value)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let expanded = output.expand_fields(&value);
 
         assert_eq!(
             expanded,
@@ -810,7 +884,13 @@ mod tests {
             crate::fields::split_assignment(&output.lines[1].text).expect("assignment");
 
         assert_eq!(
-            output.expand_fields(&split_fields(value))[4..],
+            {
+                let value = split_fields(value)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                output.expand_fields(&value)
+            }[4..],
             ["\"A\"", "\"INVALID\"", "\"C\""]
         );
     }
@@ -819,7 +899,11 @@ mod tests {
     fn a_define_cycle_is_refused_instead_of_looping() {
         let output = run("[X]\n#define a = $b\n#define b = $a\nx = $a\n");
 
-        let (expanded, unresolved) = output.expand_reporting(&split_fields("$a"));
+        let value = split_fields("$a")
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let (expanded, unresolved) = output.expand_reporting(&value);
 
         assert_eq!(expanded, vec!["$a"], "the reference stays visible");
         assert_eq!(unresolved, vec!["a"], "and is reported");
@@ -885,6 +969,60 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "hash-comments")
+        );
+    }
+
+    #[test]
+    fn a_trailing_define_is_borrowed_but_reads_exactly_like_the_expansion() {
+        // The whole option list of a `bits` entry is one `$define`. It stays
+        // borrowed, and the reader must see the same fields in the same order.
+        let output = run("[X]\n#define big = \"a\", \"b\", \"c\"\nx = bits, U08, 0, [0:2], $big\n");
+
+        let (_, value) =
+            crate::fields::split_assignment(&output.lines[1].text).expect("assignment");
+        let raw = split_fields(value);
+        let expander = output.expander();
+        let fields = expander.expand(&raw);
+
+        assert_eq!(fields.len(), 7);
+        assert_eq!(
+            fields.iter().collect::<Vec<_>>(),
+            ["bits", "U08", "0", "[0:2]", "\"a\"", "\"b\"", "\"c\""]
+        );
+    }
+
+    #[test]
+    fn a_define_in_the_middle_is_still_spliced_inline() {
+        // Only a *trailing* define is borrowed; one before another field has to
+        // be expanded in place.
+        let output = run("[X]\n#define two = \"a\", \"b\"\nx = bits, $two, \"z\"\n");
+
+        let (_, value) =
+            crate::fields::split_assignment(&output.lines[1].text).expect("assignment");
+        let raw = split_fields(value);
+        let expander = output.expander();
+        let fields = expander.expand(&raw);
+
+        assert_eq!(
+            fields.iter().collect::<Vec<_>>(),
+            ["bits", "\"a\"", "\"b\"", "\"z\""]
+        );
+    }
+
+    #[test]
+    fn a_trailing_define_with_a_per_index_override_is_expanded() {
+        // The override rewrites one element, so the list cannot stay borrowed.
+        let output = run("[X]\n#define two = \"a\", \"b\"\nx = bits, $two, 1=\"B\"\n");
+
+        let (_, value) =
+            crate::fields::split_assignment(&output.lines[1].text).expect("assignment");
+        let raw = split_fields(value);
+        let expander = output.expander();
+        let fields = expander.expand(&raw);
+
+        assert_eq!(
+            fields.iter().collect::<Vec<_>>(),
+            ["bits", "\"a\"", "\"B\""]
         );
     }
 }

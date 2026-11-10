@@ -5,8 +5,6 @@
 //! "units"`) and the legacy row without a class token. All three appear in real
 //! Speeduino and rusEFI files.
 
-use std::borrow::Cow;
-
 use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{
     BitRange, Channel, ChannelKind, DataType, Definition, Number, ScatteredConfig, Text,
@@ -29,18 +27,18 @@ pub(crate) fn parse_channels(
 
         match key.to_ascii_lowercase().as_str() {
             "ochgetcommand" => {
-                definition.comms.och_get_command = Some(CommandTemplate::parse(&value));
+                definition.comms.och_get_command = Some(CommandTemplate::parse(value));
                 section.understand(*line);
                 continue;
             }
             "ochblocksize" => {
-                definition.comms.och_block_size = crate::fields::parse_u32(&value);
+                definition.comms.och_block_size = crate::fields::parse_u32(value);
                 section.understand(*line);
                 continue;
             }
             "maxunusedruntimerange" => {
                 // An unreadable value keeps the dialect default instead of guessing.
-                if let Some(range) = crate::fields::parse_u32(&value) {
+                if let Some(range) = crate::fields::parse_u32(value) {
                     definition.comms.max_unused_runtime_range = range;
                 } else {
                     section.warn(
@@ -60,7 +58,7 @@ pub(crate) fn parse_channels(
                     .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
-                scattered.get_command = Some(CommandTemplate::parse(&value));
+                scattered.get_command = Some(CommandTemplate::parse(value));
                 section.understand(*line);
                 continue;
             }
@@ -69,7 +67,7 @@ pub(crate) fn parse_channels(
                     .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
-                scattered.offset_array = Some(crate::fields::unquote(&value).to_owned());
+                scattered.offset_array = Some(crate::fields::unquote(value).to_owned());
                 section.understand(*line);
                 continue;
             }
@@ -78,15 +76,16 @@ pub(crate) fn parse_channels(
                     .comms
                     .scattered
                     .get_or_insert_with(ScatteredConfig::default);
-                scattered.enabled = Some(value.clone());
+                scattered.enabled = Some(value.to_owned());
                 section.understand(*line);
                 continue;
             }
             _ => {}
         }
 
-        let fields = expander.expand(&split_fields(&value));
-        match parse_channel(&key, &value, &fields, *line) {
+        let raw_fields = split_fields(value);
+        let fields = expander.expand(&raw_fields);
+        match parse_channel(key, value, &fields, *line) {
             Ok(channel) => {
                 let name = channel.name.clone();
                 if definition.channels.insert(&name, channel).is_some() {
@@ -106,10 +105,10 @@ pub(crate) fn parse_channels(
 fn parse_channel(
     name: &str,
     raw: &str,
-    fields: &[Cow<'_, str>],
+    fields: &crate::preprocess::Fields<'_>,
     line: u32,
 ) -> Result<Channel, String> {
-    let first = fields.first().ok_or("no value")?.trim().to_owned();
+    let first = fields.get(0).ok_or("no value")?.trim_ascii().to_owned();
 
     // Derived channel: `name = { ego1 / 10.0 }, "AFR"`.
     if crate::fields::is_expression_field(&first) {
@@ -131,17 +130,12 @@ fn parse_channel(
 
     let data_type = fields
         .get(index)
-        .and_then(|field| DataType::parse(field))
-        .ok_or_else(|| {
-            format!(
-                "data type {:?}",
-                fields.get(index).map_or("", AsRef::as_ref)
-            )
-        })?;
+        .and_then(DataType::parse)
+        .ok_or_else(|| format!("data type {:?}", fields.get(index).unwrap_or("")))?;
     index += 1;
 
     let offset_field = fields.get(index).ok_or("no offset")?;
-    let offset = match offset_field.trim().to_ascii_lowercase().as_str() {
+    let offset = match offset_field.trim_ascii().to_ascii_lowercase().as_str() {
         "nextoffset" | "lastoffset" => {
             // Realtime offsets are absolute in every real INI; a relative
             // keyword here has no previous element to be relative to.
@@ -158,7 +152,7 @@ fn parse_channel(
 
     let mut bits = None;
     if let Some(field) = fields.get(index)
-        && field.trim().starts_with('[')
+        && field.trim_ascii().starts_with('[')
     {
         bits = parse_bit_range(field);
         index += 1;
@@ -174,10 +168,10 @@ fn parse_channel(
 
     let scale = fields
         .get(index)
-        .map_or(Number::Literal(1.0), |field| Number::parse(field));
+        .map_or(Number::Literal(1.0), Number::parse);
     let translate = fields
         .get(index + 1)
-        .map_or(Number::Literal(0.0), |field| Number::parse(field));
+        .map_or(Number::Literal(0.0), Number::parse);
 
     let kind = if lowered == "bits" {
         ChannelKind::Measured {
@@ -210,7 +204,7 @@ fn parse_channel(
 fn parse_computed_channel(
     name: &str,
     raw: &str,
-    fields: &[Cow<'_, str>],
+    fields: &crate::preprocess::Fields<'_>,
     line: u32,
     field: &str,
 ) -> Result<Channel, String> {
@@ -219,7 +213,7 @@ fn parse_computed_channel(
         .map_err(|error| format!("expression {source:?}: {error}"))?;
     let units = fields
         .get(1)
-        .map_or(Text::Literal(String::new()), |field| Text::parse(field));
+        .map_or(Text::Literal(String::new()), Text::parse);
 
     Ok(Channel {
         name: name.to_owned(),
@@ -234,10 +228,10 @@ fn parse_computed_channel(
 }
 
 fn parse_bit_range(field: &str) -> Option<BitRange> {
-    let inner = field.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let inner = field.trim_ascii().strip_prefix('[')?.strip_suffix(']')?;
     let (low, high) = inner.split_once(':')?;
-    let low: u8 = low.trim().parse().ok()?;
-    let high: u8 = high.trim().parse().ok()?;
+    let low: u8 = low.trim_ascii().parse().ok()?;
+    let high: u8 = high.trim_ascii().parse().ok()?;
     (low <= high).then_some(BitRange { low, high })
 }
 
@@ -253,10 +247,10 @@ pub(crate) fn parse_burst_mode(
         };
         match key.to_ascii_lowercase().as_str() {
             "getcommand" => {
-                definition.comms.burst_get_command = Some(CommandTemplate::parse(&value));
+                definition.comms.burst_get_command = Some(CommandTemplate::parse(value));
                 section.understand(*line);
             }
-            _ => section.unrecognized_key(&key, *line),
+            _ => section.unrecognized_key(key, *line),
         }
     }
 }
@@ -266,8 +260,13 @@ mod tests {
     use super::*;
 
     /// The parser takes the expanded fields; a test writes them out directly.
-    fn fields(value: &str) -> Vec<Cow<'static, str>> {
-        split_fields(value).into_iter().map(Cow::Owned).collect()
+    fn fields(value: &'static str) -> crate::preprocess::Fields<'static> {
+        crate::preprocess::Fields::from_owned(
+            split_fields(value)
+                .into_iter()
+                .map(std::borrow::Cow::Borrowed)
+                .collect(),
+        )
     }
 
     #[test]

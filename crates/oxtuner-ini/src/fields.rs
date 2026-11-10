@@ -7,6 +7,9 @@
 //! - a comma inside `{ … }` or `"…"` does not split fields, or
 //!   `{ bitStringValue(units, algorithm) }` becomes two fields;
 //! - field *counts* must never be assumed — trailing fields are optional.
+//!
+//! Whitespace is ASCII, so every trim in this module is [`str::trim_ascii`].
+//! A no-break space is data, not padding, and is kept as part of the field.
 
 use std::fmt;
 
@@ -25,19 +28,23 @@ fn hex_byte(high: u32, low: u32) -> u8 {
 }
 
 /// Removes a trailing `;` comment, respecting quoted strings.
+///
+/// The scan is byte-wise. Every delimiter the dialect uses is ASCII, and a
+/// UTF-8 continuation byte is never an ASCII byte, so a byte can only match
+/// where the matching character starts.
 pub fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
     let mut escaped = false;
 
-    for (index, character) in line.char_indices() {
+    for (index, &byte) in line.as_bytes().iter().enumerate() {
         if escaped {
             escaped = false;
             continue;
         }
-        match character {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            ';' if !in_quotes => return &line[..index],
+        match byte {
+            b'\\' if in_quotes => escaped = true,
+            b'"' => in_quotes = !in_quotes,
+            b';' if !in_quotes => return &line[..index],
             _ => {}
         }
     }
@@ -52,20 +59,20 @@ pub fn strip_comment(line: &str) -> &str {
 pub fn split_assignment(line: &str) -> Option<(&str, &str)> {
     let mut in_quotes = false;
     let mut escaped = false;
-    let mut depth = 0usize;
+    let mut depth = 0u32;
 
-    for (index, character) in line.char_indices() {
+    for (index, &byte) in line.as_bytes().iter().enumerate() {
         if escaped {
             escaped = false;
             continue;
         }
-        match character {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            '{' if !in_quotes => depth += 1,
-            '}' if !in_quotes => depth = depth.saturating_sub(1),
-            '=' if !in_quotes && depth == 0 => {
-                return Some((line[..index].trim(), line[index + 1..].trim()));
+        match byte {
+            b'\\' if in_quotes => escaped = true,
+            b'"' => in_quotes = !in_quotes,
+            b'{' if !in_quotes => depth += 1,
+            b'}' if !in_quotes => depth = depth.saturating_sub(1),
+            b'=' if !in_quotes && depth == 0 => {
+                return Some((line[..index].trim_ascii(), line[index + 1..].trim_ascii()));
             }
             _ => {}
         }
@@ -81,7 +88,11 @@ pub fn has_assignment(line: &str) -> bool {
 
 /// Splits a comma-separated value into trimmed fields, ignoring commas inside
 /// `"…"` and `{ … }`. Empty fields are dropped.
-pub fn split_fields(value: &str) -> Vec<String> {
+///
+/// The fields borrow `value`; a caller that stores them converts at the point
+/// of storage. A definition has tens of thousands of fields, so copying each
+/// one was a measurable share of a parse.
+pub fn split_fields(value: &str) -> Vec<&str> {
     split(value, false)
 }
 
@@ -90,32 +101,32 @@ pub fn split_fields(value: &str) -> Vec<String> {
 /// Command template lists need this: rusEFI declares `burnCommand = "B%2i", "", ""`,
 /// where the empty strings mark pages that cannot be burned. Dropping them
 /// would shift every later page onto the wrong command.
-pub fn split_fields_preserving_empty(value: &str) -> Vec<String> {
+pub fn split_fields_preserving_empty(value: &str) -> Vec<&str> {
     split(value, true)
 }
 
 /// The one scanner behind both [`split_fields`] and
 /// [`split_fields_preserving_empty`]; trimming happens once, on the way out.
-fn split(value: &str, keep_empty: bool) -> Vec<String> {
+fn split(value: &str, keep_empty: bool) -> Vec<&str> {
     let mut fields = Vec::new();
     let mut start = 0usize;
     let mut in_quotes = false;
     let mut escaped = false;
-    let mut depth = 0usize;
+    let mut depth = 0u32;
 
-    for (index, character) in value.char_indices() {
+    for (index, &byte) in value.as_bytes().iter().enumerate() {
         if escaped {
             escaped = false;
             continue;
         }
-        match character {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            '{' if !in_quotes => depth += 1,
-            '}' if !in_quotes => depth = depth.saturating_sub(1),
-            ',' if !in_quotes && depth == 0 => {
+        match byte {
+            b'\\' if in_quotes => escaped = true,
+            b'"' => in_quotes = !in_quotes,
+            b'{' if !in_quotes => depth += 1,
+            b'}' if !in_quotes => depth = depth.saturating_sub(1),
+            b',' if !in_quotes && depth == 0 => {
                 push_field(&mut fields, &value[start..index], keep_empty);
-                start = index + character.len_utf8();
+                start = index + 1;
             }
             _ => {}
         }
@@ -125,18 +136,17 @@ fn split(value: &str, keep_empty: bool) -> Vec<String> {
     fields
 }
 
-/// Adds one trimmed field. Fields are copied as slices rather than grown
-/// character by character: a real definition has thousands of them.
-fn push_field(fields: &mut Vec<String>, field: &str, keep_empty: bool) {
-    let field = field.trim();
+/// Adds one trimmed field.
+fn push_field<'a>(fields: &mut Vec<&'a str>, field: &'a str, keep_empty: bool) {
+    let field = field.trim_ascii();
     if keep_empty || !field.is_empty() {
-        fields.push(field.to_owned());
+        fields.push(field);
     }
 }
 
 /// Removes one layer of double quotes, if present.
 pub fn unquote(value: &str) -> &str {
-    let value = value.trim();
+    let value = value.trim_ascii();
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         &value[1..value.len() - 1]
     } else {
@@ -146,18 +156,19 @@ pub fn unquote(value: &str) -> &str {
 
 /// Whether a field is a `{ … }` expression.
 pub fn is_expression_field(value: &str) -> bool {
-    let value = value.trim();
+    let value = value.trim_ascii();
     value.starts_with('{') && value.ends_with('}') && value.len() >= 2
 }
 
 /// The body of a `{ … }` expression field, without the braces.
 pub fn expression_body(value: &str) -> Option<&str> {
-    is_expression_field(value).then(|| value.trim()[1..value.trim().len() - 1].trim())
+    is_expression_field(value)
+        .then(|| value.trim_ascii()[1..value.trim_ascii().len() - 1].trim_ascii())
 }
 
 /// Parses an integer, accepting decimal and `0x` hex (iniSpec 3.50).
 pub fn parse_u32(value: &str) -> Option<u32> {
-    let value = value.trim();
+    let value = value.trim_ascii();
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -169,7 +180,7 @@ pub fn parse_u32(value: &str) -> Option<u32> {
 
 /// Parses a float, accepting integers, `0x` hex and a leading `+`.
 pub fn parse_f64(value: &str) -> Option<f64> {
-    let value = value.trim();
+    let value = value.trim_ascii();
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))

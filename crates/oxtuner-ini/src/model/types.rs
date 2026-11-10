@@ -20,7 +20,7 @@ pub enum Endianness {
 impl Endianness {
     /// Parses `little` / `big`.
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match value.trim_ascii().to_ascii_lowercase().as_str() {
             "little" | "lsb" | "intel" => Some(Self::Little),
             "big" | "msb" | "motorola" => Some(Self::Big),
             _ => None,
@@ -71,7 +71,7 @@ pub enum DataType {
 impl DataType {
     /// Parses the dialect's type tokens.
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_uppercase().as_str() {
+        Some(match value.trim_ascii().to_ascii_uppercase().as_str() {
             "U08" | "UBYTE" => Self::U08,
             "S08" | "SBYTE" => Self::S08,
             "U16" => Self::U16,
@@ -144,7 +144,7 @@ pub enum Number {
 impl Number {
     /// Parses a numeric field, with or without braces.
     pub fn parse(field: &str) -> Self {
-        let field = field.trim();
+        let field = field.trim_ascii();
         if crate::fields::is_expression_field(field) {
             let source = crate::fields::expression_body(field)
                 .unwrap_or("")
@@ -242,7 +242,7 @@ pub enum Text {
 impl Text {
     /// Parses a units/label field.
     pub fn parse(field: &str) -> Self {
-        let field = field.trim();
+        let field = field.trim_ascii();
         if crate::fields::is_expression_field(field) {
             let source = crate::fields::expression_body(field)
                 .unwrap_or("")

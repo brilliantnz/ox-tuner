@@ -98,7 +98,7 @@ proptest::proptest! {
                     ordered
                         .entries
                         .iter()
-                        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(query.trim()))
+                        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(query.trim_ascii()))
                         .map(|(_, value)| value)
                 })
                 .copied();

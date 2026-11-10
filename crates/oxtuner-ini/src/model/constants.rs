@@ -25,7 +25,7 @@ pub enum ConstantClass {
 impl ConstantClass {
     /// Parses the class token.
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_lowercase().as_str() {
+        Some(match value.trim_ascii().to_ascii_lowercase().as_str() {
             "bits" => Self::Bits,
             "scalar" => Self::Scalar,
             "array" => Self::Array,

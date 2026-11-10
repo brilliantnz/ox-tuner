@@ -243,7 +243,7 @@ fn bench_expand_reference(criterion: &mut Criterion) {
     let settings = SettingsContext::new();
     let preprocessed = preprocess(&text, &settings, None).expect("preprocesses");
     let expander = preprocessed.expander();
-    let fields = vec!["$canAddresses".to_owned()];
+    let fields = ["$canAddresses"];
 
     criterion.bench_function("ini_expand_one_reference_65536", |bencher| {
         bencher.iter(|| black_box(expander.expand(black_box(&fields))));

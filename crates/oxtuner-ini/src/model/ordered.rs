@@ -88,7 +88,7 @@ impl<T> Ordered<T> {
             return Some(found);
         }
 
-        let name = name.trim();
+        let name = name.trim_ascii();
         match self.ci_lookup.get(&ci_hash(name)) {
             Some(&position) => {
                 let (candidate, value) = &self.entries[position];
