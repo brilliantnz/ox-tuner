@@ -448,7 +448,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
 pub(crate) fn check_page_data(
     msq: &Msq,
     definition: &Definition,
-    layout: &TuneLayout,
+    layout: &std::sync::Arc<TuneLayout>,
     tune: &Tune,
     report: &mut LoadReport,
 ) {
@@ -457,19 +457,25 @@ pub(crate) fn check_page_data(
         return;
     }
 
-    let mut entries_by_page: BTreeMap<u16, Vec<String>> = BTreeMap::new();
+    // Layout indices rather than names: the comparison below runs once per
+    // entry, and every name lookup is a hash over the whole name.
+    let mut entries_by_page: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for entry in msq.entries() {
         if let EntryPage::Numbered(page) = entry.page
             && !entry.is_nameless()
+            && let Some(variable) = layout.index(&entry.name)
         {
             entries_by_page
                 .entry(page.get())
                 .or_default()
-                .push(entry.name.clone());
+                .push(variable);
         }
     }
 
-    let layout_arc = std::sync::Arc::new(layout.clone());
+    // One scratch image for every page. A constant belongs to exactly one page,
+    // so the names compared on one page are never written by another, and
+    // rebuilding the image per page would allocate once per variable per page.
+    let mut scratch = Tune::new(std::sync::Arc::clone(layout));
 
     for (number, bytes) in blocks {
         let Ok(number) = u16::try_from(number) else {
@@ -495,26 +501,19 @@ pub(crate) fn check_page_data(
             continue;
         }
 
-        let mut scratch = Tune::new(std::sync::Arc::clone(&layout_arc));
         if oxtuner_tune::decode_page(layout, ini, &bytes, &mut scratch).is_err() {
             continue;
         }
 
         let mut mismatched: Vec<&str> = Vec::new();
-        for name in entries_by_page
-            .get(&number)
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-        {
-            if let Some(spec) = layout.variable(name)
-                && selects_hidden_option(definition, spec, tune)
-            {
+        for &variable in entries_by_page.get(&number).into_iter().flatten() {
+            let spec = &layout.variables()[variable];
+            if selects_hidden_option(definition, spec, tune) {
                 continue;
             }
 
-            if tune.value(name) != scratch.value(name) {
-                mismatched.push(name);
+            if tune.values().get(variable) != scratch.values().get(variable) {
+                mismatched.push(&spec.name);
             }
         }
 

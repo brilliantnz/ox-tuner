@@ -22,6 +22,10 @@ oxtuner-ini.workspace = true
 oxtuner-tune.workspace = true
 postcard = { workspace = true, default-features = false, features = ["alloc"] }
 serde.workspace = true
+# The provenance digest and the definition-cache key. The `sha2` crate's
+# backends use the CPU's SHA instructions; 0.11 is the first release whose
+# aarch64 path does.
+sha2 = "0.11.1"
 tracing.workspace = true
 
 [dev-dependencies]

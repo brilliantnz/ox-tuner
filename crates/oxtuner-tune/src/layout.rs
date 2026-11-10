@@ -468,7 +468,10 @@ impl TuneLayout {
     }
 
     fn insert(&mut self, spec: VariableSpec) {
-        if self.index(&spec.name).is_some() {
+        // One hash per variable: the duplicate check and the index entry fold
+        // the same name.
+        let hash = ci_hash(&spec.name);
+        if self.find(hash, &spec.name).is_some() {
             self.issues.push(LayoutIssue::new(
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedAttribute,
@@ -479,7 +482,7 @@ impl TuneLayout {
         }
 
         let index = self.variables.len();
-        self.lookup.entry(ci_hash(&spec.name)).or_insert(index);
+        self.lookup.entry(hash).or_insert(index);
         self.variables.push(spec);
     }
 
@@ -549,22 +552,22 @@ impl TuneLayout {
 
     /// The index of a variable by name, case-insensitively.
     pub fn index(&self, name: &str) -> Option<usize> {
-        let hash = ci_hash(name);
-        if let Some(&index) = self.lookup.get(&hash) {
-            let variable = &self.variables[index];
-            if variable.name.eq_ignore_ascii_case(name) {
-                return Some(index);
-            }
+        self.find(ci_hash(name), name)
+    }
 
-            // A hash collision stored another name first; the linear scan is
-            // the oracle for that case.
-            return self
-                .variables
-                .iter()
-                .position(|variable| variable.name.eq_ignore_ascii_case(name));
+    /// The index of a variable whose folded name hashes to `hash`.
+    fn find(&self, hash: u64, name: &str) -> Option<usize> {
+        let index = *self.lookup.get(&hash)?;
+        let variable = &self.variables[index];
+        if variable.name.eq_ignore_ascii_case(name) {
+            return Some(index);
         }
 
-        None
+        // A hash collision stored another name first; the linear scan is the
+        // oracle for that case.
+        self.variables
+            .iter()
+            .position(|variable| variable.name.eq_ignore_ascii_case(name))
     }
 
     /// Calibration pages, ordered by page number.
