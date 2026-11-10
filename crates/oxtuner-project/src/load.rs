@@ -532,16 +532,32 @@ fn load_entry(
                     tokens.len()
                 ));
             }
+
+            let mut clamped: Option<(f64, f64, f64)> = None;
+
             for (index, token) in tokens.iter().enumerate() {
                 let user = token
                     .parse::<f64>()
                     .map_err(|_| format!("`{token}` is not a number"))?;
+
+                // A file value outside the declared range is clamped the way
+                // `TunerStudio` loads one, and reported once per variable.
+                let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
+                let high = spec.maximum.unwrap_or(f64::INFINITY);
+                let (low, high) = (low.min(high), low.max(high));
+                let user = if user < low || user > high {
+                    clamped.get_or_insert((user, low, high));
+                    user.clamp(low, high)
+                } else {
+                    user
+                };
+
                 let conversion = spec.to_raw(user).map_err(|error| error.to_string())?;
                 if conversion.is_out_of_range() {
                     report.warn(
                         IssueKind::ValueOutOfRange,
                         format!(
-                            "`{}` = {user} is outside the declared range; it was kept, not clamped",
+                            "`{}` = {user} cannot be stored in the declared type; it was kept, not clamped",
                             spec.name
                         ),
                     );
@@ -549,6 +565,24 @@ fn load_entry(
                 tune.set_raw_at(&spec.name, index, conversion.raw)
                     .map_err(|error| error.to_string())?;
             }
+
+            if let Some((found, low, high)) = clamped {
+                let range = match (low.is_finite(), high.is_finite()) {
+                    (true, true) => format!("{low}..{high}"),
+                    (true, false) => format!("the declared minimum {low}"),
+                    (false, true) => format!("the declared maximum {high}"),
+                    (false, false) => "its declared range".to_owned(),
+                };
+
+                report.warn(
+                    IssueKind::ValueClamped,
+                    format!(
+                        "`{}` = {found} is outside {range}; it was clamped",
+                        spec.name
+                    ),
+                );
+            }
+
             Ok(())
         }
     }
@@ -1218,5 +1252,59 @@ boostTableLimit = { boostType == 0 ? 100.0 : 511 }
 
         let spec = loaded.layout.variable("boostTable").unwrap();
         assert_eq!(spec.maximum, Some(100.0));
+    }
+
+    const CLAMP_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+bins = array, U08, 0, [2], "", 1, 0, 0, 100, 0
+scalarValue = scalar, U08, 2, "", 1, 0, 0, 100, 0
+"#;
+
+    const CLAMP_MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant cols="1" rows="2" name="bins">5 150</constant>
+        <constant name="scalarValue">150</constant>
+    </page>
+</msq>"#;
+
+    #[test]
+    fn a_file_value_past_the_declared_range_is_clamped_and_reported() {
+        let definition = parse_str(CLAMP_DEFINITION, &SettingsContext::new()).expect("parses");
+        let loaded = load(&Msq::parse(CLAMP_MSQ.as_bytes()).unwrap(), &definition);
+
+        assert_eq!(loaded.tune.raw_at("bins", 0).unwrap(), 5.0);
+        assert_eq!(loaded.tune.raw_at("bins", 1).unwrap(), 100.0);
+        assert_eq!(loaded.tune.scalar_raw("scalarValue").unwrap(), 100.0);
+
+        let clamped: Vec<&str> = loaded
+            .report
+            .warnings
+            .iter()
+            .filter(|issue| issue.kind == IssueKind::ValueClamped)
+            .map(|issue| issue.message.as_str())
+            .collect();
+
+        assert_eq!(clamped.len(), 2, "{clamped:?}");
+        assert!(
+            clamped
+                .iter()
+                .any(|message| message.contains("scalarValue"))
+        );
+        assert!(clamped.iter().any(|message| message.contains("bins")));
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| issue.kind != IssueKind::ValueOutOfRange),
+            "a clamped value is not also reported as kept"
+        );
     }
 }

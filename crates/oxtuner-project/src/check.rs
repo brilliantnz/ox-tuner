@@ -61,6 +61,8 @@ pub enum IssueKind {
     ValueSkipped,
     /// A value was stored but lies outside the declared range.
     ValueOutOfRange,
+    /// A file value outside the declared range was clamped on load.
+    ValueClamped,
     /// A `<pageData>` hex block disagrees with the decoded `<constant>` values.
     PageDataMismatch,
 }
