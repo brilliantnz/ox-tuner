@@ -1267,11 +1267,8 @@ fn field_row(walk: &mut RowWalk<'_>, row: &DialogRow, section: &str) -> Option<D
     let display_only = row.kind == RowKind::DisplayOnlyField;
     // `EditScalar` carries only a variable name, so an array element can be
     // shown but not stored yet.
-    let writable = reference.index.is_none()
-        && !display_only
-        && !project.is_read_only()
-        && tune.is_writable(variable)
-        && value.is_some();
+    let writable =
+        !display_only && !project.is_read_only() && tune.is_writable(variable) && value.is_some();
     let power_cycle = project
         .definition()
         .extensions

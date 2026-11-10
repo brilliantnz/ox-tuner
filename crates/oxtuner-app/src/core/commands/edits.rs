@@ -13,12 +13,18 @@ pub(crate) fn read_table(name: &str, cx: &mut App) {
 }
 
 /// Asks the core to apply a dialog scalar edit.
-pub(crate) fn edit_scalar(dialog: &str, name: &str, value: f64, cx: &mut App) {
+pub(crate) fn edit_scalar(
+    dialog: &str,
+    name: &str,
+    index: Option<usize>,
+    value: f64,
+    cx: &mut App,
+) {
     send(
         cx,
         FailureCode::DialogEditRejected,
         "edit-scalar",
-        |handle| handle.edit_scalar(dialog, name, value),
+        |handle| handle.edit_scalar_at(dialog, name, index, value),
     );
 }
 

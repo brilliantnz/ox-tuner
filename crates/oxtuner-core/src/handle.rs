@@ -335,9 +335,28 @@ impl CoreHandle {
         name: impl Into<String>,
         value: f64,
     ) -> Result<OpId, CoreError> {
+        self.edit_scalar_at(dialog, name, None, value)
+    }
+
+    /// Applies one scalar or array-element edit from a dialog.
+    ///
+    /// The reply is [`crate::Event::DialogEdited`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn edit_scalar_at(
+        &self,
+        dialog: impl Into<String>,
+        name: impl Into<String>,
+        index: Option<usize>,
+        value: f64,
+    ) -> Result<OpId, CoreError> {
         self.send_request(CommandRequest::EditScalar {
             dialog: dialog.into(),
             name: name.into(),
+            index,
             value,
         })
     }

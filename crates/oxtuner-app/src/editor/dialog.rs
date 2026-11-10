@@ -567,7 +567,7 @@ impl DialogEditor {
 
         self.pending.insert(variable.clone(), value);
         self.failure = None;
-        crate::core::edit_scalar(&dialog_id, &variable, value, cx);
+        crate::core::edit_scalar(&dialog_id, &variable, field.index, value, cx);
         cx.notify();
     }
 
