@@ -1665,6 +1665,9 @@ mod tests {
         assert_eq!(records[0].count(), 1, "a repeated status does not stack");
     }
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn a_dialog_renders_a_card_for_each_panel(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);

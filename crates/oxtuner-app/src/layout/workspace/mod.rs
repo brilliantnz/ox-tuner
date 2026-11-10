@@ -732,6 +732,9 @@ mod tests {
         );
     }
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn the_tab_strip_draws_one_tab_per_panel(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -754,6 +757,9 @@ mod tests {
         );
     }
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn a_modified_document_shows_a_dot_instead_of_its_close_button(cx: &mut TestAppContext) {
         let (handle, workspace, _) = open(cx);
@@ -903,6 +909,9 @@ mod tests {
         );
     }
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn a_reopened_document_keeps_its_unsaved_mark(cx: &mut TestAppContext) {
         let (handle, workspace, _) = open(cx);
@@ -944,6 +953,9 @@ mod tests {
         );
     }
 
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
     #[gpui_kit::test]
     fn a_strip_wider_than_the_window_gets_a_scroll_rail(cx: &mut TestAppContext) {
         let (handle, workspace, _) = open(cx);
