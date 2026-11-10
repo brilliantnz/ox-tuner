@@ -487,7 +487,7 @@ fn run(
         // so a poll or a reconnect never depends on another command arriving.
         let connection_revision = live
             .as_ref()
-            .map(|connection| connection.connection_revision);
+            .map(|connection| connection.connection.revision);
         let had_frame = latest.get().is_some();
         service_live(
             &mut live,
@@ -503,7 +503,7 @@ fn run(
         );
         let connection_changed = live
             .as_ref()
-            .map(|connection| connection.connection_revision)
+            .map(|connection| connection.connection.revision)
             != connection_revision;
         let first_frame = !had_frame && latest.get().is_some();
 
@@ -832,13 +832,12 @@ struct CommandTxn {
     journal: Journal,
 }
 
-/// A live ECU session: the I/O thread, its pending conversations and the
-/// summary the UI shows.
+/// The transport and handshake state of one live session.
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the session's flags describe independent link and polling states"
+    reason = "the connection tracks independent link flags"
 )]
-struct Live {
+struct EcuConnection {
     thread: IoThread,
     replies: Rx<spsc::Array<IoReply>>,
     link_label: String,
@@ -848,46 +847,63 @@ struct Live {
     framing: &'static str,
     pages: usize,
     realtime_block: Option<u16>,
-    decoder: RealtimeDecoder,
-    pending: BTreeMap<u64, Pending>,
-    next_id: RequestId,
-    poll: Option<Poll>,
-    reconnect: Option<Reconnect>,
-    /// A burn that is queued in the firmware, waiting for its flash write.
-    burn_wait: Option<BurnWait>,
-    sequence: u64,
-    /// The ECU RAM image when no project owns one (a definition on its own).
-    standalone: Option<Box<Tune>>,
-    /// Whether the last handshake succeeded and no loss happened since.
     connected: bool,
-    /// Whether a successful page read should start polling. Cleared when the
-    /// user stops it, so a stop is not undone by the next read.
     auto_poll: bool,
-    /// A signature-only probe: report the verdict, then close.
     probe: bool,
-    /// The last signature verdict, kept for reconnects and the summary.
     signature: String,
     verdict: SignatureVerdict,
-    /// The transaction in flight, if a write or burn is running.
+    revision: u64,
+}
+
+/// Conversations waiting for the wire.
+struct RequestTable {
+    pending: BTreeMap<u64, Pending>,
+    next_id: RequestId,
+}
+
+/// The transactions that own the link.
+struct LiveTransactions {
     write_tx: Option<WriteTxn>,
-    /// The controller command in flight, if one is running.
     command_tx: Option<CommandTxn>,
-    /// The live session log, when one is recording.
-    logger: Option<Logger>,
-    /// Channel names in the running log's column order.
-    log_columns: Vec<String>,
-    /// Raw page bytes last read from or written to the ECU.
-    page_bytes: BTreeMap<u8, Vec<u8>>,
-    /// Whether every declared page was read and applied without skips.
-    pages_complete: bool,
-    /// Bumped when the session starts, ends or reconnects, so the loop can
-    /// refresh menu gates that read live channels without threading a flag
-    /// through every reply handler.
-    connection_revision: u64,
-    /// The first realtime frame's monotonic time, the chart/log time origin.
+    burn_wait: Option<BurnWait>,
+}
+
+/// Decoded realtime state.
+struct EcuTelemetry {
+    decoder: RealtimeDecoder,
+    sequence: u64,
     first_frame: Option<Instant>,
-    /// Monotonic seconds of the last decoded frame.
     last_frame_time: f64,
+}
+
+/// The running session log.
+struct SessionLogState {
+    logger: Option<Logger>,
+    log_columns: Vec<String>,
+}
+
+/// The page image and the ECU image when no project owns one.
+struct PageImageState {
+    standalone: Option<Box<Tune>>,
+    page_bytes: BTreeMap<u8, Vec<u8>>,
+    pages_complete: bool,
+}
+
+/// Poll and reconnect timers.
+struct LinkTimers {
+    poll: Option<Poll>,
+    reconnect: Option<Reconnect>,
+}
+
+/// A live ECU session, grouped by the lifecycle of its parts.
+struct Live {
+    connection: EcuConnection,
+    requests: RequestTable,
+    txns: LiveTransactions,
+    telemetry: EcuTelemetry,
+    logging: SessionLogState,
+    images: PageImageState,
+    timers: LinkTimers,
 }
 
 impl Live {
@@ -906,60 +922,74 @@ impl Live {
             .and_then(|size| u16::try_from(size).ok())
             .filter(|size| *size > 0);
         Self {
-            thread,
-            replies,
-            link_label: link.label(),
-            custom_link: !link.is_serial(),
-            definition_signature: definition.signature.clone(),
-            behavior: behavior.as_dyn().name().to_owned(),
-            framing: match framing {
-                LinkMode::Legacy => "legacy",
-                LinkMode::Envelope => "envelope",
+            connection: EcuConnection {
+                thread,
+                replies,
+                link_label: link.label(),
+                custom_link: !link.is_serial(),
+                definition_signature: definition.signature.clone(),
+                behavior: behavior.as_dyn().name().to_owned(),
+                framing: match framing {
+                    LinkMode::Legacy => "legacy",
+                    LinkMode::Envelope => "envelope",
+                },
+                pages: definition.pages.len(),
+                realtime_block,
+                connected: false,
+                auto_poll: true,
+                probe: false,
+                signature: String::new(),
+                verdict: SignatureVerdict::Mismatch,
+                revision: 0,
             },
-            pages: definition.pages.len(),
-            realtime_block,
-            decoder: RealtimeDecoder::new(definition),
-            pending: BTreeMap::new(),
-            next_id: RequestId::FIRST,
-            poll: None,
-            reconnect: None,
-            burn_wait: None,
-            sequence: 0,
-            standalone,
-            connected: false,
-            auto_poll: true,
-            probe: false,
-            signature: String::new(),
-            verdict: SignatureVerdict::Mismatch,
-            write_tx: None,
-            command_tx: None,
-            logger: None,
-            log_columns: Vec::new(),
-            page_bytes: BTreeMap::new(),
-            pages_complete: false,
-            connection_revision: 0,
-            first_frame: None,
-            last_frame_time: 0.0,
+            requests: RequestTable {
+                pending: BTreeMap::new(),
+                next_id: RequestId::FIRST,
+            },
+            txns: LiveTransactions {
+                write_tx: None,
+                command_tx: None,
+                burn_wait: None,
+            },
+            telemetry: EcuTelemetry {
+                decoder: RealtimeDecoder::new(definition),
+                sequence: 0,
+                first_frame: None,
+                last_frame_time: 0.0,
+            },
+            logging: SessionLogState {
+                logger: None,
+                log_columns: Vec::new(),
+            },
+            images: PageImageState {
+                standalone,
+                page_bytes: BTreeMap::new(),
+                pages_complete: false,
+            },
+            timers: LinkTimers {
+                poll: None,
+                reconnect: None,
+            },
         }
     }
 
     /// Queues one request and records what its answer will mean.
     fn request(&mut self, op: OpId, kind: PendingKind, io_op: IoOp) -> Result<(), CoreError> {
-        let id = self.next_id;
-        self.thread.submit(id.0, io_op)?;
-        self.next_id = self.next_id.next();
-        self.pending.insert(id.0, Pending { op, kind });
+        let id = self.requests.next_id;
+        self.connection.thread.submit(id.0, io_op)?;
+        self.requests.next_id = self.requests.next_id.next();
+        self.requests.pending.insert(id.0, Pending { op, kind });
         Ok(())
     }
 
     /// Records the transaction the next replies belong to.
     fn begin_transaction(&mut self, transaction: WriteTxn) {
-        self.write_tx = Some(transaction);
+        self.txns.write_tx = Some(transaction);
     }
 
     /// Forgets a transaction whose first request could not be queued.
     fn abort_transaction(&mut self, reason: &str) {
-        let Some(transaction) = self.write_tx.take() else {
+        let Some(transaction) = self.txns.write_tx.take() else {
             return;
         };
         if let Some(journal) = &transaction.journal {
@@ -967,8 +997,8 @@ impl Live {
                 at: journal::timestamp(),
                 operation: transaction.kind.journal_name().to_owned(),
                 phase: "result".to_owned(),
-                port: self.link_label.clone(),
-                signature: self.signature.clone(),
+                port: self.connection.link_label.clone(),
+                signature: self.connection.signature.clone(),
                 pages: journal::pages_label(&transaction.pages),
                 cells: transaction.cells,
                 variables: transaction.variables,
@@ -985,14 +1015,17 @@ impl Live {
 
     /// Whether a request of this kind is already in flight.
     fn pending_kind(&self, kind: PendingKind) -> bool {
-        self.pending.values().any(|pending| pending.kind == kind)
+        self.requests
+            .pending
+            .values()
+            .any(|pending| pending.kind == kind)
     }
 
     /// Starts (or changes) the poll schedule.
     fn start_polling(&mut self, interval_ms: u32) {
         let interval = Duration::from_millis(u64::from(interval_ms))
             .clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL);
-        self.poll = Some(Poll {
+        self.timers.poll = Some(Poll {
             interval,
             next_at: Instant::now(),
         });
@@ -1000,19 +1033,20 @@ impl Live {
 
     /// Stops polling; the last frame stays readable.
     fn stop_polling(&mut self) {
-        self.poll = None;
+        self.timers.poll = None;
     }
 
     /// Whether a poll is due.
     fn poll_due(&self) -> bool {
-        self.poll
+        self.timers
+            .poll
             .as_ref()
             .is_some_and(|poll| poll.next_at <= Instant::now())
     }
 
     /// Moves the poll schedule on.
     fn polled(&mut self) {
-        if let Some(poll) = &mut self.poll {
+        if let Some(poll) = &mut self.timers.poll {
             poll.next_at = Instant::now() + poll.interval;
         }
     }
@@ -1024,16 +1058,17 @@ impl Live {
     /// page with an inline one loses the deferred pages when the last inline
     /// save clears the flag. One page per burn keeps every page accounted for.
     fn can_observe_burn(&self) -> bool {
-        self.realtime_block.is_some() && self.decoder.has_channel(BURN_PENDING_CHANNEL)
+        self.connection.realtime_block.is_some()
+            && self.telemetry.decoder.has_channel(BURN_PENDING_CHANNEL)
     }
 
     /// Starts waiting for the firmware to write an accepted burn to flash.
     fn begin_burn_wait(&mut self) {
         let now = Instant::now();
-        if self.realtime_block.is_none() {
+        if self.connection.realtime_block.is_none() {
             // Nothing to sample: the read-back runs at once, as a burn without
             // a status bit always did.
-            self.burn_wait = None;
+            self.txns.burn_wait = None;
             return;
         }
         let observed = self.can_observe_burn();
@@ -1043,7 +1078,7 @@ impl Live {
                 BURN_SETTLE.as_millis()
             );
         }
-        self.burn_wait = Some(BurnWait {
+        self.txns.burn_wait = Some(BurnWait {
             next_at: now
                 + if observed {
                     BURN_POLL_INTERVAL
@@ -1057,56 +1092,59 @@ impl Live {
 
     /// Whether the next burn check is due.
     fn burn_due(&self) -> bool {
-        self.burn_wait
+        self.txns
+            .burn_wait
             .is_some_and(|wait| wait.next_at <= Instant::now())
     }
 
     /// Whether a reconnect attempt is due.
     fn reconnect_due(&self) -> bool {
-        self.reconnect
+        self.timers
+            .reconnect
             .as_ref()
             .is_some_and(|reconnect| reconnect.next_at <= Instant::now())
     }
 
     /// The summary to show for this session.
     fn summary(&self, writes_enabled: bool) -> ConnectionView {
-        let read_only = self.verdict == SignatureVerdict::Mismatch;
+        let read_only = self.connection.verdict == SignatureVerdict::Mismatch;
         ConnectionView {
-            port: self.link_label.clone(),
-            custom: self.custom_link,
-            signature: self.signature.clone(),
-            definition_signature: self.definition_signature.clone(),
-            verdict: self.verdict,
+            port: self.connection.link_label.clone(),
+            custom: self.connection.custom_link,
+            signature: self.connection.signature.clone(),
+            definition_signature: self.connection.definition_signature.clone(),
+            verdict: self.connection.verdict,
             read_only,
             read_only_reason: read_only.then(|| {
                 format!(
                     "the ECU reports {:?}, the definition expects {:?}",
-                    self.signature, self.definition_signature
+                    self.connection.signature, self.connection.definition_signature
                 )
             }),
             writes_enabled,
-            behavior: self.behavior.clone(),
-            framing: self.framing,
-            pages: self.pages,
-            realtime_block: self.realtime_block,
+            behavior: self.connection.behavior.clone(),
+            framing: self.connection.framing,
+            pages: self.connection.pages,
+            realtime_block: self.connection.realtime_block,
         }
     }
 
     /// Re-evaluates the signature verdict after a handshake.
     fn set_signature(&mut self, signature: String) {
-        self.verdict = if signature.trim() == self.definition_signature.trim() {
+        self.connection.verdict = if signature.trim() == self.connection.definition_signature.trim()
+        {
             SignatureVerdict::Match
         } else {
             SignatureVerdict::Mismatch
         };
-        self.signature = signature;
-        self.connected = true;
-        self.connection_revision = self.connection_revision.wrapping_add(1);
-        self.reconnect = None;
+        self.connection.signature = signature;
+        self.connection.connected = true;
+        self.connection.revision = self.connection.revision.wrapping_add(1);
+        self.timers.reconnect = None;
         // A fresh handshake proves the link, not the page image: the app reads
         // every page next, and a write in between would act on stale RAM.
-        self.pages_complete = false;
-        self.page_bytes.clear();
+        self.images.pages_complete = false;
+        self.images.page_bytes.clear();
     }
 }
 

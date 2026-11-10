@@ -92,7 +92,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             };
-            if connection.write_tx.is_some()
+            if connection.txns.write_tx.is_some()
                 || connection.pending_kind(PendingKind::Write)
                 || connection.pending_kind(PendingKind::Command)
             {
@@ -140,7 +140,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             };
-            if !connection.connected {
+            if !connection.connection.connected {
                 send(
                     events,
                     Event::Failed {
@@ -166,7 +166,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             }
-            if connection.write_tx.is_some()
+            if connection.txns.write_tx.is_some()
                 || connection.pending_kind(PendingKind::Write)
                 || connection.pending_kind(PendingKind::Command)
             {
@@ -218,7 +218,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             };
-            if !connection.connected {
+            if !connection.connection.connected {
                 send(
                     events,
                     Event::Failed {
@@ -231,7 +231,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             }
-            if connection.realtime_block.is_none() {
+            if connection.connection.realtime_block.is_none() {
                 send(
                     events,
                     Event::Failed {
@@ -244,7 +244,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             }
-            connection.auto_poll = true;
+            connection.connection.auto_poll = true;
             connection.start_polling(interval_ms);
             send(events, Event::RealtimeState { op, running: true });
             *menu_dirty = true;
@@ -252,7 +252,7 @@ pub(super) fn handle(
         }
         CommandRequest::StopRealtime => {
             let running = live.as_mut().is_some_and(|connection| {
-                connection.auto_poll = false;
+                connection.connection.auto_poll = false;
                 connection.stop_polling();
                 true
             });
@@ -442,7 +442,7 @@ pub(super) fn handle(
                 );
                 return Outcome::Continue;
             };
-            if !connection.connected {
+            if !connection.connection.connected {
                 send(
                     events,
                     Event::Failed {

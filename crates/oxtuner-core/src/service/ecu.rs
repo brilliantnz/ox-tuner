@@ -27,7 +27,7 @@ pub(super) fn teardown(
         return;
     };
 
-    if let Some(transaction) = live.write_tx.take() {
+    if let Some(transaction) = live.txns.write_tx.take() {
         let reason = "the session was closed while the write was running";
         safety.halt(reason);
         if let Some(journal) = &transaction.journal {
@@ -35,8 +35,8 @@ pub(super) fn teardown(
                 at: journal::timestamp(),
                 operation: transaction.kind.journal_name().to_owned(),
                 phase: "result".to_owned(),
-                port: live.link_label.clone(),
-                signature: live.signature.clone(),
+                port: live.connection.link_label.clone(),
+                signature: live.connection.signature.clone(),
                 pages: journal::pages_label(&transaction.pages),
                 cells: transaction.cells,
                 variables: transaction.variables,
@@ -52,7 +52,7 @@ pub(super) fn teardown(
     }
 
     // Dropping the logger flushes it; the shared status stops.
-    if live.logger.take().is_some() {
+    if live.logging.logger.take().is_some() {
         tracing::info!("the session log was closed with the session");
     }
     log.mark_stopped();
@@ -61,7 +61,7 @@ pub(super) fn teardown(
         &mut live,
         "the session was closed before the command completed",
     );
-    for pending in std::mem::take(&mut live.pending).into_values() {
+    for pending in std::mem::take(&mut live.requests.pending).into_values() {
         match pending.kind {
             // Background work the UI never asked for: no answer to send.
             PendingKind::Realtime | PendingKind::Reconnect => {}
@@ -79,7 +79,7 @@ pub(super) fn teardown(
             ),
         }
     }
-    live.thread.shutdown();
+    live.connection.thread.shutdown();
     latest.clear();
     history.clear();
 }
@@ -87,20 +87,23 @@ pub(super) fn teardown(
 /// How long the core may wait for the next command.
 pub(super) fn next_wait(live: Option<&Live>) -> Option<Duration> {
     let live = live?;
-    if !live.pending.is_empty() {
+    if !live.requests.pending.is_empty() {
         return Some(PENDING_WAIT);
     }
 
     let now = Instant::now();
     let poll = live
+        .timers
         .poll
         .as_ref()
         .map(|poll| poll.next_at.saturating_duration_since(now));
     let reconnect = live
+        .timers
         .reconnect
         .as_ref()
         .map(|reconnect| reconnect.next_at.saturating_duration_since(now));
     let burn = live
+        .txns
         .burn_wait
         .as_ref()
         .map(|wait| wait.next_at.saturating_duration_since(now));
@@ -241,7 +244,7 @@ pub(super) fn connect(
                 effective_framing,
                 standalone,
             );
-            connection.probe = probe;
+            connection.connection.probe = probe;
             if let Err(error) = connection.request(op, PendingKind::Connect, IoOp::Signature) {
                 tracing::warn!(%op, %error, "the signature query could not be queued");
                 report.failures += 1;
@@ -310,7 +313,7 @@ pub(super) fn service_live(
         return;
     };
 
-    while let Ok(reply) = connection.replies.try_recv() {
+    while let Ok(reply) = connection.connection.replies.try_recv() {
         let keep = on_reply(
             connection, reply, session, safety, events, latest, frames, history, log, report,
         );
@@ -346,19 +349,20 @@ pub(super) fn service_live(
     // poll stays off while a transaction owns the link.
     if connection.burn_due() {
         let op = connection
+            .txns
             .write_tx
             .as_ref()
             .map(|transaction| transaction.op);
         match op {
             Some(op) if !connection.pending_kind(PendingKind::Write) => {
-                if let Some(wait) = connection.burn_wait.as_mut() {
+                if let Some(wait) = connection.txns.burn_wait.as_mut() {
                     wait.next_at = Instant::now() + BURN_POLL_INTERVAL;
                 }
                 if let Err(error) = connection.request(op, PendingKind::Write, IoOp::ReadRealtime) {
-                    let Some(transaction) = connection.write_tx.take() else {
+                    let Some(transaction) = connection.txns.write_tx.take() else {
                         return;
                     };
-                    connection.burn_wait = None;
+                    connection.txns.burn_wait = None;
                     fail_transaction(
                         connection,
                         transaction,
@@ -372,7 +376,7 @@ pub(super) fn service_live(
                 }
             }
             Some(_) => {}
-            None => connection.burn_wait = None,
+            None => connection.txns.burn_wait = None,
         }
     }
 
@@ -382,8 +386,8 @@ pub(super) fn service_live(
         && !connection.pending_kind(PendingKind::Write)
         && !connection.pending_kind(PendingKind::Command)
         && !connection.pending_kind(PendingKind::Reconnect)
-        && connection.write_tx.is_none()
-        && connection.command_tx.is_none()
+        && connection.txns.write_tx.is_none()
+        && connection.txns.command_tx.is_none()
     {
         if let Err(error) =
             connection.request(OpId::new(0), PendingKind::Realtime, IoOp::ReadRealtime)
@@ -416,7 +420,7 @@ pub(super) fn on_reply(
     log: &LogStatus,
     report: &mut CoreReport,
 ) -> bool {
-    let Some(pending) = live.pending.remove(&reply.id) else {
+    let Some(pending) = live.requests.pending.remove(&reply.id) else {
         tracing::debug!(id = reply.id, "an I/O reply had no pending request");
         return true;
     };
@@ -425,7 +429,7 @@ pub(super) fn on_reply(
         (PendingKind::Connect, IoOutcome::Signature { signature }) => {
             live.set_signature(signature);
             let summary = live.summary(safety.writes_enabled());
-            if live.probe {
+            if live.connection.probe {
                 tracing::info!(
                     port = %summary.port,
                     signature = %summary.signature,
@@ -459,7 +463,7 @@ pub(super) fn on_reply(
             true
         }
         (PendingKind::Connect, IoOutcome::Failed(failure)) => {
-            let probe = live.probe;
+            let probe = live.connection.probe;
             tracing::warn!(
                 kind = failure.kind.as_str(),
                 %failure.message,
@@ -502,15 +506,18 @@ pub(super) fn on_reply(
                         "pages read"
                     );
                     report.page_reads += 1;
-                    live.page_bytes = pages
+                    live.images.page_bytes = pages
                         .iter()
                         .map(|read| (read.page, read.bytes.clone()))
                         .collect();
-                    live.pages_complete = summary.is_complete();
+                    live.images.pages_complete = summary.is_complete();
                     // The documented connect flow is signature → read all pages
                     // → start the poller. Starting it earlier would interleave
                     // realtime replies with the page read on the wire.
-                    if live.auto_poll && live.realtime_block.is_some() && live.poll.is_none() {
+                    if live.connection.auto_poll
+                        && live.connection.realtime_block.is_some()
+                        && live.timers.poll.is_none()
+                    {
                         live.start_polling(
                             u32::try_from(DEFAULT_POLL_INTERVAL.as_millis()).unwrap_or(100),
                         );
@@ -541,9 +548,9 @@ pub(super) fn on_reply(
             true
         }
         (PendingKind::Realtime, IoOutcome::Realtime { block }) => {
-            let sequence = live.sequence;
-            live.sequence = sequence.wrapping_add(1);
-            let mut frame = live.decoder.decode(&block, sequence);
+            let sequence = live.telemetry.sequence;
+            live.telemetry.sequence = sequence.wrapping_add(1);
+            let mut frame = live.telemetry.decoder.decode(&block, sequence);
             if frame.values.is_empty() {
                 return true;
             }
@@ -551,13 +558,13 @@ pub(super) fn on_reply(
             // editing, so the strip and Telemetry cannot disagree.
             let tune = match session {
                 Session::Project(project) => Some(project.tune()),
-                Session::Definition(_) => live.standalone.as_deref(),
+                Session::Definition(_) => live.images.standalone.as_deref(),
                 Session::Empty => None,
             };
-            frame.indicators = live.decoder.indicators(&frame.values, tune);
-            let first = *live.first_frame.get_or_insert_with(Instant::now);
+            frame.indicators = live.telemetry.decoder.indicators(&frame.values, tune);
+            let first = *live.telemetry.first_frame.get_or_insert_with(Instant::now);
             let time = first.elapsed().as_secs_f64();
-            live.last_frame_time = time;
+            live.telemetry.last_frame_time = time;
             history.push_frame_iter(
                 time,
                 frame
@@ -565,8 +572,8 @@ pub(super) fn on_reply(
                     .iter()
                     .map(|value| (value.name.as_str(), value.value)),
             );
-            if let Some(logger) = &live.logger {
-                let values = align_log_values(&live.log_columns, &frame);
+            if let Some(logger) = &live.logging.logger {
+                let values = align_log_values(&live.logging.log_columns, &frame);
                 if !logger.try_log(time, &values) {
                     report.log_drops = report.log_drops.saturating_add(1);
                 }
@@ -586,7 +593,7 @@ pub(super) fn on_reply(
             true
         }
         (PendingKind::Command, IoOutcome::Command { report: sent }) => {
-            let Some(transaction) = live.command_tx.take() else {
+            let Some(transaction) = live.txns.command_tx.take() else {
                 tracing::warn!(op = %pending.op, "a controller command reply had no transaction");
                 report.failures += 1;
                 send(
@@ -731,21 +738,21 @@ pub(super) fn connection_lost(
     reason: String,
 ) {
     tracing::warn!(%reason, "the ECU link was lost");
-    live.connected = false;
-    live.connection_revision = live.connection_revision.wrapping_add(1);
+    live.connection.connected = false;
+    live.connection.revision = live.connection.revision.wrapping_add(1);
     live.stop_polling();
     session.mark_unknown();
     latest.clear();
     // A lost link ends the log's input; close it cleanly rather than leave an
     // open file that grows only when a reconnect happens.
-    if live.logger.take().is_some() {
+    if live.logging.logger.take().is_some() {
         tracing::info!("the session log was closed because the link was lost");
     }
 
     finish_command_failed(live, &format!("the link was lost: {reason}"));
     // Every conversation that was waiting is answered now: a vanished link
     // must not leave a command unanswered.
-    for pending in std::mem::take(&mut live.pending).into_values() {
+    for pending in std::mem::take(&mut live.requests.pending).into_values() {
         if pending.kind == PendingKind::Realtime || pending.kind == PendingKind::Reconnect {
             continue;
         }
@@ -768,13 +775,14 @@ pub(super) fn connection_lost(
 /// Schedules the next reconnect attempt with exponential backoff.
 pub(super) fn schedule_reconnect(live: &mut Live) {
     let attempts = live
+        .timers
         .reconnect
         .map_or(0, |reconnect| reconnect.attempts.saturating_add(1));
     // First retry after RECONNECT_BASE, then doubling: 500 ms, 1 s, 2 s, 4 s, 5 s.
     let delay = RECONNECT_BASE
         .saturating_mul(1u32 << attempts.saturating_sub(1).min(4))
         .min(RECONNECT_MAX);
-    live.reconnect = Some(Reconnect {
+    live.timers.reconnect = Some(Reconnect {
         attempts,
         next_at: Instant::now() + delay,
     });
@@ -783,9 +791,9 @@ pub(super) fn schedule_reconnect(live: &mut Live) {
 /// Stops polling without touching the port (disconnect path).
 pub(super) fn stop_for_disconnect(live: &mut Live) {
     live.stop_polling();
-    live.reconnect = None;
-    live.connected = false;
-    live.connection_revision = live.connection_revision.wrapping_add(1);
+    live.timers.reconnect = None;
+    live.connection.connected = false;
+    live.connection.revision = live.connection.revision.wrapping_add(1);
 }
 
 /// Applies a complete page read to the session's ECU image.
@@ -799,7 +807,7 @@ pub(super) fn commit_pages(
         bytes: 0,
         constants: 0,
         skipped: 0,
-        signature_verified: live.verdict == SignatureVerdict::Match,
+        signature_verified: live.connection.verdict == SignatureVerdict::Match,
     };
 
     match session {
@@ -823,6 +831,7 @@ pub(super) fn commit_pages(
         }
         Session::Definition(_) => {
             let tune = live
+                .images
                 .standalone
                 .as_mut()
                 .ok_or_else(|| "the connection has no ECU image".to_owned())?;

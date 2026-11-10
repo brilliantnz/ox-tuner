@@ -24,7 +24,7 @@ pub(super) fn start_log(
             "connect to the ECU before logging",
         );
     };
-    if connection.logger.is_some() {
+    if connection.logging.logger.is_some() {
         return refuse(
             events,
             report,
@@ -33,7 +33,7 @@ pub(super) fn start_log(
             "a session log is already running",
         );
     }
-    if !connection.connected {
+    if !connection.connection.connected {
         return refuse(
             events,
             report,
@@ -44,6 +44,7 @@ pub(super) fn start_log(
     }
 
     let columns = connection
+        .telemetry
         .decoder
         .columns()
         .into_iter()
@@ -67,8 +68,8 @@ pub(super) fn start_log(
     match Logger::start(&path, columns, log.clone()) {
         Ok(logger) => {
             tracing::info!(%op, path = %logger.path().display(), "session log started");
-            connection.log_columns = column_names;
-            connection.logger = Some(logger);
+            connection.logging.log_columns = column_names;
+            connection.logging.logger = Some(logger);
             send(
                 events,
                 Event::LogState {
@@ -111,7 +112,7 @@ pub(super) fn stop_log(
             "there is no session to stop logging",
         );
     };
-    let Some(logger) = connection.logger.take() else {
+    let Some(logger) = connection.logging.logger.take() else {
         return refuse(
             events,
             report,
