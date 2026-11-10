@@ -207,6 +207,80 @@ pub(super) fn adopt_ecu_image(
     Outcome::Continue
 }
 
+/// Resolves cells that differ between the working image and the ECU.
+pub(super) fn resolve_conflicts(
+    op: OpId,
+    session: &mut Session,
+    journal_dir: Option<&std::path::Path>,
+    events: &EventTx,
+    report: &mut CoreReport,
+    resolution: ConflictResolution,
+) -> Outcome {
+    let Some(project) = session.project_mut() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "no tune is open",
+        );
+    };
+    let Some(ram) = project.images().ecu_ram().cloned() else {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            "read the ECU before resolving a conflict",
+        );
+    };
+
+    match resolution {
+        ConflictResolution::UseEcu => {
+            let snapshot = match snapshot::write(project, "conflict") {
+                Ok(path) => path,
+                Err(message) => {
+                    return refuse(events, report, op, FailureCode::SnapshotFailed, &message);
+                }
+            };
+            if let Err(error) = project.images_mut().import(ram) {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::WriteRefused,
+                    &error.to_string(),
+                );
+            }
+            project.images_mut().clear_conflicts();
+            record_local_journal(
+                session,
+                journal_dir,
+                "conflict",
+                0,
+                0,
+                "ok",
+                &format!("kept ECU values; snapshot {}", snapshot.display()),
+            );
+        }
+        ConflictResolution::KeepWorking => {
+            project.images_mut().clear_conflicts();
+            record_local_journal(
+                session,
+                journal_dir,
+                "conflict",
+                0,
+                0,
+                "ok",
+                "kept working values",
+            );
+        }
+    }
+
+    send(events, Event::ConflictsResolved { op });
+    Outcome::Continue
+}
+
 /// Discards local edits after snapshotting the working image.
 pub(super) fn revert_tune(
     op: OpId,

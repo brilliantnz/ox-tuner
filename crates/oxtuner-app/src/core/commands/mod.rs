@@ -20,8 +20,8 @@ pub(crate) use transfer::{
     choose_import, import_tune, list_snapshots, read_journal, restore_snapshot,
 };
 pub(crate) use tune::{
-    acknowledge_write_failure, burn_to_flash, refresh_tune_status, revert_target, revert_tune,
-    run_controller_command, set_writes_enabled, write_to_ram,
+    acknowledge_write_failure, burn_to_flash, refresh_tune_status, resolve_conflicts,
+    revert_target, revert_tune, run_controller_command, set_writes_enabled, write_to_ram,
 };
 
 use std::future::Future;

@@ -4,10 +4,13 @@
 )]
 
 use super::dispatch::send;
+
 use super::transfer::{
     advance_write, fail_transaction, finish_command_failed, record_command_result,
 };
 use super::*;
+use crate::contract::ConflictReport;
+use oxtuner_tune::{CellValue, Conflict};
 
 #[expect(
     clippy::too_many_arguments,
@@ -797,6 +800,24 @@ pub(super) fn stop_for_disconnect(live: &mut Live) {
 }
 
 /// Applies a complete page read to the session's ECU image.
+fn conflict_report(conflict: Conflict) -> ConflictReport {
+    ConflictReport {
+        name: conflict.name,
+        row: conflict.row,
+        column: conflict.column,
+        working: cell_value_text(conflict.working),
+        ecu: cell_value_text(conflict.ecu),
+    }
+}
+
+fn cell_value_text(value: CellValue) -> String {
+    match value {
+        CellValue::Number(value) => format!("{value}"),
+        CellValue::Raw(value) => format!("{value} (raw)"),
+        CellValue::Text(text) => text,
+    }
+}
+
 pub(super) fn commit_pages(
     session: &mut Session,
     live: &mut Live,
@@ -808,6 +829,7 @@ pub(super) fn commit_pages(
         constants: 0,
         skipped: 0,
         signature_verified: live.connection.verdict == SignatureVerdict::Match,
+        conflicts: Vec::new(),
     };
 
     match session {
@@ -824,10 +846,13 @@ pub(super) fn commit_pages(
                 summary.constants += report.decoded;
                 summary.skipped += report.skipped;
             }
-            project
-                .images_mut()
-                .set_ecu_ram(ram)
-                .map_err(|error| error.to_string())?;
+            let images = project.images_mut();
+            if images.ecu_ram().is_some() {
+                let conflicts = images.reconnect(ram).map_err(|error| error.to_string())?;
+                summary.conflicts = conflicts.into_iter().map(conflict_report).collect();
+            } else {
+                images.set_ecu_ram(ram).map_err(|error| error.to_string())?;
+            }
         }
         Session::Definition(_) => {
             let tune = live

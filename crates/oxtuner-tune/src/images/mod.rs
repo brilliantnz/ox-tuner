@@ -276,6 +276,12 @@ impl TuneImages {
         Ok(())
     }
 
+    /// Clears every conflict overlay after the user decided.
+    pub fn clear_conflicts(&mut self) {
+        self.overlays
+            .retain(|_, overlay| *overlay != Overlay::Conflict);
+    }
+
     /// Every currently marked conflict, in layout order.
     pub fn conflicts(&self) -> Vec<Conflict> {
         let mut conflicts = Vec::new();

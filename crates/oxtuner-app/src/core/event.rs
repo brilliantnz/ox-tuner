@@ -156,6 +156,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         Event::TuneWritten { report, .. } => (Update::Written(report), None),
         Event::TuneBurned { report, .. } => (Update::Burned(report), None),
         Event::ControllerActionRan { .. } => (Update::ControllerActionRan, None),
+        Event::ConflictsResolved { .. } => (Update::ConflictsResolved, None),
         Event::TuneImported { report, .. } => (Update::Imported(report), None),
         Event::TuneReverted { report, .. } => (Update::Reverted(report), None),
         Event::TuneStatusRead { status, .. } => (Update::TuneStatus(status), None),
@@ -188,6 +189,8 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
         && cx.global::<CoreService>().auto_sim
         && cx.global::<CoreService>().status.connection.is_none();
+    let conflict_review =
+        matches!(&update, Update::PagesRead(report) if !report.conflicts.is_empty());
     let import_consent = if matches!(
         &update,
         Update::Failed(failure) if failure.code == FailureCode::ImportNeedsConsent
@@ -202,6 +205,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         | Update::Written(_)
         | Update::Burned(_)
         | Update::ControllerActionRan
+        | Update::ConflictsResolved
         | Update::Imported(_)
         | Update::Reverted(_)
         | Update::Saved(_) => true,
@@ -276,6 +280,17 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     }
     if refresh_status {
         refresh_tune_status(cx);
+    }
+    if conflict_review {
+        cx.defer(|cx| {
+            if let Some(window) = crate::app::window::main(cx) {
+                window
+                    .update(cx, |_, window, cx| {
+                        crate::layout::write_dialogs::show_conflicts(window, cx);
+                    })
+                    .ok();
+            }
+        });
     }
     if import_consent.is_some() {
         cx.defer(|cx| {

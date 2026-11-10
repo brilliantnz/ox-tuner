@@ -591,3 +591,83 @@ pub(crate) fn show_import_consent(window: &mut Window, cx: &mut App) {
             )
     });
 }
+
+/// Shows the cells that differ between the working image and a fresh ECU read.
+pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
+    let Some(read) = CoreService::status(cx).pages_read.clone() else {
+        return;
+    };
+    if read.conflicts.is_empty() {
+        return;
+    }
+
+    let total = read.conflicts.len();
+    let rows: Vec<String> = read
+        .conflicts
+        .iter()
+        .take(8)
+        .map(|conflict| {
+            format!(
+                "{} [{}:{}]  {}  ->  {}",
+                conflict.name, conflict.row, conflict.column, conflict.working, conflict.ecu
+            )
+        })
+        .collect();
+
+    dialog::open(window, cx, move |dialog, _, cx| {
+        let muted = cx.theme().muted_foreground;
+        dialog
+            .title(t!("app.conflict.title"))
+            .width(px(620.))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(t!("app.conflict.body", count = total.to_string())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t!("app.conflict.sample")),
+                    )
+                    .children(rows.clone().into_iter().map(|row| {
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_xs()
+                            .child(row)
+                    })),
+            )
+            .footer(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("conflict-keep")
+                            .label(t!("app.conflict.keep"))
+                            .ghost()
+                            .on_click(|_, window, cx| {
+                                core::resolve_conflicts(
+                                    oxtuner_core::ConflictResolution::KeepWorking,
+                                    cx,
+                                );
+                                window.close_dialog(cx);
+                            }),
+                    )
+                    .child(
+                        Button::new("conflict-ecu")
+                            .label(t!("app.conflict.use_ecu"))
+                            .primary()
+                            .on_click(|_, window, cx| {
+                                core::resolve_conflicts(
+                                    oxtuner_core::ConflictResolution::UseEcu,
+                                    cx,
+                                );
+                                window.close_dialog(cx);
+                            }),
+                    ),
+            )
+    });
+}

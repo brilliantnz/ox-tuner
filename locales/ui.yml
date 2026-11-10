@@ -556,6 +556,17 @@ app:
       en: Connect to the ECU to send this command.
     command_needs_writes:
       en: Enable writes to send this command.
+  conflict:
+    title:
+      en: Review ECU changes
+    body:
+      en: '%{count} cells differ from the values just read from the ECU.'
+    sample:
+      en: Working value -> ECU value
+    keep:
+      en: Keep my values
+    use_ecu:
+      en: Use ECU values
   cluster:
     title:
       en: Cluster

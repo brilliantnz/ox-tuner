@@ -80,6 +80,11 @@ pub enum Event {
         /// What was sent.
         report: ControllerActionReport,
     },
+    /// Conflict marks were resolved after a read.
+    ConflictsResolved {
+        /// The command this answers.
+        op: OpId,
+    },
     /// A tune or connection change altered one or more menu gates.
     ///
     /// Only sent when the evaluated tree actually differs from the last one
@@ -266,6 +271,7 @@ impl Event {
             | Self::DialogRead { op, .. }
             | Self::DialogEdited { op, .. }
             | Self::ControllerActionRan { op, .. }
+            | Self::ConflictsResolved { op }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
             | Self::Connected { op, .. }
