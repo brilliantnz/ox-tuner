@@ -316,12 +316,12 @@ fn load_definition(
     let text = oxtuner_ini::source::decode(bytes).text;
     let recorder = IncludeRecorder::new(base);
     let resolver = |name: &str| recorder.resolve(name);
-    let definition = oxtuner_ini::parse_str_with_includes(&text, settings, &resolver)
+    let mut definition = oxtuner_ini::parse_str_with_includes(&text, settings, &resolver)
         .map_err(ProjectError::Ini)?;
     let includes = recorder.finish();
 
     if let Some(cache) = &cache {
-        cache.store(&definition, &includes);
+        cache.store(&mut definition, &includes);
     }
 
     Ok((definition, DefinitionSource::Parsed))

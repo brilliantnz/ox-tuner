@@ -14,12 +14,19 @@
 //! # `TuneLayout`
 //!
 //! ```text
-//! magic[8] | header_len u32-le | header (postcard) | definition (postcard)
+//! magic[8] | header_len u32-le | header (postcard) | payload (postcard)
 //! ```
 //!
 //! The header carries the whole key, the `#include` fingerprints and an FNV-1a
 //! payload checksum, so a stale or corrupt entry is rejected before the
 //! definition is deserialized.
+//!
+//! The payload holds the definition with its option tables lifted out, the
+//! distinct tables, and one index per entry. `serde` writes an
+//! `Arc<[BitOption]>` by value at every reference, so a table shared by many
+//! entries was stored once per entry: Speeduino points nineteen entries at one
+//! 65 536 label CAN address list, which made the file 14.4 MiB for 1.2 MiB of
+//! data and made a warm open slower than parsing.
 //!
 //! # Invalidation
 //!
@@ -31,11 +38,13 @@
 
 use std::{
     cell::RefCell,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use oxtuner_ini::{Definition, PARSER_VERSION, SettingsContext};
+use oxtuner_ini::{BitOption, Definition, PARSER_VERSION, SettingsContext};
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
@@ -131,6 +140,143 @@ struct CacheHeader {
     /// corruption a crash or a truncated copy leaves behind, and unlike a
     /// cryptographic digest it does not dominate a warm open.
     payload: u64,
+}
+
+/// The payload as it is written: the definition with its tables lifted out.
+#[derive(Serialize)]
+struct CachePayloadRef<'a> {
+    definition: &'a Definition,
+    tables: &'a [Arc<[BitOption]>],
+    constants: &'a [Option<u32>],
+    variables: &'a [Option<u32>],
+}
+
+/// The payload as it is read back.
+#[derive(Deserialize)]
+struct CachePayload {
+    definition: Definition,
+    tables: Vec<Arc<[BitOption]>>,
+    constants: Vec<Option<u32>>,
+    variables: Vec<Option<u32>>,
+}
+
+/// The option tables taken out of a definition before it is written.
+struct LiftedTables {
+    constants: Vec<Arc<[BitOption]>>,
+    variables: Vec<Arc<[BitOption]>>,
+}
+
+/// Takes every option table out of `definition`, leaving empty tables behind.
+///
+/// Taking rather than cloning keeps a definition cache write from copying the
+/// whole model; the caller puts the same tables back once the payload is
+/// encoded.
+fn lift_tables(definition: &mut Definition) -> LiftedTables {
+    let mut constants = Vec::with_capacity(definition.constants.len());
+    for (_, constant) in definition.constants.iter_mut() {
+        constants.push(std::mem::replace(&mut constant.options, Arc::from([])));
+    }
+
+    let mut variables = Vec::with_capacity(definition.pc_variables.len());
+    for (_, variable) in definition.pc_variables.iter_mut() {
+        variables.push(std::mem::replace(&mut variable.options, Arc::from([])));
+    }
+
+    LiftedTables {
+        constants,
+        variables,
+    }
+}
+
+/// Puts the tables `lift_tables` removed back where they came from.
+fn restore_tables(definition: &mut Definition, lifted: LiftedTables) {
+    let LiftedTables {
+        constants,
+        variables,
+    } = lifted;
+
+    for ((_, constant), options) in definition.constants.iter_mut().zip(constants) {
+        constant.options = options;
+    }
+
+    for ((_, variable), options) in definition.pc_variables.iter_mut().zip(variables) {
+        variable.options = options;
+    }
+}
+
+/// The distinct tables of a lifted definition, and one index per entry.
+struct InternedTables {
+    tables: Vec<Arc<[BitOption]>>,
+    constants: Vec<Option<u32>>,
+    variables: Vec<Option<u32>>,
+}
+
+/// Collects each distinct table once and records which entries use it.
+fn intern_tables(lifted: &LiftedTables) -> InternedTables {
+    let mut seen: HashMap<*const u8, u32> = HashMap::new();
+    let mut tables: Vec<Arc<[BitOption]>> = Vec::new();
+
+    let mut intern = |options: &Arc<[BitOption]>| -> Option<u32> {
+        if options.is_empty() {
+            return None;
+        }
+
+        // The pointer is only used as an identity for this parse: two
+        // entries share a table exactly when their `Arc` allocation is the same.
+        let key = Arc::as_ptr(options).cast::<u8>();
+        if let Some(&index) = seen.get(&key) {
+            return Some(index);
+        }
+
+        let index =
+            u32::try_from(tables.len()).expect("a definition has fewer than u32::MAX tables");
+        tables.push(Arc::clone(options));
+        seen.insert(key, index);
+        Some(index)
+    };
+
+    let constants = lifted.constants.iter().map(&mut intern).collect();
+    let variables = lifted.variables.iter().map(&mut intern).collect();
+
+    InternedTables {
+        tables,
+        constants,
+        variables,
+    }
+}
+
+/// Reattaches the stored tables to a definition read back from the cache.
+///
+/// Returns `None` when an index is out of range or the counts disagree, which
+/// means the payload does not describe this definition; the caller treats that
+/// as a miss rather than showing a definition with the wrong option tables.
+fn attach_tables(
+    definition: &mut Definition,
+    tables: &[Arc<[BitOption]>],
+    constants: &[Option<u32>],
+    variables: &[Option<u32>],
+) -> Option<()> {
+    if constants.len() != definition.constants.len()
+        || variables.len() != definition.pc_variables.len()
+    {
+        return None;
+    }
+
+    for ((_, constant), index) in definition.constants.iter_mut().zip(constants) {
+        constant.options = match index {
+            Some(index) => Arc::clone(tables.get(usize::try_from(*index).ok()?)?),
+            None => Arc::from([]),
+        };
+    }
+
+    for ((_, variable), index) in definition.pc_variables.iter_mut().zip(variables) {
+        variable.options = match index {
+            Some(index) => Arc::clone(tables.get(usize::try_from(*index).ok()?)?),
+            None => Arc::from([]),
+        };
+    }
+
+    Some(())
 }
 
 /// One cache location and the key this open would look up.
@@ -248,8 +394,8 @@ impl DefinitionCache {
             return None;
         }
 
-        let definition: Definition = match postcard::from_bytes(payload) {
-            Ok(definition) => definition,
+        let decoded: CachePayload = match postcard::from_bytes(payload) {
+            Ok(decoded) => decoded,
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -259,6 +405,21 @@ impl DefinitionCache {
                 return None;
             }
         };
+
+        let CachePayload {
+            mut definition,
+            tables,
+            constants,
+            variables,
+        } = decoded;
+
+        if attach_tables(&mut definition, &tables, &constants, &variables).is_none() {
+            tracing::debug!(
+                path = %self.path.display(),
+                "the definition cache payload does not match the model it was written from"
+            );
+            return None;
+        }
 
         if !definition.is_usable() {
             tracing::debug!(
@@ -275,7 +436,7 @@ impl DefinitionCache {
     ///
     /// A read-only cache directory, a full disk or a serialization failure is
     /// logged at debug level and ignored: the project is already open.
-    pub(crate) fn store(&self, definition: &Definition, includes: &[IncludeFingerprint]) {
+    pub(crate) fn store(&self, definition: &mut Definition, includes: &[IncludeFingerprint]) {
         if let Err(error) = self.write(definition, includes) {
             tracing::debug!(
                 error = %error,
@@ -291,10 +452,23 @@ impl DefinitionCache {
 
     fn write(
         &self,
-        definition: &Definition,
+        definition: &mut Definition,
         includes: &[IncludeFingerprint],
     ) -> Result<(), String> {
-        let payload = postcard::to_allocvec(definition).map_err(|error| error.to_string())?;
+        // The tables are lifted out for the encode and put back afterwards, so
+        // a shared table is written once and the caller keeps the definition
+        // it already parsed.
+        let lifted = lift_tables(definition);
+        let interned = intern_tables(&lifted);
+        let payload = postcard::to_allocvec(&CachePayloadRef {
+            definition,
+            tables: &interned.tables,
+            constants: &interned.constants,
+            variables: &interned.variables,
+        });
+        restore_tables(definition, lifted);
+        let payload = payload.map_err(|error| error.to_string())?;
+
         let header = CacheHeader {
             key: self.key.clone(),
             includes: includes.to_vec(),
@@ -486,8 +660,8 @@ mod tests {
 
         assert!(cache.load().is_none(), "a first open is a miss");
 
-        let definition = definition();
-        cache.store(&definition, &[]);
+        let mut definition = definition();
+        cache.store(&mut definition, &[]);
         let loaded = cache.load().expect("a second open is a hit");
 
         assert_eq!(loaded, definition);
@@ -502,7 +676,7 @@ mod tests {
         let bytes = b"[MegaTune]\nsignature = \"cache test\"\n";
         let cache =
             DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
-        cache.store(&definition(), &[]);
+        cache.store(&mut definition(), &[]);
 
         let mut changed = CacheKey {
             definition: cache.key.definition,
@@ -543,12 +717,12 @@ mod tests {
         let bytes = b"[MegaTune]\nsignature = \"cache test\"\n";
         let cache =
             DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
-        cache.store(&definition(), &[]);
+        cache.store(&mut definition(), &[]);
 
         fs::write(cache.path(), b"not a cache").unwrap();
         assert!(cache.load().is_none());
 
-        cache.store(&definition(), &[]);
+        cache.store(&mut definition(), &[]);
         assert_eq!(cache.load(), Some(definition()));
         fs::remove_dir_all(&root).unwrap();
     }
@@ -567,7 +741,7 @@ mod tests {
         assert!(recorder.resolve("extra.inc").is_some());
         assert!(recorder.resolve("missing.inc").is_none());
         let includes = recorder.finish();
-        cache.store(&definition(), &includes);
+        cache.store(&mut definition(), &includes);
         assert!(cache.load().is_some());
 
         fs::write(base.join("extra.inc"), "included = 2\n").unwrap();
@@ -602,6 +776,117 @@ mod tests {
 
         let remaining = fs::read_dir(&root).unwrap().count();
         assert_eq!(remaining, KEEP_ENTRIES);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn shared_definition() -> Definition {
+        oxtuner_ini::parse_str(
+            "[MegaTune]\nsignature = \"cache test\"\nqueryCommand = \"Q\"\n\n[Constants]\nnPages = 1\npageSize = 8\npage = 1\n#define opts = \"A\", \"B\"\nfirst = bits, U08, 0, [0:1], $opts\nsecond = bits, U08, 1, [0:1], $opts\n",
+            &SettingsContext::new(),
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_shared_option_table_is_written_once_and_comes_back_shared() {
+        let root = temp_dir("shared-checksum");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(&base).unwrap();
+        let bytes = b"[MegaTune]\nsignature = \"cache test\"\n";
+        let cache =
+            DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
+
+        let mut definition = shared_definition();
+        let first = Arc::clone(&definition.constant("first").expect("first").options);
+        let second = Arc::clone(&definition.constant("second").expect("second").options);
+        assert!(Arc::ptr_eq(&first, &second), "the parser shares the table");
+
+        cache.store(&mut definition, &[]);
+        let loaded = cache.load().expect("a stored definition is a hit");
+
+        let first = Arc::clone(&loaded.constant("first").expect("first").options);
+        let second = Arc::clone(&loaded.constant("second").expect("second").options);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the cache must not duplicate a table that the parser shared"
+        );
+        assert_eq!(
+            &*first,
+            &*definition.constant("first").expect("first").options
+        );
+        assert_eq!(loaded, definition, "the rest of the model is unchanged");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_payload_that_does_not_describe_the_model_is_a_miss() {
+        let root = temp_dir("mismatched-payload");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(&base).unwrap();
+        let bytes = b"[MegaTune]\nsignature = \"cache test\"\n";
+        let cache =
+            DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
+
+        let mut definition = shared_definition();
+        let lifted = lift_tables(&mut definition);
+        let interned = intern_tables(&lifted);
+
+        // One index short: the payload no longer describes this definition.
+        let constants = interned.constants[..interned.constants.len() - 1].to_vec();
+        let payload = postcard::to_allocvec(&CachePayloadRef {
+            definition: &definition,
+            tables: &interned.tables,
+            constants: &constants,
+            variables: &interned.variables,
+        })
+        .expect("encodes");
+        restore_tables(&mut definition, lifted);
+
+        let header = CacheHeader {
+            key: cache.key.clone(),
+            includes: Vec::new(),
+            payload: checksum(&payload),
+        };
+        let encoded = encode(&header, &payload).expect("encodes");
+        fs::write(cache.path(), encoded).unwrap();
+
+        assert!(
+            cache.load().is_none(),
+            "a payload whose indices do not match the model must not be served"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_payload_in_the_previous_format_is_a_miss() {
+        // The payload gained the table list and the per-entry indices. An entry
+        // written before that has a valid header and checksum but a payload
+        // that ends where the definition ends, so decoding it fails and the
+        // open falls back to parsing.
+        let root = temp_dir("old-format");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(&base).unwrap();
+        let bytes = b"[MegaTune]\nsignature = \"cache test\"\n";
+        let cache =
+            DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
+
+        let definition = definition();
+        let payload = postcard::to_allocvec(&definition).expect("encodes");
+        let header = CacheHeader {
+            key: cache.key.clone(),
+            includes: Vec::new(),
+            payload: checksum(&payload),
+        };
+        let encoded = encode(&header, &payload).expect("encodes");
+        fs::write(cache.path(), encoded).unwrap();
+
+        assert!(
+            cache.load().is_none(),
+            "an entry in the previous format must not be served"
+        );
+
         fs::remove_dir_all(&root).unwrap();
     }
 }
