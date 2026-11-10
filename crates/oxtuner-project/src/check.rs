@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use oxtuner_ini::{Definition, Shape};
-use oxtuner_tune::IniPage;
+use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, VariableSpec};
 
-use crate::msq::Msq;
+use crate::msq::{EntryPage, Msq};
 
 /// What a load check found.
 #[expect(
@@ -61,6 +61,8 @@ pub enum IssueKind {
     ValueSkipped,
     /// A value was stored but lies outside the declared range.
     ValueOutOfRange,
+    /// A `<pageData>` hex block disagrees with the decoded `<constant>` values.
+    PageDataMismatch,
 }
 
 impl IssueKind {
@@ -320,7 +322,7 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     if pc_pages != 1 {
         report.warn(
             IssueKind::PcPageCount,
-            format!("expected one unnumbered PC page, found {pc_pages}"),
+            format!("expected one PC variable page, found {pc_pages}"),
         );
     }
 }
@@ -432,6 +434,127 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             ),
         );
     }
+}
+
+/// Cross-checks a `<pageData>` hex block against the values the tune decoded.
+///
+/// Some writers store both spellings of the same page. The decoded constants
+/// are authoritative, so a disagreement is a warning: it means the file was
+/// written by a tool whose own view of the page drifted, and saying so is more
+/// useful than silently picking one. A hidden option (`INVALID`) is skipped,
+/// because any byte means "invalid" and there is nothing to compare.
+pub(crate) fn check_page_data(
+    msq: &Msq,
+    definition: &Definition,
+    layout: &TuneLayout,
+    tune: &Tune,
+    report: &mut LoadReport,
+) {
+    let blocks = msq.page_data();
+    if blocks.is_empty() {
+        return;
+    }
+
+    let mut entries_by_page: BTreeMap<u16, Vec<String>> = BTreeMap::new();
+    for entry in msq.entries() {
+        if let EntryPage::Numbered(page) = entry.page
+            && !entry.is_nameless()
+        {
+            entries_by_page
+                .entry(page.get())
+                .or_default()
+                .push(entry.name.clone());
+        }
+    }
+
+    let layout_arc = std::sync::Arc::new(layout.clone());
+
+    for (number, bytes) in blocks {
+        let Ok(number) = u16::try_from(number) else {
+            continue;
+        };
+        let page_number = MsqPage::new(number);
+        let Some(ini) = page_number.to_ini() else {
+            continue;
+        };
+        let Some(page_layout) = layout.page(ini) else {
+            continue;
+        };
+
+        let expected = usize::try_from(page_layout.size).unwrap_or(0);
+        if bytes.len() != expected {
+            report.warn(
+                IssueKind::PageDataMismatch,
+                format!(
+                    "page {number} carries {} page-data bytes, the definition says {expected}",
+                    bytes.len()
+                ),
+            );
+            continue;
+        }
+
+        let mut scratch = Tune::new(std::sync::Arc::clone(&layout_arc));
+        if oxtuner_tune::decode_page(layout, ini, &bytes, &mut scratch).is_err() {
+            continue;
+        }
+
+        let mut mismatched: Vec<&str> = Vec::new();
+        for name in entries_by_page
+            .get(&number)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+        {
+            if let Some(spec) = layout.variable(name)
+                && selects_hidden_option(definition, spec, tune)
+            {
+                continue;
+            }
+
+            if tune.value(name) != scratch.value(name) {
+                mismatched.push(name);
+            }
+        }
+
+        if !mismatched.is_empty() {
+            let count = mismatched.len();
+            let noun = if count == 1 { "value" } else { "values" };
+
+            report.warn(
+                IssueKind::PageDataMismatch,
+                format!(
+                    "page {number} page data disagrees with {count} {noun}{}",
+                    preview(&mismatched)
+                ),
+            );
+        }
+    }
+}
+
+/// Whether the loaded value selects an option the definition marks hidden.
+///
+/// `INVALID` has no stable byte value: a writer may store its list position or
+/// a sentinel such as `0xFF`. There is nothing meaningful to compare.
+#[expect(
+    clippy::float_cmp,
+    reason = "a bit option matches its exact integer raw value"
+)]
+fn selects_hidden_option(definition: &Definition, spec: &VariableSpec, tune: &Tune) -> bool {
+    if !matches!(spec.shape, EntryShape::Bits { .. }) {
+        return false;
+    }
+
+    let Some(constant) = definition.constant(&spec.name) else {
+        return false;
+    };
+    let Ok(raw) = tune.scalar_raw(&spec.name) else {
+        return false;
+    };
+
+    constant
+        .options
+        .iter()
+        .any(|option| option.hidden && f64::from(option.value) == raw)
 }
 
 fn preview(names: &[&str]) -> String {
@@ -600,6 +723,25 @@ pc = scalar, U08, 0, "", 1, 0, 0, 255, 0
                 .warnings
                 .iter()
                 .any(|issue| issue.kind == IssueKind::MissingValue)
+        );
+    }
+
+    #[test]
+    fn a_negative_pc_page_is_not_reported() {
+        // A negative number is the same page as an unnumbered one and must not
+        // raise `PcPageCount`.
+        let source = MSQ.replace("    <page>\n        <pcVariable name=\"pc\">1.0</pcVariable>\n    </page>",
+            "    <page number=\"-1\">\n        <pcVariable name=\"pc\">1.0</pcVariable>\n    </page>");
+        let report = check(&msq(&source), &definition());
+
+        assert!(!report.is_read_only(), "{:?}", report.blockers);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|issue| issue.kind == IssueKind::PcPageCount),
+            "{:?}",
+            report.warnings
         );
     }
 }

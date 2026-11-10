@@ -3,8 +3,10 @@
 //! A project folder is recognised by `projectCfg/`. The definition is
 //! `projectCfg/mainController.ini` (or the only `.ini` there), resolved with
 //! `#include` files relative to `projectCfg/`; the tune is `CurrentTune.msq`.
-//! Nothing is copied or restructured (ADR-0007), and the only writes inside the
-//! project are:
+//! Two optional files sit beside them: `projectCfg/project.properties` selects
+//! definition flags (`ecuSettings=...`) and `projectCfg/pcVariableValues.msq`
+//! carries the application-level PC variable values. Nothing is copied or
+//! restructured (ADR-0007), and the only writes inside the project are:
 //!
 //! - `CurrentTune.msq` — and only the constants whose values changed;
 //! - `.ox-tuner/provenance` — which INI was used, by hash and signature.
@@ -43,6 +45,10 @@ pub const TUNE_FILE: &str = "CurrentTune.msq";
 pub const CONFIG_DIR: &str = "projectCfg";
 /// The definition a `TunerStudio` project normally uses.
 pub const MAIN_DEFINITION: &str = "mainController.ini";
+/// Project-level PC variable values, written beside the definition.
+pub const PC_VALUES_FILE: &str = "pcVariableValues.msq";
+/// Project settings snapshot (`ecuSettings=...`).
+pub const PROPERTIES_FILE: &str = "project.properties";
 
 /// What a path looks like before opening it.
 #[expect(

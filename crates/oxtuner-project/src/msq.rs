@@ -1,9 +1,10 @@
 //! The `.msq` document model over the raw-preserving XML tree.
 //!
 //! A `.msq` is thin XML: a `<versionInfo>` header, one leading **unnumbered**
-//! `<page>` that holds the PC variables, then one `<page number="N">` per
-//! calibration page (0-based), and a `<settings>` snapshot. Values are user
-//! units keyed by name; there are no offsets in the file.
+//! `<page>` that holds the PC variables (or the same page written
+//! `number="-1"`), then one `<page number="N">` per calibration page (0-based),
+//! and a `<settings>` snapshot. Values are user units keyed by name; there are
+//! no offsets in the file.
 //!
 //! Two rules make the file layer trustworthy:
 //!
@@ -49,9 +50,9 @@ impl fmt::Display for EntryPage {
 
 /// The address a `<page>` element declares.
 ///
-/// `TunerStudio` and `LibreTune` write `number="-1"` for the page that holds PC
-/// variables when they do not use an unnumbered page, so a negative number is
-/// the PC page rather than a calibration page. A number that is not an integer
+/// `TunerStudio` writes the leading page unnumbered; another writer may spell
+/// the same page `number="-1"`. A negative number is therefore the PC page
+/// rather than a calibration page. A number that is not an integer
 /// at all is left to the consistency check, which blocks it by name.
 fn page_address(element: &Element) -> Option<EntryPage> {
     match element.attr("number") {
@@ -292,10 +293,14 @@ impl Msq {
         pages
     }
 
-    /// Number of leading unnumbered pages (normally exactly one).
+    /// Number of PC-variable pages (normally exactly one).
+    ///
+    /// A page is the PC page when it has no `number` attribute or a negative
+    /// one: `TunerStudio` writes the leading unnumbered page, and
+    /// `number="-1"` spells the same thing.
     pub fn pc_page_count(&self) -> usize {
         self.page_elements()
-            .filter(|element| element.attr("number").is_none())
+            .filter(|element| page_address(element) == Some(EntryPage::Pc))
             .count()
     }
 
@@ -327,6 +332,26 @@ impl Msq {
             }
         }
         entries
+    }
+
+    /// Every `<pageData>` block, as `(0-based page number, decoded bytes)`.
+    ///
+    /// Some writers store the whole page as continuous hex beside the decoded
+    /// `<constant>` values. The constants stay authoritative; this exists so
+    /// the load gate can check that the two agree. A block whose text is not
+    /// valid hex is skipped.
+    pub fn page_data(&self) -> Vec<(u32, Vec<u8>)> {
+        let Some(root) = self.root() else {
+            return Vec::new();
+        };
+
+        root.find_children("pageData")
+            .filter_map(|element| {
+                let page = element.attr("page")?.trim().parse::<u32>().ok()?;
+                let bytes = decode_hex(&element.trimmed_text())?;
+                Some((page, bytes))
+            })
+            .collect()
     }
 
     /// The `<settings>` snapshot as `(name, value)` pairs, in file order.
@@ -588,6 +613,27 @@ fn attribute_usize(element: &Element, name: &str) -> Option<usize> {
     element.attr(name)?.trim().parse().ok()
 }
 
+/// Decodes a continuous hex string, ignoring whitespace.
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    let compact: String = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    if compact.is_empty() || !compact.len().is_multiple_of(2) {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(compact.len() / 2);
+    let mut index = 0;
+    while index < compact.len() {
+        let pair = compact.get(index..index + 2)?;
+        bytes.push(u8::from_str_radix(pair, 16).ok()?);
+        index += 2;
+    }
+
+    Some(bytes)
+}
+
 /// The flags one `<setting>` entry documents, with the state each implies.
 ///
 /// `TunerStudio` writes a boolean as name and value (`enablehardware_test_OFF`),
@@ -693,8 +739,8 @@ mod tests {
         assert_eq!(msq.pages().len(), 1, "only page 0 is a calibration page");
         assert_eq!(
             msq.pc_page_count(),
-            0,
-            "the numbered PC page is not counted"
+            1,
+            "the numbered PC page counts as the PC page"
         );
 
         let entries = msq.entries();
@@ -722,6 +768,18 @@ mod tests {
     fn an_unmodified_save_is_byte_identical() {
         let msq = sample();
         assert_eq!(msq.save().unwrap(), SAMPLE.as_bytes());
+    }
+
+    #[test]
+    fn page_data_blocks_decode_from_hex() {
+        let source = r#"<msq>
+    <versionInfo signature="s"/>
+    <pageData page="0">00 ff 10</pageData>
+    <pageData page="1">0x</pageData>
+</msq>"#;
+        let msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        assert_eq!(msq.page_data(), vec![(0, vec![0x00, 0xFF, 0x10])]);
     }
 
     #[test]

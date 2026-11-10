@@ -347,9 +347,9 @@ type ReadOnlyCase = (&'static str, fn(&str) -> String, IssueKind);
 
 #[test]
 fn a_negative_page_number_holds_pc_variables_and_does_not_gate_the_project() {
-    // LibreTune writes the PC-variable page as `number="-1"` rather than as an
-    // unnumbered page. Those variables are not calibration data, so the page
-    // must neither block the open nor count as a tune page.
+    // The project format also writes the PC-variable page as `number="-1"`
+    // rather than as an unnumbered page. Those variables are not calibration
+    // data, so the page must neither block the open nor count as a tune page.
     let dir = TempDir::new("pc-page-negative");
     dir.write("projectCfg/mainController.ini", MAIN_DEFINITION);
     dir.write("projectCfg/page2.ini", PAGE_TWO);
@@ -767,6 +767,144 @@ reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
     );
     let reopened = Project::open(dir.path()).expect("the saved project reopens");
     assert_close(reopened.tune().scalar_user("reqFuel").unwrap(), 12.3);
+}
+
+#[test]
+fn a_project_properties_file_selects_definition_flags() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="tempUnits">1.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("project-properties");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write("projectCfg/project.properties", "ecuSettings=CELSIUS|\n");
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert!(project.settings().is_active("CELSIUS"));
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    assert_close(project.tune().scalar_user("tempUnits").unwrap(), 1.0);
+}
+
+#[test]
+fn the_project_pc_values_win_over_the_tune_page() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, "", 1, 0, 0, 255, 0
+
+[PcVariables]
+rpmhigh = scalar, U16, "rpm", 1, 0, 0, 30000, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <pcVariable name="rpmhigh">12000.0</pcVariable>
+    </page>
+    <page number="0" size="64">
+        <constant name="a">1.0</constant>
+    </page>
+</msq>
+"#;
+    const PC_VALUES: &str = r#"<msq>
+    <versionInfo fileFormat="4.0" signature="speeduino 202501"/>
+    <page number="-1">
+        <pcVariable name="rpmhigh">9000</pcVariable>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("project-pc-values");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write("projectCfg/pcVariableValues.msq", PC_VALUES);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+
+    assert_eq!(
+        project.tune().scalar_user("rpmhigh").unwrap(),
+        9000.0,
+        "the project file carries the application-level value"
+    );
+
+    let before = read_tune(&dir);
+    project.save().expect("an unedited project saves");
+    assert_eq!(
+        read_tune(&dir),
+        before,
+        "reading the project PC values does not rewrite the tune"
+    );
+}
+
+#[test]
+fn a_bare_setting_survives_a_no_op_save() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+    // The format also writes `<setting name="X"/>` with no `value` attribute.
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="tempUnits">1.0</constant>
+    </page>
+    <settings Comment="These setting are only used if this msq is opened without a project.">
+        <setting name="enablehardware_test" />
+        <setting name="CAN_COMMANDS_OFF" />
+        <setting name="CELSIUS" />
+    </settings>
+</msq>
+"#;
+
+    let dir = TempDir::new("bare-settings");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+    let before = read_tune(&dir);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+    assert!(project.settings().is_active("CELSIUS"));
+    assert!(!project.settings().is_active("CAN_COMMANDS"));
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+
+    let mut project = project;
+    let outcome = project.save().expect("an unedited project saves");
+
+    assert_eq!(outcome.cells, 0);
+    assert_eq!(
+        read_tune(&dir),
+        before,
+        "the bare setting form must survive a no-op save"
+    );
 }
 
 #[test]
