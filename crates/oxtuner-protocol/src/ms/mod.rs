@@ -18,7 +18,18 @@ use std::time::Duration;
 use oxtuner_ini::{CommandArguments, CommandTemplate, Definition};
 use oxtuner_transport::{Transport, TransportError};
 
-use crate::behavior::{BurnPlan, CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
+mod commands;
+mod pages;
+mod realtime;
+
+pub use commands::RawCommandReport;
+pub use pages::PageSpec;
+pub use realtime::RealtimeSpec;
+
+use pages::{PageCommands, build_pages};
+use realtime::{Realtime, build_realtime};
+
+use crate::behavior::{CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
 use crate::error::ProtocolError;
 use crate::frame::Frame;
 
@@ -36,66 +47,6 @@ pub enum LinkMode {
     /// Speeduino's `msEnvelope_1.0`: length, payload and CRC-32 in both
     /// directions.
     Envelope,
-}
-
-/// What the definition declares about one page.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag is an independent page capability, not a state machine"
-)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageSpec {
-    /// INI page number, 1-based.
-    pub number: u8,
-    /// Page size in bytes.
-    pub size: u32,
-    /// Base address added to every constant offset.
-    pub start_offset: u32,
-    /// The page can be read.
-    pub readable: bool,
-    /// The page can be written.
-    pub writable: bool,
-    /// The page can be burned.
-    pub burnable: bool,
-    /// The page can report a CRC-32.
-    pub crc: bool,
-}
-
-/// Where the realtime block lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RealtimeSpec {
-    /// The command that fetches it.
-    pub block_size: u16,
-    /// The definition's `outputChannelStartOffset`.
-    pub start_offset: u16,
-}
-
-/// What a `[ControllerCommands]` action sent and received.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RawCommandReport {
-    /// Command strings sent.
-    pub commands: usize,
-    /// Bytes written to the wire, including framing.
-    pub bytes: usize,
-    /// Reply payload bytes, without framing.
-    pub replies: usize,
-}
-
-/// The defined commands of one page.
-#[derive(Debug, Clone)]
-struct PageCommands {
-    spec: PageSpec,
-    /// The two bytes `%2i` expands to, from `pageIdentifier` when declared.
-    identifier: [u8; 2],
-    /// What the firmware needs before this page may be used.
-    switch: PageSwitch,
-    read: Option<CommandTemplate>,
-    write: Option<CommandTemplate>,
-    burn: Option<CommandTemplate>,
-    crc: Option<CommandTemplate>,
-    /// How a CRC reply from this page is encoded.
-    crc_reply: Option<CrcReply>,
 }
 
 /// A page read request.
@@ -225,68 +176,6 @@ pub struct MsProtocol {
     last_page: Option<u8>,
 }
 
-#[derive(Debug, Clone)]
-struct Realtime {
-    command: CommandTemplate,
-    spec: RealtimeSpec,
-}
-
-fn build_pages(
-    definition: &Definition,
-    behavior: &dyn EcuBehavior,
-    variables: &HashMap<String, u8>,
-) -> Vec<PageCommands> {
-    definition
-        .pages
-        .iter()
-        .map(|page| {
-            let number = page.number;
-            let burnable = matches!(behavior.burn(definition, number), BurnPlan::Immediate);
-            let crc = behavior.crc(definition, number);
-
-            PageCommands {
-                switch: behavior.switch_page(definition, number),
-                spec: PageSpec {
-                    number,
-                    size: page.size,
-                    start_offset: page.start_offset,
-                    readable: page.read_command.is_some(),
-                    writable: page.is_writable(),
-                    burnable,
-                    crc: crc.is_some(),
-                },
-                identifier: crate::pattern::page_identifier(
-                    page.number,
-                    page.identifier.as_ref(),
-                    &|name| variables.get(&name.to_ascii_lowercase()).copied(),
-                ),
-                read: page
-                    .read_command
-                    .clone()
-                    .filter(|command| !command.is_empty()),
-                write: page
-                    .chunk_write
-                    .clone()
-                    .filter(|command| !command.is_empty())
-                    .or_else(|| {
-                        page.value_write
-                            .clone()
-                            .filter(|command| !command.is_empty())
-                    }),
-                burn: burnable
-                    .then(|| page.burn_command.clone())
-                    .flatten()
-                    .filter(|command| !command.is_empty()),
-                crc: page
-                    .crc_command
-                    .clone()
-                    .filter(|command| !command.is_empty()),
-                crc_reply: crc.map(|crc| crc.reply),
-            }
-        })
-        .collect()
-}
-
 fn build_handshake(
     definition: &Definition,
     behavior: &dyn EcuBehavior,
@@ -303,25 +192,6 @@ fn build_handshake(
                 .map_err(ProtocolError::Encoding)
         })
         .collect()
-}
-
-fn build_realtime(definition: &Definition) -> Option<Realtime> {
-    definition
-        .comms
-        .och_get_command
-        .clone()
-        .zip(definition.comms.och_block_size)
-        .and_then(|(command, block_size)| {
-            let block_size = u16::try_from(block_size).ok()?;
-            (block_size > 0).then(|| Realtime {
-                command,
-                spec: RealtimeSpec {
-                    block_size,
-                    start_offset: u16::try_from(definition.comms.output_channel_start_offset)
-                        .unwrap_or(u16::MAX),
-                },
-            })
-        })
 }
 
 impl MsProtocol {
@@ -468,77 +338,6 @@ impl MsProtocol {
     /// Returns [`ProtocolError`] when a command cannot be encoded or the link
     /// fails. A timeout with no bytes is treated as a command that does not
     /// reply.
-    pub fn run_commands(
-        &mut self,
-        io: &mut dyn Transport,
-        commands: &[CommandTemplate],
-    ) -> Result<RawCommandReport, ProtocolError> {
-        let mut report = RawCommandReport::default();
-
-        for command in commands {
-            let request = self.encode(command, 0, 0, 0, &[])?;
-            io.flush_input();
-
-            match self.link {
-                LinkMode::Legacy => {
-                    // A raw action has no declared reply length, so whatever
-                    // arrives is drained instead of parsed. Silence is normal:
-                    // several actions (a reset, for one) never answer.
-                    io.write_all(&request)?;
-
-                    let mut reply = Vec::new();
-                    match io.read_until(
-                        &mut reply,
-                        COMMAND_REPLY_MAX,
-                        0,
-                        COMMAND_REPLY_QUIET,
-                        COMMAND_REPLY_TIMEOUT,
-                    ) {
-                        Ok(()) | Err(TransportError::Timeout { .. }) => {}
-                        Err(error) => return Err(error.into()),
-                    }
-
-                    report.bytes += request.len();
-                    report.replies += reply.len();
-                }
-                LinkMode::Envelope => {
-                    // An envelope reply has a length, so read it as a frame;
-                    // only complete silence means the action did not answer.
-                    // A partial frame is a desynchronised link, not success.
-                    let framed = Frame::encode(&request)?;
-                    io.write_all(&framed)?;
-
-                    match self.framed_reply(io) {
-                        Ok(payload) => report.replies += payload.len(),
-                        Err(ProtocolError::Transport(TransportError::Timeout {
-                            got: 0, ..
-                        })) => {}
-                        Err(error) => return Err(error),
-                    }
-
-                    report.bytes += framed.len();
-                }
-            }
-
-            report.commands += 1;
-        }
-
-        // A raw action may answer after the drain window, and the next
-        // conversation must not read those bytes as its own reply.
-        io.flush_input();
-
-        Ok(report)
-    }
-
-    /// Reads a whole page, chunked at the blocking factor.
-    ///
-    /// The page size is the definition's, so a short page in the middle of a
-    /// read cannot leave the caller with a half image it believes is complete.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ProtocolError`] when the page is unknown or unreadable, the
-    /// page is too large for one conversation, or a chunk read fails.
     pub fn read_page_all(
         &mut self,
         io: &mut dyn Transport,
@@ -714,7 +513,7 @@ impl MsProtocol {
         Ok(())
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         command: &CommandTemplate,
         page: u16,
@@ -749,7 +548,7 @@ impl MsProtocol {
     }
 
     /// Reads one complete framed reply.
-    fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
+    pub(super) fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
         let mut header = [0u8; 2];
         io.read_exact_timeout(&mut header, self.block_read_timeout)?;
         let length = Frame::length(header);
