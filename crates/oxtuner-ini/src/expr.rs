@@ -253,9 +253,9 @@ impl Expr {
     ///
     /// Returns [`ExprError`] with the offending position when the text is not
     /// a complete expression. An expression nested deeper than the parser's
-    /// nesting cap, building a tree deeper than [`MAX_AST_DEPTH`], or longer
-    /// than its source cap is rejected the same way, so hostile input cannot
-    /// exhaust the thread stack.
+    /// nesting cap, building a tree deeper than 1024 nodes, or longer than its
+    /// source cap is rejected the same way, so hostile input cannot exhaust the
+    /// thread stack.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
         if text.len() > MAX_EXPR_LEN {
             return Err(ExprError {
@@ -337,8 +337,8 @@ impl Expr {
     /// This is [`Self::evaluate`] plus `arrayValue`: the context resolves both
     /// identifiers and array elements. Everything unresolved still yields
     /// `None`; an unknown function never becomes a guess. A tree a caller
-    /// builds by hand can be deeper than [`MAX_AST_DEPTH`]; past the cap the
-    /// value cannot be folded and yields `None`.
+    /// builds by hand can be deeper than 1024 nodes; past the cap the value
+    /// cannot be folded and yields `None`.
     pub fn evaluate_with(&self, context: &mut dyn EvalContext) -> Option<f64> {
         self.evaluate_at(context, 0)
     }
