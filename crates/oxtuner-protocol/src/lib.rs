@@ -75,4 +75,4 @@ pub use crc32::crc32;
 pub use error::ProtocolError;
 pub use frame::{Frame, FrameDecoder, FrameError};
 pub use ms::{LinkMode, MsProtocol, PageSpec, Protocol, RawCommandReport, RealtimeSpec};
-pub use pattern::{CommandPattern, PatternMatch, page_identifier};
+pub use pattern::{CommandPattern, PatternMatch, WireOrder, page_identifier};

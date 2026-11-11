@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use oxtuner_ini::{BitRange, ChannelKind, CommandTemplate, DataType, Definition, Endianness};
-use oxtuner_protocol::CommandPattern;
+use oxtuner_protocol::{CommandPattern, WireOrder};
 
 mod controller;
 mod pages;
@@ -123,7 +123,13 @@ pub(super) fn pattern_for(
     CommandPattern::new(command, &|name| {
         variables.get(&name.to_ascii_lowercase()).copied()
     })
-    .map(|pattern| pattern.with_big_endian(force_big_endian))
+    .map(|pattern| {
+        pattern.with_wire_order(if force_big_endian {
+            WireOrder::BigEndian
+        } else {
+            WireOrder::LittleEndian
+        })
+    })
 }
 
 /// Builds the realtime view, refusing a base offset the wire cannot carry.

@@ -26,11 +26,25 @@ enum Part {
     Values,
 }
 
+/// The wire order of the 16-bit command arguments.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialect defines exactly two byte orders"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireOrder {
+    /// Least significant byte first, the dialect default.
+    #[default]
+    LittleEndian,
+    /// Most significant byte first, for `forceBigEndianProtocol`.
+    BigEndian,
+}
+
 /// A command template that can be matched against wire bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandPattern {
     parts: Vec<Part>,
-    force_big_endian: bool,
+    wire_order: WireOrder,
 }
 
 /// What a matched command carried.
@@ -79,14 +93,14 @@ impl CommandPattern {
         }
         Some(Self {
             parts,
-            force_big_endian: false,
+            wire_order: WireOrder::default(),
         })
     }
 
     /// Fixes the wire order of the 16-bit arguments.
     #[must_use]
-    pub fn with_big_endian(mut self, big_endian: bool) -> Self {
-        self.force_big_endian = big_endian;
+    pub fn with_wire_order(mut self, order: WireOrder) -> Self {
+        self.wire_order = order;
         self
     }
 
@@ -163,10 +177,9 @@ impl CommandPattern {
 
     fn word(&self, bytes: &[u8]) -> u16 {
         let pair = [bytes[0], bytes[1]];
-        if self.force_big_endian {
-            u16::from_be_bytes(pair)
-        } else {
-            u16::from_le_bytes(pair)
+        match self.wire_order {
+            WireOrder::LittleEndian => u16::from_le_bytes(pair),
+            WireOrder::BigEndian => u16::from_be_bytes(pair),
         }
     }
 }
@@ -243,7 +256,7 @@ mod tests {
     #[test]
     fn a_big_endian_builder_reads_the_word_in_wire_order() {
         let matched = pattern(r#""p%2i%2o%2c""#)
-            .with_big_endian(true)
+            .with_wire_order(WireOrder::BigEndian)
             .capture(&[0x70, 0x00, 0x07, 0x20, 0x00, 0x10, 0x00])
             .expect("matches");
 
