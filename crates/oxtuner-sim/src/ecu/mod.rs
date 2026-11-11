@@ -120,9 +120,10 @@ pub(super) fn pattern_for(
     variables: &HashMap<String, u8>,
     force_big_endian: bool,
 ) -> Option<CommandPattern> {
-    CommandPattern::new(command, force_big_endian, &|name| {
+    CommandPattern::new(command, &|name| {
         variables.get(&name.to_ascii_lowercase()).copied()
     })
+    .map(|pattern| pattern.with_big_endian(force_big_endian))
 }
 
 /// Builds the realtime view, refusing a base offset the wire cannot carry.

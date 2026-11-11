@@ -59,11 +59,7 @@ impl CommandPattern {
     /// (an [`Segment::Unparsed`]) or a `$variable` the resolver cannot give a
     /// value: guessing either would make the simulator answer a command the
     /// firmware would not.
-    pub fn new(
-        command: &CommandTemplate,
-        force_big_endian: bool,
-        variables: &dyn Fn(&str) -> Option<u8>,
-    ) -> Option<Self> {
+    pub fn new(command: &CommandTemplate, variables: &dyn Fn(&str) -> Option<u8>) -> Option<Self> {
         let mut parts = Vec::with_capacity(command.segments.len());
         for segment in &command.segments {
             match segment {
@@ -83,7 +79,7 @@ impl CommandPattern {
         }
         Some(Self {
             parts,
-            force_big_endian,
+            force_big_endian: false,
         })
     }
 
@@ -208,13 +204,13 @@ mod tests {
     use super::*;
 
     fn pattern(text: &str) -> CommandPattern {
-        CommandPattern::new(&CommandTemplate::parse(text), false, &|_| Some(0)).expect("a pattern")
+        CommandPattern::new(&CommandTemplate::parse(text), &|_| Some(0)).expect("a pattern")
     }
 
     #[test]
     fn a_page_read_yields_its_page_offset_and_count() {
         let command = CommandTemplate::parse(r#""p%2i%2o%2c""#);
-        let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
+        let pattern = CommandPattern::new(&command, &|_| Some(0)).expect("a pattern");
 
         let matched = pattern
             .capture(&[0x70, 0x00, 0x07, 0x20, 0x00, 0x10, 0x00])
@@ -242,5 +238,16 @@ mod tests {
                 .capture(&[0x70, 0, 1, 0])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_big_endian_builder_reads_the_word_in_wire_order() {
+        let matched = pattern(r#""p%2i%2o%2c""#)
+            .with_big_endian(true)
+            .capture(&[0x70, 0x00, 0x07, 0x20, 0x00, 0x10, 0x00])
+            .expect("matches");
+
+        assert_eq!(matched.offset, 0x2000);
+        assert_eq!(matched.count, 0x1000);
     }
 }
