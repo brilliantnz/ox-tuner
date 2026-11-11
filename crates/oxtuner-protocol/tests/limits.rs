@@ -115,7 +115,7 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
 }
 
 #[test]
-fn a_hex_text_crc_is_refused_over_the_legacy_link() {
+fn a_hex_text_crc_is_refused_on_both_links() {
     let definition = Definition::parse(
         "\
 [MegaTune]
@@ -134,17 +134,21 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     )
     .expect("parses");
     let behavior = HexTextBehavior;
-    let mut protocol = MsProtocol::new(&definition, &behavior).expect("builds");
-    let mut io = ReplayTransport::new(Trace::parse("").expect("an empty trace"));
 
-    assert_eq!(protocol.link_mode(), LinkMode::Legacy);
+    for link in [LinkMode::Legacy, LinkMode::Envelope] {
+        let mut protocol = MsProtocol::new(&definition, &behavior)
+            .expect("builds")
+            .with_link_mode(link);
+        let mut io = ReplayTransport::new(Trace::parse("").expect("an empty trace"));
 
-    let error = protocol
-        .read_page_crc(&mut io, 1)
-        .expect_err("a text CRC cannot be read as four raw bytes");
+        let error = protocol
+            .read_page_crc(&mut io, 1)
+            .expect_err("a text CRC cannot be read as four raw bytes");
 
-    assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
-    assert!(error.to_string().contains("text"), "{error}");
+        assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains("text"), "{error}");
+        assert!(error.to_string().contains("page 1"), "{error}");
+    }
 }
 
 #[test]

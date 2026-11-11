@@ -58,7 +58,9 @@ pub enum CrcReply {
     RawBigEndian,
     /// Four raw bytes, least significant first.
     RawLittleEndian,
-    /// Eight or more ASCII hex characters.
+    /// Eight or more ASCII hex characters. Recognised so a definition is not
+    /// misread, but this build has no read shape for it and refuses the page
+    /// checksum instead of parsing the first four characters.
     HexText,
 }
 

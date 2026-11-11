@@ -156,6 +156,14 @@ const SIGNATURE_MAX: usize = 512;
 /// firmware that forgot to state a factor.
 const FALLBACK_BLOCKING_FACTOR: usize = 128;
 
+/// A page CRC reply with a variable-length text encoding is not readable by
+/// this build; neither link has a read shape for it.
+fn unsupported_text_crc(page: u8) -> ProtocolError {
+    ProtocolError::Unsupported(format!(
+        "page {page} reports its CRC as text, which this build cannot read"
+    ))
+}
+
 /// The MS-compatible protocol for one definition.
 pub struct MsProtocol {
     name: &'static str,
@@ -386,9 +394,8 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError`] when the page size does not fit the command's
-    /// count field, the firmware reports a text CRC over the legacy link, the
-    /// page switch or the transport fails, or when the CRC reply is not the
-    /// expected four bytes.
+    /// count field, the firmware reports a text CRC, the page switch or the
+    /// transport fails, or when the CRC reply is not the expected four bytes.
     pub fn read_page_crc(
         &mut self,
         io: &mut dyn Transport,
@@ -410,15 +417,11 @@ impl MsProtocol {
         let identifier = entry.identifier;
         let crc_reply = entry.crc_reply.unwrap_or(CrcReply::RawBigEndian);
 
-        // A legacy reply is read as exactly four raw bytes, so a firmware that
-        // sends the CRC as text would have its first four characters parsed as
-        // hex. Refuse instead of returning a wrong checksum that read-back
-        // would treat as verified.
-        if self.link == LinkMode::Legacy && crc_reply == CrcReply::HexText {
-            return Err(ProtocolError::Unsupported(
-                "this firmware reports the page CRC as text, which the legacy link cannot read"
-                    .to_owned(),
-            ));
+        // Both links read the checksum as exactly four bytes, so a text reply
+        // would have its first four characters parsed as hex. Refuse instead of
+        // returning a wrong checksum that read-back would treat as verified.
+        if crc_reply == CrcReply::HexText {
+            return Err(unsupported_text_crc(page));
         }
 
         self.activate(io, page)?;
@@ -449,12 +452,7 @@ impl MsProtocol {
                 u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             }
             CrcReply::HexText => {
-                let text = std::str::from_utf8(&bytes).map_err(|_| {
-                    ProtocolError::UnexpectedReply("the CRC is not ASCII".to_owned())
-                })?;
-                u32::from_str_radix(text.trim(), 16).map_err(|_| {
-                    ProtocolError::UnexpectedReply(format!("the CRC text {text:?} is not hex"))
-                })?
+                return Err(unsupported_text_crc(page));
             }
         };
         Ok(Some(crc))
