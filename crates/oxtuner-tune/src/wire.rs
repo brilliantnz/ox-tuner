@@ -88,7 +88,7 @@ pub fn decode_page(
                     report.skipped += 1;
                     continue;
                 };
-                let text = String::from_utf8_lossy(slice);
+                let text: String = slice.iter().copied().map(char::from).collect();
                 if tune
                     .set_text(&variable.name, text.trim_end_matches('\0'))
                     .is_ok()
@@ -196,7 +196,9 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let source = text.as_bytes();
+                    let Some(source) = latin1_bytes(text) else {
+                        continue;
+                    };
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -321,7 +323,9 @@ pub fn patch_page(
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let source = text.as_bytes();
+                    let Some(source) = latin1_bytes(text) else {
+                        continue;
+                    };
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -390,6 +394,16 @@ fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
 
 fn type_width(data_type: DataType) -> usize {
     usize::try_from(data_type.size()).unwrap_or(usize::MAX)
+}
+
+/// Latin-1 bytes for `text`, or `None` when a character does not fit.
+///
+/// The wire encoding is Latin-1, the same as the `.msq` layer, so a text
+/// constant round-trips byte for byte instead of being lossily re-encoded.
+fn latin1_bytes(text: &str) -> Option<Vec<u8>> {
+    text.chars()
+        .map(|character| u8::try_from(u32::from(character)).ok())
+        .collect()
 }
 
 /// Replaces a bit range in an existing word, keeping every other bit.
@@ -702,6 +716,44 @@ wide = bits, U16, 0, [40:47]
             1234.0,
             "a refused field must not be written"
         );
+    }
+
+    #[test]
+    fn latin1_text_round_trips_through_the_codec() {
+        let definition = definition();
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        let bytes = [0x10, 0x27, 0xFB, 0x14, 0xE9, b'x', 0, 0, 0, 0];
+
+        decode_page(&layout, IniPage::FIRST, &bytes, &mut tune).expect("decodes");
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+
+        assert_eq!(tune.text("name").expect("name"), "\u{e9}x");
+        assert_eq!(
+            &encoded[4..6],
+            &[0xE9, b'x'],
+            "the byte survives the round trip"
+        );
+    }
+
+    #[test]
+    fn text_that_cannot_be_latin1_is_skipped_on_write() {
+        let definition = definition();
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_text("name", "\u{2192}").expect("text is set");
+
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+        let base = [1u8; 10];
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["name".to_owned()])
+            .expect("patches");
+
+        assert_eq!(
+            &encoded[4..8],
+            &[0, 0, 0, 0],
+            "nothing half-encoded is written"
+        );
+        assert_eq!(patched, base, "the base bytes stay as they were");
     }
 
     #[test]
