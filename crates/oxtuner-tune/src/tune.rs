@@ -194,7 +194,8 @@ impl Tune {
     /// # Errors
     ///
     /// Returns [`TuneError::LayoutMismatch`] when the value vectors do not
-    /// match and [`TuneError::UnknownVariable`] when a variable is missing.
+    /// match in length or kind, and [`TuneError::UnknownVariable`] when a
+    /// variable is missing.
     pub fn adopt_values(&mut self, other: &Self) -> Result<(), TuneError> {
         if self.layout.variables().len() != other.layout.variables().len() {
             return Err(TuneError::LayoutMismatch);
@@ -668,17 +669,38 @@ note = string, ASCII, 8, 4
         let mut target = Tune::from_definition(&definition);
         let mut imported = Tune::from_definition(&definition);
 
+        // One element passes the length check, so only the kind check can
+        // refuse it.
         let note = imported
             .layout()
             .index("note")
             .expect("note is in the layout");
-        imported.values[note] = Values::Numbers(vec![1.0; 8]);
+        imported.values[note] = Values::Numbers(vec![1.0]);
 
         assert_eq!(
             target.adopt_values(&imported),
             Err(TuneError::LayoutMismatch),
         );
         assert_eq!(target.text("note").expect("text is unchanged"), "");
+    }
+
+    #[test]
+    fn adopting_text_onto_a_numeric_variable_is_refused() {
+        let definition = definition();
+        let mut target = Tune::from_definition(&definition);
+        let mut imported = Tune::from_definition(&definition);
+
+        let req_fuel = imported
+            .layout()
+            .index("reqFuel")
+            .expect("reqFuel is in the layout");
+        imported.values[req_fuel] = Values::Text("nope".to_owned());
+
+        assert_eq!(
+            target.adopt_values(&imported),
+            Err(TuneError::LayoutMismatch),
+        );
+        assert_eq!(target.scalar_raw("reqFuel").expect("unchanged"), 0.0);
     }
 
     #[test]
