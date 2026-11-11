@@ -12,9 +12,11 @@
 //! # What it refuses
 //!
 //! A variable whose address or shape the definition did not resolve is skipped
-//! and counted in [`DecodeReport::skipped`]. It is never placed at offset zero
-//! and never invented — a wrong value in the ECU image is worse than a missing
-//! one (ADR-0010).
+//! and counted in [`DecodeReport::skipped`]. A bit range that reaches past the
+//! 32-bit word, such as `[40:47]`, is refused the same way: decode skips it and
+//! encode keeps the word unchanged. It is never placed at offset zero and never
+//! invented — a wrong value in the ECU image is worse than a missing one
+//! (ADR-0010).
 
 use oxtuner_ini::{DataType, Endianness};
 
@@ -25,7 +27,8 @@ use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 pub struct DecodeReport {
     /// Variables whose values were taken from the page.
     pub decoded: usize,
-    /// Variables that could not be placed (no address, no shape, too small).
+    /// Variables that could not be placed (no address, no shape, too small, a
+    /// bit range past the word).
     pub skipped: usize,
     /// Page bytes consumed by the variables that were decoded.
     pub bytes: usize,
@@ -355,7 +358,7 @@ fn type_width(data_type: DataType) -> usize {
     reason = "bit constants live in the low 32 bits of a word and return to f64 storage"
 )]
 fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
-    if low >= 32 {
+    if high >= 32 {
         return existing;
     }
 
@@ -364,8 +367,18 @@ fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
     merged as f64
 }
 
+/// The mask for `low..=high`, clamped to a 32-bit word.
+///
+/// Callers refuse a field whose high bit is past the word, so `low` is below
+/// 32 here. The guard keeps the shift total if a future caller forgets.
 fn bit_mask(low: u8, high: u8) -> u32 {
-    let width = high.saturating_sub(low).saturating_add(1).min(32);
+    let low = u32::from(low);
+    let high = u32::from(high);
+    if low >= 32 {
+        return 0;
+    }
+
+    let width = high.saturating_sub(low).saturating_add(1).min(32 - low);
     if width >= 32 {
         u32::MAX
     } else {
@@ -380,7 +393,11 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     reason = "the value is checked finite and non-negative before the bit-field cast"
 )]
 fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
-    if low >= 32 || !raw.is_finite() || raw < 0.0 {
+    if high >= 32 {
+        return None;
+    }
+
+    if !raw.is_finite() || raw < 0.0 {
         return None;
     }
     let word = raw as u64;
@@ -708,6 +725,65 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
         .expect("patches");
 
         assert_eq!(&patched[4..8], &[b'o', b'x', 0, 0]);
+    }
+
+    #[test]
+    fn a_bit_field_that_straddles_the_word_is_skipped() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [31:39]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+
+        let report =
+            decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 0.0);
+    }
+
+    #[test]
+    fn a_patch_of_a_bit_field_past_the_word_leaves_the_word_alone() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+
+        let patched = patch_page(
+            &layout,
+            IniPage::FIRST,
+            &[0xFF, 0xFF, 0, 0],
+            &tune,
+            &["wide".to_owned()],
+        )
+        .expect("patches");
+
+        assert_eq!(&patched[..2], &[0xFF, 0xFF]);
     }
 
     #[test]
