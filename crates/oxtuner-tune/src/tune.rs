@@ -104,6 +104,13 @@ pub enum TuneError {
         /// Largest page the codec accepts.
         limit: usize,
     },
+    /// A changed text value contains a character ISO-8859-1 cannot carry.
+    TextNotLatin1 {
+        /// The variable being written.
+        name: String,
+        /// The first character that does not fit.
+        character: char,
+    },
 }
 
 impl std::fmt::Display for TuneError {
@@ -134,6 +141,10 @@ impl std::fmt::Display for TuneError {
             } => write!(
                 formatter,
                 "page {page} arrived with {got} of {expected} bytes"
+            ),
+            Self::TextNotLatin1 { name, character } => write!(
+                formatter,
+                "`{name}` contains {character:?}, which has no ISO-8859-1 byte"
             ),
         }
     }
