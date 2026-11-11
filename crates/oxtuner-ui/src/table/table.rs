@@ -104,8 +104,8 @@ pub struct RealtimePoint {
 /// The tune table.
 ///
 /// Chrome follows the application theme through `cx.theme()`; the heat cells
-/// and the two colors they constrain come from [`TableStyle`] (see
-/// [`super::heatmap`]).
+/// and the two colors they constrain come from [`TableStyle`]. The ramp itself
+/// lives in the `heatmap` module.
 pub struct Table {
     model: TableModel,
     focus: FocusHandle,

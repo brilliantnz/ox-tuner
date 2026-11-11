@@ -1,14 +1,11 @@
 //! The table's two heat-constrained colors.
 //!
 //! Every other part of the grid chrome reads the application theme. These two
-//! cannot: they are read against the heat ramp (see [`super::heatmap`]), whose
-//! stops sit at mid lightness in both light and dark themes. The cell text has
-//! to stay dark against every stop, and the selection frame has to stay dark
-//! while keeping a hue the ramp does not use. No single theme token expresses
-//! that without losing the contrast.
-//!
-//! The defaults carry the constraint, and a host can replace them through
-//! `Table::set_style` when a surface needs a different palette.
+//! cannot: they are read against the heat ramp (see the `heatmap` module),
+//! which no theme token describes. The defaults carry the contrast the ramp
+//! needs, and a host can replace them through
+//! [`Table::set_style`](super::Table::set_style) when a surface needs a
+//! different palette.
 
 use gpui_kit::{Hsla, rgb};
 
@@ -23,9 +20,9 @@ pub struct TableStyle {
     pub on_heat: Hsla,
     /// Outline around the selected range.
     ///
-    /// Every ramp stop sits at mid lightness, so the frame goes dark to
-    /// separate from all of them, yellow and red included. Purple keeps the
-    /// hue outside the ramp's red-to-blue arc at the same time.
+    /// Darker than every ramp stop, so it separates from the warm ones by
+    /// lightness. The purple keeps its hue outside the ramp's red-to-blue arc
+    /// at the same time, which is what separates it from green and cyan.
     pub selection_frame: Hsla,
 }
 
@@ -76,8 +73,10 @@ mod tests {
                 text < fill,
                 "the text must stay darker than the value {step} fill"
             );
+            // WCAG non-text tier: the blue stop bottoms out near 3.6 to 1,
+            // and normal-text AA is out of reach against it with dark text.
             assert!(
-                ratio >= 3.0,
+                ratio >= 3.5,
                 "the text reads at {ratio:.2} to 1 on the value {step} fill"
             );
         }
@@ -86,19 +85,23 @@ mod tests {
     #[test]
     fn the_selection_frame_stays_dark_and_off_the_heat_hues() {
         let frame = TableStyle::default().selection_frame;
+        let frame_luminance = luminance(frame);
 
-        assert!(
-            frame.l < 0.5,
-            "the frame separates from mid-lightness stops"
-        );
         assert!(frame.a > 0.5, "the outline reads as a frame, not a tint");
 
         for step in 0..=100 {
             let stop = heat_color(0.0, 100.0, f64::from(step));
 
+            let apart = (frame.h - stop.h).abs();
+            let apart = apart.min(1.0 - apart);
+
             assert!(
-                stop.h < frame.h,
-                "the frame hue must sit outside the ramp at value {step}"
+                apart >= 0.1,
+                "the frame sits {apart:.2} turns from the value {step} stop"
+            );
+            assert!(
+                frame_luminance < luminance(stop),
+                "the frame must stay darker than the value {step} fill"
             );
         }
     }
