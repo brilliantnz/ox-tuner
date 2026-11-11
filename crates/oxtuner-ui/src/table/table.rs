@@ -27,7 +27,6 @@
 #![expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
-    clippy::unreadable_literal,
     reason = "GPUI geometry uses f32 while the tune model stores f64 and element indexes"
 )]
 
@@ -40,11 +39,10 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button, button
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Render, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, UTF16Selection, Window,
-    canvas, div, point, px, rgb,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TestSupportExt as _, UTF16Selection, Window, canvas, div, point, px,
 };
 
 use oxtuner_core::{CellEdit, TableView};
@@ -56,11 +54,12 @@ use super::geometry::{
 };
 use super::headers::{BinHighlight, ColumnHeader, HeaderEditing, RowHeader};
 use super::heatmap::{decoration, heat_color};
+use super::style::TableStyle;
 
 // use super::heatmap::contrast_text;
-// Unused while cell text is fixed at #121314. Put the import back together
-// with the call site in render_cell if the per-cell contrast picker is needed
-// again.
+// Unused while the cell text comes from `TableStyle::on_heat`. Put the import
+// back together with the call site in render_cell if the per-cell contrast
+// picker is needed again.
 use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
@@ -104,14 +103,17 @@ pub struct RealtimePoint {
 
 /// The tune table.
 ///
-/// Chrome follows the application theme through `cx.theme()`; only the heatmap
-/// cells keep their own data colours (see [`super::heatmap`]).
+/// Chrome follows the application theme through `cx.theme()`; the heat cells
+/// and the two colors they constrain come from [`TableStyle`] (see
+/// [`super::heatmap`]).
 pub struct Table {
     model: TableModel,
     focus: FocusHandle,
     body_scroll: ScrollHandle,
     dragging: bool,
     realtime: Option<RealtimePoint>,
+    /// The colors fixed by the heat ramp instead of the theme.
+    style: TableStyle,
     /// Whether a selection of several cells also tints the bins of the headers
     /// it spans. One cell always tints its two bins.
     header_wash_for_ranges: bool,
@@ -122,6 +124,7 @@ impl std::fmt::Debug for Table {
         formatter
             .debug_struct("Table")
             .field("model", &self.model)
+            .field("style", &self.style)
             .field("dragging", &self.dragging)
             .finish_non_exhaustive()
     }
@@ -254,6 +257,7 @@ impl Table {
             body_scroll: ScrollHandle::new(),
             dragging: false,
             realtime: None,
+            style: TableStyle::default(),
             header_wash_for_ranges: false,
         }
     }
@@ -261,6 +265,19 @@ impl Table {
     /// The model, for status lines and tests.
     pub fn model(&self) -> &TableModel {
         &self.model
+    }
+
+    /// The heat-constrained colors in use.
+    pub fn style(&self) -> &TableStyle {
+        &self.style
+    }
+
+    /// Replaces the heat-constrained colors. Identical values do not repaint.
+    pub fn set_style(&mut self, style: TableStyle, cx: &mut Context<'_, Self>) {
+        if self.style != style {
+            self.style = style;
+            cx.notify();
+        }
     }
 
     /// Replaces the snapshot and repaints.
@@ -615,10 +632,11 @@ impl Table {
         let fill = heat_color(minimum, maximum, value);
 
         // let text_color = contrast_text(fill);
-        // The old per-cell contrast picker, commented out because a fixed dark
-        // text colour reads fine on the palette. Restore it with its import
-        // above if the palette ever grows bright enough to need white text.
-        let text_color = Hsla::from(rgb(0x121314));
+        // The old per-cell contrast picker, commented out because the
+        // style's fixed dark text reads on the palette. Restore it with its
+        // import above if the palette ever grows bright enough to need white
+        // text.
+        let text_color = self.style.on_heat;
         let display = self.model.display(cell).unwrap_or_else(|| Arc::from(""));
         let aria = self.model.aria(cell).unwrap_or_else(|| Arc::from(""));
         let theme = cx.theme();
@@ -1006,11 +1024,9 @@ impl Render for Table {
 
         // The outline straddles the grid line instead of sitting inside the
         // range. Drawn on the bounds it would eat two pixels off the edge
-        // cells, which makes a single selected cell read as inset.
-        //
-        // Every ramp stop sits at mid lightness, so the frame goes dark to
-        // separate from all of them, yellow and red included. Purple keeps
-        // the hue outside the red-to-blue span at the same time.
+        // cells, which makes a single selected cell read as inset. The color
+        // is the style's frame token, dark enough to separate from every ramp
+        // stop and outside the ramp's hues.
         selection_layer = selection_layer.child(
             div()
                 .id("selection-frame")
@@ -1021,12 +1037,7 @@ impl Render for Table {
                 .w(px(selection_width + 2. * CELL_GAP))
                 .h(px(selection_height + 2. * CELL_GAP))
                 .border_2()
-                .border_color(Hsla {
-                    h: 288.0 / 360.0,
-                    s: 0.90,
-                    l: 0.38,
-                    a: 0.8,
-                }),
+                .border_color(self.style.selection_frame),
         );
 
         // The captions sit outside the grid box, the way a chart labels its

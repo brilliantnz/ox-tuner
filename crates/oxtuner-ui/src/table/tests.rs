@@ -28,7 +28,7 @@ use oxtuner_core::{AxisKind, AxisView, CellState, TableView};
 use super::RealtimePoint;
 use super::geometry::{AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
 use super::model::{AxisTarget, CellPos};
-use super::{Table, TableEvent};
+use super::{Table, TableEvent, TableStyle};
 
 struct Host {
     grid: Entity<Table>,
@@ -646,6 +646,24 @@ fn a_single_cell_selection_outlines_the_cell_without_an_inset(cx: &mut TestAppCo
         f32::from(frame.size.height),
         f32::from(value.size.height) + 2. * CELL_GAP
     );
+}
+
+#[gpui_kit::test]
+fn the_host_replaces_the_heat_style_and_the_grid_reads_it(cx: &mut TestAppContext) {
+    let (_, grid, _) = open(cx, 4, 4);
+
+    let style = TableStyle {
+        on_heat: gpui_kit::Hsla::from(gpui_kit::rgb(0xFF_FF_FF)),
+        ..TableStyle::default()
+    };
+
+    cx.update(|cx| {
+        assert_ne!(*grid.read(cx).style(), style, "the new style must differ");
+
+        grid.update(cx, |grid, cx| grid.set_style(style, cx));
+
+        assert_eq!(*grid.read(cx).style(), style);
+    });
 }
 
 #[gpui_kit::test]
