@@ -79,7 +79,7 @@ pub enum TuneError {
         /// Why.
         source: AttributeError,
     },
-    /// Two tunes built from different layouts were combined.
+    /// Two tunes whose value vectors do not match one layout were combined.
     LayoutMismatch,
     /// The layout has no page with that number.
     UnknownPage {
@@ -111,9 +111,8 @@ impl std::fmt::Display for TuneError {
                 write!(formatter, "`{name}` has no element {index}")
             }
             Self::Conversion { source } => write!(formatter, "{source}"),
-            Self::LayoutMismatch => formatter.write_str(
-                "the tunes were built from different definitions and cannot be compared",
-            ),
+            Self::LayoutMismatch => formatter
+                .write_str("the tunes' values do not match one layout and cannot be combined"),
             Self::UnknownPage { page } => write!(formatter, "the layout has no page {page}"),
             Self::ShortPage {
                 page,
@@ -661,6 +660,22 @@ note = string, ASCII, 8, 4
         assert_eq!(snapshot.scalar_raw("reqFuel").unwrap(), 70.0);
         assert_eq!(snapshot.last_edit("reqFuel", 0, 0), None);
         assert!(tune.last_edit("reqFuel", 0, 0).is_some());
+    }
+
+    #[test]
+    fn a_matching_import_replaces_values_and_drops_edit_times() {
+        let definition = definition();
+        let mut target = Tune::from_definition(&definition);
+        target
+            .set_user_at_time("reqFuel", 0, 9.0, UNIX_EPOCH)
+            .expect("edit is recorded");
+        let mut imported = Tune::from_definition(&definition);
+        imported.set_user("reqFuel", 3.0).expect("value is set");
+
+        target.adopt_values(&imported).expect("layouts match");
+
+        assert_eq!(target.scalar_raw("reqFuel").expect("imported"), 30.0);
+        assert_eq!(target.last_edit("reqFuel", 0, 0), None);
     }
 
     #[test]
