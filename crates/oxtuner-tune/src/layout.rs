@@ -193,7 +193,43 @@ pub struct VariableSpec {
     pub default_raw: f64,
 }
 
+/// Whether a bit field survives the page codec's read-modify-write round trip.
+///
+/// The word must be an integer that `f64` holds exactly (at most 4 bytes), and
+/// the field must end inside that word. Signed words are supported through
+/// their two's-complement bit pattern, which is what the real definitions use.
+/// Wider and floating-point words are not, because the read-modify-write path
+/// would round them.
+pub(crate) fn bit_field_can_round_trip(data_type: DataType, low: u8, high: u8) -> bool {
+    let integer = matches!(
+        data_type,
+        DataType::U08
+            | DataType::S08
+            | DataType::U16
+            | DataType::S16
+            | DataType::U32
+            | DataType::S32
+            | DataType::M08
+    );
+    let width = usize::try_from(data_type.size()).unwrap_or(usize::MAX);
+
+    integer && width <= 4 && low <= high && usize::from(high) < width.saturating_mul(8)
+}
+
 impl VariableSpec {
+    /// Whether the page codec can read and write this variable's bit field.
+    ///
+    /// A refused field is skipped by the codec, so the write plan must not
+    /// offer it as a change that can be sent.
+    pub fn bit_field_round_trips(&self) -> bool {
+        match self.shape {
+            EntryShape::Bits { low, high, .. } => {
+                bit_field_can_round_trip(self.data_type, low, high)
+            }
+            _ => true,
+        }
+    }
+
     /// The page this variable is written to, if it is a constant.
     pub const fn ini_page(&self) -> Option<IniPage> {
         self.owner.page()
