@@ -133,7 +133,7 @@ fn a_table_shape_whose_product_overflows_u32_has_no_element_count() {
 }
 
 #[test]
-fn a_table_shape_one_below_the_u32_limit_still_has_an_element_count() {
+fn a_table_shape_just_under_the_overflow_boundary_still_has_an_element_count() {
     let shape = Shape::Table {
         cols: Dimension::Fixed(65_535),
         rows: Dimension::Fixed(65_535),

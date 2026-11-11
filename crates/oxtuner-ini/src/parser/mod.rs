@@ -36,8 +36,8 @@ pub const MAX_SPEC_VERSION: f64 = 3.80;
 /// produce a different `Definition` (a grammar fix, a new section, a changed
 /// default). The definition cache includes it in its key, so an upgrade misses
 /// instead of serving a definition the build no longer agrees with. Before the
-/// first release it stays at 1, and a stale definition cache misses and is
-/// rebuilt instead of migrated.
+/// first release it stays at 1, so a cache entry written by an older build is
+/// not invalidated by a bump. Delete the cache file and let the app re-parse.
 pub const PARSER_VERSION: u32 = 1;
 
 /// Parses bytes into a frozen definition.
@@ -401,9 +401,8 @@ fn validate_pages(definition: &mut Definition) {
     let mut problems = Vec::new();
 
     for (name, constant) in definition.constants.iter() {
-        let elements = constant.shape.element_count();
         if constant.byte_size().is_none() && !constant.shape.is_dynamic() {
-            let unit = if elements.is_none() {
+            let unit = if constant.shape.element_count().is_none() {
                 "elements"
             } else {
                 "bytes"
@@ -619,6 +618,7 @@ mod tests {
             .expect("an unrepresentable shape must be reported, not silently accepted");
         assert_eq!(diagnostic.severity, Severity::Error);
         assert_eq!(diagnostic.line, Some(7));
+        assert!(diagnostic.message.contains("more elements than"));
     }
 
     #[test]
