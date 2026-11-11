@@ -103,16 +103,16 @@ pub struct RealtimePoint {
 
 /// The tune table.
 ///
-/// Chrome follows the application theme through `cx.theme()`; the heat cells
-/// and the two colors they constrain come from [`TableStyle`]. The ramp itself
-/// lives in the `heatmap` module.
+/// Chrome follows the application theme through `cx.theme()`; only
+/// [`TableStyle`] holds colours of its own, the two the heat ramp constrains.
+/// The ramp itself lives in the `heatmap` module.
 pub struct Table {
     model: TableModel,
     focus: FocusHandle,
     body_scroll: ScrollHandle,
     dragging: bool,
     realtime: Option<RealtimePoint>,
-    /// The colors fixed by the heat ramp instead of the theme.
+    /// The colours the heat ramp constrains instead of the theme.
     style: TableStyle,
     /// Whether a selection of several cells also tints the bins of the headers
     /// it spans. One cell always tints its two bins.
@@ -267,12 +267,12 @@ impl Table {
         &self.model
     }
 
-    /// The heat-constrained colors in use.
+    /// The heat-constrained colours in use.
     pub fn style(&self) -> &TableStyle {
         &self.style
     }
 
-    /// Replaces the heat-constrained colors. Identical values do not repaint.
+    /// Replaces the heat-constrained colours. Identical values do not repaint.
     pub fn set_style(&mut self, style: TableStyle, cx: &mut Context<'_, Self>) {
         if self.style != style {
             self.style = style;

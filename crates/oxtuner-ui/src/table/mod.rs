@@ -1,11 +1,11 @@
 //! The reusable tune table.
 //!
 //! A retained [`Table`] entity over the GPUI-free [`TableModel`]: snapshots in,
-//! [`TableEvent`]s out. The grid reads its chrome from the application theme
-//! and keeps only the colors the heat ramp fixes (see [`TableStyle`]) of its
-//! own (ADR-0013, ADR-0020). The smaller pieces — cells, headers, geometry,
-//! the heatmap palette — are internal components the table composes each
-//! frame.
+//! [`TableEvent`]s out. The grid reads its chrome from the application theme;
+//! only [`TableStyle`] holds colours of its own, the two the heat ramp
+//! constrains (ADR-0013, ADR-0020). The smaller pieces — cells, headers,
+//! geometry, the heatmap palette — are internal components the table composes
+//! each frame.
 
 mod cell;
 mod geometry;

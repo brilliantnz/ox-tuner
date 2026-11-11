@@ -67,7 +67,8 @@ pub(crate) fn heat_color(minimum: f64, maximum: f64, value: f64) -> Hsla {
 // }
 // Unused while the cell text comes from `TableStyle::on_heat` (see
 // `super::style`). Kept around in case the palette changes and per-cell
-// contrast is needed again.
+// contrast is needed again; prefer the linearized luminance the style tests
+// use over this gamma-space luma when restoring it.
 
 /// The write-state dot for one cell, or `None` when the cell needs no mark.
 pub(crate) fn decoration(

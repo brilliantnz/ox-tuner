@@ -648,6 +648,9 @@ fn a_single_cell_selection_outlines_the_cell_without_an_inset(cx: &mut TestAppCo
     );
 }
 
+/// Replacing the style keeps the value the grid reads next frame. The test
+/// window reports layout, not paint, so the rendered colour itself stays with
+/// the contrast tests in `style`.
 #[gpui_kit::test]
 fn the_host_replaces_the_heat_style(cx: &mut TestAppContext) {
     let (_, grid, _) = open(cx, 4, 4);

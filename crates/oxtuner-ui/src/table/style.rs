@@ -1,4 +1,4 @@
-//! The table's two heat-constrained colors.
+//! The table's two heat-constrained colours.
 //!
 //! Every other part of the grid chrome reads the application theme. These two
 //! cannot: they are read against the heat ramp (see the `heatmap` module),
@@ -9,20 +9,21 @@
 
 use gpui_kit::{Hsla, rgb};
 
-/// The table's colors fixed by the heat ramp rather than the theme.
+/// The table's colours fixed by the heat ramp rather than the theme.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TableStyle {
     /// Text painted over the heat cells.
     ///
     /// Dark in both themes: every ramp stop runs brighter than it, so one
-    /// color reads on all of them and the value never flips as the table is
+    /// colour reads on all of them and the value never flips as the table is
     /// redrawn.
     pub on_heat: Hsla,
     /// Outline around the selected range.
     ///
-    /// Darker than every ramp stop, so it separates from the warm ones by
-    /// lightness. The purple keeps its hue outside the ramp's red-to-blue arc
-    /// at the same time, which is what separates it from green and cyan.
+    /// Darker than every ramp stop, and its hue sits outside the ramp's
+    /// red-to-blue arc. The hue carries the tight cases, red and blue:
+    /// lightness alone gets to about 1.4 to 1 there, while the hue still
+    /// holds a fifth of a turn away.
     pub selection_frame: Hsla,
 }
 
@@ -47,8 +48,7 @@ mod tests {
     use super::*;
     use crate::table::heatmap::heat_color;
 
-    fn luminance(color: Hsla) -> f32 {
-        let rgba = Rgba::from(color);
+    fn luminance(color: Rgba) -> f32 {
         let linear = |channel: f32| {
             if channel <= 0.04045 {
                 channel / 12.92
@@ -57,24 +57,24 @@ mod tests {
             }
         };
 
-        0.2126 * linear(rgba.r) + 0.7152 * linear(rgba.g) + 0.0722 * linear(rgba.b)
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
     }
 
     #[test]
     fn the_cell_text_reads_on_every_heat_stop() {
         let style = TableStyle::default();
-        let text = luminance(style.on_heat);
+        let text = luminance(Rgba::from(style.on_heat));
 
         for step in 0..=100 {
-            let fill = luminance(heat_color(0.0, 100.0, f64::from(step)));
+            let fill = luminance(Rgba::from(heat_color(0.0, 100.0, f64::from(step))));
             let ratio = (fill + 0.05) / (text + 0.05);
 
             assert!(
                 text < fill,
                 "the text must stay darker than the value {step} fill"
             );
-            // WCAG non-text tier: the blue stop bottoms out near 3.6 to 1,
-            // and normal-text AA is out of reach against it with dark text.
+            // WCAG large-text tier (3 to 1): the blue stop bottoms out near
+            // 3.6 to 1, so normal-text AA (4.5 to 1) is out of reach here.
             assert!(
                 ratio >= 3.5,
                 "the text reads at {ratio:.2} to 1 on the value {step} fill"
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn the_selection_frame_stays_dark_and_off_the_heat_hues() {
         let frame = TableStyle::default().selection_frame;
-        let frame_luminance = luminance(frame);
+        let frame_color = Rgba::from(frame);
 
         assert!(frame.a > 0.5, "the outline reads as a frame, not a tint");
 
@@ -99,9 +99,11 @@ mod tests {
                 apart >= 0.1,
                 "the frame sits {apart:.2} turns from the value {step} stop"
             );
+            // The outline is translucent, so measure the pixel it paints over
+            // the fill rather than the token on its own.
             assert!(
-                frame_luminance < luminance(stop),
-                "the frame must stay darker than the value {step} fill"
+                luminance(Rgba::from(stop).blend(frame_color)) < luminance(Rgba::from(stop)),
+                "the frame reads darker than the value {step} fill after blending"
             );
         }
     }
