@@ -444,10 +444,12 @@ impl SimTransport {
                     Some(Fault::PartialWrite { bytes }) => values.len().min(*bytes),
                     _ => values.len(),
                 };
-                let written = self
-                    .memory
-                    .write(page, usize::from(offset), &values[..applied])
-                    .unwrap_or(0);
+                let Some(written) =
+                    self.memory
+                        .write(page, usize::from(offset), &values[..applied])
+                else {
+                    return error(0x84);
+                };
                 self.counters.bytes_written += u64::try_from(written).unwrap_or(0);
                 ack(self.reply_code)
             }
@@ -684,6 +686,68 @@ impl Transport for SimTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_past_the_page_end_is_an_error_and_changes_nothing() {
+        use oxtuner_ini::SettingsContext;
+
+        let definition = Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+value = scalar, U08, 0, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut transport =
+            SimTransport::new(&definition, SimConfig::default()).expect("simulates");
+        let before = transport.ram(1).expect("page 1").to_vec();
+
+        let reply = transport.respond(
+            Request::WritePage {
+                page: 1,
+                offset: 6,
+                values: &[1, 2, 3, 4],
+            },
+            None,
+            true,
+        );
+
+        assert_eq!(reply, vec![0x84]);
+        assert_eq!(transport.ram(1), Some(before.as_slice()));
+        assert_eq!(transport.counters().bytes_written, 0);
+        assert_eq!(transport.counters().writes, 1);
+
+        let unknown = transport.respond(
+            Request::WritePage {
+                page: 9,
+                offset: 0,
+                values: &[1],
+            },
+            None,
+            true,
+        );
+        assert_eq!(unknown, vec![0x84], "an unknown page is refused too");
+
+        let legacy = transport.respond(
+            Request::WritePage {
+                page: 1,
+                offset: 6,
+                values: &[1, 2, 3, 4],
+            },
+            None,
+            false,
+        );
+        assert!(legacy.is_empty(), "a legacy link stays silent on refusal");
+        assert_eq!(transport.ram(1), Some(before.as_slice()));
+    }
 
     #[test]
     fn the_transcript_keeps_the_last_entries_and_counts_the_drops() {
