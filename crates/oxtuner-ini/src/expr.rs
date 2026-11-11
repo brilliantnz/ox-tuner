@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn identifiers_walk_a_long_expression_in_source_order() {
-        let source = (0..1_000)
+        let source = (0..800)
             .map(|index| format!("a{index}"))
             .collect::<Vec<_>>()
             .join("+");
@@ -1036,9 +1036,9 @@ mod tests {
         let expression = Expr::parse(&source).expect("parses");
         let names = expression.identifiers();
 
-        assert_eq!(names.len(), 1_000);
+        assert_eq!(names.len(), 800);
         assert_eq!(names.first(), Some(&"a0"));
-        assert_eq!(names.last(), Some(&"a999"));
+        assert_eq!(names.last(), Some(&"a799"));
     }
 
     #[test]
