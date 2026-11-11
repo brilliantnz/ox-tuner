@@ -19,9 +19,11 @@
 //! A bit field is refused the same way when it reaches past its own storage
 //! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
 //! word is not an integer. Signed words are read and written as their
-//! two's-complement pattern. Decode skips a refused field. [`encode_page`] writes
-//! nothing for it, so the word keeps whatever the other constants on it wrote,
-//! and [`patch_page`] keeps the bytes the ECU sent.
+//! two's-complement pattern. Text is Latin-1 on the wire, like the `.msq` layer,
+//! so a text constant with a character above U+00FF is refused on write: it is
+//! skipped rather than half-encoded. Decode skips a refused field.
+//! [`encode_page`] writes nothing for it, so the word keeps whatever the other
+//! constants on it wrote, and [`patch_page`] keeps the bytes the ECU sent.
 
 use oxtuner_ini::{DataType, Endianness};
 
@@ -159,8 +161,9 @@ pub fn decode_page(
 ///
 /// Non-bits values are written first, then each `bits` constant merges into its
 /// word, so every other bit of that word keeps what another constant declared.
-/// A value whose address is unknown, or a bit field the codec refuses, is
-/// skipped; a page image is never shifted to make one fit.
+/// A value whose address is unknown, a bit field the codec refuses, or a text
+/// constant with a character above U+00FF is skipped; a page image is never
+/// shifted to make one fit.
 ///
 /// # Errors
 ///
@@ -196,7 +199,7 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let Some(source) = latin1_bytes(text) else {
+                    let Some(source) = to_latin1_bytes(text) else {
                         continue;
                     };
                     let end = start.saturating_add(len).min(bytes.len());
@@ -268,7 +271,8 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
 ///
 /// Names are matched case-insensitively, as the layout is. A name that is not on
 /// this page contributes nothing, and neither does a bit field the codec
-/// refuses: the base bytes stay as they are.
+/// refuses: the base bytes stay as they are. The same applies to a text constant
+/// that cannot be written as Latin-1.
 ///
 /// # Errors
 ///
@@ -323,7 +327,7 @@ pub fn patch_page(
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let Some(source) = latin1_bytes(text) else {
+                    let Some(source) = to_latin1_bytes(text) else {
                         continue;
                     };
                     let end = start.saturating_add(len).min(bytes.len());
@@ -399,8 +403,10 @@ fn type_width(data_type: DataType) -> usize {
 /// Latin-1 bytes for `text`, or `None` when a character does not fit.
 ///
 /// The wire encoding is Latin-1, the same as the `.msq` layer, so a text
-/// constant round-trips byte for byte instead of being lossily re-encoded.
-fn latin1_bytes(text: &str) -> Option<Vec<u8>> {
+/// constant round-trips byte for byte instead of being lossily re-encoded. The
+/// `.msq` layer keeps its own codec; one shared home is the planned
+/// consolidation.
+fn to_latin1_bytes(text: &str) -> Option<Vec<u8>> {
     text.chars()
         .map(|character| u8::try_from(u32::from(character)).ok())
         .collect()
@@ -733,6 +739,15 @@ wide = bits, U16, 0, [40:47]
             &encoded[4..6],
             &[0xE9, b'x'],
             "the byte survives the round trip"
+        );
+
+        tune.set_text("name", "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}")
+            .expect("text is set");
+        let truncated = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+        assert_eq!(
+            &truncated[4..8],
+            &[0xE9, 0xE9, 0xE9, 0xE9],
+            "the cut lands between characters, never inside one"
         );
     }
 
