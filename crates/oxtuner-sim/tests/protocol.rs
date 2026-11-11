@@ -447,3 +447,33 @@ fn a_partial_write_leaves_the_rest_of_the_page_untouched() {
     assert_eq!(after[0], 0xAA, "the first byte landed");
     assert_eq!(after[1], before[1], "the second byte did not");
 }
+
+#[test]
+fn a_realtime_offset_above_the_wire_field_is_refused_not_clamped() {
+    let definition = Definition::parse(
+        "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+pageReadCommand = \"p%2i%2o%2c\"
+outputChannelStartOffset = 65536
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+",
+        &SettingsContext::new(),
+    )
+    .expect("parses");
+
+    let error = SimTransport::new(&definition, SimConfig::default()).expect_err("refused");
+
+    assert!(error.to_string().contains("65536"), "{error}");
+}

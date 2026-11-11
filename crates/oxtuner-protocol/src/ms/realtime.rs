@@ -1,5 +1,7 @@
 use oxtuner_ini::{CommandTemplate, Definition};
 
+use crate::error::ProtocolError;
+
 /// Where the realtime block lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtimeSpec {
@@ -16,21 +18,32 @@ pub(super) struct Realtime {
     pub(super) spec: RealtimeSpec,
 }
 
-pub(super) fn build_realtime(definition: &Definition) -> Option<Realtime> {
-    definition
+pub(super) fn build_realtime(definition: &Definition) -> Result<Option<Realtime>, ProtocolError> {
+    let Some(command) = definition.comms.och_get_command.clone() else {
+        return Ok(None);
+    };
+    let Some(block_size) = definition
         .comms
-        .och_get_command
-        .clone()
-        .zip(definition.comms.och_block_size)
-        .and_then(|(command, block_size)| {
-            let block_size = u16::try_from(block_size).ok()?;
-            (block_size > 0).then(|| Realtime {
-                command,
-                spec: RealtimeSpec {
-                    block_size,
-                    start_offset: u16::try_from(definition.comms.output_channel_start_offset)
-                        .unwrap_or(u16::MAX),
-                },
-            })
-        })
+        .och_block_size
+        .and_then(|size| u16::try_from(size).ok())
+        .filter(|size| *size > 0)
+    else {
+        return Ok(None);
+    };
+
+    let start_offset =
+        u16::try_from(definition.comms.output_channel_start_offset).map_err(|_| {
+            ProtocolError::Unsupported(format!(
+                "the realtime block starts at offset {}, which does not fit the 16-bit wire field",
+                definition.comms.output_channel_start_offset
+            ))
+        })?;
+
+    Ok(Some(Realtime {
+        command,
+        spec: RealtimeSpec {
+            block_size,
+            start_offset,
+        },
+    }))
 }

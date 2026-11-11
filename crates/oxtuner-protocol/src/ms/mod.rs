@@ -204,8 +204,8 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
-    /// definition, or [`ProtocolError::Encoding`] when a handshake command
-    /// cannot be encoded.
+    /// definition or a declared realtime offset does not fit the wire, or
+    /// [`ProtocolError::Encoding`] when a handshake command cannot be encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
             return Err(ProtocolError::Unsupported(format!(
@@ -223,7 +223,7 @@ impl MsProtocol {
 
         let pages = build_pages(definition, behavior, &variables);
         let handshake = build_handshake(definition, behavior, &variables)?;
-        let realtime = build_realtime(definition);
+        let realtime = build_realtime(definition)?;
 
         Ok(Self {
             name: behavior.name(),
@@ -384,30 +384,30 @@ impl MsProtocol {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError`] when the page switch or the transport fails,
-    /// or when the CRC reply is not the expected four bytes.
+    /// Returns [`ProtocolError`] when the page size does not fit the command's
+    /// count field, the page switch or the transport fails, or when the CRC
+    /// reply is not the expected four bytes.
     pub fn read_page_crc(
         &mut self,
         io: &mut dyn Transport,
         page: u8,
     ) -> Result<Option<u32>, ProtocolError> {
-        let Some((identifier, command, crc_reply, size)) = self
-            .pages
-            .iter()
-            .find(|entry| entry.spec.number == page)
-            .and_then(|entry| {
-                entry.crc.clone().map(|command| {
-                    (
-                        entry.identifier,
-                        command,
-                        entry.crc_reply,
-                        u16::try_from(entry.spec.size).unwrap_or(u16::MAX),
-                    )
-                })
-            })
-        else {
+        let Some(entry) = self.pages.iter().find(|entry| entry.spec.number == page) else {
             return Ok(None);
         };
+        let Some(command) = entry.crc.clone() else {
+            return Ok(None);
+        };
+        let size = u16::try_from(entry.spec.size).map_err(|_| {
+            ProtocolError::Unsupported(format!(
+                "page {page} is {} bytes, which does not fit the 16-bit count field of its CRC \
+                 command",
+                entry.spec.size
+            ))
+        })?;
+        let identifier = entry.identifier;
+        let crc_reply = entry.crc_reply;
+
         self.activate(io, page)?;
         let request = self.encode(&command, u16::from_be_bytes(identifier), 0, size, &[])?;
 
