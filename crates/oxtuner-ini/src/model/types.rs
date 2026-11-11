@@ -376,7 +376,7 @@ impl Shape {
     /// A fixed `[cols x rows]` whose product overflows `u32` reports `None`
     /// even though [`Shape::is_dynamic`] is `false`. The parser reports that
     /// case as `shape-too-large`, so consumers must not read `None` as "empty".
-    /// A bit field wider than 32 bits saturates at `u32::MAX` options instead.
+    /// A bit field of 32 or more bits saturates at `u32::MAX` options instead.
     pub fn element_count(&self) -> Option<u32> {
         match self {
             Self::Scalar => Some(1),

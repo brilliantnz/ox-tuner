@@ -36,7 +36,7 @@ pub const MAX_SPEC_VERSION: f64 = 3.80;
 /// produce a different `Definition` (a grammar fix, a new section, a changed
 /// default). The definition cache includes it in its key, so an upgrade misses
 /// instead of serving a definition the build no longer agrees with. Before the
-/// first release it stays at 1, and a stale definition cache is deleted and
+/// first release it stays at 1, and a stale definition cache misses and is
 /// rebuilt instead of migrated.
 pub const PARSER_VERSION: u32 = 1;
 
@@ -401,8 +401,9 @@ fn validate_pages(definition: &mut Definition) {
     let mut problems = Vec::new();
 
     for (name, constant) in definition.constants.iter() {
+        let elements = constant.shape.element_count();
         if constant.byte_size().is_none() && !constant.shape.is_dynamic() {
-            let limit = if constant.shape.element_count().is_none() {
+            let unit = if elements.is_none() {
                 "elements"
             } else {
                 "bytes"
@@ -410,7 +411,7 @@ fn validate_pages(definition: &mut Definition) {
             problems.push(Diagnostic::new(
                 Severity::Error,
                 "shape-too-large",
-                format!("`{name}` declares more {limit} than a 32-bit size can hold"),
+                format!("`{name}` declares more {unit} than a 32-bit size can hold"),
                 constant.line,
                 "Constants",
             ));
@@ -464,6 +465,8 @@ fn validate_pages(definition: &mut Definition) {
     }
 
     for (name, variable) in definition.pc_variables.iter() {
+        // PC variables never become controller memory, so only the element
+        // count has to be representable. There is no byte size to exceed.
         if variable.shape.element_count().is_none() && !variable.shape.is_dynamic() {
             problems.push(Diagnostic::new(
                 Severity::Error,
@@ -616,6 +619,41 @@ mod tests {
             .expect("an unrepresentable shape must be reported, not silently accepted");
         assert_eq!(diagnostic.severity, Severity::Error);
         assert_eq!(diagnostic.line, Some(7));
+    }
+
+    #[test]
+    fn a_constant_whose_byte_size_overflows_is_reported_in_bytes() {
+        // 2 200 000 000 elements of U16 is 4.4e9 bytes, past a u32 byte count,
+        // while the element count itself still fits.
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 1024\npage = 1\nx = array, U16, 0, [2200000000], \"x\", 1.0, 0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let constant = definition.constant("x").expect("x");
+        assert!(constant.shape.element_count().is_some());
+        assert_eq!(constant.byte_size(), None);
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "shape-too-large")
+            .expect("reported");
+        assert!(diagnostic.message.contains("more bytes than"));
+    }
+
+    #[test]
+    fn an_overflowing_pc_variable_shape_is_reported() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\nx = array, U08, [65536x65536], \"x\", 1.0, 0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "shape-too-large")
+            .expect("reported");
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.section.as_deref(), Some("PcVariables"));
     }
 
     #[test]

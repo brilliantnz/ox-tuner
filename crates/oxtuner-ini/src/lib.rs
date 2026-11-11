@@ -29,8 +29,8 @@
 //! - **Versioned output.** [`PARSER_VERSION`] changes in a released build
 //!   whenever the same bytes and settings can produce a different
 //!   [`Definition`], so a definition cache written by an older parser is never
-//!   served by a newer one. Before the first release it stays at 1 and stale
-//!   caches are deleted instead.
+//!   served by a newer one. Before the first release it stays at 1 and a stale
+//!   cache misses instead of being migrated.
 //!
 //! # Example
 //!
