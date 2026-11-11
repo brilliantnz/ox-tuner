@@ -21,8 +21,9 @@
 //! also tints the two bins it sits between, so the value can be read against
 //! both axes; a range leaves the bins plain unless the owner asks for the
 //! wider wash with [`Table::set_header_wash_for_ranges`].
-//! There is no scrollbar; the body scrolls with the wheel, drag-select and
-//! the keyboard.
+//! Both scrollbars ride the body's scroll handle, so the frozen header bands
+//! and the bars always move together from one position. Besides the bars, the
+//! body also scrolls with the wheel, drag-select and the keyboard.
 
 #![expect(
     clippy::as_conversions,
@@ -35,6 +36,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button, button::ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -1151,39 +1153,53 @@ impl Render for Table {
         }
 
         body_band = body_band.child(
+            // The bar layer is a sibling of the scroll area, not a child of
+            // it, so it stays at the viewport edge while the grid scrolls
+            // under it; `relative()` here is what the overlay anchors to. It
+            // reads the same handle as the frozen header bands, which is why
+            // the bars come from `scrollbar()` and not the
+            // `overflow_scrollbar()` wrapper that tracks a handle of its own.
             div()
-                .id("table-body")
+                .id("table-body-viewport")
+                .test_support()
+                .relative()
                 .size_full()
                 .min_w_0()
-                .overflow_scroll()
-                .track_scroll(&self.body_scroll)
-                .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                 .child(
-                    // The content is exactly the grid's size: it carries
-                    // the grid-line colour, and the cells sit on top.
                     div()
-                        .relative()
-                        .w(body_width)
-                        .h(body_height)
-                        // Contrast between theme
-                        .bg(cell_border_color)
+                        .id("table-body")
+                        .size_full()
+                        .overflow_scroll()
+                        .track_scroll(&self.body_scroll)
+                        .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                         .child(
-                            v_flex()
-                                .absolute()
-                                .left(px(first_column as f32 * step_x))
-                                .top(px(first_row as f32 * step_y))
-                                .gap(px(CELL_GAP))
-                                .children(body_rows),
-                        )
-                        // Painted after the cells so the tint and the
-                        // outline sit on top; being plain frames they leave
-                        // the cells underneath fully clickable. A bin edit
-                        // owns the focus instead: the cell range stays in
-                        // the model but is not drawn until the edit lands.
-                        .when(self.model.axis_editing().is_none(), |this| {
-                            this.child(selection_layer)
-                        }),
-                ),
+                            // The content is exactly the grid's size: it carries
+                            // the grid-line colour, and the cells sit on top.
+                            div()
+                                .relative()
+                                .w(body_width)
+                                .h(body_height)
+                                // Contrast between theme
+                                .bg(cell_border_color)
+                                .child(
+                                    v_flex()
+                                        .absolute()
+                                        .left(px(first_column as f32 * step_x))
+                                        .top(px(first_row as f32 * step_y))
+                                        .gap(px(CELL_GAP))
+                                        .children(body_rows),
+                                )
+                                // Painted after the cells so the tint and the
+                                // outline sit on top; being plain frames they leave
+                                // the cells underneath fully clickable. A bin edit
+                                // owns the focus instead: the cell range stays in
+                                // the model but is not drawn until the edit lands.
+                                .when(self.model.axis_editing().is_none(), |this| {
+                                    this.child(selection_layer)
+                                }),
+                        ),
+                )
+                .scrollbar(&self.body_scroll, ScrollbarAxis::Both),
         );
 
         // Native text services need a handler registered while the frame
