@@ -244,8 +244,14 @@ pub(super) fn resolve_conflicts(
         ConflictResolution::UseEcu => {
             let snapshot = match snapshot::write(project, "conflict") {
                 Ok(path) => path,
-                Err(message) => {
-                    return refuse(events, report, op, FailureCode::SnapshotFailed, &message);
+                Err(error) => {
+                    return refuse(
+                        events,
+                        report,
+                        op,
+                        FailureCode::SnapshotFailed,
+                        &error.to_string(),
+                    );
                 }
             };
             if let Err(error) = project.images_mut().import(ram) {
@@ -315,7 +321,15 @@ pub(super) fn revert_tune(
     };
     let snapshot = match snapshot::write(project, "revert") {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::SnapshotFailed,
+                &error.to_string(),
+            );
+        }
     };
     project.images_mut().revert_to_baseline();
     tracing::info!(%op, cells = diff.cells, "tune reverted to the file baseline");
@@ -374,7 +388,15 @@ pub(super) fn revert_target(
     // snapshotted first, exactly as a whole-tune revert does.
     let snapshot = match snapshot::write(project, "revert") {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::SnapshotFailed,
+                &error.to_string(),
+            );
+        }
     };
 
     let reverted = project.images_mut().revert_variables(&variables);
@@ -558,7 +580,15 @@ pub(super) fn import_tune(
     let (cells, variables) = changed_against(project, &loaded.tune);
     let snapshot = match snapshot::write(project, operation) {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::SnapshotFailed,
+                &error.to_string(),
+            );
+        }
     };
     if let Err(error) = project.images_mut().import(loaded.tune) {
         return refuse(

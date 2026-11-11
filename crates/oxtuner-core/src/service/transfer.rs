@@ -345,13 +345,13 @@ pub(super) fn write_to_ram(
 
     let snapshot = match snapshot::write(project, "write") {
         Ok(path) => path,
-        Err(message) => {
+        Err(error) => {
             return refuse(
                 events,
                 report,
                 op,
                 FailureCode::SnapshotFailed,
-                message.as_str(),
+                &error.to_string(),
             );
         }
     };
@@ -570,7 +570,15 @@ pub(super) fn burn_to_flash(
 
     let snapshot = match snapshot::write(project, "burn") {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::SnapshotFailed,
+                &error.to_string(),
+            );
+        }
     };
     let Some(journal) = session.journal(journal_dir) else {
         return refuse(

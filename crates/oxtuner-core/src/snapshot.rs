@@ -6,7 +6,7 @@
 //! `<project>/.ox-tuner/snapshots/` and are pruned to a bounded count.
 
 use std::{
-    fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,6 +15,72 @@ use oxtuner_project::Project;
 
 /// How many snapshots one project keeps.
 pub(crate) const MAX_SNAPSHOTS: usize = 50;
+
+/// Why a snapshot could not be written.
+#[derive(Debug)]
+pub(crate) enum SnapshotError {
+    /// The snapshot directory could not be created.
+    Directory(io::Error),
+    /// The working image could not be rendered as a `.msq`.
+    Render(oxtuner_project::ProjectError),
+    /// The temporary snapshot file could not be written.
+    Write {
+        /// The temporary file that failed.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
+    /// The temporary file could not be moved into place.
+    Replace {
+        /// The snapshot path the rename targeted.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for SnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Directory(error) => {
+                write!(
+                    formatter,
+                    "the snapshot directory could not be created: {error}"
+                )
+            }
+            Self::Render(error) => {
+                write!(
+                    formatter,
+                    "the tune could not be rendered for a snapshot: {error}"
+                )
+            }
+            Self::Write { path, source } => {
+                write!(
+                    formatter,
+                    "the snapshot {} could not be written: {source}",
+                    path.display()
+                )
+            }
+            Self::Replace { path, source } => {
+                write!(
+                    formatter,
+                    "the snapshot {} could not be moved into place: {source}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnapshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Directory(error) => Some(error),
+            Self::Render(error) => Some(error),
+            Self::Write { source, .. } | Self::Replace { source, .. } => Some(source),
+        }
+    }
+}
 
 /// The snapshot directory inside a project's sidecar.
 pub(crate) fn directory(root: &Path) -> PathBuf {
@@ -25,18 +91,16 @@ pub(crate) fn directory(root: &Path) -> PathBuf {
 ///
 /// `label` names the operation (`write`, `burn`, `import`, `restore`, `revert`);
 /// the unix timestamp in the file name keeps the list sorted.
-pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, String> {
+///
+/// # Errors
+///
+/// Returns [`SnapshotError`] naming the directory, render, write or rename step
+/// that failed.
+pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotError> {
     let directory = directory(project.root());
-    fs::create_dir_all(&directory).map_err(|error| {
-        format!(
-            "the snapshot directory {} could not be created: {error}",
-            directory.display()
-        )
-    })?;
+    fs::create_dir_all(&directory).map_err(SnapshotError::Directory)?;
 
-    let bytes = project
-        .snapshot_msq()
-        .map_err(|error| format!("the tune could not be rendered for a snapshot: {error}"))?;
+    let bytes = project.snapshot_msq().map_err(SnapshotError::Render)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
@@ -46,18 +110,16 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, String> {
     // Written through a sibling temp file so a crash cannot leave a half a
     // snapshot where a restore would find it.
     let temporary = path.with_extension("msq.tmp");
-    fs::write(&temporary, bytes).map_err(|error| {
-        format!(
-            "the snapshot {} could not be written: {error}",
-            temporary.display()
-        )
+    fs::write(&temporary, bytes).map_err(|source| SnapshotError::Write {
+        path: temporary.clone(),
+        source,
     })?;
-    fs::rename(&temporary, &path).map_err(|error| {
+    fs::rename(&temporary, &path).map_err(|source| {
         let _ = fs::remove_file(&temporary);
-        format!(
-            "the snapshot {} could not be moved into place: {error}",
-            path.display()
-        )
+        SnapshotError::Replace {
+            path: path.clone(),
+            source,
+        }
     })?;
 
     prune(&directory);
@@ -148,5 +210,20 @@ mod tests {
         assert!(listed[0].ends_with("snapshot-1-write.msq"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_snapshot_write_error_keeps_its_cause_and_names_the_path() {
+        let error = SnapshotError::Write {
+            path: PathBuf::from("/projects/roadster/.ox-tuner/snapshots/snapshot-1.msq.tmp"),
+            source: io::Error::other("disk full"),
+        };
+
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert!(error.to_string().contains("snapshot-1.msq"), "{error}");
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the cause is lost: {error}"
+        );
     }
 }
