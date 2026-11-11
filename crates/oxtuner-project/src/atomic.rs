@@ -64,7 +64,7 @@ fn derived_temporary_path(path: &Path) -> PathBuf {
 
 fn temporary_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(".oxtuner-tmp");
+    name.push(format!(".oxtuner-tmp.{}", std::process::id()));
     PathBuf::from(name)
 }
 
@@ -119,6 +119,20 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_temporary_name_is_unique_per_process() {
+        let path = Path::new("/projects/roadster/CurrentTune.msq");
+
+        let temporary = temporary_path(path);
+
+        assert!(
+            temporary
+                .to_string_lossy()
+                .ends_with(&format!(".oxtuner-tmp.{}", std::process::id())),
+            "{temporary:?}"
+        );
     }
 
     #[cfg(unix)]
