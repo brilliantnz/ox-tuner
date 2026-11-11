@@ -293,6 +293,8 @@ pub enum LayoutIssueKind {
     NoPage,
     /// An array or text dimension is an expression this build cannot fold.
     UnresolvedShape,
+    /// The shape resolved, but it needs more cells than this build accepts.
+    ShapeTooLarge,
     /// A presentation attribute (`scale`, `translate`, …) is an expression
     /// that did not evaluate against the loaded values.
     UnresolvedAttribute,
@@ -389,6 +391,24 @@ impl TuneLayout {
         layout
     }
 
+    fn cap_shape(&mut self, name: &str, shape: EntryShape) -> Option<EntryShape> {
+        let cells = shape.element_count();
+        if cells <= MAX_VARIABLE_CELLS {
+            return Some(shape);
+        }
+
+        self.issues.push(LayoutIssue::new(
+            IssueSeverity::Error,
+            LayoutIssueKind::ShapeTooLarge,
+            Some(name),
+            format!(
+                "the shape needs {cells} cells, over the {MAX_VARIABLE_CELLS} limit, so the \
+                 tune leaves the variable out"
+            ),
+        ));
+        None
+    }
+
     fn add_constant(
         &mut self,
         definition: &Definition,
@@ -411,9 +431,12 @@ impl TuneLayout {
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedShape,
                 Some(name),
-                "the declared shape cannot be resolved to a size this build can hold, so the \
-                 constant has no fixed size",
+                "the declared shape depends on a value this build cannot resolve, so the \
+                 constant is left out",
             ));
+            return;
+        };
+        let Some(shape) = self.cap_shape(name, shape) else {
             return;
         };
 
@@ -474,8 +497,11 @@ impl TuneLayout {
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedShape,
                 Some(name),
-                "the PC variable declares a shape that cannot be resolved or is too large",
+                "the PC variable declares a shape that cannot be resolved",
             ));
+            return;
+        };
+        let Some(shape) = self.cap_shape(name, shape) else {
             return;
         };
 
@@ -709,6 +735,8 @@ fn digit_count(value: f64) -> u8 {
 ///
 /// Real tables are at most a few thousand cells. A hostile definition can
 /// declare billions, which would abort on allocation when the tune is built.
+/// Text length is not counted here: it is bounded by the page buffer when a
+/// value is read or written, and the tune stores only the actual string.
 const MAX_VARIABLE_CELLS: usize = 65_536;
 
 fn shape_of(shape: &Shape) -> Option<EntryShape> {
@@ -732,7 +760,7 @@ fn shape_of(shape: &Shape) -> Option<EntryShape> {
         },
     };
 
-    (entry.element_count() <= MAX_VARIABLE_CELLS).then_some(entry)
+    Some(entry)
 }
 
 /// The definition's default for one variable, in raw units.
@@ -799,8 +827,72 @@ big = array, U08, 0, [4000000000x4000000000], \"x\", 1, 0
         assert!(layout.index("big").is_none(), "the variable is dropped");
         assert!(
             layout.issues().iter().any(|issue| {
-                issue.kind == LayoutIssueKind::UnresolvedShape
-                    && issue.name.as_deref() == Some("big")
+                issue.kind == LayoutIssueKind::ShapeTooLarge && issue.name.as_deref() == Some("big")
+            }),
+            "{:?}",
+            layout.issues()
+        );
+    }
+
+    #[test]
+    fn a_shape_at_the_cell_cap_is_kept_and_one_past_it_is_dropped() {
+        let definition = |shape: &str| {
+            parse_str(
+                &format!(
+                    "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 1024
+page = 1
+table = array, U08, 0, {shape}, \"x\", 1, 0
+"
+                ),
+                &SettingsContext::new(),
+            )
+            .expect("parses")
+        };
+
+        let at_cap = TuneLayout::build(&definition("[256x256]"), &|_| None);
+        assert!(at_cap.index("table").is_some());
+        assert!(
+            !at_cap
+                .issues()
+                .iter()
+                .any(|issue| issue.kind == LayoutIssueKind::ShapeTooLarge)
+        );
+
+        let over = TuneLayout::build(&definition("[256x257]"), &|_| None);
+        assert!(over.index("table").is_none());
+        assert!(
+            over.issues()
+                .iter()
+                .any(|issue| issue.kind == LayoutIssueKind::ShapeTooLarge)
+        );
+    }
+
+    #[test]
+    fn an_oversized_pc_variable_shape_is_dropped() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[PcVariables]
+big = array, U08, [4000000000x4000000000], \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(layout.index("big").is_none());
+        assert!(
+            layout.issues().iter().any(|issue| {
+                issue.kind == LayoutIssueKind::ShapeTooLarge && issue.name.as_deref() == Some("big")
             }),
             "{:?}",
             layout.issues()
