@@ -10,12 +10,10 @@ use std::rc::Rc;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
-};
+use gpui_kit::{App, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, px};
 
 use crate::app::dialog;
 use crate::core::{self, CoreService};
@@ -415,9 +413,9 @@ pub(crate) fn show_journal(window: &mut Window, cx: &mut App) {
                     .child(div().text_xs().text_color(muted).child(path))
                     .child(
                         div()
-                            .id("write-journal-list")
                             .max_h(px(420.))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
+                            .id("write-journal-list")
                             .rounded_md()
                             .border_1()
                             .border_color(cx.theme().border)
@@ -498,9 +496,9 @@ pub(crate) fn show_snapshots(window: &mut Window, cx: &mut App) {
                     )
                     .child(
                         div()
-                            .id("snapshot-list")
                             .max_h(px(420.))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
+                            .id("snapshot-list")
                             .rounded_md()
                             .border_1()
                             .border_color(cx.theme().border)
