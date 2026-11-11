@@ -20,8 +20,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div,
+    AnyElement, Context, ElementId, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Window, div,
 };
 use oxtuner_ui::tabs::{Tab, TabBar};
 
@@ -187,9 +187,6 @@ impl Render for BottomPanel {
             // scroll is skipped there.
             .child({
                 let body = div()
-                    .id(ElementId::Name(
-                        format!("bottom-panel-scroll-{}", tab.id()).into(),
-                    ))
                     .flex_1()
                     .min_h_0()
                     .w_full()
@@ -200,7 +197,13 @@ impl Render for BottomPanel {
                 if tab == BottomTab::Diagnostics {
                     body.overflow_hidden().into_any_element()
                 } else {
-                    body.overflow_y_scrollbar().into_any_element()
+                    // The scroll area keys its state on this id, not on the
+                    // wrapped element's, so each tab keeps its own position.
+                    body.overflow_y_scrollbar()
+                        .id(ElementId::Name(
+                            format!("bottom-panel-scroll-{}", tab.id()).into(),
+                        ))
+                        .into_any_element()
                 }
             })
     }
@@ -281,12 +284,16 @@ mod tests {
     // assertions, so a release test build has nothing to assert here.
     #[cfg(debug_assertions)]
     #[gpui_kit::test]
-    fn a_scrolling_tab_draws_its_scrollbar(cx: &mut TestAppContext) {
+    fn a_scrolling_tab_uses_the_scroll_area(cx: &mut TestAppContext) {
+        /// The selector gpui-component puts on a scroll area's bar layer
+        /// (`render_scrollbar`); a rename shows up here first.
+        const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
+
         let (handle, host, panel) = open(cx);
 
         cx.update(|cx| {
             crate::core::CoreService::install_without_core(cx);
-            panel.update(cx, |panel, cx| panel.select(0, cx));
+            panel.update(cx, |panel, cx| panel.select(2, cx));
             host.update(cx, |host, cx| {
                 host.show = true;
                 cx.notify();
@@ -297,8 +304,8 @@ mod tests {
         visual.update(gpui_kit::test::TestWindowExt::render_frame);
 
         assert!(
-            visual.debug_bounds("scrollbar-overlay").is_some(),
-            "a scrolling panel tab must draw its scrollbar layer"
+            visual.debug_bounds(SCROLLBAR_LAYER).is_some(),
+            "a scrolling panel tab must render inside the scroll area"
         );
     }
 }

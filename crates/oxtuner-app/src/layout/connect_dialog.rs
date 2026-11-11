@@ -25,8 +25,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ElementId, FontWeight, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, ElementId, FontWeight, IntoElement as _, ParentElement as _,
+    Styled as _, Window, div, px,
 };
 use oxtuner_core::{ConnectionView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict};
 
@@ -282,13 +282,13 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                 )
                 .child(
                     div()
-                        .id("connect-port-list")
                         .rounded_md()
                         .border_1()
                         .border_color(cx.theme().border)
                         .p_2()
                         .max_h(px(160.))
                         .overflow_y_scrollbar()
+                        .id("connect-port-list")
                         .child(
                             v_flex()
                                 .gap_1()
