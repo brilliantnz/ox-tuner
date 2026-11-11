@@ -11,7 +11,7 @@
 //! is that [`ports`] returns device paths without product descriptions, so the
 //! connect dialog shows the path itself.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::time::{Duration, Instant};
 
 use serial2::SerialPort;
@@ -33,11 +33,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `std::io::Read` defines a zero-length read on a non-empty buffer as EOF.
 /// A pulled cable reports exactly that, so the conversation ends instead of
 /// spinning on `Ok(0)` until the deadline and then reporting a timeout.
-fn read_some(
-    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
-    buf: &mut [u8],
-) -> std::io::Result<usize> {
-    match read(buf) {
+fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+
+    match read.read(buf) {
         Ok(0) => Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
         other => other,
     }
@@ -192,7 +193,7 @@ impl Transport for SerialTransport {
             }
             self.set_timeout(deadline - now)?;
             let port = self.port()?;
-            match read_some(|slice| port.read(slice), &mut buf[filled..]) {
+            match read_once(port, &mut buf[filled..]) {
                 Ok(read) => filled += read,
                 Err(error) if error.kind() == ErrorKind::TimedOut => {
                     return Err(TransportError::Timeout {
@@ -244,7 +245,7 @@ impl Transport for SerialTransport {
             let remaining = max - (sink.len() - before);
             let take = remaining.min(buffer.len());
             let port = self.port()?;
-            match read_some(|slice| port.read(slice), &mut buffer[..take]) {
+            match read_once(port, &mut buffer[..take]) {
                 Ok(read) => {
                     sink.extend_from_slice(&buffer[..read]);
                     if buffer[..read].contains(&terminator) {
@@ -340,8 +341,6 @@ pub fn ports() -> Result<Vec<PortInfo>, TransportError> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-
     use super::*;
 
     #[test]
@@ -369,10 +368,20 @@ mod tests {
         let mut empty: &[u8] = &[];
         let mut buffer = [0u8; 4];
 
-        let error =
-            read_some(|slice| empty.read(slice), &mut buffer).expect_err("a pulled cable is EOF");
+        let error = read_once(&mut empty, &mut buffer).expect_err("a pulled cable is EOF");
 
         assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_populated_read_is_passed_through() {
+        let mut data: &[u8] = b"ok";
+        let mut buffer = [0u8; 4];
+
+        let read = read_once(&mut data, &mut buffer).expect("a non-empty read passes through");
+
+        assert_eq!(read, 2);
+        assert_eq!(&buffer[..2], b"ok");
     }
 
     #[test]
