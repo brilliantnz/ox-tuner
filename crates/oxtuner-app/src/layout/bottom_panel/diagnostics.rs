@@ -493,7 +493,7 @@ impl DiagnosticsView {
                     .child(
                         Button::new("diagnostics-clear")
                             .label(t!("app.diagnostics.clear"))
-                            .danger()
+                            .outline()
                             .disabled(self.records.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.clear_view(cx))),
                     )
