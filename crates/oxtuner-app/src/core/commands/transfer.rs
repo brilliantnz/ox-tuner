@@ -79,7 +79,12 @@ pub(crate) fn choose_import(cx: &mut App) {
             }
         }
         Ok(Ok(None)) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "the import picker failed"),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "the import picker failed");
+            cx.update(|cx| {
+                report_failure(cx, FailureCode::ImportRejected, error.to_string());
+            });
+        }
         Err(error) => tracing::warn!(%error, "the import picker channel closed"),
     })
     .detach();

@@ -11,6 +11,7 @@ use std::{
 };
 
 use gpui_kit::{App, PathPromptOptions};
+use oxtuner_core::FailureCode;
 use rust_i18n::t;
 
 use crate::{core, settings::preferences::AppSettings, state::session::AppState};
@@ -34,7 +35,12 @@ pub(crate) fn choose(cx: &mut App) {
             }
         }
         Ok(Ok(None)) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "the project folder picker failed"),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "the project folder picker failed");
+            cx.update(|cx| {
+                core::report_failure(cx, FailureCode::ProjectRejected, error.to_string());
+            });
+        }
         Err(error) => tracing::warn!(%error, "the project folder picker channel closed"),
     })
     .detach();
