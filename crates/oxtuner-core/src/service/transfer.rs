@@ -79,7 +79,7 @@ pub(super) fn run_controller_command(
             report,
             op,
             FailureCode::ControllerActionRefused,
-            &format!("`{name}` is not declared in [ControllerCommands]"),
+            format!("`{name}` is not declared in [ControllerCommands]"),
         );
     };
     let commands = controller.commands.clone();
@@ -89,7 +89,7 @@ pub(super) fn run_controller_command(
             report,
             op,
             FailureCode::ControllerActionRefused,
-            &format!("`{name}` declares no command string"),
+            format!("`{name}` declares no command string"),
         );
     }
 
@@ -136,7 +136,7 @@ pub(super) fn run_controller_command(
             report,
             op,
             FailureCode::JournalFailed,
-            &format!("the write journal could not be written: {error}"),
+            format!("the write journal could not be written: {error}"),
         );
     }
 
@@ -301,7 +301,7 @@ pub(super) fn write_to_ram(
                     report,
                     op,
                     FailureCode::WriteRefused,
-                    &format!("page {page} is not in the definition"),
+                    format!("page {page} is not in the definition"),
                 );
             };
             if !declared.is_writable() {
@@ -310,7 +310,7 @@ pub(super) fn write_to_ram(
                     report,
                     op,
                     FailureCode::WriteRefused,
-                    &format!("page {page} has no write command"),
+                    format!("page {page} has no write command"),
                 );
             }
             if !changed_pages.contains(&page) {
@@ -346,13 +346,7 @@ pub(super) fn write_to_ram(
     let snapshot = match snapshot::write(project, "write") {
         Ok(path) => path,
         Err(error) => {
-            return refuse(
-                events,
-                report,
-                op,
-                FailureCode::SnapshotFailed,
-                &error.to_string(),
-            );
+            return refuse(events, report, op, FailureCode::SnapshotFailed, error);
         }
     };
     let Some(journal) = session.journal(journal_dir) else {
@@ -382,7 +376,7 @@ pub(super) fn write_to_ram(
             report,
             op,
             FailureCode::JournalFailed,
-            &format!("the write journal could not be written: {error}"),
+            format!("the write journal could not be written: {error}"),
         );
     }
 
@@ -500,7 +494,7 @@ pub(super) fn burn_to_flash(
         true,
         (!read_only.is_empty()).then_some(read_only.as_str()),
     ) {
-        return refuse(events, report, op, FailureCode::BurnRefused, &reason);
+        return refuse(events, report, op, FailureCode::BurnRefused, reason);
     }
     if !connection.images.pages_complete {
         return refuse(
@@ -558,7 +552,7 @@ pub(super) fn burn_to_flash(
                     report,
                     op,
                     FailureCode::BurnRefused,
-                    &format!("page {page} cannot be burned"),
+                    format!("page {page} cannot be burned"),
                 );
             }
             chosen.push(page);
@@ -571,13 +565,7 @@ pub(super) fn burn_to_flash(
     let snapshot = match snapshot::write(project, "burn") {
         Ok(path) => path,
         Err(error) => {
-            return refuse(
-                events,
-                report,
-                op,
-                FailureCode::SnapshotFailed,
-                &error.to_string(),
-            );
+            return refuse(events, report, op, FailureCode::SnapshotFailed, error);
         }
     };
     let Some(journal) = session.journal(journal_dir) else {
@@ -607,7 +595,7 @@ pub(super) fn burn_to_flash(
             report,
             op,
             FailureCode::JournalFailed,
-            &format!("the write journal could not be written: {error}"),
+            format!("the write journal could not be written: {error}"),
         );
     }
 

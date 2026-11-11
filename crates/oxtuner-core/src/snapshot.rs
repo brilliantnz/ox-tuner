@@ -20,12 +20,17 @@ pub(crate) const MAX_SNAPSHOTS: usize = 50;
 #[derive(Debug)]
 pub(crate) enum SnapshotError {
     /// The snapshot directory could not be created.
-    Directory(io::Error),
+    Directory {
+        /// The directory that failed.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
     /// The working image could not be rendered as a `.msq`.
     Render(oxtuner_project::ProjectError),
-    /// The temporary snapshot file could not be written.
+    /// The snapshot file could not be written.
     Write {
-        /// The temporary file that failed.
+        /// The snapshot path that was being written.
         path: PathBuf,
         /// The underlying I/O failure.
         source: io::Error,
@@ -42,10 +47,11 @@ pub(crate) enum SnapshotError {
 impl fmt::Display for SnapshotError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Directory(error) => {
+            Self::Directory { path, source } => {
                 write!(
                     formatter,
-                    "the snapshot directory could not be created: {error}"
+                    "the snapshot directory {} could not be created: {source}",
+                    path.display()
                 )
             }
             Self::Render(error) => {
@@ -75,9 +81,10 @@ impl fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Directory(error) => Some(error),
+            Self::Directory { source, .. }
+            | Self::Write { source, .. }
+            | Self::Replace { source, .. } => Some(source),
             Self::Render(error) => Some(error),
-            Self::Write { source, .. } | Self::Replace { source, .. } => Some(source),
         }
     }
 }
@@ -98,7 +105,10 @@ pub(crate) fn directory(root: &Path) -> PathBuf {
 /// that failed.
 pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotError> {
     let directory = directory(project.root());
-    fs::create_dir_all(&directory).map_err(SnapshotError::Directory)?;
+    fs::create_dir_all(&directory).map_err(|source| SnapshotError::Directory {
+        path: directory.clone(),
+        source,
+    })?;
 
     let bytes = project.snapshot_msq().map_err(SnapshotError::Render)?;
     let stamp = SystemTime::now()
@@ -110,9 +120,12 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotE
     // Written through a sibling temp file so a crash cannot leave a half a
     // snapshot where a restore would find it.
     let temporary = path.with_extension("msq.tmp");
-    fs::write(&temporary, bytes).map_err(|source| SnapshotError::Write {
-        path: temporary.clone(),
-        source,
+    fs::write(&temporary, bytes).map_err(|source| {
+        let _ = fs::remove_file(&temporary);
+        SnapshotError::Write {
+            path: path.clone(),
+            source,
+        }
     })?;
     fs::rename(&temporary, &path).map_err(|source| {
         let _ = fs::remove_file(&temporary);
@@ -214,16 +227,34 @@ mod tests {
 
     #[test]
     fn a_snapshot_write_error_keeps_its_cause_and_names_the_path() {
-        let error = SnapshotError::Write {
-            path: PathBuf::from("/projects/roadster/.ox-tuner/snapshots/snapshot-1.msq.tmp"),
+        let path = PathBuf::from("/projects/roadster/.ox-tuner/snapshots/snapshot-1.msq");
+        let write = SnapshotError::Write {
+            path: path.clone(),
             source: io::Error::other("disk full"),
         };
+        let directory = SnapshotError::Directory {
+            path: path
+                .parent()
+                .expect("the snapshot path has a directory")
+                .to_path_buf(),
+            source: io::Error::other("permission denied"),
+        };
 
-        assert!(error.to_string().contains("disk full"), "{error}");
-        assert!(error.to_string().contains("snapshot-1.msq"), "{error}");
+        for error in [write, directory] {
+            assert!(error.to_string().contains("snapshots"), "{error}");
+            assert!(
+                std::error::Error::source(&error).is_some(),
+                "the cause is lost: {error}"
+            );
+        }
         assert!(
-            std::error::Error::source(&error).is_some(),
-            "the cause is lost: {error}"
+            SnapshotError::Write {
+                path,
+                source: io::Error::other("disk full"),
+            }
+            .to_string()
+            .contains("snapshot-1.msq"),
+            "the message names the snapshot, not only the temporary file"
         );
     }
 }
