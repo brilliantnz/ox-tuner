@@ -181,10 +181,25 @@ impl Expr {
     /// # Errors
     ///
     /// Returns [`ExprError`] with the offending position when the text is not
-    /// a complete expression.
+    /// a complete expression. An expression nested deeper than the parser's
+    /// nesting cap, or longer than its source cap, is rejected the same way, so
+    /// hostile input cannot exhaust the thread stack.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
+        if text.len() > MAX_EXPR_LEN {
+            return Err(ExprError {
+                message: format!(
+                    "expression is {} bytes, over the {MAX_EXPR_LEN} byte cap",
+                    text.len()
+                ),
+            });
+        }
+
         let tokens = tokenize(text)?;
-        let mut parser = Parser { tokens, index: 0 };
+        let mut parser = Parser {
+            tokens,
+            index: 0,
+            depth: 0,
+        };
         let expression = parser.ternary()?;
         if parser.index != parser.tokens.len() {
             return Err(ExprError {
@@ -207,13 +222,29 @@ impl Expr {
     ///
     /// This is [`Self::evaluate`] plus `arrayValue`: the context resolves both
     /// identifiers and array elements. Everything unresolved still yields
-    /// `None`; an unknown function never becomes a guess.
+    /// `None`; an unknown function never becomes a guess. An expression whose
+    /// tree is deeper than the traversal cap also yields `None`.
     pub fn evaluate_with(&self, context: &mut dyn EvalContext) -> Option<f64> {
+        self.evaluate_at(context, 0)
+    }
+
+    /// Evaluates at `depth`, refusing to recurse past [`MAX_AST_DEPTH`].
+    ///
+    /// A flat expression such as `1+1+1+…` can be longer than the parser's
+    /// nesting cap while still building a deep tree. The traversal cap keeps
+    /// that tree from exhausting the stack; past it the value cannot be folded,
+    /// so it stays dynamic.
+    fn evaluate_at(&self, context: &mut dyn EvalContext, depth: u32) -> Option<f64> {
+        if depth > MAX_AST_DEPTH {
+            return None;
+        }
+        let next = depth + 1;
+
         let value = match self {
             Self::Number(number) => *number,
             Self::Ident(name) => context.value(name)?,
             Self::Unary(operator, operand) => {
-                let operand = operand.evaluate_with(context)?;
+                let operand = operand.evaluate_at(context, next)?;
                 match operator {
                     UnaryOp::Negate => -operand,
                     UnaryOp::Plus => operand,
@@ -222,22 +253,22 @@ impl Expr {
                 }
             }
             Self::Binary(operator, left, right) => {
-                let left = left.evaluate_with(context)?;
-                let right = right.evaluate_with(context)?;
+                let left = left.evaluate_at(context, next)?;
+                let right = right.evaluate_at(context, next)?;
                 apply_binary(*operator, left, right)?
             }
             Self::Ternary(condition, when_true, when_false) => {
-                if condition.evaluate_with(context)? == 0.0 {
-                    when_false.evaluate_with(context)?
+                if condition.evaluate_at(context, next)? == 0.0 {
+                    when_false.evaluate_at(context, next)?
                 } else {
-                    when_true.evaluate_with(context)?
+                    when_true.evaluate_at(context, next)?
                 }
             }
             Self::Index(base, index) => {
                 let Self::Ident(name) = base.as_ref() else {
                     return None;
                 };
-                let index = index.evaluate_with(context)?;
+                let index = index.evaluate_at(context, next)?;
                 context.element(name, index)?
             }
             Self::Call(name, arguments) if name.eq_ignore_ascii_case("arrayvalue") => {
@@ -247,13 +278,13 @@ impl Expr {
                 let Self::Ident(array_name) = array else {
                     return None;
                 };
-                let index = index.evaluate_with(context)?;
+                let index = index.evaluate_at(context, next)?;
                 context.array_value(array_name, index)?
             }
             Self::Call(name, arguments) => {
                 let values: Vec<f64> = arguments
                     .iter()
-                    .map(|argument| argument.evaluate_with(context))
+                    .map(|argument| argument.evaluate_at(context, next))
                     .collect::<Option<Vec<f64>>>()?;
                 evaluate_call(name, &values).or_else(|| context.function(name, &values))?
             }
@@ -264,36 +295,36 @@ impl Expr {
 
     /// Every identifier the expression reads, for validation and dependency
     /// tracking.
+    ///
+    /// The walk is iterative, so a long flat expression cannot exhaust the
+    /// stack through this path.
     pub fn identifiers(&self) -> Vec<&str> {
         let mut found = Vec::new();
-        self.collect_identifiers(&mut found);
-        found
-    }
+        let mut pending = vec![self];
 
-    fn collect_identifiers<'a>(&'a self, found: &mut Vec<&'a str>) {
-        match self {
-            Self::Ident(name) => found.push(name),
-            Self::Number(_) => {}
-            Self::Unary(_, operand) => operand.collect_identifiers(found),
-            Self::Binary(_, left, right) => {
-                left.collect_identifiers(found);
-                right.collect_identifiers(found);
-            }
-            Self::Ternary(condition, when_true, when_false) => {
-                condition.collect_identifiers(found);
-                when_true.collect_identifiers(found);
-                when_false.collect_identifiers(found);
-            }
-            Self::Call(_, arguments) => {
-                for argument in arguments {
-                    argument.collect_identifiers(found);
+        while let Some(expression) = pending.pop() {
+            match expression {
+                Self::Ident(name) => found.push(name.as_str()),
+                Self::Number(_) => {}
+                Self::Unary(_, operand) => pending.push(operand),
+                Self::Binary(_, left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                Self::Ternary(condition, when_true, when_false) => {
+                    pending.push(when_false);
+                    pending.push(when_true);
+                    pending.push(condition);
+                }
+                Self::Call(_, arguments) => pending.extend(arguments.iter().rev()),
+                Self::Index(base, index) => {
+                    pending.push(index);
+                    pending.push(base);
                 }
             }
-            Self::Index(base, index) => {
-                base.collect_identifiers(found);
-                index.collect_identifiers(found);
-            }
         }
+
+        found
     }
 }
 
@@ -512,12 +543,57 @@ fn one_char_symbol(character: char) -> Option<&'static str> {
     })
 }
 
+/// How deeply parentheses, calls and prefix operators may nest.
+///
+/// The parser is recursive descent, so hostile input must stop before it can
+/// exhaust the thread stack. Depth is counted per expression, and the parser
+/// is discarded on error, so a failed nested parse never has to unwind it.
+const MAX_NESTING: u32 = 128;
+
+/// Longest expression source accepted, in bytes.
+///
+/// Real INI expressions are tens of bytes. The cap keeps a hostile flat chain
+/// from building a tree whose derived drop, clone and equality walks would
+/// recurse once per node.
+const MAX_EXPR_LEN: usize = 4 * 1024;
+
+/// Counts one level of nesting and reports whether it is within `cap`.
+pub(crate) fn bump_depth(depth: &mut u32, cap: u32) -> bool {
+    *depth += 1;
+    *depth <= cap
+}
+
+/// How deep [`Expr::evaluate_with`] may recurse into a parsed tree.
+///
+/// The parser's [`MAX_NESTING`] counts parentheses and operators while it
+/// parses; a flat chain such as `1+1+1+…` builds a tree as deep as its length
+/// without ever nesting. This cap bounds that traversal too, and a value past
+/// it stays dynamic instead of overflowing the stack.
+const MAX_AST_DEPTH: u32 = 1024;
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    depth: u32,
 }
 
 impl Parser {
+    fn enter(&mut self) -> Result<(), ExprError> {
+        if !bump_depth(&mut self.depth, MAX_NESTING) {
+            return Err(ExprError {
+                message: format!(
+                    "expression nests too deeply at token {} (limit {MAX_NESTING})",
+                    self.index
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     fn peek_symbol(&self) -> Option<&str> {
         match self.tokens.get(self.index) {
             Some(Token::Symbol(symbol)) => Some(symbol),
@@ -555,9 +631,15 @@ impl Parser {
     fn ternary(&mut self) -> Result<Expr, ExprError> {
         let condition = self.binary(0)?;
         if self.eat("?") {
+            self.enter()?;
             let when_true = self.ternary()?;
+            self.leave();
             self.expect(":")?;
+
+            self.enter()?;
             let when_false = self.ternary()?;
+            self.leave();
+
             return Ok(Expr::Ternary(
                 Box::new(condition),
                 Box::new(when_true),
@@ -624,7 +706,11 @@ impl Parser {
         };
         if let Some(operator) = operator {
             self.index += 1;
+
+            self.enter()?;
             let operand = self.unary()?;
+            self.leave();
+
             return Ok(Expr::Unary(operator, Box::new(operand)));
         }
         self.primary()
@@ -639,6 +725,7 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 self.index += 1;
                 if self.eat("(") {
+                    self.enter()?;
                     let mut arguments = Vec::new();
                     if !self.eat(")") {
                         loop {
@@ -649,21 +736,30 @@ impl Parser {
                             self.expect(",")?;
                         }
                     }
+                    self.leave();
+
                     return Ok(Expr::Call(name, arguments));
                 }
 
                 let base = Expr::Ident(name);
                 if self.eat("[") {
+                    self.enter()?;
                     let index = self.ternary()?;
+                    self.leave();
                     self.expect("]")?;
+
                     return Ok(Expr::Index(Box::new(base), Box::new(index)));
                 }
                 Ok(base)
             }
             Some(Token::Symbol("(")) => {
                 self.index += 1;
+
+                self.enter()?;
                 let inner = self.ternary()?;
+                self.leave();
                 self.expect(")")?;
+
                 Ok(inner)
             }
             _ => Err(ExprError {
@@ -679,6 +775,10 @@ mod tests {
 
     fn no_lookup(_: &str) -> Option<f64> {
         None
+    }
+
+    fn nesting_cap() -> usize {
+        usize::try_from(MAX_NESTING).expect("the nesting cap fits in usize")
     }
 
     #[test]
@@ -856,6 +956,92 @@ mod tests {
             let error = Expr::parse(source).expect_err(source);
             assert!(!error.message.is_empty(), "{source}");
         }
+    }
+
+    #[test]
+    fn a_deeply_nested_expression_is_rejected_at_the_depth_cap() {
+        let source = format!("{}1{}", "(".repeat(1_000), ")".repeat(1_000));
+
+        let error = Expr::parse(&source).expect_err("must stop at the depth cap");
+
+        assert!(error.message.contains("nests too deeply"));
+    }
+
+    #[test]
+    fn an_expression_at_the_nesting_cap_parses() {
+        let source = format!(
+            "{}1{}",
+            "(".repeat(nesting_cap()),
+            ")".repeat(nesting_cap())
+        );
+
+        Expr::parse(&source).expect("the cap itself is allowed");
+    }
+
+    #[test]
+    fn one_level_past_the_nesting_cap_is_rejected() {
+        let source = format!(
+            "{}1{}",
+            "(".repeat(nesting_cap() + 1),
+            ")".repeat(nesting_cap() + 1)
+        );
+
+        Expr::parse(&source).expect_err("one past the cap is too deep");
+    }
+
+    #[test]
+    fn a_long_prefix_chain_is_rejected_at_the_depth_cap() {
+        let source = format!("{}1", "!".repeat(1_000));
+
+        Expr::parse(&source).expect_err("must stop at the depth cap");
+    }
+
+    #[test]
+    fn an_expression_over_the_length_cap_is_rejected() {
+        let source = vec!["1"; MAX_EXPR_LEN].join("+");
+
+        let error = Expr::parse(&source).expect_err("must reject an oversized expression");
+
+        assert!(error.message.contains("over the"));
+    }
+
+    #[test]
+    fn sibling_nestings_do_not_accumulate_depth() {
+        let branch = format!("{}1{}", "(".repeat(100), ")".repeat(100));
+
+        Expr::parse(&format!("{branch} + {branch}")).expect("operands restore depth");
+        Expr::parse(&format!("f({branch}, {branch})")).expect("arguments restore depth");
+        Expr::parse(&format!("1 ? {branch} : {branch}")).expect("branches restore depth");
+    }
+
+    #[test]
+    fn a_long_binary_chain_evaluates_without_unbounded_recursion() {
+        let short = vec!["1"; 100].join("+");
+        let expression = Expr::parse(&short).expect("parses");
+        assert_eq!(expression.evaluate(&no_lookup), Some(100.0));
+
+        let long = vec!["1"; 2_000].join("+");
+        let expression = Expr::parse(&long).expect("parses flat");
+        assert_eq!(
+            expression.evaluate(&no_lookup),
+            None,
+            "past the traversal cap the value stays dynamic"
+        );
+    }
+
+    #[test]
+    fn identifiers_walk_a_long_expression_in_source_order() {
+        let source = (0..800)
+            .map(|index| format!("a{index}"))
+            .collect::<Vec<_>>()
+            .join("+");
+
+        let expression = Expr::parse(&source).expect("parses");
+        let names = expression.identifiers();
+
+        assert_eq!(names.len(), 800);
+        assert_eq!(names.first(), Some(&"a0"));
+        assert_eq!(names.last(), Some(&"a799"));
     }
 
     #[test]
