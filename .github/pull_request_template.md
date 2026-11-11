@@ -29,7 +29,7 @@
 
 ## Performance
 
-<!-- Required when changing a hot path or adding per-frame/project-open work. Include same-machine before/after numbers and benchmark names. Otherwise write "Not applicable." -->
+<!-- Required when changing a hot path or adding per-frame/project-open work. Include same-machine before/after numbers, the delta (absolute and % change), and benchmark names. Otherwise write "Not applicable." -->
 
 Not applicable.
 
