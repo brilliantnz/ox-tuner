@@ -411,7 +411,7 @@ impl TuneLayout {
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedShape,
                 Some(name),
-                "the declared shape depends on a value this build cannot resolve, so the \
+                "the declared shape cannot be resolved to a size this build can hold, so the \
                  constant has no fixed size",
             ));
             return;
@@ -474,7 +474,7 @@ impl TuneLayout {
                 IssueSeverity::Error,
                 LayoutIssueKind::UnresolvedShape,
                 Some(name),
-                "the PC variable declares a shape that cannot be resolved",
+                "the PC variable declares a shape that cannot be resolved or is too large",
             ));
             return;
         };
@@ -705,26 +705,34 @@ fn digit_count(value: f64) -> u8 {
     value.round().clamp(0.0, 9.0) as u8
 }
 
+/// Largest number of cells a variable may have.
+///
+/// Real tables are at most a few thousand cells. A hostile definition can
+/// declare billions, which would abort on allocation when the tune is built.
+const MAX_VARIABLE_CELLS: usize = 65_536;
+
 fn shape_of(shape: &Shape) -> Option<EntryShape> {
-    match shape {
-        Shape::Scalar => Some(EntryShape::Scalar),
-        Shape::Bits { low, high, shift } => Some(EntryShape::Bits {
+    let entry = match shape {
+        Shape::Scalar => EntryShape::Scalar,
+        Shape::Bits { low, high, shift } => EntryShape::Bits {
             low: *low,
             high: *high,
             shift: *shift,
-        }),
-        Shape::List(length) => Some(EntryShape::Array {
+        },
+        Shape::List(length) => EntryShape::Array {
             cols: usize::try_from(length.value()?).ok()?,
             rows: 1,
-        }),
-        Shape::Table { cols, rows } => Some(EntryShape::Array {
+        },
+        Shape::Table { cols, rows } => EntryShape::Array {
             cols: usize::try_from(cols.value()?).ok()?,
             rows: usize::try_from(rows.value()?).ok()?,
-        }),
-        Shape::Text { length, .. } => Some(EntryShape::Text {
+        },
+        Shape::Text { length, .. } => EntryShape::Text {
             len: usize::try_from(length.value()?).ok()?,
-        }),
-    }
+        },
+    };
+
+    (entry.element_count() <= MAX_VARIABLE_CELLS).then_some(entry)
 }
 
 /// The definition's default for one variable, in raw units.
@@ -768,6 +776,36 @@ fn default_raw(
 mod tests {
     use super::*;
     use oxtuner_ini::{SettingsContext, parse_str};
+
+    #[test]
+    fn an_oversized_shape_drops_the_variable_with_an_issue() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 1024
+page = 1
+big = array, U08, 0, [4000000000x4000000000], \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(layout.index("big").is_none(), "the variable is dropped");
+        assert!(
+            layout.issues().iter().any(|issue| {
+                issue.kind == LayoutIssueKind::UnresolvedShape
+                    && issue.name.as_deref() == Some("big")
+            }),
+            "{:?}",
+            layout.issues()
+        );
+    }
 
     #[test]
     fn a_bit_field_must_fit_its_integer_word() {
