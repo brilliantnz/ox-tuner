@@ -355,6 +355,10 @@ fn type_width(data_type: DataType) -> usize {
     reason = "bit constants live in the low 32 bits of a word and return to f64 storage"
 )]
 fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
+    if low >= 32 {
+        return existing;
+    }
+
     let mask = bit_mask(low, high);
     let merged = (existing as i64 & !i64::from(mask)) | (((value as i64) << low) & i64::from(mask));
     merged as f64
@@ -376,7 +380,7 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     reason = "the value is checked finite and non-negative before the bit-field cast"
 )]
 fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
-    if !raw.is_finite() || raw < 0.0 {
+    if low >= 32 || !raw.is_finite() || raw < 0.0 {
         return None;
     }
     let word = raw as u64;
@@ -570,6 +574,33 @@ name = string, ASCII, 4, 4
 
         assert_eq!(&encoded[..4], &bytes[..4]);
         assert_eq!(&encoded[4..6], b"ox");
+    }
+
+    #[test]
+    fn a_bit_field_past_the_word_is_skipped_not_a_panic() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+
+        let report =
+            decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 0.0);
     }
 
     #[test]
