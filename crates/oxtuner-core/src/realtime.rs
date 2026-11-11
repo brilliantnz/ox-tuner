@@ -75,10 +75,14 @@ pub struct LatestFrame {
 
 impl LatestFrame {
     /// The newest frame, or `None` before the first one arrives.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a writer panicked while holding the frame lock.
     pub fn get(&self) -> Option<Arc<RealtimeFrame>> {
         self.inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the frame lock is only ever held by infallible code")
             .clone()
     }
 
@@ -87,7 +91,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("the frame lock is only ever held by infallible code");
         *slot = Some(Arc::new(frame));
     }
 
@@ -96,7 +100,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("the frame lock is only ever held by infallible code");
         *slot = None;
     }
 }

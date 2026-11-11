@@ -28,7 +28,7 @@ fn store() -> LogStore {
     let slot = HANDLE.get_or_init(|| Mutex::new(None));
     let mut slot = slot
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .expect("the bench setup lock is only ever held by infallible code");
 
     let handle = slot.get_or_insert_with(|| {
         let directory =

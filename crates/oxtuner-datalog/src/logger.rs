@@ -131,11 +131,15 @@ impl LogStatus {
     }
 
     /// The current file, while one is open.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a writer panicked while holding the status lock.
     pub fn path(&self) -> Option<PathBuf> {
         self.inner
             .path
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the log status lock is only ever held by infallible code")
             .clone()
     }
 
@@ -179,7 +183,8 @@ impl LogStatus {
             .inner
             .path
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_owned());
+            .expect("the log status lock is only ever held by infallible code") =
+            Some(path.to_owned());
     }
 
     fn stopped(&self) {

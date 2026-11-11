@@ -359,13 +359,13 @@ impl ChartHistory {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
         self.inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the history lock is only ever held by infallible code")
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
         self.inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("the history lock is only ever held by infallible code")
     }
 }
 

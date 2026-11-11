@@ -149,7 +149,7 @@ impl Gate {
         let closed = self
             .closed
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("the gate mutex is only ever held by infallible code");
         if *closed {
             return Err(CoreError::Stopped);
         }
@@ -161,7 +161,7 @@ impl Gate {
         let mut closed = self
             .closed
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("the gate mutex is only ever held by infallible code");
         *closed = true;
     }
 }
