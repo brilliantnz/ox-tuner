@@ -90,8 +90,8 @@ pub enum XmlErrorKind {
     /// `<!--` without a `-->` terminator after its body, including a
     /// terminator that overlaps the opener (`<!-->`).
     UnterminatedComment,
-    /// `<?xml` without a `?>` terminator after its body, including a
-    /// terminator that overlaps the opener (`<?>`).
+    /// A prolog `<?` declaration without a `?>` terminator after its body,
+    /// including a terminator that overlaps the opener (`<?>`).
     UnterminatedDeclaration,
     /// A closing tag that never ends.
     UnterminatedCloseTag,
@@ -762,11 +762,11 @@ impl<'a> Parser<'a> {
 
     fn parse_cdata(&mut self) -> Result<String, XmlError> {
         let start = self.pos + 9;
-        let Some(offset) = self.source[self.pos..].find("]]>") else {
+        let Some(offset) = self.source[start..].find("]]>") else {
             self.pos = self.bytes.len();
             return self.error(XmlErrorKind::UnterminatedCdata);
         };
-        let end = self.pos + offset;
+        let end = start + offset;
         let cdata = self.source[start..end].to_owned();
         self.pos = end + 3;
         Ok(cdata)
