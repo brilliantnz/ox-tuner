@@ -1,0 +1,9 @@
+# Share compiler artifacts across checkouts via sccache.
+# sccache cannot cache incremental builds, so incremental is off here:
+# cold builds hit the shared cache instead of recompiling the GPUI tree.
+# Verify with: cargo build -p oxtuner-ini && sccache --show-stats
+[build]
+rustc-wrapper = "sccache"
+
+[profile.dev]
+incremental = false
