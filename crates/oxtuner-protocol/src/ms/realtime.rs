@@ -22,14 +22,17 @@ pub(super) fn build_realtime(definition: &Definition) -> Result<Option<Realtime>
     let Some(command) = definition.comms.och_get_command.clone() else {
         return Ok(None);
     };
-    let Some(block_size) = definition
-        .comms
-        .och_block_size
-        .and_then(|size| u16::try_from(size).ok())
-        .filter(|size| *size > 0)
-    else {
+    let Some(size) = definition.comms.och_block_size else {
         return Ok(None);
     };
+    let block_size = u16::try_from(size)
+        .ok()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| {
+            ProtocolError::Unsupported(format!(
+                "the realtime block is {size} byte(s), which is not a usable 16-bit size"
+            ))
+        })?;
 
     let start_offset =
         u16::try_from(definition.comms.output_channel_start_offset).map_err(|_| {

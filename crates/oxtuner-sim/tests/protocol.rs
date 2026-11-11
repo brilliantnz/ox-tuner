@@ -511,3 +511,36 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
         oxtuner_protocol::crc32(transport.ram(1).expect("page 1"))
     );
 }
+
+#[test]
+fn a_realtime_block_size_that_is_unusable_is_refused() {
+    for size in [0, 70000] {
+        let definition = Definition::parse(
+            &format!(
+                "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+pageReadCommand = \"p%2i%2o%2c\"
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = {size}
+rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+"
+            ),
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let error = SimTransport::new(&definition, SimConfig::default()).expect_err("refused");
+
+        assert!(error.to_string().contains(&size.to_string()), "{error}");
+    }
+}

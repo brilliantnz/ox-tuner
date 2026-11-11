@@ -146,3 +146,38 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
     assert!(error.to_string().contains("text"), "{error}");
 }
+
+#[test]
+fn a_realtime_block_size_that_is_unusable_is_refused() {
+    for size in [0, 70000] {
+        let definition = Definition::parse(
+            &format!(
+                "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+pageReadCommand = \"p%2i%2o%2c\"
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = {size}
+rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+"
+            ),
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let behavior = BehaviorKind::select(&definition).expect("a known family");
+
+        let error = MsProtocol::new(&definition, behavior.as_dyn()).expect_err("refused");
+
+        assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains(&size.to_string()), "{error}");
+    }
+}

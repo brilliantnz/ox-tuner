@@ -141,13 +141,19 @@ fn realtime_ecu(
     let Some(pattern) = pattern_for(command, variables, force_big_endian) else {
         return Ok(None);
     };
-    let Some(block_size) = definition
-        .comms
-        .och_block_size
-        .and_then(|size| usize::try_from(size).ok())
-    else {
+    let Some(size) = definition.comms.och_block_size else {
         return Ok(None);
     };
+    let block_size = u16::try_from(size)
+        .ok()
+        .filter(|size| *size > 0)
+        .map(usize::from)
+        .ok_or_else(|| SimError {
+            message: format!(
+                "`{}` declares a {size}-byte realtime block, which is not a usable 16-bit size",
+                definition.signature
+            ),
+        })?;
     let start_offset =
         u16::try_from(definition.comms.output_channel_start_offset).map_err(|_| SimError {
             message: format!(
