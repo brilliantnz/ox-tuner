@@ -211,24 +211,23 @@ pub struct CommandTemplate {
 /// Why a command template could not be encoded.
 ///
 /// The message names the segment that failed; callers that only display the
-/// failure can use [`Display`](fmt::Display), and a caller that needs the
-/// underlying cause can walk [`std::error::Error::source`].
+/// failure can use [`Display`](fmt::Display).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodeError(String);
+pub struct CommandEncodeError(String);
 
-impl fmt::Display for EncodeError {
+impl CommandEncodeError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for CommandEncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl std::error::Error for EncodeError {}
-
-impl From<String> for EncodeError {
-    fn from(message: String) -> Self {
-        Self(message)
-    }
-}
+impl std::error::Error for CommandEncodeError {}
 
 /// One piece of a command string.
 #[expect(
@@ -387,20 +386,25 @@ impl CommandTemplate {
     ///
     /// # Errors
     ///
-    /// Returns [`EncodeError`] when a variable is unknown, a `%v` placeholder
-    /// has no payload, or the command contains text this build cannot encode.
+    /// Returns [`CommandEncodeError`] when a variable is unknown, a `%v`
+    /// placeholder has no payload, or the command contains text this build
+    /// cannot encode.
     pub fn encode(
         &self,
         arguments: &CommandArguments<'_>,
         variables: &dyn Fn(&str) -> Option<u8>,
-    ) -> Result<Vec<u8>, EncodeError> {
+    ) -> Result<Vec<u8>, CommandEncodeError> {
         let mut bytes = Vec::new();
         for segment in &self.segments {
             match segment {
                 Segment::Byte(byte) => bytes.push(*byte),
                 Segment::Variable(name) => match variables(name) {
                     Some(value) => bytes.push(value),
-                    None => return Err(format!("unknown command variable ${name}").into()),
+                    None => {
+                        return Err(CommandEncodeError::new(format!(
+                            "unknown command variable ${name}"
+                        )));
+                    }
                 },
                 Segment::Placeholder(Placeholder::PageId) => {
                     // The page identifier is the `[canId][page]` pair — read
@@ -425,13 +429,15 @@ impl CommandTemplate {
                 Segment::Placeholder(Placeholder::Value) => match arguments.values.first() {
                     Some(_) => bytes.extend_from_slice(arguments.values),
                     None => {
-                        return Err("the command needs at least one payload byte"
-                            .to_owned()
-                            .into());
+                        return Err(CommandEncodeError::new(
+                            "the command needs at least one payload byte",
+                        ));
                     }
                 },
                 Segment::Unparsed(text) => {
-                    return Err(format!("the command contains unsupported text {text:?}").into());
+                    return Err(CommandEncodeError::new(format!(
+                        "the command contains unsupported text {text:?}"
+                    )));
                 }
             }
         }

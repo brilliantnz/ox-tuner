@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use oxtuner_ini::EncodeError;
+use oxtuner_ini::CommandEncodeError;
 use oxtuner_transport::TransportError;
 
 /// Why a conversation produced no usable answer.
@@ -28,7 +28,7 @@ pub enum ProtocolError {
         operation: &'static str,
     },
     /// The definition's command template could not be encoded.
-    Encoding(EncodeError),
+    Encoding(CommandEncodeError),
 }
 
 impl ProtocolError {
