@@ -572,6 +572,33 @@ mod tests {
     }
 
     #[test]
+    fn a_definition_with_a_deeply_nested_condition_returns_an_error() {
+        let condition = format!("{}FLAG{}", "(".repeat(10_000), ")".repeat(10_000));
+        let text = format!("[MegaTune]\nsignature = \"x\"\n#if {condition}\n#endif\n");
+
+        let error = parse_str(&text, &SettingsContext::new()).expect_err("must be rejected");
+
+        assert_eq!(error.diagnostics()[0].code, "condition-too-deep");
+    }
+
+    #[test]
+    fn a_deeply_nested_field_is_reported_without_aborting() {
+        let expression = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let text = format!(
+            "[MegaTune]\nsignature = \"x\"\n[OutputChannels]\nderived = {{ {expression} }}, \"u\"\n"
+        );
+
+        let definition = parse_str(&text, &SettingsContext::new()).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-channel")
+            .expect("the deep field is reported");
+        assert!(diagnostic.message.contains("nests too deeply"));
+    }
+
+    #[test]
     fn an_unknown_section_is_kept_as_data_not_an_error() {
         let text = format!("{}\n[EventTriggers]\n  trigger = something\n", minimal());
 

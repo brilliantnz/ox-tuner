@@ -184,7 +184,11 @@ impl Expr {
     /// a complete expression.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
         let tokens = tokenize(text)?;
-        let mut parser = Parser { tokens, index: 0 };
+        let mut parser = Parser {
+            tokens,
+            index: 0,
+            depth: 0,
+        };
         let expression = parser.ternary()?;
         if parser.index != parser.tokens.len() {
             return Err(ExprError {
@@ -512,12 +516,34 @@ fn one_char_symbol(character: char) -> Option<&'static str> {
     })
 }
 
+/// How deeply parentheses, calls and prefix operators may nest.
+///
+/// The parser is recursive descent, so hostile input must stop before it can
+/// exhaust the thread stack. Depth is counted per expression, and the parser
+/// is discarded on error, so a failed nested parse never has to unwind it.
+const MAX_NESTING: u32 = 128;
+
 struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    depth: u32,
 }
 
 impl Parser {
+    fn enter(&mut self) -> Result<(), ExprError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(ExprError {
+                message: "expression nests too deeply".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     fn peek_symbol(&self) -> Option<&str> {
         match self.tokens.get(self.index) {
             Some(Token::Symbol(symbol)) => Some(symbol),
@@ -555,9 +581,15 @@ impl Parser {
     fn ternary(&mut self) -> Result<Expr, ExprError> {
         let condition = self.binary(0)?;
         if self.eat("?") {
+            self.enter()?;
             let when_true = self.ternary()?;
+            self.leave();
             self.expect(":")?;
+
+            self.enter()?;
             let when_false = self.ternary()?;
+            self.leave();
+
             return Ok(Expr::Ternary(
                 Box::new(condition),
                 Box::new(when_true),
@@ -624,7 +656,11 @@ impl Parser {
         };
         if let Some(operator) = operator {
             self.index += 1;
+
+            self.enter()?;
             let operand = self.unary()?;
+            self.leave();
+
             return Ok(Expr::Unary(operator, Box::new(operand)));
         }
         self.primary()
@@ -639,6 +675,7 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 self.index += 1;
                 if self.eat("(") {
+                    self.enter()?;
                     let mut arguments = Vec::new();
                     if !self.eat(")") {
                         loop {
@@ -649,21 +686,30 @@ impl Parser {
                             self.expect(",")?;
                         }
                     }
+                    self.leave();
+
                     return Ok(Expr::Call(name, arguments));
                 }
 
                 let base = Expr::Ident(name);
                 if self.eat("[") {
+                    self.enter()?;
                     let index = self.ternary()?;
+                    self.leave();
                     self.expect("]")?;
+
                     return Ok(Expr::Index(Box::new(base), Box::new(index)));
                 }
                 Ok(base)
             }
             Some(Token::Symbol("(")) => {
                 self.index += 1;
+
+                self.enter()?;
                 let inner = self.ternary()?;
+                self.leave();
                 self.expect(")")?;
+
                 Ok(inner)
             }
             _ => Err(ExprError {
@@ -856,6 +902,15 @@ mod tests {
             let error = Expr::parse(source).expect_err(source);
             assert!(!error.message.is_empty(), "{source}");
         }
+    }
+
+    #[test]
+    fn a_deeply_nested_expression_is_rejected_at_the_depth_cap() {
+        let source = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+
+        let error = Expr::parse(&source).expect_err("must stop at the depth cap");
+
+        assert!(error.message.contains("nests too deeply"));
     }
 
     #[test]

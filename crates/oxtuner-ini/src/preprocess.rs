@@ -502,7 +502,17 @@ fn handle_conditional_directive(
             let result = evaluate_condition(rest, &mut preprocessed.settings);
             let taken = match result {
                 Ok(taken) => taken,
-                Err(message) => {
+                Err(ConditionError::TooDeep) => {
+                    fatal.push(Diagnostic::new(
+                        Severity::Error,
+                        "condition-too-deep",
+                        "a condition nests too deeply",
+                        line_number,
+                        "Preprocessor",
+                    ));
+                    false
+                }
+                Err(ConditionError::Syntax(message)) => {
                     preprocessed.diagnostics.push(Diagnostic::new(
                         Severity::Warning,
                         "bad-condition",
@@ -524,14 +534,25 @@ fn handle_conditional_directive(
         "elif" => match conditionals.last_mut() {
             Some(frame) => {
                 let result = evaluate_condition(rest, &mut preprocessed.settings);
-                let taken = result.unwrap_or_else(|message| {
-                    preprocessed.diagnostics.push(Diagnostic::new(
-                        Severity::Warning,
-                        "bad-condition",
-                        message,
-                        line_number,
-                        "Preprocessor",
-                    ));
+                let taken = result.unwrap_or_else(|error| {
+                    match error {
+                        ConditionError::TooDeep => fatal.push(Diagnostic::new(
+                            Severity::Error,
+                            "condition-too-deep",
+                            "a condition nests too deeply",
+                            line_number,
+                            "Preprocessor",
+                        )),
+                        ConditionError::Syntax(message) => {
+                            preprocessed.diagnostics.push(Diagnostic::new(
+                                Severity::Warning,
+                                "bad-condition",
+                                message,
+                                line_number,
+                                "Preprocessor",
+                            ));
+                        }
+                    }
                     false
                 });
                 let taken = taken && !frame.branch_taken && frame.parent_active;
@@ -639,18 +660,33 @@ fn handle_active_directive(
 
 /// Evaluates a `#if` condition: flag names, `!`, `&&`, `||`, parentheses and
 /// the literals `true` / `false`.
-fn evaluate_condition(text: &str, settings: &mut SettingsContext) -> Result<bool, String> {
+fn evaluate_condition(text: &str, settings: &mut SettingsContext) -> Result<bool, ConditionError> {
     let tokens = condition_tokens(text)?;
     let mut parser = ConditionParser {
         tokens,
         index: 0,
+        depth: 0,
         settings,
     };
     let value = parser.or_expression()?;
     if parser.index != parser.tokens.len() {
-        return Err(format!("unexpected trailing input in condition `{text}`"));
+        return Err(format!("unexpected trailing input in condition `{text}`").into());
     }
     Ok(value)
+}
+
+/// Why a `#if` or `#elif` condition could not be evaluated.
+enum ConditionError {
+    /// The condition is malformed. The branch is skipped with a warning.
+    Syntax(String),
+    /// The condition nests past [`MAX_NESTING`], which is fatal.
+    TooDeep,
+}
+
+impl From<String> for ConditionError {
+    fn from(message: String) -> Self {
+        Self::Syntax(message)
+    }
 }
 
 fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
@@ -693,9 +729,13 @@ fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
     Ok(tokens)
 }
 
+/// How deeply parentheses and `!` may nest in a `#if` condition.
+const MAX_NESTING: u32 = 128;
+
 struct ConditionParser<'a> {
     tokens: Vec<String>,
     index: usize,
+    depth: u32,
     settings: &'a mut SettingsContext,
 }
 
@@ -712,7 +752,7 @@ impl ConditionParser<'_> {
         false
     }
 
-    fn or_expression(&mut self) -> Result<bool, String> {
+    fn or_expression(&mut self) -> Result<bool, ConditionError> {
         let mut value = self.and_expression()?;
         while self.eat("||") {
             let right = self.and_expression()?;
@@ -721,7 +761,7 @@ impl ConditionParser<'_> {
         Ok(value)
     }
 
-    fn and_expression(&mut self) -> Result<bool, String> {
+    fn and_expression(&mut self) -> Result<bool, ConditionError> {
         let mut value = self.unary_expression()?;
         while self.eat("&&") {
             let right = self.unary_expression()?;
@@ -730,14 +770,25 @@ impl ConditionParser<'_> {
         Ok(value)
     }
 
-    fn unary_expression(&mut self) -> Result<bool, String> {
+    fn unary_expression(&mut self) -> Result<bool, ConditionError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(ConditionError::TooDeep);
+        }
+
+        let value = self.unary_expression_inner();
+        self.depth -= 1;
+        value
+    }
+
+    fn unary_expression_inner(&mut self) -> Result<bool, ConditionError> {
         if self.eat("!") {
             return Ok(!self.unary_expression()?);
         }
         if self.eat("(") {
             let value = self.or_expression()?;
             if !self.eat(")") {
-                return Err("unbalanced parentheses in condition".to_owned());
+                return Err("unbalanced parentheses in condition".to_owned().into());
             }
             return Ok(value);
         }
@@ -754,7 +805,7 @@ impl ConditionParser<'_> {
                     }
                 }
             }
-            None => Err("a condition ends with an operator".to_owned()),
+            None => Err("a condition ends with an operator".to_owned().into()),
         }
     }
 }
@@ -907,6 +958,17 @@ mod tests {
 
         assert_eq!(expanded, vec!["$a"], "the reference stays visible");
         assert_eq!(unresolved, vec!["a"], "and is reported");
+    }
+
+    #[test]
+    fn a_deeply_nested_condition_is_fatal() {
+        let condition = format!("{}FLAG{}", "(".repeat(10_000), ")".repeat(10_000));
+        let text = format!("[X]\n#if {condition}\n#endif\n");
+
+        let error = preprocess(&text, &SettingsContext::new(), None).expect_err("must be fatal");
+
+        assert_eq!(error.diagnostics()[0].code, "condition-too-deep");
+        assert_eq!(error.diagnostics()[0].line, Some(2));
     }
 
     #[test]
