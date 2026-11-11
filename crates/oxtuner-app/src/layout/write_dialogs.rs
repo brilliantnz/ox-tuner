@@ -264,7 +264,7 @@ pub(crate) fn show_revert(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("revert-confirm")
                             .label(t!("app.revert.confirm"))
-                            .primary()
+                            .danger()
                             .disabled(unsaved == 0)
                             .on_click(|_, window, cx| {
                                 core::revert_tune(cx);

@@ -853,7 +853,7 @@ impl DialogEditor {
             .child(
                 Button::new("dialog-retry")
                     .label(t!("app.dialog.retry"))
-                    .primary()
+                    .outline()
                     .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
             )
             .into_any_element()
