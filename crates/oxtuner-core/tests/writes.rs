@@ -655,12 +655,15 @@ fn importing_a_different_signature_needs_consent() {
     let core = Harness::start(true);
     core.open(dir.path());
 
-    let op = core.handle.import_tune(&other, false).expect("queued");
+    let op = core.handle.import_tune(&other).expect("queued");
     let (kind, message) = failure(&core.wait(|event| event.op() == Some(op)));
     assert_eq!(kind, FailureCode::ImportNeedsConsent);
     assert!(message.contains("consent"), "{message}");
 
-    let op = core.handle.import_tune(&other, true).expect("queued");
+    let op = core
+        .handle
+        .import_tune_with_consent(&other)
+        .expect("queued");
     let event = core.wait(|event| event.op() == Some(op));
     let Event::TuneImported {
         report: summary, ..
@@ -690,7 +693,10 @@ fn a_bad_import_is_reported_and_leaves_the_tune_alone() {
     let core = Harness::start(true);
     core.open(dir.path());
 
-    let op = core.handle.import_tune(&other, true).expect("queued");
+    let op = core
+        .handle
+        .import_tune_with_consent(&other)
+        .expect("queued");
     let (kind, _) = failure(&core.wait(|event| event.op() == Some(op)));
     assert_eq!(kind, FailureCode::ImportRejected);
 

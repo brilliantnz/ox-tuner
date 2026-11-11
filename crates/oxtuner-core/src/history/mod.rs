@@ -178,4 +178,11 @@ mod tests {
         assert_eq!(history.stats().frames, 0);
         assert_eq!(history.channels().len(), 1);
     }
+
+    #[test]
+    fn hidden_and_visible_constructors_set_the_flag() {
+        assert!(!ChannelInfo::new("rpm", "rpm").hidden);
+        assert!(ChannelInfo::new("rpm", "rpm").hidden().hidden);
+        assert!(!ChannelInfo::new("rpm", "rpm").hidden().visible().hidden);
+    }
 }

@@ -532,20 +532,30 @@ impl CoreHandle {
 
     /// Imports a `.msq` into the working image.
     ///
-    /// A different-signature tune needs `consented: true`.
+    /// A tune whose signature differs from the open definition is refused;
+    /// [`Self::import_tune_with_consent`] is the approved path for that case.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
     /// command cannot be queued.
-    pub fn import_tune(
-        &self,
-        path: impl Into<PathBuf>,
-        consented: bool,
-    ) -> Result<OpId, CoreError> {
+    pub fn import_tune(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send_request(CommandRequest::ImportTune {
             path: path.into(),
-            consented,
+            consented: false,
+        })
+    }
+
+    /// Imports a `.msq` after the user approved a different signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn import_tune_with_consent(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::ImportTune {
+            path: path.into(),
+            consented: true,
         })
     }
 

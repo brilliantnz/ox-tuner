@@ -17,7 +17,7 @@ pub(crate) use session::{
     request_connect, save_trace, start_realtime, test_connection,
 };
 pub(crate) use transfer::{
-    choose_import, import_tune, list_snapshots, read_journal, restore_snapshot,
+    choose_import, import_tune_with_consent, list_snapshots, read_journal, restore_snapshot,
 };
 pub(crate) use tune::{
     acknowledge_write_failure, burn_to_flash, refresh_tune_status, resolve_conflicts,

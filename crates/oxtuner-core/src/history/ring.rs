@@ -40,8 +40,15 @@ impl ChannelInfo {
 
     /// Marks the channel hidden, as the definition's `hide` flag does.
     #[must_use]
-    pub fn hidden(mut self, hidden: bool) -> Self {
-        self.hidden = hidden;
+    pub fn hidden(mut self) -> Self {
+        self.hidden = true;
+        self
+    }
+
+    /// Marks the channel visible, overriding a definition that hides it.
+    #[must_use]
+    pub fn visible(mut self) -> Self {
+        self.hidden = false;
         self
     }
 }
