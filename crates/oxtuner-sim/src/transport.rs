@@ -563,8 +563,8 @@ fn realtime_block(
 ) -> Option<Vec<u8>> {
     let mut block = generator.block(step);
     if burn_pending
-        && let Some((offset, mask)) = realtime.burn_pending
-        && let Some(byte) = block.get_mut(offset)
+        && let Some((byte_offset, mask)) = realtime.burn_pending
+        && let Some(byte) = block.get_mut(byte_offset)
     {
         *byte |= mask;
     }
