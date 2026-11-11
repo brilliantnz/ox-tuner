@@ -57,9 +57,8 @@ use super::heatmap::{decoration, heat_color};
 use super::style::TableStyle;
 
 // use super::heatmap::contrast_text;
-// Unused while the cell text comes from `TableStyle::on_heat`. Put the import
-// back together with the call site in render_cell if the per-cell contrast
-// picker is needed again.
+// Unused; see the note above `contrast_text` in `heatmap.rs` before restoring
+// it.
 use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
@@ -632,10 +631,9 @@ impl Table {
         let fill = heat_color(minimum, maximum, value);
 
         // let text_color = contrast_text(fill);
-        // The old per-cell contrast picker, commented out because the
-        // style's fixed dark text reads on the palette. Restore it with its
-        // import above if the palette ever grows bright enough to need white
-        // text.
+        // The old per-cell contrast picker, commented out because the style's
+        // fixed dark text reads on the palette. See the note above
+        // `contrast_text` in `heatmap.rs` before restoring it.
         let text_color = self.style.on_heat;
         let display = self.model.display(cell).unwrap_or_else(|| Arc::from(""));
         let aria = self.model.aria(cell).unwrap_or_else(|| Arc::from(""));

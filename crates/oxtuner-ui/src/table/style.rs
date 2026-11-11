@@ -21,9 +21,8 @@ pub struct TableStyle {
     /// Outline around the selected range.
     ///
     /// Darker than every ramp stop, and its hue sits outside the ramp's
-    /// red-to-blue arc. The hue carries the tight cases, red and blue:
-    /// lightness alone gets to about 1.4 to 1 there, while the hue still
-    /// holds a fifth of a turn away.
+    /// red-to-blue arc. The hue carries the tight cases, red and blue, where
+    /// the lightness difference alone is small.
     pub selection_frame: Hsla,
 }
 
