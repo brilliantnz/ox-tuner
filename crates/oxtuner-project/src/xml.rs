@@ -87,9 +87,11 @@ pub enum XmlErrorKind {
     },
     /// `<![CDATA[` without its `]]>` terminator.
     UnterminatedCdata,
-    /// `<!--` without its `-->` terminator.
+    /// `<!--` without a `-->` terminator after its body, including a
+    /// terminator that overlaps the opener (`<!-->`).
     UnterminatedComment,
-    /// `<?xml` without its `?>` terminator.
+    /// A prolog `<?` declaration without a `?>` terminator after its body,
+    /// including a terminator that overlaps the opener (`<?>`).
     UnterminatedDeclaration,
     /// A closing tag that never ends.
     UnterminatedCloseTag,
@@ -583,11 +585,12 @@ impl<'a> Parser<'a> {
 
     fn parse_declaration(&mut self) -> Result<String, XmlError> {
         let start = self.pos + 2;
-        let Some(offset) = self.source[self.pos..].find("?>") else {
+        let Some(offset) = self.source[start..].find("?>") else {
             self.pos = self.bytes.len();
             return self.error(XmlErrorKind::UnterminatedDeclaration);
         };
-        let end = self.pos + offset;
+        let end = start + offset;
+
         let declaration = self.source[start..end].to_owned();
         self.pos = end + 2;
         Ok(declaration)
@@ -595,11 +598,12 @@ impl<'a> Parser<'a> {
 
     fn parse_comment(&mut self) -> Result<String, XmlError> {
         let start = self.pos + 4;
-        let Some(offset) = self.source[self.pos..].find("-->") else {
+        let Some(offset) = self.source[start..].find("-->") else {
             self.pos = self.bytes.len();
             return self.error(XmlErrorKind::UnterminatedComment);
         };
-        let end = self.pos + offset;
+        let end = start + offset;
+
         let comment = self.source[start..end].to_owned();
         self.pos = end + 3;
         Ok(comment)
@@ -758,11 +762,11 @@ impl<'a> Parser<'a> {
 
     fn parse_cdata(&mut self) -> Result<String, XmlError> {
         let start = self.pos + 9;
-        let Some(offset) = self.source[self.pos..].find("]]>") else {
+        let Some(offset) = self.source[start..].find("]]>") else {
             self.pos = self.bytes.len();
             return self.error(XmlErrorKind::UnterminatedCdata);
         };
-        let end = self.pos + offset;
+        let end = start + offset;
         let cdata = self.source[start..end].to_owned();
         self.pos = end + 3;
         Ok(cdata)
@@ -943,6 +947,9 @@ mod tests {
                     found: "!DOCTYPE".to_owned(),
                 },
             ),
+            ("<?>", XmlErrorKind::UnterminatedDeclaration),
+            ("<!-->", XmlErrorKind::UnterminatedComment),
+            ("<!--->", XmlErrorKind::UnterminatedComment),
             ("<a><!-- x</a>", XmlErrorKind::UnterminatedComment),
             ("<a><![CDATA[x</a>", XmlErrorKind::UnterminatedCdata),
         ];
