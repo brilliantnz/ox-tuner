@@ -277,7 +277,49 @@ impl Expr {
                 message: format!("unexpected trailing input at {}", parser.describe_here()),
             });
         }
+        if !expression.within_depth(MAX_AST_DEPTH) {
+            return Err(ExprError {
+                message: format!("expression nests too deeply (limit {MAX_AST_DEPTH})"),
+            });
+        }
         Ok(expression)
+    }
+
+    /// Whether every path through the tree is at most `limit` nodes deep.
+    ///
+    /// The parser checks this after building, so the evaluator, the cache codec
+    /// and the source cap all agree on one maximum.
+    fn within_depth(&self, limit: u32) -> bool {
+        let mut pending = vec![(self, 1u32)];
+        while let Some((expression, depth)) = pending.pop() {
+            if depth > limit {
+                return false;
+            }
+
+            let next = depth + 1;
+            match expression {
+                Self::Number(_) | Self::Ident(_) => {}
+                Self::Unary(_, operand) => pending.push((operand, next)),
+                Self::Binary(_, left, right) => {
+                    pending.push((left, next));
+                    pending.push((right, next));
+                }
+                Self::Ternary(condition, when_true, when_false) => {
+                    pending.push((condition, next));
+                    pending.push((when_true, next));
+                    pending.push((when_false, next));
+                }
+                Self::Call(_, arguments) => {
+                    pending.extend(arguments.iter().map(|argument| (argument, next)));
+                }
+                Self::Index(base, index) => {
+                    pending.push((base, next));
+                    pending.push((index, next));
+                }
+            }
+        }
+
+        true
     }
 
     /// Evaluates the expression with `lookup` supplying identifiers.
@@ -1086,18 +1128,30 @@ mod tests {
     }
 
     #[test]
-    fn a_long_binary_chain_evaluates_without_unbounded_recursion() {
-        let short = vec!["1"; 100].join("+");
-        let expression = Expr::parse(&short).expect("parses");
-        assert_eq!(expression.evaluate(&no_lookup), Some(100.0));
-
-        let long = vec!["1"; 2_000].join("+");
-        let expression = Expr::parse(&long).expect("parses flat");
+    fn a_long_binary_chain_is_rejected_at_the_depth_cap() {
+        let half = usize::try_from(MAX_AST_DEPTH / 2).expect("the half cap fits usize");
+        let at_cap = vec!["1"; half].join("+");
+        let expression = Expr::parse(&at_cap).expect("a chain under the cap parses");
         assert_eq!(
             expression.evaluate(&no_lookup),
-            None,
-            "past the traversal cap the value stays dynamic"
+            Some(f64::from(MAX_AST_DEPTH / 2))
         );
+
+        let long = vec!["1"; 2_000].join("+");
+        assert!(
+            Expr::parse(&long).is_err(),
+            "past the cap the tree is refused"
+        );
+    }
+
+    #[test]
+    fn a_parsed_expression_survives_the_cache_codec() {
+        let source = vec!["1"; 1_000].join("+");
+        let expression = Expr::parse(&source).expect("parses");
+        let bytes = postcard::to_allocvec(&expression).expect("serializes");
+        let decoded: Expr = postcard::from_bytes(&bytes).expect("the cache reads it back");
+
+        assert_eq!(decoded, expression);
     }
 
     #[test]

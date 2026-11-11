@@ -614,7 +614,7 @@ fn read_raw(
     reason = "the value is checked finite and non-negative; bit fields live in 64-bit words and return to f64 storage"
 )]
 fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
-    if range.high >= 64 {
+    if range.high >= 64 || range.low > range.high {
         return None;
     }
 
@@ -875,6 +875,11 @@ halfRpm = { rpm / 2 }, \"rpm\"
             ),
             None,
             "a range past the 64-bit word must not shift"
+        );
+        assert_eq!(
+            extract_bits(f64::from(0xFFu8), BitRange { low: 200, high: 10 }),
+            None,
+            "a reversed range must not shift"
         );
         assert_eq!(
             extract_bits(f64::from(0x1234u16), BitRange { low: 8, high: 15 }),
