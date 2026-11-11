@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn a_deeply_nested_field_is_reported_without_aborting() {
-        let expression = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let expression = format!("{}1{}", "(".repeat(1_000), ")".repeat(1_000));
         let text = format!(
             "[MegaTune]\nsignature = \"x\"\n[OutputChannels]\nderived = {{ {expression} }}, \"u\"\n"
         );

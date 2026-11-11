@@ -17,6 +17,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::error::{Diagnostic, IniError, Severity};
+use crate::expr::bump_depth;
 use crate::fields::{has_assignment, split_fields, strip_comment};
 use crate::settings::SettingsContext;
 
@@ -500,7 +501,7 @@ fn handle_conditional_directive(
     match name {
         "if" => {
             let result = evaluate_condition(rest, &mut preprocessed.settings);
-            let taken = report_condition_failure(result, preprocessed, fatal, line_number);
+            let taken = resolve_condition(result, preprocessed, fatal, line_number);
             let taken = taken && enclosing_active;
             conditionals.push(Conditional {
                 parent_active: enclosing_active,
@@ -512,7 +513,7 @@ fn handle_conditional_directive(
         "elif" => match conditionals.last_mut() {
             Some(frame) => {
                 let result = evaluate_condition(rest, &mut preprocessed.settings);
-                let taken = report_condition_failure(result, preprocessed, fatal, line_number);
+                let taken = resolve_condition(result, preprocessed, fatal, line_number);
                 let taken = taken && !frame.branch_taken && frame.parent_active;
                 frame.active = taken;
                 frame.branch_taken |= taken;
@@ -639,14 +640,14 @@ fn evaluate_condition(text: &str, settings: &mut SettingsContext) -> Result<bool
 enum ConditionError {
     /// The condition is malformed. The branch is skipped with a warning.
     Syntax(String),
-    /// The condition nests past [`MAX_NESTING`]. Fatal, unlike a syntax error,
+    /// The condition nests past [`MAX_CONDITION_NESTING`]. Fatal, unlike a syntax error,
     /// because it is the signature of hostile or corrupt input rather than a
     /// typo a human can fix on the reported line.
     TooDeep,
 }
 
 /// Reports a failed condition and returns the branch decision.
-fn report_condition_failure(
+fn resolve_condition(
     result: Result<bool, ConditionError>,
     preprocessed: &mut Preprocessed,
     fatal: &mut Vec<Diagnostic>,
@@ -721,7 +722,7 @@ fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
 ///
 /// Independent of the expression parser's cap: this grammar is much smaller,
 /// so the two limits do not need to move together.
-const MAX_NESTING: u32 = 128;
+const MAX_CONDITION_NESTING: u32 = 128;
 
 struct ConditionParser<'a> {
     tokens: Vec<String>,
@@ -762,8 +763,7 @@ impl ConditionParser<'_> {
     }
 
     fn enter(&mut self) -> Result<(), ConditionError> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING {
+        if !bump_depth(&mut self.depth, MAX_CONDITION_NESTING) {
             return Err(ConditionError::TooDeep);
         }
         Ok(())
@@ -823,7 +823,7 @@ mod tests {
     }
 
     fn nesting_cap() -> usize {
-        usize::try_from(MAX_NESTING).expect("the nesting cap fits in usize")
+        usize::try_from(MAX_CONDITION_NESTING).expect("the nesting cap fits in usize")
     }
 
     #[test]
@@ -1019,6 +1019,16 @@ mod tests {
             1,
             "the header stays, the branch is skipped"
         );
+    }
+
+    #[test]
+    fn a_long_negation_chain_is_fatal() {
+        let condition = "!".repeat(10_000);
+        let text = format!("[X]\n#if {condition} FLAG\n#endif\n");
+
+        let error = preprocess(&text, &SettingsContext::new(), None).expect_err("must be fatal");
+
+        assert_eq!(error.diagnostics()[0].code, "condition-too-deep");
     }
 
     #[test]

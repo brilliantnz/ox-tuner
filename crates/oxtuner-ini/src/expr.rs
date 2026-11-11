@@ -182,9 +182,18 @@ impl Expr {
     ///
     /// Returns [`ExprError`] with the offending position when the text is not
     /// a complete expression. An expression nested deeper than the parser's
-    /// nesting cap is rejected the same way, so hostile input cannot exhaust
-    /// the thread stack.
+    /// nesting cap, or longer than its source cap, is rejected the same way, so
+    /// hostile input cannot exhaust the thread stack.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
+        if text.len() > MAX_EXPR_LEN {
+            return Err(ExprError {
+                message: format!(
+                    "expression is {} bytes, over the {MAX_EXPR_LEN} byte cap",
+                    text.len()
+                ),
+            });
+        }
+
         let tokens = tokenize(text)?;
         let mut parser = Parser {
             tokens,
@@ -541,6 +550,19 @@ fn one_char_symbol(character: char) -> Option<&'static str> {
 /// is discarded on error, so a failed nested parse never has to unwind it.
 const MAX_NESTING: u32 = 128;
 
+/// Longest expression source accepted, in bytes.
+///
+/// Real INI expressions are tens of bytes. The cap keeps a hostile flat chain
+/// from building a tree whose derived drop, clone and equality walks would
+/// recurse once per node.
+const MAX_EXPR_LEN: usize = 8 * 1024;
+
+/// Counts one level of nesting and reports whether it is within `cap`.
+pub(crate) fn bump_depth(depth: &mut u32, cap: u32) -> bool {
+    *depth += 1;
+    *depth <= cap
+}
+
 /// How deep [`Expr::evaluate_with`] may recurse into a parsed tree.
 ///
 /// The parser's [`MAX_NESTING`] counts parentheses and operators while it
@@ -557,8 +579,7 @@ struct Parser {
 
 impl Parser {
     fn enter(&mut self) -> Result<(), ExprError> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING {
+        if !bump_depth(&mut self.depth, MAX_NESTING) {
             return Err(ExprError {
                 message: format!("expression nests too deeply at token {}", self.index),
             });
@@ -936,7 +957,7 @@ mod tests {
 
     #[test]
     fn a_deeply_nested_expression_is_rejected_at_the_depth_cap() {
-        let source = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let source = format!("{}1{}", "(".repeat(1_000), ")".repeat(1_000));
 
         let error = Expr::parse(&source).expect_err("must stop at the depth cap");
 
@@ -967,9 +988,18 @@ mod tests {
 
     #[test]
     fn a_long_prefix_chain_is_rejected_at_the_depth_cap() {
-        let source = format!("{}1", "!".repeat(10_000));
+        let source = format!("{}1", "!".repeat(1_000));
 
         Expr::parse(&source).expect_err("must stop at the depth cap");
+    }
+
+    #[test]
+    fn an_expression_over_the_length_cap_is_rejected() {
+        let source = vec!["1"; MAX_EXPR_LEN].join("+");
+
+        let error = Expr::parse(&source).expect_err("must reject an oversized expression");
+
+        assert!(error.message.contains("over the"));
     }
 
     #[test]
@@ -998,7 +1028,7 @@ mod tests {
 
     #[test]
     fn identifiers_walk_a_long_expression_in_source_order() {
-        let source = (0..2_000)
+        let source = (0..1_000)
             .map(|index| format!("a{index}"))
             .collect::<Vec<_>>()
             .join("+");
@@ -1006,9 +1036,9 @@ mod tests {
         let expression = Expr::parse(&source).expect("parses");
         let names = expression.identifiers();
 
-        assert_eq!(names.len(), 2_000);
+        assert_eq!(names.len(), 1_000);
         assert_eq!(names.first(), Some(&"a0"));
-        assert_eq!(names.last(), Some(&"a1999"));
+        assert_eq!(names.last(), Some(&"a999"));
     }
 
     #[test]
