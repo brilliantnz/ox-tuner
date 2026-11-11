@@ -2,9 +2,10 @@
 //!
 //! This crate is the project's own widget layer over GPUI and GPUI Base. The
 //! chart takes a [`chart::ChartStyle`] token set from the host; the table reads
-//! its chrome from the application theme and keeps only data colours of its
-//! own. Both draw with base primitives and expose retained state + events
-//! rather than reaching further into globals.
+//! its chrome from the application theme and keeps only two colours of its own,
+//! the [`table::TableStyle`] tokens the heat ramp constrains (the ramp itself
+//! supplies the value fills). Both draw with base primitives and expose
+//! retained state + events rather than reaching further into globals.
 //!
 //! The widgets are the live chart, the tune table, the tune curve, and the
 //! tuning indicator strip. Each is built as a retained entity with a small
@@ -46,4 +47,4 @@ pub use chart::{
 };
 pub use curve::{Curve, CurveEvent, CurveModel, CurvePoint, CurveSnapshot};
 pub use indicator::{IndicatorState, IndicatorStrip, IndicatorStyle, IndicatorTone, IndicatorView};
-pub use table::{RealtimePoint, Table, TableEvent, TableModel};
+pub use table::{RealtimePoint, Table, TableEvent, TableModel, TableStyle};

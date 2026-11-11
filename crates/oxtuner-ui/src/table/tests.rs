@@ -19,16 +19,16 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _,
+    AnyWindowHandle, AppContext as _, Bounds, Context, ElementId, Entity, Focusable as _, Hsla,
     IntoElement, ParentElement as _, Point, Render, Styled as _, Subscription, TestAppContext,
-    Window, WindowBounds, WindowOptions, div, px, size,
+    Window, WindowBounds, WindowOptions, div, px, rgb, size,
 };
 use oxtuner_core::{AxisKind, AxisView, CellState, TableView};
 
 use super::RealtimePoint;
 use super::geometry::{AXIS_LABEL_GAP, AXIS_LABEL_HEIGHT, CELL_GAP, CELL_HEIGHT, CELL_WIDTH};
 use super::model::{AxisTarget, CellPos};
-use super::{Table, TableEvent};
+use super::{Table, TableEvent, TableStyle};
 
 struct Host {
     grid: Entity<Table>,
@@ -646,6 +646,61 @@ fn a_single_cell_selection_outlines_the_cell_without_an_inset(cx: &mut TestAppCo
         f32::from(frame.size.height),
         f32::from(value.size.height) + 2. * CELL_GAP
     );
+}
+
+/// Replacing the style keeps the value the grid reads next frame. The test
+/// window reports layout, not paint, so the rendered colour itself stays with
+/// the contrast tests in `style`.
+#[gpui_kit::test]
+fn the_host_replaces_the_heat_style(cx: &mut TestAppContext) {
+    let (_, grid, _) = open(cx, 4, 4);
+
+    let style = TableStyle {
+        on_heat: Hsla::from(rgb(0xFF_FF_FF)),
+        ..TableStyle::default()
+    };
+
+    cx.update(|cx| {
+        assert_ne!(*grid.read(cx).style(), style, "the new style must differ");
+
+        grid.update(cx, |grid, cx| grid.set_style(style, cx));
+
+        assert_eq!(*grid.read(cx).style(), style);
+    });
+}
+
+#[gpui_kit::test]
+fn setting_the_same_style_again_does_not_repaint(cx: &mut TestAppContext) {
+    let (handle, grid, _) = open(cx, 4, 4);
+
+    let notified = Rc::new(RefCell::new(0_usize));
+    let _subscription = {
+        let notified = Rc::clone(&notified);
+        cx.update(|cx| cx.observe(&grid, move |_, _| *notified.borrow_mut() += 1))
+    };
+
+    // Flush the notification queued while the table was built.
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    *notified.borrow_mut() = 0;
+
+    cx.update(|cx| {
+        grid.update(cx, |grid, cx| grid.set_style(TableStyle::default(), cx));
+    });
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    assert_eq!(*notified.borrow(), 0, "an identical style must not repaint");
+
+    let changed = TableStyle {
+        selection_frame: Hsla::from(rgb(0xFF_FF_FF)),
+        ..TableStyle::default()
+    };
+    cx.update(|cx| {
+        grid.update(cx, |grid, cx| grid.set_style(changed, cx));
+    });
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    assert_eq!(*notified.borrow(), 1, "a changed style must repaint");
 }
 
 #[gpui_kit::test]
