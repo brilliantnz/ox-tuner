@@ -8,7 +8,9 @@
 
 use proptest::prelude::*;
 
-use oxtuner_ini::{IniError, SettingsContext, parse_bytes, parse_str, preprocess};
+use oxtuner_ini::{
+    Dimension, IniError, SettingsContext, Shape, parse_bytes, parse_str, preprocess,
+};
 
 fn parse(text: &str) -> Result<oxtuner_ini::Definition, IniError> {
     parse_str(text, &SettingsContext::new())
@@ -40,6 +42,22 @@ proptest! {
     #[test]
     fn preprocessing_always_terminates(text in "\\PC{0,600}") {
         let _ = preprocess(&text, &SettingsContext::new(), None);
+    }
+
+    /// A table whose two dimensions are 65 536 or more always overflows the
+    /// element count, and reports it as unknown instead of panicking or
+    /// wrapping.
+    #[test]
+    fn a_table_element_count_never_wraps(
+        cols in 65_536u32..=u32::MAX,
+        rows in 65_536u32..=u32::MAX,
+    ) {
+        let shape = Shape::Table {
+            cols: Dimension::Fixed(cols),
+            rows: Dimension::Fixed(rows),
+        };
+
+        prop_assert_eq!(shape.element_count(), None);
     }
 
     /// Whatever the input, re-parsing the same text gives the same answer.
