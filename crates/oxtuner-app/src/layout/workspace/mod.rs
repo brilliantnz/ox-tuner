@@ -327,7 +327,7 @@ impl Workspace {
                         .child(
                             Button::new("close-unsaved-discard")
                                 .label(t!("app.close_unsaved.discard"))
-                                .secondary()
+                                .danger()
                                 .w_full()
                                 .on_click(move |_, window, cx| {
                                     // A modified tab always has a target; when

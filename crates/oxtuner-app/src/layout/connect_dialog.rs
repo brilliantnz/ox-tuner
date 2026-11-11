@@ -387,6 +387,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                 t!("app.connect.test")
             })
             .icon(IconName::Search)
+            .outline()
             .disabled(!ready || busy || connected);
 
         let test_button = match chosen.clone() {
@@ -404,6 +405,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             Button::new("connect-disconnect")
                 .label(t!("app.connect.disconnect"))
                 .icon(IconName::CircleX)
+                .outline()
                 .on_click(|_, _, cx| {
                     core::disconnect(cx);
                     cx.refresh_windows();
