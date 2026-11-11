@@ -581,7 +581,10 @@ impl Parser {
     fn enter(&mut self) -> Result<(), ExprError> {
         if !bump_depth(&mut self.depth, MAX_NESTING) {
             return Err(ExprError {
-                message: format!("expression nests too deeply at token {}", self.index),
+                message: format!(
+                    "expression nests too deeply at token {} (limit {MAX_NESTING})",
+                    self.index
+                ),
             });
         }
         Ok(())

@@ -659,7 +659,7 @@ fn resolve_condition(
             fatal.push(Diagnostic::new(
                 Severity::Error,
                 "condition-too-deep",
-                "a condition nests too deeply",
+                format!("a condition nests too deeply (limit {MAX_CONDITION_NESTING})"),
                 line_number,
                 "Preprocessor",
             ));
