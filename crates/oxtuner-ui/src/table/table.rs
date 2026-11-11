@@ -22,8 +22,8 @@
 //! both axes; a range leaves the bins plain unless the owner asks for the
 //! wider wash with [`Table::set_header_wash_for_ranges`].
 //! Both scrollbars ride the body's scroll handle, so the frozen header bands
-//! and the bars always report one position. The body scrolls with the wheel,
-//! drag-select and the keyboard as well as the bars.
+//! and the bars always report one position. Besides the bars, the body also
+//! scrolls with the wheel, drag-select and the keyboard.
 
 #![expect(
     clippy::as_conversions,
@@ -1155,7 +1155,10 @@ impl Render for Table {
         body_band = body_band.child(
             // The bar layer is a sibling of the scroll area, not a child of
             // it, so it stays at the viewport edge while the grid scrolls
-            // under it. It reads the same handle as the frozen header bands.
+            // under it; `relative()` here is what the overlay anchors to. It
+            // reads the same handle as the frozen header bands, which is why
+            // the bars come from `scrollbar()` and not the
+            // `overflow_scrollbar()` wrapper that tracks a handle of its own.
             div()
                 .id("table-body-viewport")
                 .test_support()

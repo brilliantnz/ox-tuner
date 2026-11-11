@@ -1081,6 +1081,7 @@ fn headers_stay_aligned_when_scrolled_past_the_end(cx: &mut TestAppContext) {
 /// The selector gpui-component puts on a scroll area's bar layer
 /// (`render_scrollbar`). The bar is the only way to measure its edge without
 /// owning the scroll area, so a rename shows up here first.
+#[cfg(debug_assertions)]
 const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
 
 // `debug_bounds` is only recorded when the renderer is built with debug
@@ -1088,10 +1089,22 @@ const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
 #[cfg(debug_assertions)]
 #[gpui_kit::test]
 fn the_body_shows_its_scrollbar_at_the_viewport_edge(cx: &mut TestAppContext) {
+    use gpui_kit::{ScrollDelta, point, px};
+
     let (handle, _, _) = open(cx, 32, 32);
 
     let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
     visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+    // Move the grid away from its origin before measuring: a bar layer that
+    // rode the content would land at nearly the same place at offset zero.
+    visual.update(|window, cx| {
+        window.scroll(
+            cell(20, 1, 32),
+            ScrollDelta::Pixels(point(px(400.0), px(0.0))),
+            cx,
+        );
+    });
 
     let body =
         visual.update(|window, _| window.find(ElementId::from("table-body-viewport")).bounds());
