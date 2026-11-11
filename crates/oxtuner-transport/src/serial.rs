@@ -28,6 +28,21 @@ const READ_POLL: Duration = Duration::from_millis(20);
 /// An upper bound on a single write.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Reads once, turning `Ok(0)` into end of file.
+///
+/// `std::io::Read` defines a zero-length read on a non-empty buffer as EOF.
+/// A pulled cable reports exactly that, so the conversation ends instead of
+/// spinning on `Ok(0)` until the deadline and then reporting a timeout.
+fn read_some(
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    match read(buf) {
+        Ok(0) => Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
+        other => other,
+    }
+}
+
 /// One port the connect dialog can offer.
 ///
 /// `serial2` lists device paths; on macOS the callout `/dev/cu.*` entry is the
@@ -177,8 +192,7 @@ impl Transport for SerialTransport {
             }
             self.set_timeout(deadline - now)?;
             let port = self.port()?;
-            match port.read(&mut buf[filled..]) {
-                Ok(0) => {}
+            match read_some(|slice| port.read(slice), &mut buf[filled..]) {
                 Ok(read) => filled += read,
                 Err(error) if error.kind() == ErrorKind::TimedOut => {
                     return Err(TransportError::Timeout {
@@ -230,8 +244,7 @@ impl Transport for SerialTransport {
             let remaining = max - (sink.len() - before);
             let take = remaining.min(buffer.len());
             let port = self.port()?;
-            match port.read(&mut buffer[..take]) {
-                Ok(0) => {}
+            match read_some(|slice| port.read(slice), &mut buffer[..take]) {
                 Ok(read) => {
                     sink.extend_from_slice(&buffer[..read]);
                     if buffer[..read].contains(&terminator) {
@@ -327,6 +340,8 @@ pub fn ports() -> Result<Vec<PortInfo>, TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
 
     #[test]
@@ -347,6 +362,17 @@ mod tests {
                 assert_ne!(port.name, "");
             }
         }
+    }
+
+    #[test]
+    fn a_zero_length_read_is_end_of_file() {
+        let mut empty: &[u8] = &[];
+        let mut buffer = [0u8; 4];
+
+        let error =
+            read_some(|slice| empty.read(slice), &mut buffer).expect_err("a pulled cable is EOF");
+
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
     }
 
     #[test]
