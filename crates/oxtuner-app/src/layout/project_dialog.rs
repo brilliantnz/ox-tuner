@@ -142,7 +142,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("project-close-current")
                             .label(t!("app.project.close_project"))
-                            .ghost()
+                            .outline()
                             .disabled(status.project.is_none())
                             .on_click(|_, window, cx| {
                                 crate::core::close_project(cx);

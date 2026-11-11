@@ -339,7 +339,7 @@ fn safety_page() -> SettingPage {
                             .child(
                                 Button::new("review-disclaimer")
                                     .label(t!("app.settings.review"))
-                                    .ghost()
+                                    .outline()
                                     .with_size(options.size())
                                     .on_click(|_, window, cx| crate::disclaimer::show(window, cx)),
                             )

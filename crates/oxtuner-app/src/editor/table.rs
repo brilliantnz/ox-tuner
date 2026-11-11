@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::toolbar::Toolbar;
@@ -838,7 +838,7 @@ impl TableEditor {
             .child(
                 Button::new("table-retry")
                     .label(t!("app.table.retry"))
-                    .ghost()
+                    .outline()
                     .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
             )
             .into_any_element()
