@@ -196,6 +196,12 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                 );
             }
             EntryShape::Bits { low, high, .. } => {
+                // Refuse before reading the word: rewriting an unchanged U64
+                // through f64 would still lose low bits.
+                if high >= 32 {
+                    continue;
+                }
+
                 let Ok(value) = tune.raw_at(&variable.name, 0) else {
                     continue;
                 };
@@ -305,6 +311,12 @@ pub fn patch_page(
                 );
             }
             EntryShape::Bits { low, high, .. } => {
+                // Refuse before reading the word: rewriting an unchanged U64
+                // through f64 would still lose low bits.
+                if high >= 32 {
+                    continue;
+                }
+
                 let Ok(value) = tune.raw_at(&variable.name, 0) else {
                     continue;
                 };
@@ -367,10 +379,11 @@ fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
     merged as f64
 }
 
-/// The mask for `low..=high`, clamped to a 32-bit word.
+/// The mask for `low..=high`.
 ///
-/// Callers refuse a field whose high bit is past the word, so `low` is below
-/// 32 here. The guard keeps the shift total if a future caller forgets.
+/// The precondition is `high < 32`: callers refuse a field that reaches past
+/// the word, so `low` is below 32 too. The clamp only keeps the shift total for
+/// a caller that forgets, and never makes a straddling range valid.
 fn bit_mask(low: u8, high: u8) -> u32 {
     let low = u32::from(low);
     let high = u32::from(high);
@@ -594,6 +607,14 @@ name = string, ASCII, 4, 4
     }
 
     #[test]
+    fn a_mask_covers_only_the_bits_inside_the_word() {
+        assert_eq!(bit_mask(0, 0), 1);
+        assert_eq!(bit_mask(0, 15), 0xFFFF);
+        assert_eq!(bit_mask(31, 31), 0x8000_0000);
+        assert_eq!(bit_mask(0, 31), u32::MAX);
+    }
+
+    #[test]
     fn a_bit_field_past_the_word_is_skipped_not_a_panic() {
         let definition = oxtuner_ini::Definition::parse(
             "\
@@ -784,6 +805,33 @@ wide = bits, U16, 0, [40:47]
         .expect("patches");
 
         assert_eq!(&patched[..2], &[0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn a_patch_of_a_u64_bit_field_past_the_word_keeps_every_byte() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+wide = bits, U64, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched, base, "a skipped field must not rewrite the word");
     }
 
     #[test]
