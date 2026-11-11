@@ -38,10 +38,15 @@ pub(crate) fn choose(cx: &mut App) {
         Ok(Err(error)) => {
             tracing::warn!(%error, "the project folder picker failed");
             cx.update(|cx| {
-                core::report_failure(cx, FailureCode::ProjectRejected, error.to_string());
+                core::report_failure(cx, FailureCode::PickerFailed, error.to_string());
             });
         }
-        Err(error) => tracing::warn!(%error, "the project folder picker channel closed"),
+        Err(error) => {
+            tracing::warn!(%error, "the project folder picker channel closed");
+            cx.update(|cx| {
+                core::report_failure(cx, FailureCode::PickerFailed, error.to_string());
+            });
+        }
     })
     .detach();
 }

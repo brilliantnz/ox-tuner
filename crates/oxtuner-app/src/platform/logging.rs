@@ -21,12 +21,25 @@ pub struct Logging {
 
 impl Global for Logging {}
 
+/// How the first filter is chosen before the saved preference is applied.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the start-up levels are a closed set"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartLevel {
+    /// The build profile's default, the normal start-up choice.
+    ProfileDefault,
+    /// Verbose from the first record.
+    Verbose,
+}
+
 /// Installs the process-wide subscriber.
 ///
 /// Returns `None` when the log directory cannot be created. The app still
 /// starts; it just has no file and no in-memory tail. The caller must keep the
 /// handle alive or hand it to [`install`].
-pub fn init(directory: &Path, log_file: bool, verbose: bool) -> Option<LogHandle> {
+pub fn init(directory: &Path, log_file: bool, start: StartLevel) -> Option<LogHandle> {
     let policy = if log_file {
         FilePolicy::On
     } else {
@@ -34,7 +47,7 @@ pub fn init(directory: &Path, log_file: bool, verbose: bool) -> Option<LogHandle
     };
     let config = LogConfig::new(directory)
         .with_file(policy)
-        .with_verbose(verbose);
+        .with_verbose(start == StartLevel::Verbose);
 
     match oxtuner_log::init(&config) {
         Ok(handle) => Some(handle),

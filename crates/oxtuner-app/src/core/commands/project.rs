@@ -103,10 +103,15 @@ pub(crate) fn choose_definition(cx: &mut App) {
         Ok(Err(error)) => {
             tracing::warn!(%error, "the definition picker failed");
             cx.update(|cx| {
-                report_failure(cx, FailureCode::DefinitionRejected, error.to_string());
+                report_failure(cx, FailureCode::PickerFailed, error.to_string());
             });
         }
-        Err(error) => tracing::warn!(%error, "the definition picker channel closed"),
+        Err(error) => {
+            tracing::warn!(%error, "the definition picker channel closed");
+            cx.update(|cx| {
+                report_failure(cx, FailureCode::PickerFailed, error.to_string());
+            });
+        }
     })
     .detach();
 }
