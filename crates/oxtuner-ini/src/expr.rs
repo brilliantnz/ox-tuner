@@ -555,7 +555,7 @@ const MAX_NESTING: u32 = 128;
 /// Real INI expressions are tens of bytes. The cap keeps a hostile flat chain
 /// from building a tree whose derived drop, clone and equality walks would
 /// recurse once per node.
-const MAX_EXPR_LEN: usize = 8 * 1024;
+const MAX_EXPR_LEN: usize = 4 * 1024;
 
 /// Counts one level of nesting and reports whether it is within `cap`.
 pub(crate) fn bump_depth(depth: &mut u32, cap: u32) -> bool {
