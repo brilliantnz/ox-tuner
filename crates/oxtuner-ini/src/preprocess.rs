@@ -426,10 +426,12 @@ pub fn preprocess(
 
         // Block comments go first because they can span lines. A file without
         // the marker skips the extra scan entirely, so the common path keeps
-        // its old cost.
+        // its old cost. A line that starts as a `;` or `#` comment is prose,
+        // not a place where `/*` can open a block, whatever the prose says.
+        let starts_line_comment = raw.trim_ascii_start().starts_with([';', '#']);
         let uncommented = if !has_block_comments {
             Cow::Borrowed(raw)
-        } else if block_comment.open.is_some() || raw.contains("/*") {
+        } else if block_comment.open.is_some() || (raw.contains("/*") && !starts_line_comment) {
             Cow::Owned(block_comment.strip(raw, line_number))
         } else {
             Cow::Borrowed(raw)
@@ -998,6 +1000,26 @@ mod tests {
             "unexpected diagnostics: {:?}",
             output.diagnostics
         );
+    }
+
+    #[test]
+    fn a_comment_line_whose_prose_contains_an_equals_does_not_open_a_block() {
+        for comment in ["; see foo=bar /* details", "# note /* details"] {
+            let text = format!("[Constants]\na = 1\n{comment}\nb = 2\n");
+
+            let output = run(&text);
+
+            assert_eq!(output.lines.len(), 3, "{comment}");
+            assert_eq!(output.lines[2].text, "b = 2", "{comment}");
+            assert!(
+                !output
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| { diagnostic.code.as_ref() == "unterminated-block-comment" }),
+                "{comment}: {:?}",
+                output.diagnostics
+            );
+        }
     }
 
     #[test]
