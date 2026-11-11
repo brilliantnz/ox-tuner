@@ -1078,6 +1078,38 @@ fn headers_stay_aligned_when_scrolled_past_the_end(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// The selector gpui-component puts on a scroll area's bar layer
+/// (`render_scrollbar`). The bar is the only way to measure its edge without
+/// owning the scroll area, so a rename shows up here first.
+const SCROLLBAR_LAYER: &str = "scrollbar-overlay";
+
+// `debug_bounds` is only recorded when the renderer is built with debug
+// assertions, so a release test build has nothing to assert here.
+#[cfg(debug_assertions)]
+#[gpui_kit::test]
+fn the_body_shows_its_scrollbar_at_the_viewport_edge(cx: &mut TestAppContext) {
+    let (handle, _, _) = open(cx, 32, 32);
+
+    let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+    visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+    let body =
+        visual.update(|window, _| window.find(ElementId::from("table-body-viewport")).bounds());
+    let bar = visual.debug_bounds(SCROLLBAR_LAYER).expect(
+        "the body draws its scrollbar layer; if gpui-kit renamed that layer, update \
+         SCROLLBAR_LAYER",
+    );
+
+    assert!(
+        (bar.right().as_f32() - body.right().as_f32()).abs() < 1.0,
+        "the scrollbar must sit on the body's right edge"
+    );
+    assert!(
+        (bar.bottom().as_f32() - body.bottom().as_f32()).abs() < 1.0,
+        "the scrollbar must sit on the body's bottom edge"
+    );
+}
+
 #[gpui_kit::test]
 fn a_one_row_table_draws_no_row_band_and_lifts_the_caption(cx: &mut TestAppContext) {
     let (handle, grid, _) = open(cx, 1, 6);
