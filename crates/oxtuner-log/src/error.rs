@@ -1,6 +1,10 @@
 use std::io;
 
 /// Why the logging pipeline could not start or could not be reconfigured.
+///
+/// `Init` and `Filter` box their cause because the concrete error types come
+/// from `tracing-subscriber` and are not part of this crate's public surface.
+/// The source chain still reports them.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
