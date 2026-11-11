@@ -588,6 +588,11 @@ impl<'a> Parser<'a> {
             return self.error(XmlErrorKind::UnterminatedDeclaration);
         };
         let end = self.pos + offset;
+        if end < start {
+            self.pos = self.bytes.len();
+            return self.error(XmlErrorKind::UnterminatedDeclaration);
+        }
+
         let declaration = self.source[start..end].to_owned();
         self.pos = end + 2;
         Ok(declaration)
@@ -600,6 +605,11 @@ impl<'a> Parser<'a> {
             return self.error(XmlErrorKind::UnterminatedComment);
         };
         let end = self.pos + offset;
+        if end < start {
+            self.pos = self.bytes.len();
+            return self.error(XmlErrorKind::UnterminatedComment);
+        }
+
         let comment = self.source[start..end].to_owned();
         self.pos = end + 3;
         Ok(comment)
@@ -943,6 +953,8 @@ mod tests {
                     found: "!DOCTYPE".to_owned(),
                 },
             ),
+            ("<?>", XmlErrorKind::UnterminatedDeclaration),
+            ("<!-->", XmlErrorKind::UnterminatedComment),
             ("<a><!-- x</a>", XmlErrorKind::UnterminatedComment),
             ("<a><![CDATA[x</a>", XmlErrorKind::UnterminatedCdata),
         ];
