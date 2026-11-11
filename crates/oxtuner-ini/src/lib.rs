@@ -64,7 +64,7 @@ pub mod settings;
 pub mod source;
 
 pub use error::{Diagnostic, IniError, Severity};
-pub use fields::{CommandArguments, CommandTemplate, Placeholder, Segment};
+pub use fields::{CommandArguments, CommandTemplate, EncodeError, Placeholder, Segment};
 pub use model::{
     Axis, BitOption, BitRange, Channel, ChannelKind, CommsSettings, Constant, ConstantClass,
     ConstantFlags, Coverage, Curve, DataType, DatalogEntry, Definition, Dialog, DialogRow,

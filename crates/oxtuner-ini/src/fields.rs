@@ -204,6 +204,28 @@ pub struct CommandTemplate {
     pub segments: Vec<Segment>,
 }
 
+/// Why a command template could not be encoded.
+///
+/// The message names the segment that failed; callers that only display the
+/// failure can use [`Display`](fmt::Display), and a caller that needs the
+/// underlying cause can walk [`std::error::Error::source`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeError(String);
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+impl From<String> for EncodeError {
+    fn from(message: String) -> Self {
+        Self(message)
+    }
+}
+
 /// One piece of a command string.
 #[expect(
     clippy::exhaustive_enums,
@@ -361,20 +383,20 @@ impl CommandTemplate {
     ///
     /// # Errors
     ///
-    /// Returns a message when a variable is unknown, a `%v` placeholder has no
-    /// payload, or the command contains text this build cannot encode.
+    /// Returns [`EncodeError`] when a variable is unknown, a `%v` placeholder
+    /// has no payload, or the command contains text this build cannot encode.
     pub fn encode(
         &self,
         arguments: &CommandArguments<'_>,
         variables: &dyn Fn(&str) -> Option<u8>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, EncodeError> {
         let mut bytes = Vec::new();
         for segment in &self.segments {
             match segment {
                 Segment::Byte(byte) => bytes.push(*byte),
                 Segment::Variable(name) => match variables(name) {
                     Some(value) => bytes.push(value),
-                    None => return Err(format!("unknown command variable ${name}")),
+                    None => return Err(format!("unknown command variable ${name}").into()),
                 },
                 Segment::Placeholder(Placeholder::PageId) => {
                     // The page identifier is the `[canId][page]` pair — read
@@ -398,10 +420,14 @@ impl CommandTemplate {
                 }
                 Segment::Placeholder(Placeholder::Value) => match arguments.values.first() {
                     Some(_) => bytes.extend_from_slice(arguments.values),
-                    None => return Err("the command needs at least one payload byte".to_owned()),
+                    None => {
+                        return Err("the command needs at least one payload byte"
+                            .to_owned()
+                            .into());
+                    }
                 },
                 Segment::Unparsed(text) => {
-                    return Err(format!("the command contains unsupported text {text:?}"));
+                    return Err(format!("the command contains unsupported text {text:?}").into());
                 }
             }
         }
@@ -561,7 +587,7 @@ mod tests {
             .encode(&CommandArguments::default(), &|_| None)
             .expect_err("must not invent a byte");
 
-        assert!(error.contains("$missing"));
+        assert!(error.to_string().contains("$missing"));
     }
 
     #[test]
