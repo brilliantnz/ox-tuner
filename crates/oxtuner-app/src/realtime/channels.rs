@@ -9,12 +9,12 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
 use oxtuner_ui::chart::ChartState;
 
@@ -111,7 +111,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
                         div()
                             .id("chart-channel-list")
                             .max_h(px(360.))
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .rounded_md()
                             .border_1()
                             .border_color(cx.theme().border)

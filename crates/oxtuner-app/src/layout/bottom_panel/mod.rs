@@ -17,12 +17,11 @@ mod telemetry;
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div,
+    ParentElement as _, Render, SharedString, Styled as _, Window, div,
 };
 use oxtuner_ui::tabs::{Tab, TabBar};
 
@@ -186,25 +185,24 @@ impl Render for BottomPanel {
             // switching to another tab starts that category's content at the
             // top. Diagnostics owns its own virtual-list scroll, so the outer
             // scroll is skipped there.
-            .child(
-                div()
+            .child({
+                let body = div()
                     .id(ElementId::Name(
                         format!("bottom-panel-scroll-{}", tab.id()).into(),
                     ))
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .when(
-                        tab == BottomTab::Diagnostics,
-                        gpui_kit::Styled::overflow_hidden,
-                    )
-                    .when(tab != BottomTab::Diagnostics, |this| {
-                        this.overflow_y_scroll()
-                    })
                     .bg(cx.theme().tokens.tab)
                     .p_3()
-                    .child(tab.content(diagnostics)),
-            )
+                    .child(tab.content(diagnostics));
+
+                if tab == BottomTab::Diagnostics {
+                    body.overflow_hidden().into_any_element()
+                } else {
+                    body.overflow_y_scrollbar().into_any_element()
+                }
+            })
     }
 }
 
@@ -277,5 +275,30 @@ mod tests {
         .expect("render the diagnostics tab");
 
         assert_eq!(cx.update(|cx| panel.read(cx).tab), BottomTab::Diagnostics);
+    }
+
+    // `debug_bounds` is only recorded when the renderer is built with debug
+    // assertions, so a release test build has nothing to assert here.
+    #[cfg(debug_assertions)]
+    #[gpui_kit::test]
+    fn a_scrolling_tab_draws_its_scrollbar(cx: &mut TestAppContext) {
+        let (handle, host, panel) = open(cx);
+
+        cx.update(|cx| {
+            crate::core::CoreService::install_without_core(cx);
+            panel.update(cx, |panel, cx| panel.select(0, cx));
+            host.update(cx, |host, cx| {
+                host.show = true;
+                cx.notify();
+            });
+        });
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.update(gpui_kit::test::TestWindowExt::render_frame);
+
+        assert!(
+            visual.debug_bounds("scrollbar-overlay").is_some(),
+            "a scrolling panel tab must draw its scrollbar layer"
+        );
     }
 }
