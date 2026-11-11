@@ -563,10 +563,10 @@ fn realtime_block(
 ) -> Option<Vec<u8>> {
     let mut block = generator.block(step);
     if burn_pending
-        && let Some((offset, low)) = realtime.burn_pending
+        && let Some((offset, mask)) = realtime.burn_pending
         && let Some(byte) = block.get_mut(offset)
     {
-        *byte |= 1 << low;
+        *byte |= mask;
     }
     let start = usize::from(offset.checked_sub(realtime.start_offset)?);
     let end = start.checked_add(usize::from(count))?;

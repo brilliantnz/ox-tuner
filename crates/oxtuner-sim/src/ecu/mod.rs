@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use oxtuner_ini::{ChannelKind, CommandTemplate, Definition};
+use oxtuner_ini::{BitRange, ChannelKind, CommandTemplate, DataType, Definition, Endianness};
 use oxtuner_protocol::CommandPattern;
 
 mod controller;
@@ -19,9 +19,47 @@ pub(crate) use pages::PageEcu;
 
 use crate::SimError;
 
-/// One page's commands.
-#[derive(Debug, Clone)]
+/// The byte and mask for a `burnPending` bit inside the realtime block.
+///
+/// The bit range is relative to the channel's word. The lane follows the
+/// definition's endianness, so `[8:8]` on a U16 lands in the second byte for a
+/// little-endian definition and the first byte for a big-endian one. A field
+/// that would cross the byte boundary is clamped to the bits in that lane.
+fn burn_pending_bit(
+    definition: &Definition,
+    offset: usize,
+    storage: DataType,
+    bits: BitRange,
+    block_size: usize,
+) -> Option<(usize, u8)> {
+    let width = usize::try_from(storage.size()).ok()?;
+    let lane = usize::from(bits.low / 8);
+    if lane >= width {
+        return None;
+    }
 
+    let byte_offset = match definition.endianness {
+        Endianness::Little => offset.checked_add(lane)?,
+        Endianness::Big => offset.checked_add(width.checked_sub(1)?.checked_sub(lane)?)?,
+    };
+    if byte_offset >= block_size {
+        return None;
+    }
+
+    let shift = u32::from(bits.low % 8);
+    let available = 8 - shift;
+    let field = u32::from(bits.width()).min(available);
+    let mask = if field >= 8 {
+        u8::MAX
+    } else {
+        ((1u8 << field) - 1) << shift
+    };
+
+    Some((byte_offset, mask))
+}
+
+/// The realtime command and the status bit it exposes.
+#[derive(Debug, Clone)]
 pub(crate) struct RealtimeEcu {
     pub(crate) pattern: CommandPattern,
     pub(crate) block_size: usize,
@@ -116,6 +154,7 @@ impl SimEcu {
                             return None;
                         }
                         let ChannelKind::Measured {
+                            storage,
                             offset,
                             bits: Some(bits),
                             ..
@@ -124,7 +163,7 @@ impl SimEcu {
                             return None;
                         };
                         let offset = usize::try_from(*offset).ok()?;
-                        (offset < block_size).then_some((offset, bits.low))
+                        burn_pending_bit(definition, offset, *storage, *bits, block_size)
                     }),
                 })
             });
@@ -308,6 +347,61 @@ cmdOff = \"y\\x01\"
                 count: 3
             }
         );
+    }
+
+    fn burn_pending_definition(endianness: &str) -> Definition {
+        Definition::parse(
+            &format!(
+                "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = {endianness}
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+burnPending = bits, U16, 0, [8:8]
+"
+            ),
+            &SettingsContext::new(),
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_burn_pending_bit_in_the_high_byte_follows_endianness() {
+        for (endianness, expected) in [("little", (1, 1u8)), ("big", (0, 1u8))] {
+            let definition = burn_pending_definition(endianness);
+            let (_, channel) = definition
+                .channels
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("burnPending"))
+                .expect("burnPending is declared");
+            let ChannelKind::Measured {
+                storage,
+                offset,
+                bits: Some(bits),
+                ..
+            } = &channel.kind
+            else {
+                panic!("burnPending is a measured bit channel");
+            };
+
+            let bit = burn_pending_bit(
+                &definition,
+                usize::try_from(*offset).expect("offset fits"),
+                *storage,
+                *bits,
+                8,
+            );
+
+            assert_eq!(bit, Some(expected), "{endianness}");
+        }
     }
 
     #[test]
