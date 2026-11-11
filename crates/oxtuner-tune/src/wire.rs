@@ -12,12 +12,14 @@
 //! # What it refuses
 //!
 //! A variable whose address or shape the definition did not resolve is skipped
-//! and counted in [`DecodeReport::skipped`]. A bit field is refused the same
-//! way when it reaches past its own storage word (`[40:47]` on a U16) or when
-//! its word is wider than 32 bits or not an integer. Decode skips it and encode
-//! keeps the word unchanged. It is never placed at offset zero and never
-//! invented — a wrong value in the ECU image is worse than a missing one
-//! (ADR-0010).
+//! and counted in [`DecodeReport::skipped`]. It is never placed at offset zero
+//! and never invented — a wrong value in the ECU image is worse than a missing
+//! one (ADR-0010).
+//!
+//! A bit field is refused the same way when it reaches past its own storage
+//! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
+//! word is not an unsigned integer. Decode skips it, and [`encode_page`] and
+//! [`patch_page`] leave the word unchanged.
 
 use oxtuner_ini::{DataType, Endianness};
 
@@ -28,15 +30,16 @@ use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 pub struct DecodeReport {
     /// Variables whose values were taken from the page.
     pub decoded: usize,
-    /// Variables that could not be placed (no address, no shape, too small, a
-    /// bit field outside its storage word or on a word wider than 32 bits).
+    /// Variables that were not decoded: no address, no shape, too small, a bit
+    /// field outside its storage word, or a word that is not an unsigned
+    /// integer of at most 32 bits.
     pub skipped: usize,
     /// Page bytes consumed by the variables that were decoded.
     pub bytes: usize,
 }
 
 impl DecodeReport {
-    /// Whether every variable on the page was placed.
+    /// Whether every variable on the page was decoded.
     pub fn is_complete(&self) -> bool {
         self.skipped == 0
     }
@@ -102,7 +105,7 @@ pub fn decode_page(
                 };
                 let raw = match variable.shape {
                     EntryShape::Bits { low, high, .. } => {
-                        if bit_field_fits(variable.data_type, high) {
+                        if bit_field_can_round_trip(variable.data_type, high) {
                             extract_bits(raw, low, high).map(f64::from)
                         } else {
                             None
@@ -203,7 +206,7 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
             EntryShape::Bits { low, high, .. } => {
                 // Refuse before reading the word: rewriting an unchanged wide
                 // word through f64 would still lose low bits.
-                if !bit_field_fits(variable.data_type, high) {
+                if !bit_field_can_round_trip(variable.data_type, high) {
                     continue;
                 }
 
@@ -250,7 +253,8 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
 /// a full [`encode_page`] image would overwrite those with defaults.
 ///
 /// Names are matched case-insensitively, as the layout is. A name that is not on
-/// this page contributes nothing.
+/// this page contributes nothing, and neither does a bit field the codec
+/// refuses: the base bytes stay as they are.
 ///
 /// # Errors
 ///
@@ -318,7 +322,7 @@ pub fn patch_page(
             EntryShape::Bits { low, high, .. } => {
                 // Refuse before reading the word: rewriting an unchanged wide
                 // word through f64 would still lose low bits.
-                if !bit_field_fits(variable.data_type, high) {
+                if !bit_field_can_round_trip(variable.data_type, high) {
                     continue;
                 }
 
@@ -367,26 +371,21 @@ fn type_width(data_type: DataType) -> usize {
     usize::try_from(data_type.size()).unwrap_or(usize::MAX)
 }
 
-/// Whether a `bits` variable can be merged safely inside its storage word.
+/// Whether a `bits` variable survives the read-modify-write round trip.
 ///
-/// The word must be an integer that `f64` holds exactly (at most 4 bytes), and
-/// the field must end inside that word. A wider word would be rounded on its
-/// way through `f64`, and a field past its own word would spill into bits
+/// The word must be an unsigned integer that `f64` holds exactly (at most 4
+/// bytes), and the field must end inside that word. A wider word would be
+/// rounded on its way through `f64`, a signed word would be sign-extended and
+/// clamp when merged, and a field past its own word would spill into bits
 /// another constant owns.
-fn bit_field_fits(data_type: DataType, high: u8) -> bool {
-    let integer = matches!(
+fn bit_field_can_round_trip(data_type: DataType, high: u8) -> bool {
+    let unsigned = matches!(
         data_type,
-        DataType::U08
-            | DataType::S08
-            | DataType::U16
-            | DataType::S16
-            | DataType::U32
-            | DataType::S32
-            | DataType::M08
+        DataType::U08 | DataType::U16 | DataType::U32 | DataType::M08
     );
     let width = type_width(data_type);
 
-    integer && width <= 4 && usize::from(high) < width.saturating_mul(8)
+    unsigned && width <= 4 && usize::from(high) < width.saturating_mul(8)
 }
 
 /// Replaces a bit range in an existing word, keeping every other bit.
@@ -842,7 +841,7 @@ wide = bits, U16, 0, [40:47]
     }
 
     #[test]
-    fn a_patch_of_a_u64_bit_field_past_the_word_keeps_every_byte() {
+    fn a_patch_of_a_u64_bit_field_keeps_every_byte() {
         let definition = oxtuner_ini::Definition::parse(
             "\
 [MegaTune]
@@ -853,7 +852,7 @@ endianness = little
 nPages = 1
 pageSize = 8
 page = 1
-wide = bits, U64, 0, [40:47]
+wide = bits, U64, 0, [0:7]
 ",
             &SettingsContext::new(),
         )
@@ -866,6 +865,95 @@ wide = bits, U64, 0, [40:47]
             .expect("patches");
 
         assert_eq!(patched, base, "a skipped field must not rewrite the word");
+    }
+
+    #[test]
+    fn a_u64_bit_field_is_skipped_on_decode() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+wide = bits, U64, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
+
+        let report = decode_page(&layout, IniPage::FIRST, &[0xFF; 8], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1, "a wide word cannot survive a write-back");
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 1234.0);
+    }
+
+    #[test]
+    fn an_f32_bit_field_is_skipped_on_patch() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, F32, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0x00, 0x00, 0x80, 0x3F];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched, base, "a float word must not be rewritten");
+    }
+
+    #[test]
+    fn a_full_width_u32_bit_field_decodes() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U32, 0, [0:31]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+
+        let report = decode_page(
+            &layout,
+            IniPage::FIRST,
+            &[0xEF, 0xBE, 0xAD, 0xDE],
+            &mut tune,
+        )
+        .expect("decodes");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            f64::from(0xDEAD_BEEFu32)
+        );
     }
 
     #[test]
