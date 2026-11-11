@@ -691,7 +691,7 @@ mod tests {
     fn a_write_past_the_page_end_is_an_error_and_changes_nothing() {
         use oxtuner_ini::SettingsContext;
 
-        let definition = oxtuner_ini::Definition::parse(
+        let definition = Definition::parse(
             "\
 [MegaTune]
 signature = \"speeduino 202501\"
@@ -721,6 +721,31 @@ value = scalar, U08, 0, \"x\", 1, 0
         );
 
         assert_eq!(reply, vec![0x84]);
+        assert_eq!(transport.ram(1), Some(before.as_slice()));
+        assert_eq!(transport.counters().bytes_written, 0);
+        assert_eq!(transport.counters().writes, 1);
+
+        let unknown = transport.respond(
+            Request::WritePage {
+                page: 9,
+                offset: 0,
+                values: &[1],
+            },
+            None,
+            true,
+        );
+        assert_eq!(unknown, vec![0x84], "an unknown page is refused too");
+
+        let legacy = transport.respond(
+            Request::WritePage {
+                page: 1,
+                offset: 6,
+                values: &[1, 2, 3, 4],
+            },
+            None,
+            false,
+        );
+        assert!(legacy.is_empty(), "a legacy link stays silent on refusal");
         assert_eq!(transport.ram(1), Some(before.as_slice()));
     }
 
