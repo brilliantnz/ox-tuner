@@ -186,9 +186,10 @@ impl Tune {
     ///
     /// An imported `.msq` is parsed with the same definition but builds its own
     /// layout allocation, so a pointer comparison cannot accept it. This is the
-    /// checked adoption: every variable must exist with the same element count;
-    /// only then are the values replaced. Edit timestamps do not survive, which
-    /// is right for a tune that arrived from a file.
+    /// checked adoption: every variable must exist with the same element count
+    /// and the same value kind; only then are the values replaced. Edit
+    /// timestamps do not survive, which is right for a tune that arrived from a
+    /// file.
     ///
     /// # Errors
     ///
@@ -204,6 +205,9 @@ impl Tune {
                 return Err(TuneError::UnknownVariable(spec.name.clone()));
             };
             if other_values.len() != spec.element_count() {
+                return Err(TuneError::LayoutMismatch);
+            }
+            if spec.shape.is_numeric() != matches!(other_values, Values::Numbers(_)) {
                 return Err(TuneError::LayoutMismatch);
             }
             values.push(other_values.clone());
@@ -656,6 +660,25 @@ note = string, ASCII, 8, 4
         assert_eq!(snapshot.scalar_raw("reqFuel").unwrap(), 70.0);
         assert_eq!(snapshot.last_edit("reqFuel", 0, 0), None);
         assert!(tune.last_edit("reqFuel", 0, 0).is_some());
+    }
+
+    #[test]
+    fn adopting_numbers_onto_a_text_variable_is_refused() {
+        let definition = definition();
+        let mut target = Tune::from_definition(&definition);
+        let mut imported = Tune::from_definition(&definition);
+
+        let note = imported
+            .layout()
+            .index("note")
+            .expect("note is in the layout");
+        imported.values[note] = Values::Numbers(vec![1.0; 8]);
+
+        assert_eq!(
+            target.adopt_values(&imported),
+            Err(TuneError::LayoutMismatch),
+        );
+        assert_eq!(target.text("note").expect("text is unchanged"), "");
     }
 
     #[test]
