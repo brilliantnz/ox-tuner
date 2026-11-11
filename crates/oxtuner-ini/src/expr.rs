@@ -55,8 +55,8 @@ impl Drop for DepthGuard {
 
 /// The serialized shape of [`Expr`], used to apply a depth cap while reading.
 ///
-/// Variant names and order must match [`Expr`], because the cache encodes the
-/// same externally tagged representation.
+/// Variant order must match [`Expr`], because postcard encodes an externally
+/// tagged enum by index. The names match too, for formats that use them.
 #[derive(serde::Deserialize)]
 enum ExprRepr {
     Number(f64),
@@ -94,19 +94,18 @@ impl<'de> serde::Deserialize<'de> for Expr {
     where
         D: serde::Deserializer<'de>,
     {
+        let _guard = DepthGuard;
         let depth = EXPR_DEPTH.with(|current| {
             let next = current.get().saturating_add(1);
             current.set(next);
             next
         });
         if depth > MAX_AST_DEPTH {
-            EXPR_DEPTH.with(|current| current.set(current.get().saturating_sub(1)));
-            return Err(<D::Error as serde::de::Error>::custom(
-                "expression nests too deeply",
-            ));
+            return Err(<D::Error as serde::de::Error>::custom(format!(
+                "expression nests too deeply (limit {MAX_AST_DEPTH})"
+            )));
         }
 
-        let _guard = DepthGuard;
         let repr: ExprRepr = serde::Deserialize::deserialize(deserializer)?;
         Ok(repr.into())
     }
@@ -1117,11 +1116,44 @@ mod tests {
     }
 
     #[test]
-    fn an_expression_round_trips_through_serde() {
-        let expression = Expr::parse("(1 + 2) * value").expect("parses");
+    fn every_expression_variant_round_trips_through_serde() {
+        let expressions = [
+            Expr::Number(1.0),
+            Expr::Ident("value".to_owned()),
+            Expr::Unary(UnaryOp::Negate, Box::new(Expr::Number(1.0))),
+            Expr::Binary(
+                BinaryOp::Add,
+                Box::new(Expr::Number(1.0)),
+                Box::new(Expr::Number(2.0)),
+            ),
+            Expr::Ternary(
+                Box::new(Expr::Ident("a".to_owned())),
+                Box::new(Expr::Number(1.0)),
+                Box::new(Expr::Number(0.0)),
+            ),
+            Expr::Call("table".to_owned(), vec![Expr::Number(1.0)]),
+            Expr::Index(
+                Box::new(Expr::Ident("table".to_owned())),
+                Box::new(Expr::Number(0.0)),
+            ),
+        ];
+
+        for expression in expressions {
+            let bytes = postcard::to_allocvec(&expression).expect("serializes");
+            let decoded: Expr = postcard::from_bytes(&bytes).expect("deserializes");
+            assert_eq!(decoded, expression);
+        }
+    }
+
+    #[test]
+    fn an_expression_at_the_depth_cap_deserializes() {
+        let mut expression = Expr::Number(1.0);
+        for _ in 0..MAX_AST_DEPTH - 1 {
+            expression = Expr::Unary(UnaryOp::Plus, Box::new(expression));
+        }
 
         let bytes = postcard::to_allocvec(&expression).expect("serializes");
-        let decoded: Expr = postcard::from_bytes(&bytes).expect("deserializes");
+        let decoded: Expr = postcard::from_bytes(&bytes).expect("the cap itself is allowed");
 
         assert_eq!(decoded, expression);
     }

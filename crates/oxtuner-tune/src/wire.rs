@@ -173,7 +173,9 @@ pub fn decode_page(
 ///
 /// # Errors
 ///
-/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare.
+/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare,
+/// and [`TuneError::PageTooLarge`] when the declared size is over
+/// [`MAX_PAGE_BYTES`].
 pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
@@ -870,7 +872,7 @@ value = scalar, U08, 0, \"x\", 1, 0
             matches!(
                 error,
                 TuneError::PageTooLarge {
-                    limit: 1_048_576,
+                    limit: MAX_PAGE_BYTES,
                     ..
                 }
             ),

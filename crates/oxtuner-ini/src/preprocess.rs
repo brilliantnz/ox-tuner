@@ -981,6 +981,15 @@ mod tests {
     }
 
     #[test]
+    fn condition_tokens_split_two_character_operators() {
+        assert_eq!(
+            condition_tokens("a && b || !c").expect("tokens"),
+            vec!["a", "&&", "b", "||", "!", "c"]
+        );
+        assert!(condition_tokens("a &").is_err());
+    }
+
+    #[test]
     fn a_condition_at_the_nesting_cap_evaluates() {
         let nested = format!(
             "{}true{}",
