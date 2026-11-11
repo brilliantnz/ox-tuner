@@ -386,7 +386,8 @@ nPages = 1
 pageSize = 8
 page = 1
 first = scalar, U08, 0, \"x\", 1.0, 0.0, 0.0, 255.0, 1
-/* dead = scalar, U08, 1, \"x\", 1.0, 0.0, 0.0, 255.0, 1 */
+/* dead = scalar, U08, 1, \"x\", 1.0, 0.0, 0.0, 255.0, 1
+   still dead */
 second = scalar, U08, \"x\", 1.0, 0.0, 0.0, 255.0, 1
 ";
 
@@ -394,9 +395,14 @@ second = scalar, U08, \"x\", 1.0, 0.0, 0.0, 255.0, 1
     let first = definition.constant("first").expect("first");
     let second = definition.constant("second").expect("second");
 
+    assert_eq!(
+        definition.constants.len(),
+        2,
+        "the commented entry must not become a constant"
+    );
     assert!(
         definition.constant("dead").is_none(),
-        "the commented entry must not become a constant"
+        "the commented entry must not be addressable"
     );
     assert_eq!(first.address, Some(0));
     assert_eq!(second.offset, Offset::Next);

@@ -305,6 +305,10 @@ fn parse_index_override(field: &str) -> Option<(usize, String)> {
 pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 /// A `/* … */` comment, which may run across physical lines.
+///
+/// This is a separate scanner rather than one of the `fields` helpers because
+/// it rewrites the line and carries state into the next one; the helpers only
+/// trim or split a single string.
 #[derive(Debug, Default)]
 struct BlockComment {
     /// Line where the open comment started, while it is open.
@@ -465,7 +469,7 @@ pub fn preprocess(
         // the previous value's comma-separated list. Requiring the trailing
         // comma matters: bare keywords such as `std_separator` are indented and
         // carry no `=`, and must stay their own logical line.
-        let continuation = raw.starts_with([' ', '\t'])
+        let continuation = uncommented.starts_with([' ', '\t'])
             && !content.starts_with('[')
             && !has_assignment(content)
             && preprocessed
@@ -525,6 +529,15 @@ pub fn preprocess(
     if fatal.is_empty() {
         Ok(preprocessed)
     } else {
+        // The truncation explains why later entries are missing, so keep it
+        // beside the structural failure instead of discarding it with the rest.
+        fatal.extend(
+            preprocessed
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code.as_ref() == "unterminated-block-comment")
+                .cloned(),
+        );
         Err(IniError::new(fatal))
     }
 }
@@ -1020,6 +1033,24 @@ mod tests {
                 output.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn an_unterminated_block_comment_survives_a_fatal_condition() {
+        let error = preprocess(
+            "a = 1\n#if X\nb = 2\n/* dead\n",
+            &SettingsContext::new(),
+            None,
+        )
+        .expect_err("the #if is unterminated");
+
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_ref() == "unterminated-block-comment"),
+            "the truncation warning is lost: {error}"
+        );
     }
 
     #[test]
