@@ -5,9 +5,12 @@
 //! the new one, never a half-written tune. The parent directory is flushed
 //! afterwards so the rename itself is durable too.
 
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Replaces `path` with `bytes`.
 ///
@@ -62,9 +65,15 @@ fn derived_temporary_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The next unused suffix for a tune temporary in this process.
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+// A crash can leave one temporary behind. It is deliberately not swept here: a
+// concurrent saver's live temporary looks the same as a stale one.
 fn temporary_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(format!(".oxtuner-tmp.{}", std::process::id()));
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    name.push(format!(".oxtuner-tmp.{}.{sequence}", std::process::id()));
     PathBuf::from(name)
 }
 
@@ -122,17 +131,20 @@ mod tests {
     }
 
     #[test]
-    fn the_temporary_name_is_unique_per_process() {
+    fn the_temporary_name_is_unique_per_write_and_per_process() {
         let path = Path::new("/projects/roadster/CurrentTune.msq");
 
-        let temporary = temporary_path(path);
+        let first = temporary_path(path);
+        let second = temporary_path(path);
 
-        assert!(
-            temporary
-                .to_string_lossy()
-                .ends_with(&format!(".oxtuner-tmp.{}", std::process::id())),
-            "{temporary:?}"
-        );
+        assert_ne!(first, second, "two savers must not share one temporary");
+        for name in [&first, &second] {
+            assert!(
+                name.to_string_lossy()
+                    .contains(&format!(".oxtuner-tmp.{}.", std::process::id())),
+                "{name:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
