@@ -26,6 +26,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+postcard = { workspace = true, default-features = false, features = ["alloc"] }
 proptest.workspace = true
 
 [lints]

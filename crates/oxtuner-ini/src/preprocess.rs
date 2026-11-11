@@ -699,9 +699,10 @@ fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
             tokens.push(characters[start..index].iter().collect());
             continue;
         }
-        let two: String = characters.iter().skip(index).take(2).collect();
-        if matches!(two.as_str(), "&&" | "||") {
-            tokens.push(two);
+        if let Some(next) = characters.get(index + 1)
+            && matches!((character, *next), ('&', '&') | ('|', '|'))
+        {
+            tokens.push(characters[index..index + 2].iter().collect());
             index += 2;
             continue;
         }
@@ -977,6 +978,15 @@ mod tests {
 
         assert_eq!(error.diagnostics()[0].code, "condition-too-deep");
         assert_eq!(error.diagnostics()[0].line, Some(2));
+    }
+
+    #[test]
+    fn condition_tokens_split_two_character_operators() {
+        assert_eq!(
+            condition_tokens("a && b || !c").expect("tokens"),
+            vec!["a", "&&", "b", "||", "!", "c"]
+        );
+        assert!(condition_tokens("a &").is_err());
     }
 
     #[test]

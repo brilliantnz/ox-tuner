@@ -5106,6 +5106,7 @@ name = "oxtuner-ini"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "postcard",
  "proptest",
  "serde",
  "tracing",

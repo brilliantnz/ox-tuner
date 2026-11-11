@@ -30,6 +30,13 @@ use oxtuner_ini::{DataType, Endianness};
 use crate::layout::bit_field_can_round_trip;
 use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 
+/// Largest page image the codec will build.
+///
+/// Real pages top out at 16 724 bytes in the reference definitions. The wire
+/// offsets are 16-bit, so a larger page could never be read back in full. A
+/// hostile definition could declare billions and abort while encoding.
+const MAX_PAGE_BYTES: usize = 65_536;
+
 /// What one page decode did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeReport {
@@ -167,12 +174,22 @@ pub fn decode_page(
 ///
 /// # Errors
 ///
-/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare.
+/// Returns [`TuneError::UnknownPage`] for a page the layout does not declare,
+/// and [`TuneError::PageTooLarge`] when the declared size is over 64 KiB
+/// (65 536 bytes).
 pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
     };
-    let size = usize::try_from(page_layout.size).unwrap_or(0);
+    let size = usize::try_from(page_layout.size).unwrap_or(usize::MAX);
+    if size > MAX_PAGE_BYTES {
+        return Err(TuneError::PageTooLarge {
+            page,
+            size,
+            limit: MAX_PAGE_BYTES,
+        });
+    }
+
     let mut bytes = vec![0u8; size];
 
     // Non-bits values fill their words first, then bits fields merge into the
@@ -829,6 +846,72 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
         let bytes = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
 
         assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn an_oversized_page_is_refused_before_allocating() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 2000000
+page = 1
+value = scalar, U08, 0, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+
+        let error = encode_page(&layout, IniPage::FIRST, &tune).expect_err("too large");
+
+        assert!(
+            matches!(
+                error,
+                TuneError::PageTooLarge {
+                    limit: MAX_PAGE_BYTES,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_page_at_the_limit_is_encoded_and_one_byte_more_is_refused() {
+        let definition = |size: u32| {
+            oxtuner_ini::Definition::parse(
+                &format!(
+                    "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = {size}
+page = 1
+value = scalar, U08, 0, \"x\", 1, 0
+"
+                ),
+                &SettingsContext::new(),
+            )
+            .expect("parses")
+        };
+
+        let at_limit = TuneLayout::build(&definition(65_536), &|_| None);
+        let tune = Tune::new(Arc::new(at_limit.clone()));
+        let encoded = encode_page(&at_limit, IniPage::FIRST, &tune).expect("at the limit");
+        assert_eq!(encoded.len(), 65_536);
+
+        let over = TuneLayout::build(&definition(65_537), &|_| None);
+        let tune = Tune::new(Arc::new(over.clone()));
+        let error = encode_page(&over, IniPage::FIRST, &tune).expect_err("one byte over");
+
+        assert!(matches!(error, TuneError::PageTooLarge { .. }), "{error}");
     }
 
     #[test]

@@ -245,6 +245,18 @@ impl RealtimeDecoder {
                     offset,
                     bits,
                 } => {
+                    if let Some(range) = bits {
+                        let word_bits = storage.size().saturating_mul(8);
+                        if range.low > range.high || u32::from(range.high) >= word_bits {
+                            tracing::warn!(
+                                line = channel.line,
+                                channel = %name,
+                                "a bit range reaches past its storage word"
+                            );
+                            continue;
+                        }
+                    }
+
                     sources.push(Source::Measured {
                         name: name.to_owned(),
                         offset: usize::try_from(*offset).unwrap_or(usize::MAX),
@@ -614,6 +626,10 @@ fn read_raw(
     reason = "the value is checked finite and non-negative; bit fields live in 64-bit words and return to f64 storage"
 )]
 fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
+    if range.high >= 64 || range.low > range.high {
+        return None;
+    }
+
     if !raw.is_finite() || raw < 0.0 {
         return None;
     }
@@ -856,6 +872,72 @@ halfRpm = { rpm / 2 }, \"rpm\"
         assert!(
             frame.values.is_empty(),
             "a short block must decode to no values"
+        );
+    }
+
+    #[test]
+    fn a_bit_range_past_its_storage_word_is_not_decoded() {
+        let definition = Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 4
+bad = bits, U08, 0, [8:8]
+good = bits, U08, 0, [0:0]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let decoder = RealtimeDecoder::new(&definition);
+
+        let frame = decoder.decode(&[1, 0, 0, 0], 1);
+
+        assert!(frame.value("bad").is_none(), "the channel is not decoded");
+        assert_eq!(
+            frame.value("good").map(|value| value.value),
+            Some(1.0),
+            "a valid bit field stays"
+        );
+    }
+
+    #[test]
+    fn a_bit_range_past_the_word_is_skipped() {
+        assert_eq!(
+            extract_bits(
+                f64::from(0xFFu8),
+                BitRange {
+                    low: 200,
+                    high: 207
+                }
+            ),
+            None,
+            "a range past the 64-bit word must not shift"
+        );
+        assert_eq!(
+            extract_bits(f64::from(0xFFu8), BitRange { low: 200, high: 10 }),
+            None,
+            "a reversed range must not shift"
+        );
+        assert_eq!(
+            extract_bits(f64::from(u32::MAX), BitRange { low: 0, high: 63 }),
+            Some(f64::from(u32::MAX)),
+            "a full 64-bit range uses the whole-word mask"
+        );
+        assert_eq!(
+            extract_bits(f64::from(0u8), BitRange { low: 0, high: 64 }),
+            None
+        );
+        assert_eq!(
+            extract_bits(f64::from(0x1234u16), BitRange { low: 8, high: 15 }),
+            Some(f64::from(0x12u8)),
         );
     }
 
