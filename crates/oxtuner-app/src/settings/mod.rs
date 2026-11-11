@@ -16,7 +16,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::setting::{
@@ -339,6 +339,7 @@ fn safety_page() -> SettingPage {
                             .child(
                                 Button::new("review-disclaimer")
                                     .label(t!("app.settings.review"))
+                                    .ghost()
                                     .with_size(options.size())
                                     .on_click(|_, window, cx| crate::disclaimer::show(window, cx)),
                             )
@@ -415,6 +416,7 @@ fn about_page() -> SettingPage {
                         SettingField::render(|options, _, _| {
                             Button::new("open-homepage")
                                 .label(t!("app.settings.github_label"))
+                                .ghost()
                                 .with_size(options.size())
                                 .on_click(|_, _, cx| {
                                     cx.open_url("https://github.com/brilliantnz/ox-tuner");

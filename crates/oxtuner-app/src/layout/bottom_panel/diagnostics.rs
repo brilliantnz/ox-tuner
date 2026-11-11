@@ -9,7 +9,7 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui_kit::base::{VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
-use gpui_kit::component::button::{Button, ButtonGroup};
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::select::{Select, SelectState};
@@ -475,12 +475,14 @@ impl DiagnosticsView {
                             } else {
                                 t!("app.diagnostics.pause")
                             })
+                            .ghost()
                             .selected(self.paused)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_paused(cx))),
                     )
                     .child(
                         Button::new("diagnostics-follow")
                             .label(t!("app.diagnostics.follow"))
+                            .ghost()
                             .selected(self.follow)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.follow = !this.follow;
@@ -491,18 +493,21 @@ impl DiagnosticsView {
                     .child(
                         Button::new("diagnostics-clear")
                             .label(t!("app.diagnostics.clear"))
+                            .ghost()
                             .disabled(self.records.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.clear_view(cx))),
                     )
                     .child(
                         Button::new("diagnostics-copy")
                             .label(t!("app.diagnostics.copy"))
+                            .ghost()
                             .disabled(self.records.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
                     )
                     .child(
                         Button::new("diagnostics-open")
                             .label(t!("app.diagnostics.open"))
+                            .ghost()
                             .disabled(!has_file)
                             .on_click(cx.listener(|_, _, _, cx| Self::open_file(cx))),
                     ),

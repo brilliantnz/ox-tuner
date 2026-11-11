@@ -87,6 +87,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                             let detail = path.display().to_string();
                             Button::new(("project-recent", index))
                                 .label(label)
+                                .ghost()
                                 .tooltip(detail)
                                 .on_click(move |_, window, cx| {
                                     project::open(path.clone(), cx);
@@ -141,6 +142,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("project-close-current")
                             .label(t!("app.project.close_project"))
+                            .ghost()
                             .disabled(status.project.is_none())
                             .on_click(|_, window, cx| {
                                 crate::core::close_project(cx);

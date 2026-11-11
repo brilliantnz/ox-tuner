@@ -550,7 +550,7 @@ impl TableEditor {
         let operations_button = Button::new("table-operations")
             .label(t!("app.table.operations"))
             .compact()
-            .secondary()
+            .ghost()
             .dropdown_caret(true)
             .disabled(!has_table || read_only)
             .dropdown_menu(move |menu, _, _| {
@@ -608,6 +608,7 @@ impl TableEditor {
             .child(
                 Button::new("table-undo")
                     .icon(IconName::Undo2)
+                    .ghost()
                     .accessibility_label(t!("app.table.undo"))
                     .tooltip(t!("app.table.undo_tooltip"))
                     .disabled(!can_undo)
@@ -620,6 +621,7 @@ impl TableEditor {
             .child(
                 Button::new("table-redo")
                     .icon(IconName::Redo2)
+                    .ghost()
                     .accessibility_label(t!("app.table.redo"))
                     .tooltip(t!("app.table.redo_tooltip"))
                     .disabled(!can_redo)
@@ -634,6 +636,7 @@ impl TableEditor {
                 Button::new("table-copy")
                     .icon(IconName::Copy)
                     .label(t!("app.table.copy"))
+                    .ghost()
                     .tooltip(t!("app.table.copy_tooltip"))
                     .disabled(!has_table)
                     .on_click(move |_, window, cx| {
@@ -645,6 +648,7 @@ impl TableEditor {
             .child(
                 Button::new("table-paste")
                     .label(t!("app.table.paste"))
+                    .ghost()
                     .tooltip(t!("app.table.paste_tooltip"))
                     .disabled(!has_table || read_only)
                     .on_click(move |_, window, cx| {
@@ -657,6 +661,7 @@ impl TableEditor {
                 Button::new("table-save")
                     .icon(IconName::HardDrive)
                     .label(t!("app.table.save"))
+                    .primary()
                     .tooltip(t!("app.table.save_tooltip"))
                     .disabled(!has_table || read_only || changed == 0)
                     .on_click(|_, _, cx| crate::core::save_tune(cx)),
@@ -669,6 +674,7 @@ impl TableEditor {
                 Button::new("table-flip-y")
                     .icon(IconName::ChevronsUpDown)
                     .label(t!("app.table.flip_y"))
+                    .ghost()
                     .tooltip(t!("app.table.flip_y_tooltip"))
                     .selected(self.flip_y)
                     .disabled(!has_table)
@@ -832,6 +838,7 @@ impl TableEditor {
             .child(
                 Button::new("table-retry")
                     .label(t!("app.table.retry"))
+                    .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
             )
             .into_any_element()
