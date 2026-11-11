@@ -21,7 +21,7 @@ use std::fmt;
     clippy::exhaustive_enums,
     reason = "the expression grammar is a closed set defined by the INI dialect"
 )]
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub enum Expr {
     /// A numeric literal.
     Number(f64),
@@ -38,6 +38,78 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     /// One array element written as `constant[index]`, as Speeduino gates do.
     Index(Box<Expr>, Box<Expr>),
+}
+
+thread_local! {
+    static EXPR_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Lowers the depth counter when a deserialized node finishes, even on error.
+struct DepthGuard;
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        EXPR_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// The serialized shape of [`Expr`], used to apply a depth cap while reading.
+///
+/// Variant names and order must match [`Expr`], because the cache encodes the
+/// same externally tagged representation.
+#[derive(serde::Deserialize)]
+enum ExprRepr {
+    Number(f64),
+    Ident(String),
+    Unary(UnaryOp, Box<Expr>),
+    Binary(BinaryOp, Box<Expr>, Box<Expr>),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    Call(String, Vec<Expr>),
+    Index(Box<Expr>, Box<Expr>),
+}
+
+impl From<ExprRepr> for Expr {
+    fn from(repr: ExprRepr) -> Self {
+        match repr {
+            ExprRepr::Number(number) => Self::Number(number),
+            ExprRepr::Ident(name) => Self::Ident(name),
+            ExprRepr::Unary(operator, operand) => Self::Unary(operator, operand),
+            ExprRepr::Binary(operator, left, right) => Self::Binary(operator, left, right),
+            ExprRepr::Ternary(condition, when_true, when_false) => {
+                Self::Ternary(condition, when_true, when_false)
+            }
+            ExprRepr::Call(name, arguments) => Self::Call(name, arguments),
+            ExprRepr::Index(base, index) => Self::Index(base, index),
+        }
+    }
+}
+
+/// Deserializes an expression with a depth cap.
+///
+/// The definition cache rebuilds trees straight from bytes, so the parser's
+/// limits do not apply there. A crafted cache could otherwise nest deep enough
+/// to exhaust the stack inside the serde derive.
+impl<'de> serde::Deserialize<'de> for Expr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let depth = EXPR_DEPTH.with(|current| {
+            let next = current.get().saturating_add(1);
+            current.set(next);
+            next
+        });
+        if depth > MAX_AST_DEPTH {
+            EXPR_DEPTH.with(|current| current.set(current.get().saturating_sub(1)));
+            return Err(<D::Error as serde::de::Error>::custom(
+                "expression nests too deeply",
+            ));
+        }
+
+        let _guard = DepthGuard;
+        let repr: ExprRepr = serde::Deserialize::deserialize(deserializer)?;
+        Ok(repr.into())
+    }
 }
 
 /// Prefix operators.
@@ -1042,6 +1114,27 @@ mod tests {
         assert_eq!(names.len(), 800);
         assert_eq!(names.first(), Some(&"a0"));
         assert_eq!(names.last(), Some(&"a799"));
+    }
+
+    #[test]
+    fn an_expression_round_trips_through_serde() {
+        let expression = Expr::parse("(1 + 2) * value").expect("parses");
+
+        let bytes = postcard::to_allocvec(&expression).expect("serializes");
+        let decoded: Expr = postcard::from_bytes(&bytes).expect("deserializes");
+
+        assert_eq!(decoded, expression);
+    }
+
+    #[test]
+    fn a_deeply_nested_expression_cannot_be_deserialized() {
+        let mut expression = Expr::Number(1.0);
+        for _ in 0..=MAX_AST_DEPTH {
+            expression = Expr::Unary(UnaryOp::Plus, Box::new(expression));
+        }
+
+        let bytes = postcard::to_allocvec(&expression).expect("serializes");
+        postcard::from_bytes::<Expr>(&bytes).expect_err("must stop at the cap");
     }
 
     #[test]

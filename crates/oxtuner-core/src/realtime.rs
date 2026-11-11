@@ -614,6 +614,10 @@ fn read_raw(
     reason = "the value is checked finite and non-negative; bit fields live in 64-bit words and return to f64 storage"
 )]
 fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
+    if range.high >= 64 {
+        return None;
+    }
+
     if !raw.is_finite() || raw < 0.0 {
         return None;
     }
@@ -856,6 +860,25 @@ halfRpm = { rpm / 2 }, \"rpm\"
         assert!(
             frame.values.is_empty(),
             "a short block must decode to no values"
+        );
+    }
+
+    #[test]
+    fn a_bit_range_past_the_word_is_skipped() {
+        assert_eq!(
+            extract_bits(
+                f64::from(0xFFu8),
+                BitRange {
+                    low: 200,
+                    high: 207
+                }
+            ),
+            None,
+            "a range past the 64-bit word must not shift"
+        );
+        assert_eq!(
+            extract_bits(f64::from(0x1234u16), BitRange { low: 8, high: 15 }),
+            Some(f64::from(0x12u8)),
         );
     }
 

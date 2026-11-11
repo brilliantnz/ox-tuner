@@ -699,9 +699,10 @@ fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
             tokens.push(characters[start..index].iter().collect());
             continue;
         }
-        let two: String = characters.iter().skip(index).take(2).collect();
-        if matches!(two.as_str(), "&&" | "||") {
-            tokens.push(two);
+        if let Some(next) = characters.get(index + 1)
+            && matches!((character, *next), ('&', '&') | ('|', '|'))
+        {
+            tokens.push(characters[index..index + 2].iter().collect());
             index += 2;
             continue;
         }

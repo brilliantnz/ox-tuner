@@ -30,6 +30,12 @@ use oxtuner_ini::{DataType, Endianness};
 use crate::layout::bit_field_can_round_trip;
 use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 
+/// Largest page image the codec will build.
+///
+/// Real pages are at most tens of kilobytes. A hostile definition could declare
+/// billions and abort on allocation while encoding.
+const MAX_PAGE_BYTES: usize = 1 << 20;
+
 /// What one page decode did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeReport {
@@ -172,7 +178,15 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
     };
-    let size = usize::try_from(page_layout.size).unwrap_or(0);
+    let size = usize::try_from(page_layout.size).unwrap_or(usize::MAX);
+    if size > MAX_PAGE_BYTES {
+        return Err(TuneError::PageTooLarge {
+            page,
+            size,
+            limit: MAX_PAGE_BYTES,
+        });
+    }
+
     let mut bytes = vec![0u8; size];
 
     // Non-bits values fill their words first, then bits fields merge into the
@@ -829,6 +843,39 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
         let bytes = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
 
         assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn an_oversized_page_is_refused_before_allocating() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 2000000
+page = 1
+value = scalar, U08, 0, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+
+        let error = encode_page(&layout, IniPage::FIRST, &tune).expect_err("too large");
+
+        assert!(
+            matches!(
+                error,
+                TuneError::PageTooLarge {
+                    limit: 1_048_576,
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]

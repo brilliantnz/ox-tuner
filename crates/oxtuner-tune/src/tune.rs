@@ -95,6 +95,15 @@ pub enum TuneError {
         /// Bytes the definition declares.
         expected: usize,
     },
+    /// The definition's page is larger than the codec will build.
+    PageTooLarge {
+        /// The page asked for.
+        page: IniPage,
+        /// Bytes the definition declares.
+        size: usize,
+        /// Largest page the codec accepts.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for TuneError {
@@ -114,6 +123,10 @@ impl std::fmt::Display for TuneError {
             Self::LayoutMismatch => formatter
                 .write_str("the tunes' values do not match one layout and cannot be combined"),
             Self::UnknownPage { page } => write!(formatter, "the layout has no page {page}"),
+            Self::PageTooLarge { page, size, limit } => write!(
+                formatter,
+                "page {page} declares {size} byte(s), over the {limit} byte limit"
+            ),
             Self::ShortPage {
                 page,
                 got,
