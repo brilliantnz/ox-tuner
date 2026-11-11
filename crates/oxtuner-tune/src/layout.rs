@@ -769,6 +769,23 @@ mod tests {
     use super::*;
     use oxtuner_ini::{SettingsContext, parse_str};
 
+    #[test]
+    fn a_bit_field_must_fit_its_integer_word() {
+        assert!(bit_field_can_round_trip(DataType::U08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::U16, 0, 15));
+        assert!(bit_field_can_round_trip(DataType::U32, 0, 31));
+        assert!(bit_field_can_round_trip(DataType::M08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::S08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::S16, 0, 15));
+        assert!(bit_field_can_round_trip(DataType::S32, 0, 31));
+
+        assert!(!bit_field_can_round_trip(DataType::U16, 8, 23));
+        assert!(!bit_field_can_round_trip(DataType::U64, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::S64, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::F32, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::U16, 100, 5));
+    }
+
     const DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"

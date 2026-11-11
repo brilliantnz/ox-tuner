@@ -20,8 +20,8 @@
 //! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
 //! word is not an integer. Signed words are read and written as their
 //! two's-complement pattern. Decode skips a refused field. [`encode_page`] writes
-//! nothing for it, so its word stays zero in the fresh image, and
-//! [`patch_page`] keeps the bytes the ECU sent.
+//! nothing for it, so the word keeps whatever the other constants on it wrote,
+//! and [`patch_page`] keeps the bytes the ECU sent.
 
 use oxtuner_ini::{DataType, Endianness};
 
@@ -174,10 +174,11 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
 
     // Non-bits values fill their words first, then bits fields merge into the
     // result, so declaration order never decides which value survives.
-    for bits_pass in [false, true] {
+    for bits_only in [false, true] {
         for index in &page_layout.variables {
             let variable = &layout.variables()[*index];
-            if matches!(variable.shape, EntryShape::Bits { .. }) != bits_pass {
+            let is_bits = matches!(variable.shape, EntryShape::Bits { .. });
+            if is_bits != bits_only {
                 continue;
             }
 
@@ -298,10 +299,11 @@ pub fn patch_page(
 
     // Apply changed scalars, arrays and text first, then merge changed bits
     // fields, so a shared word keeps every part that changed.
-    for bits_pass in [false, true] {
+    for bits_only in [false, true] {
         for index in &page_layout.variables {
             let variable = &layout.variables()[*index];
-            if matches!(variable.shape, EntryShape::Bits { .. }) != bits_pass {
+            let is_bits = matches!(variable.shape, EntryShape::Bits { .. });
+            if is_bits != bits_only {
                 continue;
             }
             if !changed.contains(&variable.name.to_ascii_lowercase()) {
@@ -429,8 +431,8 @@ fn sign_extend(word: i64, bits: usize) -> i64 {
 /// The mask for `low..=high`.
 ///
 /// The precondition is `high < 32`: callers refuse a field that reaches past
-/// the word, so `low` is below 32 too. The clamp only keeps the shift total for
-/// a caller that forgets, and never makes a straddling range valid.
+/// the word, so `low` is below 32 too. The clamp only keeps the shift below 32
+/// so it cannot overflow, and it never makes a straddling range valid.
 fn bit_mask(low: u8, high: u8) -> u32 {
     let low = u32::from(low);
     let high = u32::from(high);
@@ -450,7 +452,7 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::as_conversions,
-    reason = "the value is checked finite and non-negative before the bit-field cast"
+    reason = "the value is checked finite before the bit-field cast, and negative words use their two's-complement pattern"
 )]
 fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
     if high >= 32 {
@@ -658,23 +660,6 @@ name = string, ASCII, 4, 4
 
         assert_eq!(&encoded[..4], &bytes[..4]);
         assert_eq!(&encoded[4..6], b"ox");
-    }
-
-    #[test]
-    fn a_bit_field_must_fit_its_unsigned_word() {
-        assert!(bit_field_can_round_trip(DataType::U08, 0, 7));
-        assert!(bit_field_can_round_trip(DataType::U16, 0, 15));
-        assert!(bit_field_can_round_trip(DataType::U32, 0, 31));
-        assert!(bit_field_can_round_trip(DataType::M08, 0, 7));
-        assert!(bit_field_can_round_trip(DataType::S08, 0, 7));
-        assert!(bit_field_can_round_trip(DataType::S16, 0, 15));
-        assert!(bit_field_can_round_trip(DataType::S32, 0, 31));
-
-        assert!(!bit_field_can_round_trip(DataType::U16, 8, 23));
-        assert!(!bit_field_can_round_trip(DataType::U64, 0, 7));
-        assert!(!bit_field_can_round_trip(DataType::S64, 0, 7));
-        assert!(!bit_field_can_round_trip(DataType::F32, 0, 7));
-        assert!(!bit_field_can_round_trip(DataType::U16, 100, 5));
     }
 
     #[test]
