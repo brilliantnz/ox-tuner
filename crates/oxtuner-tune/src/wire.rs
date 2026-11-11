@@ -12,9 +12,10 @@
 //! # What it refuses
 //!
 //! A variable whose address or shape the definition did not resolve is skipped
-//! and counted in [`DecodeReport::skipped`]. A bit range that reaches past the
-//! 32-bit word, such as `[40:47]`, is refused the same way: decode skips it and
-//! encode keeps the word unchanged. It is never placed at offset zero and never
+//! and counted in [`DecodeReport::skipped`]. A bit field is refused the same
+//! way when it reaches past its own storage word (`[40:47]` on a U16) or when
+//! its word is wider than 32 bits or not an integer. Decode skips it and encode
+//! keeps the word unchanged. It is never placed at offset zero and never
 //! invented — a wrong value in the ECU image is worse than a missing one
 //! (ADR-0010).
 
@@ -28,7 +29,7 @@ pub struct DecodeReport {
     /// Variables whose values were taken from the page.
     pub decoded: usize,
     /// Variables that could not be placed (no address, no shape, too small, a
-    /// bit range past the word).
+    /// bit field outside its storage word or on a word wider than 32 bits).
     pub skipped: usize,
     /// Page bytes consumed by the variables that were decoded.
     pub bytes: usize,
@@ -101,7 +102,11 @@ pub fn decode_page(
                 };
                 let raw = match variable.shape {
                     EntryShape::Bits { low, high, .. } => {
-                        extract_bits(raw, low, high).map(f64::from)
+                        if bit_field_fits(variable.data_type, high) {
+                            extract_bits(raw, low, high).map(f64::from)
+                        } else {
+                            None
+                        }
                     }
                     _ => Some(raw),
                 };
@@ -196,9 +201,9 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                 );
             }
             EntryShape::Bits { low, high, .. } => {
-                // Refuse before reading the word: rewriting an unchanged U64
-                // through f64 would still lose low bits.
-                if high >= 32 {
+                // Refuse before reading the word: rewriting an unchanged wide
+                // word through f64 would still lose low bits.
+                if !bit_field_fits(variable.data_type, high) {
                     continue;
                 }
 
@@ -311,9 +316,9 @@ pub fn patch_page(
                 );
             }
             EntryShape::Bits { low, high, .. } => {
-                // Refuse before reading the word: rewriting an unchanged U64
-                // through f64 would still lose low bits.
-                if high >= 32 {
+                // Refuse before reading the word: rewriting an unchanged wide
+                // word through f64 would still lose low bits.
+                if !bit_field_fits(variable.data_type, high) {
                     continue;
                 }
 
@@ -360,6 +365,28 @@ fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
 
 fn type_width(data_type: DataType) -> usize {
     usize::try_from(data_type.size()).unwrap_or(usize::MAX)
+}
+
+/// Whether a `bits` variable can be merged safely inside its storage word.
+///
+/// The word must be an integer that `f64` holds exactly (at most 4 bytes), and
+/// the field must end inside that word. A wider word would be rounded on its
+/// way through `f64`, and a field past its own word would spill into bits
+/// another constant owns.
+fn bit_field_fits(data_type: DataType, high: u8) -> bool {
+    let integer = matches!(
+        data_type,
+        DataType::U08
+            | DataType::S08
+            | DataType::U16
+            | DataType::S16
+            | DataType::U32
+            | DataType::S32
+            | DataType::M08
+    );
+    let width = type_width(data_type);
+
+    integer && width <= 4 && usize::from(high) < width.saturating_mul(8)
 }
 
 /// Replaces a bit range in an existing word, keeping every other bit.
@@ -612,6 +639,8 @@ name = string, ASCII, 4, 4
         assert_eq!(bit_mask(0, 15), 0xFFFF);
         assert_eq!(bit_mask(31, 31), 0x8000_0000);
         assert_eq!(bit_mask(0, 31), u32::MAX);
+        assert_eq!(bit_mask(31, 39), 0x8000_0000, "clamped to the word");
+        assert_eq!(bit_mask(40, 47), 0, "no bits exist past the word");
     }
 
     #[test]
@@ -633,12 +662,17 @@ wide = bits, U16, 0, [40:47]
         .expect("parses");
         let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
 
         let report =
             decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
 
         assert_eq!(report.skipped, 1);
-        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 0.0);
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            1234.0,
+            "a refused field must not be written"
+        );
     }
 
     #[test]
@@ -767,12 +801,17 @@ wide = bits, U16, 0, [31:39]
         .expect("parses");
         let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
 
         let report =
             decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
 
         assert_eq!(report.skipped, 1);
-        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 0.0);
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            1234.0,
+            "a refused field must not be written"
+        );
     }
 
     #[test]
@@ -794,17 +833,12 @@ wide = bits, U16, 0, [40:47]
         .expect("parses");
         let layout = TuneLayout::build(&definition, &|_| None);
         let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0xFF, 0xFF, 0, 0];
 
-        let patched = patch_page(
-            &layout,
-            IniPage::FIRST,
-            &[0xFF, 0xFF, 0, 0],
-            &tune,
-            &["wide".to_owned()],
-        )
-        .expect("patches");
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
 
-        assert_eq!(&patched[..2], &[0xFF, 0xFF]);
+        assert_eq!(patched, base, "a skipped field must not rewrite the word");
     }
 
     #[test]
