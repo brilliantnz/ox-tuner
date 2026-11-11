@@ -106,6 +106,11 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
             // it is honest, writing a guessed offset would not be.
             continue;
         }
+        if !spec.bit_field_round_trips() {
+            // The codec refuses this bit field, so a write would report success
+            // without sending it. Leave it out of the plan instead.
+            continue;
+        }
         let (Some(after), Some(sent)) = (working.value(&spec.name), ram.value(&spec.name)) else {
             continue;
         };

@@ -193,7 +193,43 @@ pub struct VariableSpec {
     pub default_raw: f64,
 }
 
+/// Whether a bit field survives the page codec's read-modify-write round trip.
+///
+/// The word must be an integer that `f64` holds exactly (at most 4 bytes), and
+/// the field must end inside that word. Signed words are supported through
+/// their two's-complement bit pattern, which is what the real definitions use.
+/// Wider and floating-point words are not, because the read-modify-write path
+/// would round them.
+pub(crate) fn bit_field_can_round_trip(data_type: DataType, low: u8, high: u8) -> bool {
+    let integer = matches!(
+        data_type,
+        DataType::U08
+            | DataType::S08
+            | DataType::U16
+            | DataType::S16
+            | DataType::U32
+            | DataType::S32
+            | DataType::M08
+    );
+    let width = usize::try_from(data_type.size()).unwrap_or(usize::MAX);
+
+    integer && width <= 4 && low <= high && usize::from(high) < width.saturating_mul(8)
+}
+
 impl VariableSpec {
+    /// Whether the page codec can read and write this variable's bit field.
+    ///
+    /// A refused field is skipped by the codec, so the write plan must not
+    /// offer it as a change that can be sent.
+    pub fn bit_field_round_trips(&self) -> bool {
+        match self.shape {
+            EntryShape::Bits { low, high, .. } => {
+                bit_field_can_round_trip(self.data_type, low, high)
+            }
+            _ => true,
+        }
+    }
+
     /// The page this variable is written to, if it is a constant.
     pub const fn ini_page(&self) -> Option<IniPage> {
         self.owner.page()
@@ -732,6 +768,23 @@ fn default_raw(
 mod tests {
     use super::*;
     use oxtuner_ini::{SettingsContext, parse_str};
+
+    #[test]
+    fn a_bit_field_must_fit_its_integer_word() {
+        assert!(bit_field_can_round_trip(DataType::U08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::U16, 0, 15));
+        assert!(bit_field_can_round_trip(DataType::U32, 0, 31));
+        assert!(bit_field_can_round_trip(DataType::M08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::S08, 0, 7));
+        assert!(bit_field_can_round_trip(DataType::S16, 0, 15));
+        assert!(bit_field_can_round_trip(DataType::S32, 0, 31));
+
+        assert!(!bit_field_can_round_trip(DataType::U16, 8, 23));
+        assert!(!bit_field_can_round_trip(DataType::U64, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::S64, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::F32, 0, 7));
+        assert!(!bit_field_can_round_trip(DataType::U16, 100, 5));
+    }
 
     const DEFINITION: &str = r#"
 [MegaTune]

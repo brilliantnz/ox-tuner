@@ -15,9 +15,17 @@
 //! and counted in [`DecodeReport::skipped`]. It is never placed at offset zero
 //! and never invented — a wrong value in the ECU image is worse than a missing
 //! one (ADR-0010).
+//!
+//! A bit field is refused the same way when it reaches past its own storage
+//! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
+//! word is not an integer. Signed words are read and written as their
+//! two's-complement pattern. Decode skips a refused field. [`encode_page`] writes
+//! nothing for it, so the word keeps whatever the other constants on it wrote,
+//! and [`patch_page`] keeps the bytes the ECU sent.
 
 use oxtuner_ini::{DataType, Endianness};
 
+use crate::layout::bit_field_can_round_trip;
 use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 
 /// What one page decode did.
@@ -25,14 +33,16 @@ use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 pub struct DecodeReport {
     /// Variables whose values were taken from the page.
     pub decoded: usize,
-    /// Variables that could not be placed (no address, no shape, too small).
+    /// Variables that were not decoded: no address, no shape, too small, a bit
+    /// field outside its storage word, or a word that is not an integer of at
+    /// most 32 bits.
     pub skipped: usize,
     /// Page bytes consumed by the variables that were decoded.
     pub bytes: usize,
 }
 
 impl DecodeReport {
-    /// Whether every variable on the page was placed.
+    /// Whether every variable on the page was decoded.
     pub fn is_complete(&self) -> bool {
         self.skipped == 0
     }
@@ -98,7 +108,11 @@ pub fn decode_page(
                 };
                 let raw = match variable.shape {
                     EntryShape::Bits { low, high, .. } => {
-                        extract_bits(raw, low, high).map(f64::from)
+                        if bit_field_can_round_trip(variable.data_type, low, high) {
+                            extract_bits(raw, low, high).map(f64::from)
+                        } else {
+                            None
+                        }
                     }
                     _ => Some(raw),
                 };
@@ -143,10 +157,10 @@ pub fn decode_page(
 
 /// Writes one page's values into a fresh byte image.
 ///
-/// Bits that belong to a `bits` constant keep the rest of their word: the word
-/// is read from `tune`'s current value first, then modified. Values whose
-/// address is unknown are skipped; a page image is never shifted to make one
-/// fit.
+/// Non-bits values are written first, then each `bits` constant merges into its
+/// word, so every other bit of that word keeps what another constant declared.
+/// A value whose address is unknown, or a bit field the codec refuses, is
+/// skipped; a page image is never shifted to make one fit.
 ///
 /// # Errors
 ///
@@ -158,67 +172,82 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
     let size = usize::try_from(page_layout.size).unwrap_or(0);
     let mut bytes = vec![0u8; size];
 
-    for index in &page_layout.variables {
-        let variable = &layout.variables()[*index];
-        let Some(start) = offset_of(variable, page_layout.start_offset) else {
-            continue;
-        };
-        match variable.shape {
-            EntryShape::Text { len } => {
-                // A text constant whose address did not land inside the page is
-                // skipped, like an unresolved numeric one. `start == len` is a
-                // valid empty write; beyond it is a definition bug.
-                if start >= bytes.len() {
-                    continue;
-                }
-                let Ok(text) = tune.text(&variable.name) else {
-                    continue;
-                };
-                let source = text.as_bytes();
-                let end = start.saturating_add(len).min(bytes.len());
-                let take = source.len().min(end - start);
-                bytes[start..end].fill(0);
-                bytes[start..start + take].copy_from_slice(&source[..take]);
+    // Non-bits values fill their words first, then bits fields merge into the
+    // result, so declaration order never decides which value survives.
+    for bits_only in [false, true] {
+        for index in &page_layout.variables {
+            let variable = &layout.variables()[*index];
+            let is_bits = matches!(variable.shape, EntryShape::Bits { .. });
+            if is_bits != bits_only {
+                continue;
             }
-            EntryShape::Scalar => {
-                let Ok(raw) = tune.raw_at(&variable.name, 0) else {
-                    continue;
-                };
-                write_value(
-                    &mut bytes,
-                    start,
-                    variable.data_type,
-                    layout.endianness(),
-                    raw,
-                );
-            }
-            EntryShape::Bits { low, high, .. } => {
-                let Ok(value) = tune.raw_at(&variable.name, 0) else {
-                    continue;
-                };
-                let Some(existing) =
-                    read_value(&bytes, start, variable.data_type, layout.endianness())
-                else {
-                    continue;
-                };
-                let merged = merge_bits(existing, value, low, high);
-                write_value(
-                    &mut bytes,
-                    start,
-                    variable.data_type,
-                    layout.endianness(),
-                    merged,
-                );
-            }
-            EntryShape::Array { cols, rows } => {
-                let count = cols.saturating_mul(rows);
-                let width = type_width(variable.data_type);
-                for element in 0..count {
-                    let Ok(raw) = tune.raw_at(&variable.name, element) else {
-                        break;
+
+            let Some(start) = offset_of(variable, page_layout.start_offset) else {
+                continue;
+            };
+            match variable.shape {
+                EntryShape::Text { len } => {
+                    // A text constant whose address did not land inside the page is
+                    // skipped, like an unresolved numeric one. `start == len` is a
+                    // valid empty write; beyond it is a definition bug.
+                    if start >= bytes.len() {
+                        continue;
+                    }
+                    let Ok(text) = tune.text(&variable.name) else {
+                        continue;
                     };
-                    let at = start.saturating_add(element.saturating_mul(width));
-                    write_value(&mut bytes, at, variable.data_type, layout.endianness(), raw);
+                    let source = text.as_bytes();
+                    let end = start.saturating_add(len).min(bytes.len());
+                    let take = source.len().min(end - start);
+                    bytes[start..end].fill(0);
+                    bytes[start..start + take].copy_from_slice(&source[..take]);
+                }
+                EntryShape::Scalar => {
+                    let Ok(raw) = tune.raw_at(&variable.name, 0) else {
+                        continue;
+                    };
+                    write_value(
+                        &mut bytes,
+                        start,
+                        variable.data_type,
+                        layout.endianness(),
+                        raw,
+                    );
+                }
+                EntryShape::Bits { low, high, .. } => {
+                    // Refuse before reading the word: rewriting an unchanged wide
+                    // word through f64 would still lose low bits.
+                    if !bit_field_can_round_trip(variable.data_type, low, high) {
+                        continue;
+                    }
+
+                    let Ok(value) = tune.raw_at(&variable.name, 0) else {
+                        continue;
+                    };
+                    let Some(existing) =
+                        read_value(&bytes, start, variable.data_type, layout.endianness())
+                    else {
+                        continue;
+                    };
+                    let merged = merge_bits(existing, value, variable.data_type, low, high);
+                    write_value(
+                        &mut bytes,
+                        start,
+                        variable.data_type,
+                        layout.endianness(),
+                        merged,
+                    );
+                }
+                EntryShape::Array { cols, rows } => {
+                    let count = cols.saturating_mul(rows);
+                    let width = type_width(variable.data_type);
+                    for element in 0..count {
+                        let Ok(raw) = tune.raw_at(&variable.name, element) else {
+                            break;
+                        };
+                        let at = start.saturating_add(element.saturating_mul(width));
+                        write_value(&mut bytes, at, variable.data_type, layout.endianness(), raw);
+                    }
                 }
             }
         }
@@ -236,7 +265,8 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
 /// a full [`encode_page`] image would overwrite those with defaults.
 ///
 /// Names are matched case-insensitively, as the layout is. A name that is not on
-/// this page contributes nothing.
+/// this page contributes nothing, and neither does a bit field the codec
+/// refuses: the base bytes stay as they are.
 ///
 /// # Errors
 ///
@@ -267,67 +297,82 @@ pub fn patch_page(
         .map(|name| name.to_ascii_lowercase())
         .collect();
 
-    for index in &page_layout.variables {
-        let variable = &layout.variables()[*index];
-        if !changed.contains(&variable.name.to_ascii_lowercase()) {
-            continue;
-        }
-        let Some(start) = offset_of(variable, page_layout.start_offset) else {
-            continue;
-        };
-        match variable.shape {
-            EntryShape::Text { len } => {
-                if start >= bytes.len() {
-                    continue;
-                }
-                let Ok(text) = tune.text(&variable.name) else {
-                    continue;
-                };
-                let source = text.as_bytes();
-                let end = start.saturating_add(len).min(bytes.len());
-                let take = source.len().min(end - start);
-                bytes[start..end].fill(0);
-                bytes[start..start + take].copy_from_slice(&source[..take]);
+    // Apply changed scalars, arrays and text first, then merge changed bits
+    // fields, so a shared word keeps every part that changed.
+    for bits_only in [false, true] {
+        for index in &page_layout.variables {
+            let variable = &layout.variables()[*index];
+            let is_bits = matches!(variable.shape, EntryShape::Bits { .. });
+            if is_bits != bits_only {
+                continue;
             }
-            EntryShape::Scalar => {
-                let Ok(raw) = tune.raw_at(&variable.name, 0) else {
-                    continue;
-                };
-                write_value(
-                    &mut bytes,
-                    start,
-                    variable.data_type,
-                    layout.endianness(),
-                    raw,
-                );
+            if !changed.contains(&variable.name.to_ascii_lowercase()) {
+                continue;
             }
-            EntryShape::Bits { low, high, .. } => {
-                let Ok(value) = tune.raw_at(&variable.name, 0) else {
-                    continue;
-                };
-                let Some(existing) =
-                    read_value(&bytes, start, variable.data_type, layout.endianness())
-                else {
-                    continue;
-                };
-                let merged = merge_bits(existing, value, low, high);
-                write_value(
-                    &mut bytes,
-                    start,
-                    variable.data_type,
-                    layout.endianness(),
-                    merged,
-                );
-            }
-            EntryShape::Array { cols, rows } => {
-                let count = cols.saturating_mul(rows);
-                let width = type_width(variable.data_type);
-                for element in 0..count {
-                    let Ok(raw) = tune.raw_at(&variable.name, element) else {
-                        break;
+
+            let Some(start) = offset_of(variable, page_layout.start_offset) else {
+                continue;
+            };
+            match variable.shape {
+                EntryShape::Text { len } => {
+                    if start >= bytes.len() {
+                        continue;
+                    }
+                    let Ok(text) = tune.text(&variable.name) else {
+                        continue;
                     };
-                    let at = start.saturating_add(element.saturating_mul(width));
-                    write_value(&mut bytes, at, variable.data_type, layout.endianness(), raw);
+                    let source = text.as_bytes();
+                    let end = start.saturating_add(len).min(bytes.len());
+                    let take = source.len().min(end - start);
+                    bytes[start..end].fill(0);
+                    bytes[start..start + take].copy_from_slice(&source[..take]);
+                }
+                EntryShape::Scalar => {
+                    let Ok(raw) = tune.raw_at(&variable.name, 0) else {
+                        continue;
+                    };
+                    write_value(
+                        &mut bytes,
+                        start,
+                        variable.data_type,
+                        layout.endianness(),
+                        raw,
+                    );
+                }
+                EntryShape::Bits { low, high, .. } => {
+                    // Refuse before reading the word: rewriting an unchanged wide
+                    // word through f64 would still lose low bits.
+                    if !bit_field_can_round_trip(variable.data_type, low, high) {
+                        continue;
+                    }
+
+                    let Ok(value) = tune.raw_at(&variable.name, 0) else {
+                        continue;
+                    };
+                    let Some(existing) =
+                        read_value(&bytes, start, variable.data_type, layout.endianness())
+                    else {
+                        continue;
+                    };
+                    let merged = merge_bits(existing, value, variable.data_type, low, high);
+                    write_value(
+                        &mut bytes,
+                        start,
+                        variable.data_type,
+                        layout.endianness(),
+                        merged,
+                    );
+                }
+                EntryShape::Array { cols, rows } => {
+                    let count = cols.saturating_mul(rows);
+                    let width = type_width(variable.data_type);
+                    for element in 0..count {
+                        let Ok(raw) = tune.raw_at(&variable.name, element) else {
+                            break;
+                        };
+                        let at = start.saturating_add(element.saturating_mul(width));
+                        write_value(&mut bytes, at, variable.data_type, layout.endianness(), raw);
+                    }
                 }
             }
         }
@@ -354,14 +399,48 @@ fn type_width(data_type: DataType) -> usize {
     clippy::as_conversions,
     reason = "bit constants live in the low 32 bits of a word and return to f64 storage"
 )]
-fn merge_bits(existing: f64, value: f64, low: u8, high: u8) -> f64 {
+fn merge_bits(existing: f64, value: f64, data_type: DataType, low: u8, high: u8) -> f64 {
+    if high >= 32 {
+        return existing;
+    }
+
     let mask = bit_mask(low, high);
     let merged = (existing as i64 & !i64::from(mask)) | (((value as i64) << low) & i64::from(mask));
+
+    // A signed word is stored as its two's-complement pattern, so present the
+    // merged bits with that width's sign before the write clamps it.
+    let merged = if matches!(data_type, DataType::S08 | DataType::S16 | DataType::S32) {
+        sign_extend(merged, type_width(data_type).saturating_mul(8))
+    } else {
+        merged
+    };
+
     merged as f64
 }
 
+/// Reinterprets the low `bits` of `word` as a signed value.
+fn sign_extend(word: i64, bits: usize) -> i64 {
+    if bits >= 64 {
+        return word;
+    }
+
+    let shift = 64 - bits;
+    (word << shift) >> shift
+}
+
+/// The mask for `low..=high`.
+///
+/// The precondition is `high < 32`: callers refuse a field that reaches past
+/// the word, so `low` is below 32 too. The clamp only keeps the shift below 32
+/// so it cannot overflow, and it never makes a straddling range valid.
 fn bit_mask(low: u8, high: u8) -> u32 {
-    let width = high.saturating_sub(low).saturating_add(1).min(32);
+    let low = u32::from(low);
+    let high = u32::from(high);
+    if low >= 32 {
+        return 0;
+    }
+
+    let width = high.saturating_sub(low).saturating_add(1).min(32 - low);
     if width >= 32 {
         u32::MAX
     } else {
@@ -373,13 +452,24 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::as_conversions,
-    reason = "the value is checked finite and non-negative before the bit-field cast"
+    reason = "the value is checked finite before the bit-field cast, and negative words use their two's-complement pattern"
 )]
 fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
-    if !raw.is_finite() || raw < 0.0 {
+    if high >= 32 {
         return None;
     }
-    let word = raw as u64;
+
+    if !raw.is_finite() {
+        return None;
+    }
+
+    // A signed word arrives sign-extended. Bit fields read the two's-complement
+    // pattern of the low bits, so keep that pattern rather than refusing it.
+    let word = if raw < 0.0 {
+        (raw as i64) as u64
+    } else {
+        raw as u64
+    };
     let shift = u32::from(low);
     let mask = u64::from(bit_mask(low, high)) >> shift;
     u32::try_from((word >> shift) & mask).ok()
@@ -573,6 +663,48 @@ name = string, ASCII, 4, 4
     }
 
     #[test]
+    fn a_mask_covers_only_the_bits_inside_the_word() {
+        assert_eq!(bit_mask(0, 0), 1);
+        assert_eq!(bit_mask(0, 15), 0xFFFF);
+        assert_eq!(bit_mask(31, 31), 0x8000_0000);
+        assert_eq!(bit_mask(0, 31), u32::MAX);
+        assert_eq!(bit_mask(31, 39), 0x8000_0000, "clamped to the word");
+        assert_eq!(bit_mask(40, 47), 0, "no bits exist past the word");
+    }
+
+    #[test]
+    fn a_bit_field_past_the_word_is_skipped_not_a_panic() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
+
+        let report =
+            decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            1234.0,
+            "a refused field must not be written"
+        );
+    }
+
+    #[test]
     fn a_variable_without_an_address_is_skipped_not_placed_at_zero() {
         let definition = oxtuner_ini::Definition::parse(
             "\
@@ -677,6 +809,326 @@ value = scalar, U08, 0, \"x\", 1.0, 0.0
         .expect("patches");
 
         assert_eq!(&patched[4..8], &[b'o', b'x', 0, 0]);
+    }
+
+    #[test]
+    fn a_bit_field_that_straddles_the_word_is_skipped() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [8:23]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
+
+        let report =
+            decode_page(&layout, IniPage::FIRST, &[0xFF, 0xFF, 0, 0], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            1234.0,
+            "a refused field must not be written"
+        );
+    }
+
+    #[test]
+    fn a_patch_of_a_bit_field_past_the_word_leaves_the_word_alone() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U16, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0xFF, 0xFF, 0, 0];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched, base, "a skipped field must not rewrite the word");
+    }
+
+    #[test]
+    fn a_patch_of_a_u64_bit_field_keeps_every_byte() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+wide = bits, U64, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched, base, "a skipped field must not rewrite the word");
+    }
+
+    #[test]
+    fn a_u64_bit_field_is_skipped_on_decode() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+wide = bits, U64, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1234.0).expect("known");
+
+        let report = decode_page(&layout, IniPage::FIRST, &[0xFF; 8], &mut tune).expect("decodes");
+
+        assert_eq!(report.skipped, 1, "a wide word cannot survive a write-back");
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 1234.0);
+    }
+
+    #[test]
+    fn an_f32_bit_field_is_skipped_on_patch() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, F32, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0x00, 0x00, 0x80, 0x3F];
+
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched, base, "a float word must not be rewritten");
+    }
+
+    #[test]
+    fn a_full_width_u32_bit_field_decodes() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U32, 0, [0:31]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+
+        let report = decode_page(
+            &layout,
+            IniPage::FIRST,
+            &[0xEF, 0xBE, 0xAD, 0xDE],
+            &mut tune,
+        )
+        .expect("decodes");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(
+            tune.raw_at("wide", 0).expect("wide"),
+            f64::from(0xDEAD_BEEFu32)
+        );
+    }
+
+    #[test]
+    fn a_signed_word_bit_field_round_trips() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, S08, 0, [0:2]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        let base = [0xFD, 0, 0, 0];
+
+        let report = decode_page(&layout, IniPage::FIRST, &base, &mut tune).expect("decodes");
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), 5.0);
+
+        tune.set_image_raw("wide", 0, 2.0).expect("known");
+        let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["wide".to_owned()])
+            .expect("patches");
+
+        assert_eq!(patched[0], 0xFA, "upper bits stay set, the field becomes 2");
+    }
+
+    #[test]
+    fn a_signed_bit_field_can_set_the_sign_bit() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, S08, 0, [7:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, 1.0).expect("known");
+
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+
+        assert_eq!(
+            encoded[0], 0x80,
+            "the sign bit is the two's-complement -128"
+        );
+    }
+
+    #[test]
+    fn an_m08_bit_field_decodes() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 1
+page = 1
+wide = bits, M08, 0, [0:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+
+        let report = decode_page(&layout, IniPage::FIRST, &[0x5A], &mut tune).expect("decodes");
+
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(tune.raw_at("wide", 0).expect("wide"), f64::from(0x5Au8));
+    }
+
+    #[test]
+    fn bits_merge_after_scalars_regardless_of_declaration_order() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+fan = bits, U08, 0, [1:1]
+status = scalar, U08, 0, \"bits\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("status", 0, 1.0).expect("status");
+        tune.set_image_raw("fan", 0, 1.0).expect("fan");
+
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+
+        assert_eq!(
+            encoded[0], 0b0000_0011,
+            "both the scalar and the bit survive"
+        );
+    }
+
+    #[test]
+    fn a_full_width_u32_bit_field_encodes() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 4
+page = 1
+wide = bits, U32, 0, [0:31]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        tune.set_image_raw("wide", 0, f64::from(0xDEAD_BEEFu32))
+            .expect("wide");
+
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+
+        assert_eq!(encoded, [0xEF, 0xBE, 0xAD, 0xDE]);
     }
 
     #[test]
