@@ -57,6 +57,12 @@ pub fn strip_comment(line: &str) -> &str {
 /// Returns `None` when the line has no assignment, which is how the parser
 /// distinguishes entries from stray text.
 pub fn split_assignment(line: &str) -> Option<(&str, &str)> {
+    let index = assignment_index(line)?;
+    Some((line[..index].trim_ascii(), line[index + 1..].trim_ascii()))
+}
+
+/// The byte index of the first `=` outside quotes and braces.
+pub(crate) fn assignment_index(line: &str) -> Option<usize> {
     let mut in_quotes = false;
     let mut escaped = false;
     let mut depth = 0u32;
@@ -71,9 +77,7 @@ pub fn split_assignment(line: &str) -> Option<(&str, &str)> {
             b'"' => in_quotes = !in_quotes,
             b'{' if !in_quotes => depth += 1,
             b'}' if !in_quotes => depth = depth.saturating_sub(1),
-            b'=' if !in_quotes && depth == 0 => {
-                return Some((line[..index].trim_ascii(), line[index + 1..].trim_ascii()));
-            }
+            b'=' if !in_quotes && depth == 0 => return Some(index),
             _ => {}
         }
     }

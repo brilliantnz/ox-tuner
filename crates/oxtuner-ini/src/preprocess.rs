@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use crate::error::{Diagnostic, IniError, Severity};
 use crate::expr::bump_depth;
-use crate::fields::{has_assignment, split_fields, strip_comment};
+use crate::fields::{assignment_index, has_assignment, split_fields, strip_comment};
 use crate::settings::SettingsContext;
 
 /// One entry after preprocessing.
@@ -304,6 +304,70 @@ fn parse_index_override(field: &str) -> Option<(usize, String)> {
 /// found; the caller turns that into a diagnostic instead of failing.
 pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
 
+/// A `/* … */` comment, which may run across physical lines.
+#[derive(Debug, Default)]
+struct BlockComment {
+    /// Line where the open comment started, while it is open.
+    open: Option<u32>,
+}
+
+impl BlockComment {
+    /// Strips block comments from one physical line.
+    ///
+    /// Quoted text is data. A `;` before the assignment is the key-help
+    /// separator, so scanning continues; a `;` after the assignment starts a
+    /// line comment, and the rest of the line is left for
+    /// [`strip_line_comments`]. Each removed comment becomes one space, which
+    /// keeps adjacent tokens apart and makes a comment-only line blank.
+    fn strip(&mut self, line: &str, line_number: u32) -> String {
+        let assignment = assignment_index(line);
+        let mut cleaned = String::with_capacity(line.len());
+        let mut in_quotes = false;
+        let mut escaped = false;
+        let mut characters = line.char_indices().peekable();
+
+        while let Some((index, character)) = characters.next() {
+            if self.open.is_some() {
+                if character == '*' && line[index + 1..].starts_with('/') {
+                    self.open = None;
+                    characters.next();
+                    cleaned.push(' ');
+                }
+                continue;
+            }
+
+            if escaped {
+                escaped = false;
+                cleaned.push(character);
+                continue;
+            }
+
+            match character {
+                '\\' if in_quotes => {
+                    escaped = true;
+                    cleaned.push(character);
+                }
+                '"' => {
+                    in_quotes = !in_quotes;
+                    cleaned.push(character);
+                }
+                ';' if !in_quotes && assignment.is_none_or(|equals| index > equals) => {
+                    cleaned.push_str(&line[index..]);
+                    break;
+                }
+                '/' if !in_quotes && line[index + 1..].starts_with('*') => {
+                    self.open = Some(line_number);
+                    characters.next();
+                    cleaned.push(' ');
+                }
+                _ => cleaned.push(character),
+            }
+        }
+
+        cleaned
+    }
+}
+
 /// Removes comments from one physical line without losing a `key;help = value`
 /// entry.
 ///
@@ -351,6 +415,8 @@ pub fn preprocess(
     let mut fatal = Vec::new();
 
     let physical: Vec<&str> = text.lines().collect();
+    let has_block_comments = text.contains("/*");
+    let mut block_comment = BlockComment::default();
     let mut index = 0usize;
 
     while index < physical.len() {
@@ -358,9 +424,20 @@ pub fn preprocess(
         let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
         index += 1;
 
-        // Comments come off first: `;#if CONN_SLOW` in a real rusEFI INI is a
+        // Block comments go first because they can span lines. A file without
+        // the marker skips the extra scan entirely, so the common path keeps
+        // its old cost.
+        let uncommented = if !has_block_comments {
+            Cow::Borrowed(raw)
+        } else if block_comment.open.is_some() || raw.contains("/*") {
+            Cow::Owned(block_comment.strip(raw, line_number))
+        } else {
+            Cow::Borrowed(raw)
+        };
+
+        // Comments come off next: `;#if CONN_SLOW` in a real rusEFI INI is a
         // commented-out directive, not a directive.
-        let cleaned = strip_line_comments(raw);
+        let cleaned = strip_line_comments(&uncommented);
         let content = cleaned.trim_ascii();
         if content.is_empty() {
             continue;
@@ -405,6 +482,16 @@ pub fn preprocess(
             line: line_number,
             text: content.to_owned(),
         });
+    }
+
+    if let Some(line) = block_comment.open {
+        preprocessed.diagnostics.push(Diagnostic::new(
+            Severity::Warning,
+            "unterminated-block-comment",
+            "this `/*` comment has no matching `*/`; the rest of the file is ignored",
+            line,
+            "Preprocessor",
+        ));
     }
 
     if preprocessed.hash_comments > 0 {
@@ -865,6 +952,64 @@ mod tests {
             output.diagnostics
         );
         assert!(!output.settings.tested_flags().contains("conn_slow"));
+    }
+
+    #[test]
+    fn a_block_comment_is_removed_across_lines_and_quotes_keep_their_markers() {
+        let output = run(
+            "[Constants]\nname = \"keep /* this */\"\n/* dead = 1,\n   still dead */\nlive = 2\n",
+        );
+
+        assert_eq!(output.lines.len(), 3);
+        assert_eq!(output.lines[1].text, "name = \"keep /* this */\"");
+        assert_eq!(output.lines[2].text, "live = 2");
+        assert!(
+            output.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
+    }
+
+    #[test]
+    fn an_unterminated_block_comment_drops_the_rest_and_warns() {
+        let output = run("a = 1\n/* dead\nb = 2\n");
+
+        assert_eq!(output.lines.len(), 1);
+        assert_eq!(output.lines[0].text, "a = 1");
+        assert!(
+            output.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Warning
+                    && diagnostic.code.as_ref() == "unterminated-block-comment"
+                    && diagnostic.line == Some(2)
+            }),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_block_marker_inside_a_line_comment_is_text() {
+        let output = run("a = 1 ; /* not an opening\nb = 2\n");
+
+        assert_eq!(output.lines.len(), 2);
+        assert_eq!(output.lines[1].text, "b = 2");
+        assert!(
+            output.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_block_comment_after_a_key_help_semicolon_is_removed() {
+        let output = run("key;\"help\" = scalar /* note */\n");
+
+        assert_eq!(output.lines[0].text, "key = scalar");
+        assert!(
+            output.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
     }
 
     #[test]
