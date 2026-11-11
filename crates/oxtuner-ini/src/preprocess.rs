@@ -430,13 +430,16 @@ pub fn preprocess(
 
         // Block comments go first because they can span lines. A file without
         // the marker skips the extra scan entirely, so the common path keeps
-        // its old cost. A line that starts as a `;` or `#` comment is prose,
-        // not a place where `/*` can open a block, whatever the prose says.
-        let starts_line_comment = raw.trim_ascii_start().starts_with([';', '#']);
-        let uncommented = if !has_block_comments {
-            Cow::Borrowed(raw)
-        } else if block_comment.open.is_some() || (raw.contains("/*") && !starts_line_comment) {
-            Cow::Owned(block_comment.strip(raw, line_number))
+        // its old cost.
+        let uncommented = if has_block_comments {
+            // A line that starts as a `;` or `#` comment is prose, not a place
+            // where `/*` can open a block, whatever the prose says.
+            let starts_line_comment = raw.trim_ascii_start().starts_with([';', '#']);
+            if block_comment.open.is_some() || (raw.contains("/*") && !starts_line_comment) {
+                Cow::Owned(block_comment.strip(raw, line_number))
+            } else {
+                Cow::Borrowed(raw)
+            }
         } else {
             Cow::Borrowed(raw)
         };
