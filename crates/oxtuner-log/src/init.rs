@@ -126,7 +126,7 @@ impl LogControl {
         let next = filter::default_filter(self.profile, verbose);
         self.reload
             .reload(next)
-            .map_err(|error| LogError::Filter(error.to_string()))
+            .map_err(|error| LogError::Filter(Box::new(error)))
     }
 
     /// Whether `RUST_LOG` supplied the filter and therefore owns the level.
@@ -214,7 +214,7 @@ pub fn init(config: &LogConfig) -> Result<LogHandle, LogError> {
     // the `tracing-log` feature.
     subscriber
         .try_init()
-        .map_err(|error| LogError::Init(error.to_string()))?;
+        .map_err(|error| LogError::Init(Box::new(error)))?;
 
     crate::panic::install();
 
