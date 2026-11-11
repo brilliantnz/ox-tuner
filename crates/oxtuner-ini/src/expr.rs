@@ -253,8 +253,9 @@ impl Expr {
     ///
     /// Returns [`ExprError`] with the offending position when the text is not
     /// a complete expression. An expression nested deeper than the parser's
-    /// nesting cap, or longer than its source cap, is rejected the same way, so
-    /// hostile input cannot exhaust the thread stack.
+    /// nesting cap, building a tree deeper than [`MAX_AST_DEPTH`], or longer
+    /// than its source cap is rejected the same way, so hostile input cannot
+    /// exhaust the thread stack.
     pub fn parse(text: &str) -> Result<Self, ExprError> {
         if text.len() > MAX_EXPR_LEN {
             return Err(ExprError {
@@ -279,7 +280,7 @@ impl Expr {
         }
         if !expression.within_depth(MAX_AST_DEPTH) {
             return Err(ExprError {
-                message: format!("expression nests too deeply (limit {MAX_AST_DEPTH})"),
+                message: format!("expression builds a tree deeper than {MAX_AST_DEPTH} nodes"),
             });
         }
         Ok(expression)
@@ -335,18 +336,18 @@ impl Expr {
     ///
     /// This is [`Self::evaluate`] plus `arrayValue`: the context resolves both
     /// identifiers and array elements. Everything unresolved still yields
-    /// `None`; an unknown function never becomes a guess. An expression whose
-    /// tree is deeper than the traversal cap also yields `None`.
+    /// `None`; an unknown function never becomes a guess. A tree a caller
+    /// builds by hand can be deeper than [`MAX_AST_DEPTH`]; past the cap the
+    /// value cannot be folded and yields `None`.
     pub fn evaluate_with(&self, context: &mut dyn EvalContext) -> Option<f64> {
         self.evaluate_at(context, 0)
     }
 
     /// Evaluates at `depth`, refusing to recurse past [`MAX_AST_DEPTH`].
     ///
-    /// A flat expression such as `1+1+1+…` can be longer than the parser's
-    /// nesting cap while still building a deep tree. The traversal cap keeps
-    /// that tree from exhausting the stack; past it the value cannot be folded,
-    /// so it stays dynamic.
+    /// The parser and the cache codec refuse trees deeper than this, so the
+    /// guard covers a tree a caller assembled from the public variants. Past
+    /// the cap the value cannot be folded, so it stays dynamic.
     fn evaluate_at(&self, context: &mut dyn EvalContext, depth: u32) -> Option<f64> {
         if depth > MAX_AST_DEPTH {
             return None;
@@ -676,12 +677,13 @@ pub(crate) fn bump_depth(depth: &mut u32, cap: u32) -> bool {
     *depth <= cap
 }
 
-/// How deep [`Expr::evaluate_with`] may recurse into a parsed tree.
+/// How deep an expression tree may be.
 ///
 /// The parser's [`MAX_NESTING`] counts parentheses and operators while it
-/// parses; a flat chain such as `1+1+1+…` builds a tree as deep as its length
-/// without ever nesting. This cap bounds that traversal too, and a value past
-/// it stays dynamic instead of overflowing the stack.
+/// parses, but a flat chain such as `1+1+1+…` builds a tree as deep as its
+/// length without ever nesting. This is the shared tree cap: [`Expr::parse`]
+/// rejects a deeper tree, the cache codec rejects one on read, and
+/// [`Expr::evaluate_with`] refuses to fold one built by hand.
 const MAX_AST_DEPTH: u32 = 1024;
 
 struct Parser {
@@ -884,6 +886,8 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn no_lookup(_: &str) -> Option<f64> {
@@ -1193,10 +1197,37 @@ mod tests {
         ];
 
         for expression in expressions {
+            mirror_covers_every_variant(&expression);
             let bytes = postcard::to_allocvec(&expression).expect("serializes");
             let decoded: Expr = postcard::from_bytes(&bytes).expect("deserializes");
             assert_eq!(decoded, expression);
         }
+    }
+
+    /// Adding an `Expr` variant breaks this match, which forces the mirror to
+    /// be updated with it.
+    fn mirror_covers_every_variant(expression: &Expr) {
+        match expression {
+            Expr::Number(_)
+            | Expr::Ident(_)
+            | Expr::Unary(..)
+            | Expr::Binary(..)
+            | Expr::Ternary(..)
+            | Expr::Call(..)
+            | Expr::Index(..) => {}
+        }
+    }
+
+    #[test]
+    fn many_sibling_expressions_do_not_accumulate_depth() {
+        let expressions: Vec<Expr> = (0..2_000u32)
+            .map(|index| Expr::Number(f64::from(index)))
+            .collect();
+
+        let bytes = postcard::to_allocvec(&expressions).expect("serializes");
+        let decoded: Vec<Expr> = postcard::from_bytes(&bytes).expect("siblings restore the depth");
+
+        assert_eq!(decoded, expressions);
     }
 
     #[test]
@@ -1221,6 +1252,15 @@ mod tests {
 
         let bytes = postcard::to_allocvec(&expression).expect("serializes");
         postcard::from_bytes::<Expr>(&bytes).expect_err("must stop at the cap");
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_cache_bytes_never_panic(
+            bytes in proptest::collection::vec(any::<u8>(), 0..2_000)
+        ) {
+            let _ = postcard::from_bytes::<Expr>(&bytes);
+        }
     }
 
     #[test]

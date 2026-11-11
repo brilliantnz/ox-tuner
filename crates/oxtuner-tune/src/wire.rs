@@ -32,9 +32,10 @@ use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 
 /// Largest page image the codec will build.
 ///
-/// Real pages are at most tens of kilobytes. A hostile definition could declare
-/// billions and abort on allocation while encoding.
-const MAX_PAGE_BYTES: usize = 1 << 20;
+/// Real pages top out at 16 724 bytes in the reference definitions. The wire
+/// offsets are 16-bit, so a larger page could never be read back in full. A
+/// hostile definition could declare billions and abort while encoding.
+const MAX_PAGE_BYTES: usize = 65_536;
 
 /// What one page decode did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -174,8 +175,8 @@ pub fn decode_page(
 /// # Errors
 ///
 /// Returns [`TuneError::UnknownPage`] for a page the layout does not declare,
-/// and [`TuneError::PageTooLarge`] when the declared size is over 1 MiB
-/// (1 048 576 bytes).
+/// and [`TuneError::PageTooLarge`] when the declared size is over 64 KiB
+/// (65 536 bytes).
 pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
@@ -878,6 +879,39 @@ value = scalar, U08, 0, \"x\", 1, 0
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_page_at_the_limit_is_encoded_and_one_byte_more_is_refused() {
+        let definition = |size: u32| {
+            oxtuner_ini::Definition::parse(
+                &format!(
+                    "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = {size}
+page = 1
+value = scalar, U08, 0, \"x\", 1, 0
+"
+                ),
+                &SettingsContext::new(),
+            )
+            .expect("parses")
+        };
+
+        let at_limit = TuneLayout::build(&definition(65_536), &|_| None);
+        let tune = Tune::new(Arc::new(at_limit.clone()));
+        let encoded = encode_page(&at_limit, IniPage::FIRST, &tune).expect("at the limit");
+        assert_eq!(encoded.len(), 65_536);
+
+        let over = TuneLayout::build(&definition(65_537), &|_| None);
+        let tune = Tune::new(Arc::new(over.clone()));
+        let error = encode_page(&over, IniPage::FIRST, &tune).expect_err("one byte over");
+
+        assert!(matches!(error, TuneError::PageTooLarge { .. }), "{error}");
     }
 
     #[test]

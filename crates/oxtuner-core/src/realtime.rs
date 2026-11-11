@@ -245,6 +245,18 @@ impl RealtimeDecoder {
                     offset,
                     bits,
                 } => {
+                    if let Some(range) = bits {
+                        let word_bits = storage.size().saturating_mul(8);
+                        if range.low > range.high || u32::from(range.high) >= word_bits {
+                            tracing::warn!(
+                                line = channel.line,
+                                channel = %name,
+                                "a bit range reaches past its storage word"
+                            );
+                            continue;
+                        }
+                    }
+
                     sources.push(Source::Measured {
                         name: name.to_owned(),
                         offset: usize::try_from(*offset).unwrap_or(usize::MAX),
@@ -864,6 +876,39 @@ halfRpm = { rpm / 2 }, \"rpm\"
     }
 
     #[test]
+    fn a_bit_range_past_its_storage_word_is_not_decoded() {
+        let definition = Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 4
+bad = bits, U08, 0, [8:8]
+good = bits, U08, 0, [0:0]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let decoder = RealtimeDecoder::new(&definition);
+
+        let frame = decoder.decode(&[1, 0, 0, 0], 1);
+
+        assert!(frame.value("bad").is_none(), "the channel is not decoded");
+        assert_eq!(
+            frame.value("good").map(|value| value.value),
+            Some(1.0),
+            "a valid bit field stays"
+        );
+    }
+
+    #[test]
     fn a_bit_range_past_the_word_is_skipped() {
         assert_eq!(
             extract_bits(
@@ -880,6 +925,15 @@ halfRpm = { rpm / 2 }, \"rpm\"
             extract_bits(f64::from(0xFFu8), BitRange { low: 200, high: 10 }),
             None,
             "a reversed range must not shift"
+        );
+        assert_eq!(
+            extract_bits(f64::from(u32::MAX), BitRange { low: 0, high: 63 }),
+            Some(f64::from(u32::MAX)),
+            "a full 64-bit range uses the whole-word mask"
+        );
+        assert_eq!(
+            extract_bits(f64::from(0u8), BitRange { low: 0, high: 64 }),
+            None
         );
         assert_eq!(
             extract_bits(f64::from(0x1234u16), BitRange { low: 8, high: 15 }),
