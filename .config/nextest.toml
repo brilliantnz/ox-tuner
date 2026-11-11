@@ -1,0 +1,6 @@
+# cargo-nextest defaults for this workspace.
+# Run scoped (`cargo nextest run -p <crate>`) during iteration, full
+# (`cargo nextest run --workspace`) pre-PR.
+[profile.default]
+# Transport EOF tests wait out real deadlines; don't flag them slow.
+slow-timeout = "120s"
