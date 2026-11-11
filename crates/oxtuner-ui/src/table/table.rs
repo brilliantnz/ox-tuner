@@ -22,8 +22,8 @@
 //! both axes; a range leaves the bins plain unless the owner asks for the
 //! wider wash with [`Table::set_header_wash_for_ranges`].
 //! Both scrollbars ride the body's scroll handle, so the frozen header bands
-//! and the bars always report one position. Besides the bars, the body also
-//! scrolls with the wheel, drag-select and the keyboard.
+//! and the bars always move together from one position. Besides the bars, the
+//! body also scrolls with the wheel, drag-select and the keyboard.
 
 #![expect(
     clippy::as_conversions,

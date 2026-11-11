@@ -1105,6 +1105,9 @@ fn the_body_shows_its_scrollbar_at_the_viewport_edge(cx: &mut TestAppContext) {
             cx,
         );
     });
+    // Record the scrolled frame, so the bounds read below describe the
+    // position the assertion is about.
+    visual.update(gpui_kit::test::TestWindowExt::render_frame);
 
     let body =
         visual.update(|window, _| window.find(ElementId::from("table-body-viewport")).bounds());
