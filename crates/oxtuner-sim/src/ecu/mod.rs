@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use oxtuner_ini::{ChannelKind, CommandTemplate, Definition};
+use oxtuner_ini::{BitRange, ChannelKind, CommandTemplate, DataType, Definition, Endianness};
 use oxtuner_protocol::CommandPattern;
 
 mod controller;
@@ -19,15 +19,57 @@ pub(crate) use pages::PageEcu;
 
 use crate::SimError;
 
-/// One page's commands.
-#[derive(Debug, Clone)]
+/// The byte and mask for a `burnPending` bit inside the realtime block.
+///
+/// The bit range is relative to the channel's word. The lane follows the
+/// definition's endianness, so `[8:8]` on a U16 lands in the second byte for a
+/// little-endian definition and the first byte for a big-endian one. A field
+/// that would cross the byte boundary is clamped to the bits in that lane.
+/// A lane outside the storage word or a byte outside the block yields `None`.
+fn burn_pending_bit(
+    endianness: Endianness,
+    offset: usize,
+    storage: DataType,
+    bits: BitRange,
+    block_size: usize,
+) -> Option<(usize, u8)> {
+    let width = usize::try_from(storage.size()).ok()?;
+    let lane = usize::from(bits.low / 8);
+    if lane >= width {
+        return None;
+    }
 
+    let byte_offset = match endianness {
+        Endianness::Little => offset.checked_add(lane)?,
+        Endianness::Big => offset.checked_add(width.checked_sub(1)?.checked_sub(lane)?)?,
+    };
+    if byte_offset >= block_size {
+        return None;
+    }
+
+    let shift = u32::from(bits.low % 8);
+    let available = 8 - shift;
+    let field = u32::from(bits.width()).min(available);
+    let ones = if field >= 8 {
+        u8::MAX
+    } else {
+        (1u8 << field) - 1
+    };
+    let mask = ones << shift;
+
+    Some((byte_offset, mask))
+}
+
+/// The realtime command and the status bit it exposes.
+#[derive(Debug, Clone)]
 pub(crate) struct RealtimeEcu {
     pub(crate) pattern: CommandPattern,
     pub(crate) block_size: usize,
     pub(crate) start_offset: u16,
-    /// Where a `burnPending` status bit lives, when the definition declares
-    /// one. A queued burn sets it so a client can wait for its flash write.
+    /// Where a `burnPending` status bit lives, when the definition declares a
+    /// usable one: the byte's offset in the realtime block and the mask that
+    /// marks the field's bits. `None` when there is no bit channel, or its
+    /// bits fall outside the storage word or the block.
     pub(crate) burn_pending: Option<(usize, u8)>,
 }
 
@@ -116,6 +158,7 @@ impl SimEcu {
                             return None;
                         }
                         let ChannelKind::Measured {
+                            storage,
                             offset,
                             bits: Some(bits),
                             ..
@@ -124,7 +167,7 @@ impl SimEcu {
                             return None;
                         };
                         let offset = usize::try_from(*offset).ok()?;
-                        (offset < block_size).then_some((offset, bits.low))
+                        burn_pending_bit(definition.endianness, offset, *storage, *bits, block_size)
                     }),
                 })
             });
@@ -308,6 +351,118 @@ cmdOff = \"y\\x01\"
                 count: 3
             }
         );
+    }
+
+    fn burn_pending_definition(endianness: &str) -> Definition {
+        Definition::parse(
+            &format!(
+                "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = {endianness}
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+burnPending = bits, U16, 0, [8:8]
+"
+            ),
+            &SettingsContext::new(),
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_burn_pending_mask_stays_inside_its_byte() {
+        assert_eq!(
+            burn_pending_bit(
+                Endianness::Little,
+                0,
+                DataType::U16,
+                BitRange { low: 6, high: 10 },
+                8
+            ),
+            Some((0, 0b1100_0000)),
+            "a crossing field keeps only its bits in the lane"
+        );
+        assert_eq!(
+            burn_pending_bit(
+                Endianness::Little,
+                0,
+                DataType::U16,
+                BitRange { low: 8, high: 9 },
+                8
+            ),
+            Some((1, 0b0000_0011))
+        );
+        assert_eq!(
+            burn_pending_bit(
+                Endianness::Little,
+                0,
+                DataType::U16,
+                BitRange { low: 16, high: 16 },
+                8
+            ),
+            None,
+            "a bit past the storage word has no lane"
+        );
+        assert_eq!(
+            burn_pending_bit(
+                Endianness::Little,
+                0,
+                DataType::U08,
+                BitRange { low: 0, high: 7 },
+                8
+            ),
+            Some((0, u8::MAX))
+        );
+        assert_eq!(
+            burn_pending_bit(
+                Endianness::Little,
+                8,
+                DataType::U08,
+                BitRange { low: 0, high: 0 },
+                8
+            ),
+            None,
+            "a byte past the block is refused"
+        );
+    }
+
+    #[test]
+    fn a_burn_pending_bit_in_the_high_byte_follows_endianness() {
+        for (endianness, expected) in [("little", (1, 1u8)), ("big", (0, 1u8))] {
+            let definition = burn_pending_definition(endianness);
+            let (_, channel) = definition
+                .channels
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("burnPending"))
+                .expect("burnPending is declared");
+            let ChannelKind::Measured {
+                storage,
+                offset,
+                bits: Some(bits),
+                ..
+            } = &channel.kind
+            else {
+                panic!("burnPending is a measured bit channel");
+            };
+
+            let bit = burn_pending_bit(
+                definition.endianness,
+                usize::try_from(*offset).expect("offset fits"),
+                *storage,
+                *bits,
+                8,
+            );
+
+            assert_eq!(bit, Some(expected), "{endianness}");
+        }
     }
 
     #[test]
