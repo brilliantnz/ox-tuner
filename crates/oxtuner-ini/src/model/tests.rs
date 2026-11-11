@@ -121,6 +121,18 @@ fn a_table_shape_is_column_first() {
 }
 
 #[test]
+fn a_table_shape_whose_product_overflows_u32_has_no_element_count() {
+    // 65 536 columns by 65 536 rows is 2^32 elements.
+    let shape = Shape::Table {
+        cols: Dimension::Fixed(65_536),
+        rows: Dimension::Fixed(65_536),
+    };
+
+    assert_eq!(shape.element_count(), None);
+    assert!(!shape.is_dynamic());
+}
+
+#[test]
 fn a_bit_shape_reports_its_option_count() {
     let shape = Shape::Bits {
         low: 0,

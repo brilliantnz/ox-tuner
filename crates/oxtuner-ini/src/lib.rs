@@ -26,9 +26,11 @@
 //!   are `serde` (the derives that let `oxtuner-project` cache a frozen
 //!   definition) and `tracing` (the phase spans around preprocessing, section
 //!   parsing and validation); there is no INI or parsing dependency.
-//! - **Versioned output.** [`PARSER_VERSION`] changes whenever the same bytes
-//!   and settings can produce a different [`Definition`], so a definition
-//!   cache written by an older parser is never served by a newer one.
+//! - **Versioned output.** [`PARSER_VERSION`] changes in a released build
+//!   whenever the same bytes and settings can produce a different
+//!   [`Definition`], so a definition cache written by an older parser is never
+//!   served by a newer one. Before the first release it stays at 1 and stale
+//!   caches are deleted instead.
 //!
 //! # Example
 //!

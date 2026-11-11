@@ -370,7 +370,13 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// Number of elements, when the dimensions are fixed.
+    /// Number of elements, when the dimensions are fixed and the product fits
+    /// in a `u32`.
+    ///
+    /// A fixed `[cols x rows]` whose product overflows `u32` reports `None`
+    /// even though [`Shape::is_dynamic`] is `false`. The parser reports that
+    /// case as `shape-too-large`, so consumers must not read `None` as "empty".
+    /// A bit field wider than 32 bits saturates at `u32::MAX` options instead.
     pub fn element_count(&self) -> Option<u32> {
         match self {
             Self::Scalar => Some(1),
@@ -379,11 +385,14 @@ impl Shape {
                 Some(1u32.checked_shl(u32::from(width)).unwrap_or(u32::MAX))
             }
             Self::List(length) | Self::Text { length, .. } => length.value(),
-            Self::Table { cols, rows } => Some(cols.value()? * rows.value()?),
+            Self::Table { cols, rows } => Some(cols.value()?.checked_mul(rows.value()?)?),
         }
     }
 
     /// Whether any dimension still needs runtime resolution.
+    ///
+    /// `false` does not guarantee that [`Shape::element_count`] is `Some`:
+    /// fixed dimensions can still overflow the element count.
     pub fn is_dynamic(&self) -> bool {
         match self {
             Self::Scalar | Self::Bits { .. } => false,

@@ -120,7 +120,12 @@ pub struct Constant {
 }
 
 impl Constant {
-    /// Size in bytes, when the shape is fully known.
+    /// Size in bytes, when the shape is known and its element count fits in a
+    /// `u32`.
+    ///
+    /// `None` means the size is unknown: a dimension is still an expression, or
+    /// the fixed element count times the type width overflows `u32` (reported
+    /// as `shape-too-large`).
     pub fn byte_size(&self) -> Option<u32> {
         match self.class {
             ConstantClass::Bits => Some(self.data_type.size()),
