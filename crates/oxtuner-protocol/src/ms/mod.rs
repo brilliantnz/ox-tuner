@@ -385,8 +385,9 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError`] when the page size does not fit the command's
-    /// count field, the page switch or the transport fails, or when the CRC
-    /// reply is not the expected four bytes.
+    /// count field, the firmware reports a text CRC over the legacy link, the
+    /// page switch or the transport fails, or when the CRC reply is not the
+    /// expected four bytes.
     pub fn read_page_crc(
         &mut self,
         io: &mut dyn Transport,
@@ -406,7 +407,18 @@ impl MsProtocol {
             ))
         })?;
         let identifier = entry.identifier;
-        let crc_reply = entry.crc_reply;
+        let crc_reply = entry.crc_reply.unwrap_or(CrcReply::RawBigEndian);
+
+        // A legacy reply is read as exactly four raw bytes, so a firmware that
+        // sends the CRC as text would have its first four characters parsed as
+        // hex. Refuse instead of returning a wrong checksum that read-back
+        // would treat as verified.
+        if self.link == LinkMode::Legacy && crc_reply == CrcReply::HexText {
+            return Err(ProtocolError::Unsupported(
+                "this firmware reports the page CRC as text, which the legacy link cannot read"
+                    .to_owned(),
+            ));
+        }
 
         self.activate(io, page)?;
         let request = self.encode(&command, u16::from_be_bytes(identifier), 0, size, &[])?;
@@ -430,7 +442,7 @@ impl MsProtocol {
                 bytes.len()
             )));
         }
-        let crc = match crc_reply.unwrap_or(CrcReply::RawBigEndian) {
+        let crc = match crc_reply {
             CrcReply::RawBigEndian => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             CrcReply::RawLittleEndian => {
                 u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])

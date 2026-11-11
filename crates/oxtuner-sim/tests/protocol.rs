@@ -477,3 +477,37 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
 
     assert!(error.to_string().contains("65536"), "{error}");
 }
+
+#[test]
+fn a_legacy_crc_read_still_uses_four_raw_bytes() {
+    let definition = Definition::parse(
+        "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+pageReadCommand = \"p%2i%2o%2c\"
+pageCrcCommand = \"d%2i%2o%2c\"
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+",
+        &SettingsContext::new(),
+    )
+    .expect("parses");
+    let mut transport = sim(&definition);
+    let mut protocol = protocol(&definition, LinkMode::Legacy);
+    transport.open().expect("opens");
+
+    let crc = protocol
+        .read_page_crc(&mut transport, 1)
+        .expect("CRC read")
+        .expect("the definition declares one");
+
+    assert_eq!(
+        crc,
+        oxtuner_protocol::crc32(transport.ram(1).expect("page 1"))
+    );
+}
