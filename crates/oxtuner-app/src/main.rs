@@ -1,7 +1,7 @@
 //! `oxtuner` — binary entry point.
 //!
 //! The start-up sequence lives here, in `main`, the way an application's
-//! bootstrap belongs: read the documents, start logging, pick the language,
+//! bootstrap belongs: start logging, read the documents, pick the language,
 //! then open the window. Everything the app registers after that is
 //! `oxtuner_app::init` and the feature modules.
 //!
@@ -22,18 +22,23 @@ use oxtuner_app::{
 };
 
 fn main() {
-    // Read before anything is built: the settings choose the language every
-    // text is in, and the session decides where the window opens.
+    // The flags and paths are read before anything is built, so the log
+    // pipeline can start before the documents load.
     let auto_sim = std::env::args().any(|argument| argument == "--sim");
     let log_file = std::env::args().any(|argument| argument == "--log-file");
     let paths = AppPaths::discover();
-    let settings = AppSettings::load(&paths);
-    let session = AppState::load(&paths);
 
     // The pipeline installs the subscriber, so this must happen before the
-    // first record. Keep the handle alive for the process; dropping it flushes
-    // the file and stops the non-blocking writer.
-    let log_handle = logging::init(paths.log_dir(), log_file, settings.log_verbose());
+    // first record. A corrupt settings or session file is quarantined with a
+    // warning, and that warning has to reach the store and the log file. The
+    // stored verbose preference is applied below, once the settings are read.
+    // Keep the handle alive for the process; dropping it flushes the file and
+    // stops the non-blocking writer.
+    let log_handle = logging::init(paths.log_dir(), log_file, false);
+
+    // Read after logging: every warning about a corrupt file must be recorded.
+    let settings = AppSettings::load(&paths);
+    let session = AppState::load(&paths);
 
     // The bundled OxTuner themes are seeded next to the settings file before
     // anything reads them; the watcher installed later picks up user edits.
@@ -65,6 +70,10 @@ fn main() {
         if let Some(handle) = log_handle {
             logging::install(cx, handle);
         }
+
+        // The pipeline starts at the profile default; the persisted preference
+        // takes effect now that the settings have been read.
+        logging::set_verbose(cx, settings.log_verbose());
 
         init(cx);
 
