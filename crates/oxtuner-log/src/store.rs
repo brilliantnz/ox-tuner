@@ -21,6 +21,12 @@ const DEFAULT_CAPACITY: usize = 5_000;
 /// when the ring is full the oldest record is dropped and counted, while the
 /// file keeps every record it received. Cloning the store is cheap; every
 /// clone shares the same ring.
+///
+/// # Panics
+///
+/// Reading or pushing into the ring panics when an earlier holder panicked
+/// while the lock was held. The contents are then unverified, so the process
+/// stops instead of serving a ring nobody can vouch for.
 #[derive(Clone, Debug)]
 pub struct LogStore {
     inner: Arc<Mutex<Ring>>,
@@ -51,6 +57,10 @@ impl LogStore {
     }
 
     /// The newest records, oldest first, with the drop and revision counters.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the ring lock was held.
     pub fn snapshot(&self) -> LogBufferSnapshot {
         let ring = self.lock();
 
@@ -62,6 +72,10 @@ impl LogStore {
     }
 
     /// How many records the ring currently holds.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the ring lock was held.
     pub fn len(&self) -> usize {
         self.lock().records.len()
     }
@@ -72,11 +86,19 @@ impl LogStore {
     }
 
     /// How many records were evicted because the ring was full.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the ring lock was held.
     pub fn dropped(&self) -> u64 {
         self.lock().dropped
     }
 
     /// The number of accepted records, including evicted ones.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the ring lock was held.
     pub fn revision(&self) -> u64 {
         self.lock().revision
     }
@@ -99,7 +121,7 @@ impl LogStore {
     fn lock(&self) -> MutexGuard<'_, Ring> {
         self.inner
             .lock()
-            .expect("the log store lock is only ever held by infallible code")
+            .expect("a previous panic poisoned the log store; the ring is unverified")
     }
 }
 

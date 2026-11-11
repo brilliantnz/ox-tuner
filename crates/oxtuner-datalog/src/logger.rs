@@ -139,7 +139,7 @@ impl LogStatus {
         self.inner
             .path
             .read()
-            .expect("the log status lock is only ever held by infallible code")
+            .expect("a previous panic poisoned the log status; the path is unverified")
             .clone()
     }
 
@@ -159,6 +159,10 @@ impl LogStatus {
     }
 
     /// A frozen copy for rendering.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the status lock was held.
     pub fn snapshot(&self) -> SessionLogSnapshot {
         SessionLogSnapshot {
             running: self.is_running(),
@@ -183,7 +187,7 @@ impl LogStatus {
             .inner
             .path
             .write()
-            .expect("the log status lock is only ever held by infallible code") =
+            .expect("a previous panic poisoned the log status; the path is unverified") =
             Some(path.to_owned());
     }
 

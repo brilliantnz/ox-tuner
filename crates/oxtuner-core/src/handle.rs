@@ -149,7 +149,7 @@ impl Gate {
         let closed = self
             .closed
             .lock()
-            .expect("the gate mutex is only ever held by infallible code");
+            .expect("a previous panic poisoned the command gate; the queue state is unknown");
         if *closed {
             return Err(CoreError::Stopped);
         }
@@ -161,7 +161,7 @@ impl Gate {
         let mut closed = self
             .closed
             .lock()
-            .expect("the gate mutex is only ever held by infallible code");
+            .expect("a previous panic poisoned the command gate; the queue state is unknown");
         *closed = true;
     }
 }

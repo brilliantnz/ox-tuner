@@ -28,7 +28,7 @@ fn store() -> LogStore {
     let slot = HANDLE.get_or_init(|| Mutex::new(None));
     let mut slot = slot
         .lock()
-        .expect("the bench setup lock is only ever held by infallible code");
+        .expect("a previous panic poisoned the bench setup lock");
 
     let handle = slot.get_or_insert_with(|| {
         let directory =
