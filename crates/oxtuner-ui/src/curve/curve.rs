@@ -223,8 +223,8 @@ impl Curve {
             "down" => self.nudge(if coarse { -10 } else { -1 }, cx),
             "pageup" => self.nudge(10, cx),
             "pagedown" => self.nudge(-10, cx),
-            "home" => self.move_to_edge(true, cx),
-            "end" => self.move_to_edge(false, cx),
+            "home" => self.move_to_first(cx),
+            "end" => self.move_to_last(cx),
             "escape" => self.cancel_drag(cx),
             _ => {}
         }
@@ -240,13 +240,18 @@ impl Curve {
         }
     }
 
-    fn move_to_edge(&mut self, first: bool, cx: &mut Context<'_, Self>) {
-        let count = self.model.point_count();
-        if count == 0 {
-            return;
-        }
+    fn move_to_first(&mut self, cx: &mut Context<'_, Self>) {
+        self.move_to_index(0, cx);
+    }
 
-        let index = if first { 0 } else { count - 1 };
+    fn move_to_last(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(last) = self.model.point_count().checked_sub(1) else {
+            return;
+        };
+        self.move_to_index(last, cx);
+    }
+
+    fn move_to_index(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if self.model.select(index) {
             self.model.set_hovered(None);
             cx.emit(CurveEvent::SelectionChanged { index });

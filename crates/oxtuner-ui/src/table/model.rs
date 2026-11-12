@@ -303,15 +303,15 @@ pub enum Edge {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Extend {
     /// Keep the anchor and move the cursor.
-    Yes,
+    Keep,
     /// Collapse the selection to the moved cell.
-    No,
+    Replace,
 }
 
 /// Which way a page or tab move goes.
 #[expect(clippy::exhaustive_enums, reason = "a row move is forward or backward")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
+pub enum MoveDirection {
     /// Later rows or cells.
     Forward,
     /// Earlier rows or cells.
@@ -1004,25 +1004,24 @@ impl TableModel {
     }
 
     /// Moves one page of displayed rows.
-    pub fn move_page(&mut self, direction: Direction, extend: Extend) {
-        let delta = PAGE_ROWS as isize;
-        let delta = match direction {
-            Direction::Forward => delta,
-            Direction::Backward => -delta,
+    pub fn move_page(&mut self, direction: MoveDirection, extend: Extend) {
+        let step = match direction {
+            MoveDirection::Forward => PAGE_ROWS as isize,
+            MoveDirection::Backward => -(PAGE_ROWS as isize),
         };
-        self.move_cursor(delta, 0, extend);
+        self.move_cursor(step, 0, extend);
     }
 
     /// Applies a cursor move, extending or replacing the selection.
     fn move_to(&mut self, cell: CellPos, extend: Extend) {
         match extend {
-            Extend::Yes => self.selection.cursor = cell,
-            Extend::No => self.selection = Selection::single(cell),
+            Extend::Keep => self.selection.cursor = cell,
+            Extend::Replace => self.selection = Selection::single(cell),
         }
     }
 
     /// Moves one displayed cell forward or backward, as Tab does.
-    pub fn tab(&mut self, direction: Direction) {
+    pub fn tab(&mut self, direction: MoveDirection) {
         let rows = self.rows();
         let columns = self.columns();
         if rows == 0 || columns == 0 {
@@ -1031,8 +1030,8 @@ impl TableModel {
         let display = self.display_row(self.selection.cursor.row);
         let index = display * columns + self.selection.cursor.column;
         let next = match direction {
-            Direction::Forward => (index + 1).min(rows * columns - 1),
-            Direction::Backward => index.saturating_sub(1),
+            MoveDirection::Forward => (index + 1).min(rows * columns - 1),
+            MoveDirection::Backward => index.saturating_sub(1),
         };
         let cell = CellPos {
             row: self.data_row(next / columns),
@@ -2003,20 +2002,20 @@ mod tests {
         // Start from the lowest bin, which is drawn last.
         model.select(CellPos { row: 0, column: 0 });
 
-        model.move_cursor(-1, 0, Extend::No);
+        model.move_cursor(-1, 0, Extend::Replace);
         assert_eq!(
             model.selection().cursor,
             CellPos { row: 1, column: 0 },
             "moving up reaches the next higher data row"
         );
 
-        model.move_to_edge(Edge::First, Extend::No);
+        model.move_to_edge(Edge::First, Extend::Replace);
         assert_eq!(
             model.selection().cursor.row,
             3,
             "Home is the top display row, the highest bin"
         );
-        model.move_to_edge(Edge::Last, Extend::No);
+        model.move_to_edge(Edge::Last, Extend::Replace);
         assert_eq!(
             model.selection().cursor.row,
             0,
@@ -2031,7 +2030,7 @@ mod tests {
         model.set_table(table(4, 2));
 
         assert_eq!(model.display_row(0), 0);
-        model.move_cursor(1, 0, Extend::No);
+        model.move_cursor(1, 0, Extend::Replace);
         assert_eq!(model.selection().cursor.row, 1);
     }
 
@@ -2040,11 +2039,11 @@ mod tests {
         let mut model = TableModel::new();
         model.set_flip_y(true);
         model.set_table(table(2, 2));
-        model.tab(Direction::Forward);
+        model.tab(MoveDirection::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
-        model.tab(Direction::Forward);
+        model.tab(MoveDirection::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 1, column: 0 });
-        model.tab(Direction::Backward);
+        model.tab(MoveDirection::Backward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
     }
 

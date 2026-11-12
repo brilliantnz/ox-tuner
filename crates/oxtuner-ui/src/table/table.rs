@@ -60,7 +60,9 @@ use super::style::TableStyle;
 // use super::heatmap::contrast_text;
 // Unused; see the note above `contrast_text` in `heatmap.rs` before restoring
 // it.
-use super::model::{BulkOp, CellPos, Direction, Edge, Editing, Extend, HistoryStep, TableModel};
+use super::model::{
+    BulkOp, CellPos, Edge, Editing, Extend, HistoryStep, MoveDirection, TableModel,
+};
 
 /// What the table asks its owner to do.
 #[expect(
@@ -429,23 +431,11 @@ impl Table {
 
     /// The keyboard contract, in one place so tests can drive it through real
     /// events and a reader can see the whole rule set.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the keyboard contract reads as one list so a reviewer can check every key"
-    )]
     pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
-        let extend = if modifiers.shift {
-            Extend::Yes
-        } else {
-            Extend::No
-        };
-        let tab_direction = if modifiers.shift {
-            Direction::Backward
-        } else {
-            Direction::Forward
-        };
+        let extend = extend_from_shift(modifiers.shift);
+        let tab_direction = direction_from_shift(modifiers.shift);
 
         if self.model.axis_editing().is_some() {
             match key {
@@ -536,8 +526,8 @@ impl Table {
             "escape" => self.model.collapse_selection(),
             "home" => self.model.move_to_edge(Edge::First, extend),
             "end" => self.model.move_to_edge(Edge::Last, extend),
-            "pageup" => self.model.move_page(Direction::Backward, extend),
-            "pagedown" => self.model.move_page(Direction::Forward, extend),
+            "pageup" => self.model.move_page(MoveDirection::Backward, extend),
+            "pagedown" => self.model.move_page(MoveDirection::Forward, extend),
             // Printable text starts an edit when the platform handler delivers
             // it; see `replace_text_in_range`.
             _ => {}
@@ -865,6 +855,20 @@ impl Table {
             .into_any_element()
         })
         .collect()
+    }
+}
+
+/// Whether Shift extends the selection.
+fn extend_from_shift(shift: bool) -> Extend {
+    if shift { Extend::Keep } else { Extend::Replace }
+}
+
+/// Which way Shift-Tab moves.
+fn direction_from_shift(shift: bool) -> MoveDirection {
+    if shift {
+        MoveDirection::Backward
+    } else {
+        MoveDirection::Forward
     }
 }
 
