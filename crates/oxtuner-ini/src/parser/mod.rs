@@ -305,8 +305,12 @@ impl SectionParser {
     /// Records an informational note about the section as a whole, for a fact
     /// that belongs to no single line.
     pub(crate) fn note_file(&mut self, code: &'static str, message: impl Into<String>) {
-        self.diagnostics
-            .push(Diagnostic::whole_file(Severity::Note, code, message));
+        self.diagnostics.push(Diagnostic::section_wide(
+            Severity::Note,
+            code,
+            message,
+            &self.name,
+        ));
     }
 
     /// Records an error tied to a line.
@@ -709,6 +713,7 @@ mod tests {
             .find(|diagnostic| diagnostic.code == "page-size-count")
             .expect("the mismatch is reported");
         assert_eq!(diagnostic.line, None);
+        assert_eq!(diagnostic.section.as_deref(), Some("Constants"));
         assert!(!diagnostic.to_string().contains("0: "));
     }
 

@@ -80,6 +80,22 @@ impl Diagnostic {
         }
     }
 
+    /// A message about a section as a whole, with no line.
+    pub fn section_wide(
+        severity: Severity,
+        code: &'static str,
+        message: impl Into<String>,
+        section: &str,
+    ) -> Self {
+        Self {
+            severity,
+            code: code.into(),
+            message: message.into(),
+            line: None,
+            section: Some(section.to_owned()),
+        }
+    }
+
     /// A message about the file as a whole.
     pub fn whole_file(severity: Severity, code: &'static str, message: impl Into<String>) -> Self {
         Self {
