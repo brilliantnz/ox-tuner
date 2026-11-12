@@ -274,11 +274,16 @@ impl PageLayout {
     ///
     /// An index the layout does not have contributes nothing: the page may
     /// outlive the layout it was built from, and a stale index is not worth a
-    /// panic in a view.
+    /// panic in a view. A debug build asserts the mismatch so the layout bug
+    /// behind it does not hide as a short scrollbar.
     pub fn cell_count(&self, layout: &TuneLayout) -> usize {
         self.variables
             .iter()
-            .filter_map(|index| layout.variables.get(*index))
+            .filter_map(|index| {
+                let spec = layout.variables.get(*index);
+                debug_assert!(spec.is_some(), "stale variable index {index}");
+                spec
+            })
             .map(VariableSpec::element_count)
             .sum()
     }
