@@ -13,6 +13,7 @@ use std::fmt;
 use crate::{IniPage, Tune, TuneError, TuneLayout, Values};
 
 /// The difference between two tunes built from the same layout.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TuneDiff {
     /// Variables with at least one changed cell, in layout order.

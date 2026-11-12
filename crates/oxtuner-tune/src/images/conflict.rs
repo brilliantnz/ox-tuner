@@ -21,6 +21,7 @@ pub enum CellValue {
 }
 
 /// A cell the ECU and the working image disagree about.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conflict {
     /// Variable name.
