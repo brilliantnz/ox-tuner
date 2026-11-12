@@ -329,6 +329,7 @@ impl BlockComment {
         let mut escaped = false;
         let mut depth = 0u32;
         let mut first_equals = None;
+        let mut equals_ahead = None;
         let mut characters = line.char_indices().peekable();
 
         while let Some((index, character)) = characters.next() {
@@ -368,12 +369,15 @@ impl BlockComment {
                     first_equals.get_or_insert(index);
                     cleaned.push(character);
                 }
-                ';' if !in_quotes
-                    && (first_equals.is_some()
-                        || assignment_index(&line[index + 1..]).is_none()) =>
-                {
-                    cleaned.push_str(&line[index..]);
-                    break;
+                ';' if !in_quotes && depth == 0 => {
+                    let comment = first_equals.is_some()
+                        || !*equals_ahead
+                            .get_or_insert_with(|| assignment_index(&line[index + 1..]).is_some());
+                    if comment {
+                        cleaned.push_str(&line[index..]);
+                        break;
+                    }
+                    cleaned.push(character);
                 }
                 '/' if !in_quotes && line[index + 1..].starts_with('*') => {
                     self.open = Some(line_number);
