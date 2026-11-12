@@ -932,10 +932,12 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
             let dialog_id = dialog.id.clone();
             let command_name = command.command.clone();
 
-            let mut button =
-                Button::new(format!("dialog-command-{}-{}", dialog.id, command.command))
-                    .label(t!("app.dialog.run"))
-                    .ghost();
+            let mut button = Button::new(format!(
+                "dialog-command-{}-{}-{}",
+                dialog.id, command.command, command.label
+            ))
+            .label(t!("app.dialog.run"))
+            .ghost();
 
             match blocked {
                 Some(reason) => {
