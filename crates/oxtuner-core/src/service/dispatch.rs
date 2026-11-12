@@ -595,6 +595,7 @@ pub(super) fn handle(
                 // failure is logged and never fails the session.
                 tracing::warn!(%op, %error, "the project layout could not be persisted");
             }
+            send(events, Event::ProjectUiSaved { op });
             Outcome::Continue
         }
         CommandRequest::SaveTune => {

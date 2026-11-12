@@ -280,8 +280,8 @@ impl CoreHandle {
 
     /// Stores the open project's panel layout in its state file.
     ///
-    /// Best effort: there is no reply event, and a project that is not open
-    /// ignores the command.
+    /// The reply is [`crate::Event::ProjectUiSaved`]. A project that is not
+    /// open answers the same way and stores nothing.
     ///
     /// # Errors
     ///

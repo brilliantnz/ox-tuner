@@ -450,6 +450,11 @@ fn the_project_layout_is_stored_in_its_own_state_file() {
     core.handle
         .set_project_ui(ui.clone())
         .expect("the layout command is queued");
+    let ack = core.next();
+    assert!(
+        matches!(ack, Event::ProjectUiSaved { .. }),
+        "the layout command answers: {ack:?}"
+    );
 
     // Commands run in order on the core thread, so the save proves the layout
     // write finished before the file is read.
@@ -471,12 +476,10 @@ fn a_layout_command_with_no_project_open_is_ignored() {
     core.handle
         .set_project_ui(oxtuner_project::UiState::default())
         .expect("the command is queued");
-    // A refresh answers after it, proving the command was handled in order.
-    let op = core
-        .handle
-        .refresh_tune_status()
-        .expect("the refresh is queued");
-    let event = core.next();
-    assert_eq!(event.op(), Some(op));
+    let ack = core.next();
+    assert!(
+        matches!(ack, Event::ProjectUiSaved { .. }),
+        "a command with no project still answers: {ack:?}"
+    );
     assert!(!dir.path().join(".oxtuner").exists());
 }

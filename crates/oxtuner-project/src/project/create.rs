@@ -17,6 +17,13 @@ use oxtuner_ini::SettingsContext;
 use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
 use crate::msq::Msq;
 
+/// The longest folder name creation accepts.
+///
+/// A project folder sits inside `Documents/OxTunerProjects`, and the files
+/// inside it add more path. 128 bytes stays far inside every desktop limit
+/// while leaving room for a descriptive name.
+const MAX_NAME_LEN: usize = 128;
+
 /// Empty folders a new project carries for compatible tooling.
 ///
 /// Neither reference project carries a logs folder at the top level — the
@@ -183,7 +190,7 @@ impl Project {
 ///
 /// Projects move between machines, so the Windows rules apply everywhere:
 ///
-/// - empty after trimming, `.` or `..`
+/// - empty after trimming, `.` or `..`, or longer than [`MAX_NAME_LEN`]
 /// - a path separator, NUL or control character
 /// - a Windows-reserved character `< > : " | ? *`, or a reserved device
 ///   name (`CON`, `NUL`, `COM1`…) with or without an extension
@@ -200,6 +207,9 @@ fn validate_name(name: &str) -> Result<String, ProjectError> {
     }
     if trimmed == "." || trimmed == ".." {
         return Err(invalid("the name is not a usable folder name"));
+    }
+    if trimmed.len() > MAX_NAME_LEN {
+        return Err(invalid("the name is longer than 128 bytes"));
     }
     if trimmed.chars().any(|character| {
         character == '/' || character == '\\' || character == '\0' || character.is_control()
@@ -343,5 +353,10 @@ mod tests {
                 "{name:?} must be refused"
             );
         }
+        let long = "x".repeat(MAX_NAME_LEN + 1);
+        assert!(
+            matches!(validate_name(&long), Err(ProjectError::InvalidName { .. })),
+            "a name over the cap must be refused"
+        );
     }
 }

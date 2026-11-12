@@ -42,6 +42,12 @@ pub enum Event {
         /// What the save rewrote.
         outcome: SaveReport,
     },
+    /// The project's panel layout was stored, or there was no project to
+    /// store it for.
+    ProjectUiSaved {
+        /// The command this answers.
+        op: OpId,
+    },
     /// A table was read from the open project.
     TableRead {
         /// The command this answers.
@@ -275,6 +281,7 @@ impl Event {
             Self::DefinitionLoaded { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
+            | Self::ProjectUiSaved { op }
             | Self::TableRead { op, .. }
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }

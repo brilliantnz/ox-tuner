@@ -130,7 +130,8 @@ pub(crate) enum CommandRequest {
     /// Replace the open project's panel layout in its state file.
     ///
     /// Best effort: the layout is a convenience next to the tune, so a write
-    /// failure is logged and answered by nothing. There is no reply event.
+    /// failure is logged. The reply is always
+    /// [`super::Event::ProjectUiSaved`], whether or not a project is open.
     SetProjectUi {
         /// The layout to store.
         ui: UiState,

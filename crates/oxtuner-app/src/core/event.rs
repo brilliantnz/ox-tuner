@@ -198,6 +198,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
+        Event::ProjectUiSaved { .. } => (Update::Nothing, None),
         Event::PortsListed { .. }
         | Event::PortsChanged { .. }
         | Event::Rejected { .. }
