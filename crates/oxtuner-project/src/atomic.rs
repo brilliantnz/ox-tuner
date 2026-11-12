@@ -58,15 +58,16 @@ pub(crate) fn write_derived(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-/// A sibling temporary name a second process cannot take.
+/// The next unused suffix for a project temporary in this process.
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A sibling temporary name no other writer in this process can take.
 fn derived_temporary_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(format!(".{}.tmp", std::process::id()));
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    name.push(format!(".{}.{sequence}.tmp", std::process::id()));
     PathBuf::from(name)
 }
-
-/// The next unused suffix for a tune temporary in this process.
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // A crash can leave one temporary behind. It is deliberately not swept here: a
 // concurrent saver's live temporary looks the same as a stale one.
