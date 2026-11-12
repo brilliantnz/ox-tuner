@@ -4,7 +4,7 @@
 )]
 
 use super::*;
-use oxtuner_core::DeviceView;
+use oxtuner_core::ProjectConnection;
 
 fn summary() -> DefinitionView {
     DefinitionView {
@@ -48,7 +48,7 @@ fn project() -> ProjectView {
         skipped: 0,
         warnings: Vec::new(),
         ui: oxtuner_project::UiState::default(),
-        device: DeviceView::default(),
+        connection: ProjectConnection::default(),
     }
 }
 

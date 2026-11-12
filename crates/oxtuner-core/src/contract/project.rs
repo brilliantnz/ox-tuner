@@ -158,13 +158,13 @@ pub struct ProjectView {
     pub warnings: Vec<String>,
     /// The panel layout this project was last read with.
     pub ui: oxtuner_project::UiState,
-    /// The device this project last used, when state has it.
-    pub device: DeviceView,
+    /// The connection this project last used, when state has it.
+    pub connection: ProjectConnection,
 }
 
-/// The project's remembered device: what the connect dialog starts from.
+/// The project's remembered connection: what the connect dialog starts from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DeviceView {
+pub struct ProjectConnection {
     /// Serial port last opened from this project.
     pub last_port: Option<String>,
     /// Baud rate paired with that port.

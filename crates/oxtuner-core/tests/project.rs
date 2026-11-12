@@ -402,31 +402,34 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
 }
 
 #[test]
-fn the_project_view_carries_the_remembered_device() {
+fn the_project_view_carries_the_remembered_connection() {
     let dir = project_dir("device", TUNE);
     dir.write(
         ".oxtuner/project.json",
-        r#"{"schema_version": 1, "device": {"last_port": "/dev/ttyACM0", "baud_override": 115200}}"#,
+        r#"{"schema_version": 1, "connection": {"last_port": "/dev/ttyACM0", "baud_override": 115200}}"#,
     );
 
     let core = Harness::start();
     let _ = core.open(dir.path());
     let summary = opened(&core.next()).clone();
 
-    assert_eq!(summary.device.last_port.as_deref(), Some("/dev/ttyACM0"));
-    assert_eq!(summary.device.baud_override, Some(115_200));
+    assert_eq!(
+        summary.connection.last_port.as_deref(),
+        Some("/dev/ttyACM0")
+    );
+    assert_eq!(summary.connection.baud_override, Some(115_200));
 }
 
 #[test]
-fn a_project_without_state_has_no_remembered_device() {
+fn a_project_without_state_has_no_remembered_connection() {
     let dir = project_dir("no-device", TUNE);
 
     let core = Harness::start();
     let _ = core.open(dir.path());
     let summary = opened(&core.next()).clone();
 
-    assert_eq!(summary.device.last_port, None);
-    assert_eq!(summary.device.baud_override, None);
+    assert_eq!(summary.connection.last_port, None);
+    assert_eq!(summary.connection.baud_override, None);
 }
 
 #[test]
@@ -436,15 +439,18 @@ fn the_project_layout_is_stored_in_its_own_state_file() {
 
     let _ = core.open(dir.path());
     let summary = opened(&core.next()).clone();
-    assert!(summary.ui.primary_visible, "a fresh project starts open");
+    assert!(
+        summary.ui.primary_sidebar_visible,
+        "a fresh project starts open"
+    );
 
     let ui = oxtuner_project::UiState {
-        primary_width: 300.0,
-        secondary_width: 260.0,
-        bottom_height: 240.0,
-        primary_visible: false,
-        secondary_visible: true,
-        bottom_visible: true,
+        primary_sidebar_width: 300.0,
+        secondary_sidebar_width: 260.0,
+        bottom_panel_height: 240.0,
+        primary_sidebar_visible: false,
+        secondary_sidebar_visible: true,
+        bottom_panel_visible: true,
         table_low_at_top: true,
     };
     core.handle

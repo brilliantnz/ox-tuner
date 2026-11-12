@@ -67,8 +67,8 @@ use crate::{
     i18n::t,
     settings::preferences::AppSettings,
     state::session::{
-        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, capture_window,
-        schedule_save,
+        AppState, BOTTOM_PANEL_HEIGHT_RANGE, PRIMARY_SIDEBAR_WIDTH_RANGE,
+        SECONDARY_SIDEBAR_WIDTH_RANGE, capture_window, schedule_save,
     },
 };
 
@@ -216,9 +216,9 @@ impl AppLayout {
     fn render_panel_buttons(cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
         let layout = &cx.global::<AppState>().data().layout;
         let (primary, secondary, bottom) = (
-            layout.primary_visible,
-            layout.secondary_visible,
-            layout.bottom_visible,
+            layout.primary_sidebar_visible,
+            layout.secondary_sidebar_visible,
+            layout.bottom_panel_visible,
         );
         let pending = crate::core::CoreService::status(cx)
             .pending_project
@@ -358,10 +358,14 @@ impl Render for AppLayout {
     )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
-        let (primary, secondary, bottom) = (layout.primary(), layout.secondary(), layout.bottom());
-        let primary_visible = layout.primary_visible;
-        let secondary_visible = layout.secondary_visible;
-        let bottom_visible = layout.bottom_visible;
+        let (primary, secondary, bottom) = (
+            layout.primary_sidebar(),
+            layout.secondary_sidebar(),
+            layout.bottom_panel(),
+        );
+        let primary_sidebar_visible = layout.primary_sidebar_visible;
+        let secondary_sidebar_visible = layout.secondary_sidebar_visible;
+        let bottom_panel_visible = layout.bottom_panel_visible;
         let pending = crate::core::CoreService::status(cx)
             .pending_project
             .as_ref()
@@ -386,25 +390,25 @@ impl Render for AppLayout {
                             .on_resize(move |state, _, cx| {
                                 // Only a visible sidebar has a handle, and a hidden
                                 // one would report the editor's width instead.
-                                if !primary_visible {
+                                if !primary_sidebar_visible {
                                     return;
                                 }
                                 let sizes = state.read(cx).sizes().clone();
                                 AppState::update_global(cx, |data| {
-                                    data.layout.apply_primary(&sizes);
+                                    data.layout.apply_primary_sidebar(&sizes);
                                 });
                                 schedule_save(cx);
                             })
                             // Panels are left out while closed rather than hidden:
                             // a hidden panel still renders its resize handle, which
                             // would leave a stray divider on the window's edge.
-                            .when(primary_visible, |this| {
+                            .when(primary_sidebar_visible, |this| {
                                 this.child(
                                     resizable_panel()
                                         .size(primary)
                                         .size_range(
-                                            px(PRIMARY_WIDTH_RANGE.start)
-                                                ..px(PRIMARY_WIDTH_RANGE.end),
+                                            px(PRIMARY_SIDEBAR_WIDTH_RANGE.start)
+                                                ..px(PRIMARY_SIDEBAR_WIDTH_RANGE.end),
                                         )
                                         .fixed()
                                         .child(PrimarySidebar::new(self.explorer.clone())),
@@ -414,12 +418,12 @@ impl Render for AppLayout {
                                 resizable_panel().child(
                                     h_resizable("layout-panels")
                                         .on_resize(move |state, _, cx| {
-                                            if !secondary_visible {
+                                            if !secondary_sidebar_visible {
                                                 return;
                                             }
                                             let sizes = state.read(cx).sizes().clone();
                                             AppState::update_global(cx, |data| {
-                                                data.layout.apply_secondary(&sizes);
+                                                data.layout.apply_secondary_sidebar(&sizes);
                                             });
                                             schedule_save(cx);
                                         })
@@ -427,12 +431,12 @@ impl Render for AppLayout {
                                             resizable_panel().child(
                                                 v_resizable("layout-editor")
                                                     .on_resize(move |state, _, cx| {
-                                                        if !bottom_visible {
+                                                        if !bottom_panel_visible {
                                                             return;
                                                         }
                                                         let sizes = state.read(cx).sizes().clone();
                                                         AppState::update_global(cx, |data| {
-                                                            data.layout.apply_bottom(&sizes);
+                                                            data.layout.apply_bottom_panel(&sizes);
                                                         });
                                                         schedule_save(cx);
                                                     })
@@ -442,14 +446,14 @@ impl Render for AppLayout {
                                                     )
                                                     // The editor keeps the space it
                                                     // has when the panel opens or
-                                                    .when(bottom_visible, |this| {
+                                                    .when(bottom_panel_visible, |this| {
                                                         this.child(
                                                             resizable_panel()
                                                                 .size(bottom)
                                                                 .size_range(
-                                                                    px(BOTTOM_HEIGHT_RANGE.start)
+                                                                    px(BOTTOM_PANEL_HEIGHT_RANGE.start)
                                                                         ..px(
-                                                                            BOTTOM_HEIGHT_RANGE.end
+                                                                            BOTTOM_PANEL_HEIGHT_RANGE.end
                                                                         ),
                                                                 )
                                                                 // A panel keeps the
@@ -463,13 +467,13 @@ impl Render for AppLayout {
                                                     }),
                                             ),
                                         )
-                                        .when(secondary_visible, |this| {
+                                        .when(secondary_sidebar_visible, |this| {
                                             this.child(
                                                 resizable_panel()
                                                     .size(secondary)
                                                     .size_range(
-                                                        px(SECONDARY_WIDTH_RANGE.start)
-                                                            ..px(SECONDARY_WIDTH_RANGE.end),
+                                                        px(SECONDARY_SIDEBAR_WIDTH_RANGE.start)
+                                                            ..px(SECONDARY_SIDEBAR_WIDTH_RANGE.end),
                                                     )
                                                     .fixed()
                                                     .child(SecondarySidebar),
@@ -532,21 +536,21 @@ pub fn open_main_window(cx: &mut App) {
 /// Shows or hides the navigation sidebar.
 pub fn toggle_primary_sidebar(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.primary_visible = !layout.primary_visible;
+        layout.primary_sidebar_visible = !layout.primary_sidebar_visible;
     });
 }
 
 /// Shows or hides the inspector sidebar.
 pub fn toggle_secondary_sidebar(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.secondary_visible = !layout.secondary_visible;
+        layout.secondary_sidebar_visible = !layout.secondary_sidebar_visible;
     });
 }
 
 /// Shows or hides the output panel.
 pub fn toggle_bottom_panel(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.bottom_visible = !layout.bottom_visible;
+        layout.bottom_panel_visible = !layout.bottom_panel_visible;
     });
 }
 
@@ -556,7 +560,7 @@ pub fn toggle_bottom_panel(cx: &mut App) {
 /// panel is forced visible first, because a notification can arrive while it
 /// was hidden; the filter and the tab then change in the same update.
 pub(crate) fn show_diagnostics(window: &mut Window, cx: &mut App, filter: Option<String>) {
-    AppState::update_global(cx, |data| data.layout.bottom_visible = true);
+    AppState::update_global(cx, |data| data.layout.bottom_panel_visible = true);
     schedule_save(cx);
 
     match app::window::main_view(cx) {

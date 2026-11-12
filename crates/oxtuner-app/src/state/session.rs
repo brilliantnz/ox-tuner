@@ -37,16 +37,16 @@ pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 /// crash with at most this much lost.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
-pub(crate) const DEFAULT_PRIMARY_WIDTH: f32 = 240.;
-pub(crate) const DEFAULT_SECONDARY_WIDTH: f32 = 280.;
-pub(crate) const DEFAULT_BOTTOM_HEIGHT: f32 = 180.;
+pub(crate) const DEFAULT_PRIMARY_SIDEBAR_WIDTH: f32 = 240.;
+pub(crate) const DEFAULT_SECONDARY_SIDEBAR_WIDTH: f32 = 280.;
+pub(crate) const DEFAULT_BOTTOM_PANEL_HEIGHT: f32 = 180.;
 
 /// Width limits of the primary (navigation) sidebar.
-pub(crate) const PRIMARY_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
+pub(crate) const PRIMARY_SIDEBAR_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
 /// Width limits of the secondary (inspector) sidebar.
-pub(crate) const SECONDARY_WIDTH_RANGE: std::ops::Range<f32> = 200.0..480.0;
+pub(crate) const SECONDARY_SIDEBAR_WIDTH_RANGE: std::ops::Range<f32> = 200.0..480.0;
 /// Height limits of the bottom panel.
-pub(crate) const BOTTOM_HEIGHT_RANGE: std::ops::Range<f32> = 180.0..480.0;
+pub(crate) const BOTTOM_PANEL_HEIGHT_RANGE: std::ops::Range<f32> = 180.0..480.0;
 
 /// How close a frame must be to a display's usable area to *record* a maximize.
 ///
@@ -272,26 +272,30 @@ impl WindowRect {
     reason = "each panel visibility is an independent layout fact"
 )]
 pub(crate) struct LayoutState {
-    pub(crate) primary_width: f32,
-    pub(crate) secondary_width: f32,
-    pub(crate) bottom_height: f32,
+    pub(crate) primary_sidebar_width: f32,
+    pub(crate) secondary_sidebar_width: f32,
+    pub(crate) bottom_panel_height: f32,
     /// Whether the navigation sidebar is open.
     #[serde(default = "default_true")]
-    pub(crate) primary_visible: bool,
+    pub(crate) primary_sidebar_visible: bool,
     /// Whether the inspector sidebar is open.
     #[serde(default = "default_true")]
-    pub(crate) secondary_visible: bool,
+    pub(crate) secondary_sidebar_visible: bool,
     /// Whether the output panel is open. Missing in older files, where it did
     /// not exist; `serde(default)` on a struct field would use `false`, so the
     /// default is named explicitly.
     #[serde(default = "default_true")]
-    pub(crate) bottom_visible: bool,
+    pub(crate) bottom_panel_visible: bool,
     /// Whether the table grid draws its Y axis downward: low bins at the top.
     ///
     /// The default draws it upward like a chart, so the low bin is at the
     /// bottom and the column header sits under the table, the way `TunerStudio`
     /// opens a table.
-    #[serde(default)]
+    ///
+    /// This one is **not** stored in `state.json`: how a table is drawn belongs
+    /// to the project whose table it is, so it lives in the project's own
+    /// `project.json` and is echoed here only while that project is open.
+    #[serde(skip)]
     pub(crate) table_low_at_top: bool,
 }
 
@@ -302,39 +306,45 @@ const fn default_true() -> bool {
 impl Default for LayoutState {
     fn default() -> Self {
         Self {
-            primary_width: DEFAULT_PRIMARY_WIDTH,
-            secondary_width: DEFAULT_SECONDARY_WIDTH,
-            bottom_height: DEFAULT_BOTTOM_HEIGHT,
-            primary_visible: true,
-            secondary_visible: true,
-            bottom_visible: true,
+            primary_sidebar_width: DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
+            primary_sidebar_visible: true,
+            secondary_sidebar_visible: true,
+            bottom_panel_visible: true,
             table_low_at_top: false,
         }
     }
 }
 
 impl LayoutState {
-    pub(crate) fn primary(&self) -> Pixels {
-        px(clamp(self.primary_width, PRIMARY_WIDTH_RANGE))
+    pub(crate) fn primary_sidebar(&self) -> Pixels {
+        px(clamp(
+            self.primary_sidebar_width,
+            PRIMARY_SIDEBAR_WIDTH_RANGE,
+        ))
     }
 
-    pub(crate) fn secondary(&self) -> Pixels {
-        px(clamp(self.secondary_width, SECONDARY_WIDTH_RANGE))
+    pub(crate) fn secondary_sidebar(&self) -> Pixels {
+        px(clamp(
+            self.secondary_sidebar_width,
+            SECONDARY_SIDEBAR_WIDTH_RANGE,
+        ))
     }
 
-    pub(crate) fn bottom(&self) -> Pixels {
-        px(clamp(self.bottom_height, BOTTOM_HEIGHT_RANGE))
+    pub(crate) fn bottom_panel(&self) -> Pixels {
+        px(clamp(self.bottom_panel_height, BOTTOM_PANEL_HEIGHT_RANGE))
     }
 
     /// The project state this layout is stored as.
     pub(crate) fn to_project_ui(&self) -> UiState {
         UiState {
-            primary_width: self.primary_width,
-            secondary_width: self.secondary_width,
-            bottom_height: self.bottom_height,
-            primary_visible: self.primary_visible,
-            secondary_visible: self.secondary_visible,
-            bottom_visible: self.bottom_visible,
+            primary_sidebar_width: self.primary_sidebar_width,
+            secondary_sidebar_width: self.secondary_sidebar_width,
+            bottom_panel_height: self.bottom_panel_height,
+            primary_sidebar_visible: self.primary_sidebar_visible,
+            secondary_sidebar_visible: self.secondary_sidebar_visible,
+            bottom_panel_visible: self.bottom_panel_visible,
             table_low_at_top: self.table_low_at_top,
         }
     }
@@ -345,12 +355,12 @@ impl LayoutState {
     /// readers clamp them, so a file edited by hand cannot open a panel at an
     /// unusable size.
     pub(crate) fn apply_project_ui(&mut self, ui: &UiState) {
-        self.primary_width = ui.primary_width;
-        self.secondary_width = ui.secondary_width;
-        self.bottom_height = ui.bottom_height;
-        self.primary_visible = ui.primary_visible;
-        self.secondary_visible = ui.secondary_visible;
-        self.bottom_visible = ui.bottom_visible;
+        self.primary_sidebar_width = ui.primary_sidebar_width;
+        self.secondary_sidebar_width = ui.secondary_sidebar_width;
+        self.bottom_panel_height = ui.bottom_panel_height;
+        self.primary_sidebar_visible = ui.primary_sidebar_visible;
+        self.secondary_sidebar_visible = ui.secondary_sidebar_visible;
+        self.bottom_panel_visible = ui.bottom_panel_visible;
         self.table_low_at_top = ui.table_low_at_top;
     }
 
@@ -359,25 +369,25 @@ impl LayoutState {
     ///
     /// Short slices are ignored rather than indexed: the group reports whatever
     /// panels it currently holds, and a panel can be hidden.
-    pub(crate) fn apply_primary(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_primary_sidebar(&mut self, sizes: &[Pixels]) {
         if let Some(width) = sizes.first() {
-            self.primary_width = width.as_f32();
+            self.primary_sidebar_width = width.as_f32();
         }
     }
 
     /// Records the width the panel group reports for its second panel: the
     /// secondary sidebar.
-    pub(crate) fn apply_secondary(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_secondary_sidebar(&mut self, sizes: &[Pixels]) {
         if let Some(width) = sizes.get(1) {
-            self.secondary_width = width.as_f32();
+            self.secondary_sidebar_width = width.as_f32();
         }
     }
 
     /// Records the height the editor group reports for its second panel: the
     /// bottom panel.
-    pub(crate) fn apply_bottom(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_bottom_panel(&mut self, sizes: &[Pixels]) {
         if let Some(height) = sizes.get(1) {
-            self.bottom_height = height.as_f32();
+            self.bottom_panel_height = height.as_f32();
         }
     }
 }
@@ -660,12 +670,12 @@ mod tests {
                 maximized: false,
             },
             layout: LayoutState {
-                primary_width: 300.,
-                secondary_width: 320.,
-                bottom_height: 220.,
-                primary_visible: true,
-                secondary_visible: false,
-                bottom_visible: false,
+                primary_sidebar_width: 300.,
+                secondary_sidebar_width: 320.,
+                bottom_panel_height: 220.,
+                primary_sidebar_visible: true,
+                secondary_sidebar_visible: false,
+                bottom_panel_visible: false,
                 table_low_at_top: true,
             },
             last_project: Some(PathBuf::from("/projects/roadster")),
@@ -674,7 +684,23 @@ mod tests {
         let encoded = serde_json::to_string(&data).expect("serialize");
         let decoded: AppStateData = serde_json::from_str(&encoded).expect("deserialize");
 
-        assert_eq!(decoded, data);
+        // The table orientation is per project, so it is the one field the
+        // global file does not carry.
+        assert!(
+            !encoded.contains("table_low_at_top"),
+            "the table orientation is not global: {encoded}"
+        );
+        assert!(!decoded.layout.table_low_at_top);
+        assert_eq!(
+            AppStateData {
+                layout: LayoutState {
+                    table_low_at_top: false,
+                    ..data.layout
+                },
+                ..data
+            },
+            decoded
+        );
     }
 
     #[test]
@@ -689,13 +715,19 @@ mod tests {
         assert_eq!(data.schema_version, STATE_SCHEMA_VERSION);
         assert!(data.window.maximized);
         assert_eq!(data.last_project, Some(PathBuf::from("/projects/roadster")));
-        assert_eq!(data.layout.primary_width, DEFAULT_PRIMARY_WIDTH);
-        assert_eq!(data.layout.secondary_width, DEFAULT_SECONDARY_WIDTH);
+        assert_eq!(
+            data.layout.primary_sidebar_width,
+            DEFAULT_PRIMARY_SIDEBAR_WIDTH
+        );
+        assert_eq!(
+            data.layout.secondary_sidebar_width,
+            DEFAULT_SECONDARY_SIDEBAR_WIDTH
+        );
         // Panels are open by default; a file that predates them must not open a
         // window with everything hidden.
-        assert!(data.layout.primary_visible);
-        assert!(data.layout.secondary_visible);
-        assert!(data.layout.bottom_visible);
+        assert!(data.layout.primary_sidebar_visible);
+        assert!(data.layout.secondary_sidebar_visible);
+        assert!(data.layout.bottom_panel_visible);
         assert!(
             !data.layout.table_low_at_top,
             "the chart orientation is the default for files that predate the toggle"
@@ -711,15 +743,21 @@ mod tests {
     #[test]
     fn layout_sizes_are_clamped_on_read() {
         let layout = LayoutState {
-            primary_width: 5.,
-            secondary_width: 10_000.,
-            bottom_height: 50.,
+            primary_sidebar_width: 5.,
+            secondary_sidebar_width: 10_000.,
+            bottom_panel_height: 50.,
             ..LayoutState::default()
         };
 
-        assert_eq!(layout.primary(), px(PRIMARY_WIDTH_RANGE.start));
-        assert_eq!(layout.secondary(), px(SECONDARY_WIDTH_RANGE.end));
-        assert_eq!(layout.bottom(), px(BOTTOM_HEIGHT_RANGE.start));
+        assert_eq!(
+            layout.primary_sidebar(),
+            px(PRIMARY_SIDEBAR_WIDTH_RANGE.start)
+        );
+        assert_eq!(
+            layout.secondary_sidebar(),
+            px(SECONDARY_SIDEBAR_WIDTH_RANGE.end)
+        );
+        assert_eq!(layout.bottom_panel(), px(BOTTOM_PANEL_HEIGHT_RANGE.start));
     }
 
     /// Dragging a layout handle is the one path that panicked in the field, so
@@ -728,29 +766,29 @@ mod tests {
     fn dragging_the_primary_handle_records_the_navigation_width() {
         let mut layout = LayoutState::default();
 
-        layout.apply_primary(&[px(260.), px(800.)]);
+        layout.apply_primary_sidebar(&[px(260.), px(800.)]);
 
-        assert_eq!(layout.primary_width, 260.);
+        assert_eq!(layout.primary_sidebar_width, 260.);
         // The editor absorbs the rest; it is never stored.
-        assert_eq!(layout.bottom_height, DEFAULT_BOTTOM_HEIGHT);
+        assert_eq!(layout.bottom_panel_height, DEFAULT_BOTTOM_PANEL_HEIGHT);
     }
 
     #[test]
     fn dragging_the_secondary_handle_records_the_inspector_width() {
         let mut layout = LayoutState::default();
 
-        layout.apply_secondary(&[px(900.), px(320.)]);
+        layout.apply_secondary_sidebar(&[px(900.), px(320.)]);
 
-        assert_eq!(layout.secondary_width, 320.);
-        assert_eq!(layout.primary_width, DEFAULT_PRIMARY_WIDTH);
+        assert_eq!(layout.secondary_sidebar_width, 320.);
+        assert_eq!(layout.primary_sidebar_width, DEFAULT_PRIMARY_SIDEBAR_WIDTH);
     }
 
     #[test]
     fn size_mapping_tolerates_an_empty_or_short_list() {
         let mut layout = LayoutState::default();
-        layout.apply_primary(&[]);
-        layout.apply_secondary(&[px(900.)]);
-        layout.apply_bottom(&[px(600.)]);
+        layout.apply_primary_sidebar(&[]);
+        layout.apply_secondary_sidebar(&[px(900.)]);
+        layout.apply_bottom_panel(&[px(600.)]);
         assert_eq!(layout, LayoutState::default());
     }
 
@@ -758,8 +796,8 @@ mod tests {
     fn dragging_the_bottom_handle_records_the_panel_height() {
         let mut layout = LayoutState::default();
 
-        layout.apply_bottom(&[px(600.), px(240.)]);
-        assert_eq!(layout.bottom_height, 240.);
+        layout.apply_bottom_panel(&[px(600.), px(240.)]);
+        assert_eq!(layout.bottom_panel_height, 240.);
     }
 
     /// The reference window helper cannot be built without a platform, so the
@@ -901,12 +939,12 @@ mod tests {
     #[test]
     fn a_layout_round_trips_through_the_project_state() {
         let layout = LayoutState {
-            primary_width: 300.,
-            secondary_width: 260.,
-            bottom_height: 240.,
-            primary_visible: false,
-            secondary_visible: true,
-            bottom_visible: true,
+            primary_sidebar_width: 300.,
+            secondary_sidebar_width: 260.,
+            bottom_panel_height: 240.,
+            primary_sidebar_visible: false,
+            secondary_sidebar_visible: true,
+            bottom_panel_visible: true,
             table_low_at_top: true,
         };
 

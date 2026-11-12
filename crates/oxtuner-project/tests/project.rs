@@ -309,7 +309,7 @@ fn a_save_records_project_state_inside_the_sidecar() {
     let definition_bytes =
         fs::read(dir.path().join("projectCfg/mainController.ini")).expect("the INI is readable");
     let mut project = Project::open(dir.path()).expect("the project opens");
-    assert_eq!(project.state().device.last_port, None);
+    assert_eq!(project.state().connection.last_port, None);
 
     project.save().expect("the project saves");
 
@@ -330,7 +330,7 @@ fn a_corrupt_sidecar_does_not_block_opening_and_heals_on_save() {
     dir.write(".oxtuner/project.json", "{ not json");
 
     let mut project = Project::open(dir.path()).expect("the project still opens");
-    assert!(project.state().device.last_port.is_none());
+    assert!(project.state().connection.last_port.is_none());
     assert_eq!(project.state().definition.signature, "speeduino 202501");
 
     project.save().expect("the save heals the file");
@@ -346,16 +346,16 @@ fn the_device_section_survives_a_reopen() {
     let dir = project_dir("device-state");
     let mut project = Project::open(dir.path()).expect("the project opens");
     project
-        .set_device(Some("/dev/ttyACM0".to_owned()), Some(115_200))
+        .set_connection(Some("/dev/ttyACM0".to_owned()), Some(115_200))
         .expect("the device persists");
     drop(project);
 
     let reopened = Project::open(dir.path()).expect("the project reopens");
     assert_eq!(
-        reopened.state().device.last_port.as_deref(),
+        reopened.state().connection.last_port.as_deref(),
         Some("/dev/ttyACM0")
     );
-    assert_eq!(reopened.state().device.baud_override, Some(115_200));
+    assert_eq!(reopened.state().connection.baud_override, Some(115_200));
 }
 
 #[test]
@@ -550,12 +550,12 @@ fn a_standalone_tune_uses_its_settings_snapshot_and_has_no_sidecar() {
     assert!(project.settings().is_active("CELSIUS"));
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
     assert_close(project.tune().scalar_user("tempUnits").unwrap(), 1.0);
-    assert!(project.state().device.last_port.is_none());
+    assert!(project.state().connection.last_port.is_none());
 
     project.tune_mut().set_user("tempUnits", 4.0).unwrap();
     let outcome = project.save().expect("the edit saves");
     assert_eq!(outcome.variables, ["tempUnits"]);
-    assert!(project.state().device.last_port.is_none());
+    assert!(project.state().connection.last_port.is_none());
     assert!(!dir.path().join(".oxtuner").exists());
 }
 
@@ -1207,18 +1207,18 @@ fn creating_a_project_refuses_an_unreadable_definition() {
 #[test]
 fn a_newer_sidecar_is_left_untouched() {
     let dir = project_dir("newer-state");
-    let before = r#"{"schema_version": 999, "device": {"last_port": "/dev/ttyACM0"}}"#;
+    let before = r#"{"schema_version": 999, "connection": {"last_port": "/dev/ttyACM0"}}"#;
     dir.write(".oxtuner/project.json", before);
 
     let mut project = Project::open(dir.path()).expect("the project still opens");
-    assert!(project.state().device.last_port.is_none());
+    assert!(project.state().connection.last_port.is_none());
 
     project.save().expect("the save succeeds");
     project
-        .set_device(Some("/dev/ttyUSB0".to_owned()), None)
+        .set_connection(Some("/dev/ttyUSB0".to_owned()), None)
         .expect("the device updates in memory");
     assert_eq!(
-        project.state().device.last_port.as_deref(),
+        project.state().connection.last_port.as_deref(),
         Some("/dev/ttyUSB0")
     );
 
@@ -1237,7 +1237,7 @@ fn a_standalone_tune_ignores_a_neighboring_sidecar() {
     dir.write("project/standalone.ini", STANDALONE_DEFINITION);
     dir.write(
         "project/.oxtuner/project.json",
-        r#"{"schema_version": 1, "device": {"last_port": "/dev/ttyACM0"}}"#,
+        r#"{"schema_version": 1, "connection": {"last_port": "/dev/ttyACM0"}}"#,
     );
 
     let project = Project::open_standalone(
@@ -1245,7 +1245,7 @@ fn a_standalone_tune_ignores_a_neighboring_sidecar() {
         dir.path().join("project/standalone.ini"),
     )
     .expect("the tune opens");
-    assert!(project.state().device.last_port.is_none());
+    assert!(project.state().connection.last_port.is_none());
 }
 
 #[test]
@@ -1280,15 +1280,15 @@ page = 1
 fn the_ui_section_is_per_project_and_survives_a_reopen() {
     let dir = project_dir("ui-state");
     let mut project = Project::open(dir.path()).expect("the project opens");
-    assert!(project.state().ui.primary_visible);
+    assert!(project.state().ui.primary_sidebar_visible);
 
     let ui = UiState {
-        primary_width: 300.0,
-        secondary_width: 200.0,
-        bottom_height: 260.0,
-        primary_visible: false,
-        secondary_visible: true,
-        bottom_visible: false,
+        primary_sidebar_width: 300.0,
+        secondary_sidebar_width: 200.0,
+        bottom_panel_height: 260.0,
+        primary_sidebar_visible: false,
+        secondary_sidebar_visible: true,
+        bottom_panel_visible: false,
         table_low_at_top: true,
     };
     project.set_ui(ui.clone()).expect("the layout persists");

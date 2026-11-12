@@ -215,7 +215,7 @@ pub(crate) struct ProjectSettings {
 pub(crate) struct ConnectionSettings {
     /// Realtime refresh rate, in hertz.
     ///
-    /// The device a project talks to is per project
+    /// The connection a project uses is per project
     /// (`.oxtuner/project.json`), so this is the only connection preference
     /// that belongs to the whole installation.
     pub(crate) poll_rate_hz: u32,

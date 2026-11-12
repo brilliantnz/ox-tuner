@@ -466,8 +466,9 @@ pub(super) fn on_reply(
             // A connect that answered is the one worth reopening next time;
             // remembering it in the project keeps each project on its own ECU.
             if let Session::Project(project) = session
-                && let Some(device) = &live.connection.device
-                && let Err(error) = project.set_device(Some(device.port.clone()), Some(device.baud))
+                && let Some(saved) = &live.connection.saved_connection
+                && let Err(error) =
+                    project.set_connection(Some(saved.port.clone()), Some(saved.baud))
             {
                 tracing::warn!(%error, "the project device could not be persisted");
             }

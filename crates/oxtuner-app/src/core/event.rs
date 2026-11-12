@@ -245,9 +245,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         Update::Opened(view) if view.in_project => Some(view.ui.clone()),
         _ => None,
     };
-    // The core persisted this device into the project's state; mirror it in the
+    // The core persisted this connection into the project state; mirror it in the
     // open view so a dialog opened in the same session starts from it too.
-    let confirmed_device = match &update {
+    let confirmed_connection = match &update {
         Update::Connected(connection) if !connection.custom => {
             let baud = cx
                 .global::<CoreService>()
@@ -270,11 +270,11 @@ pub(super) fn apply(event: Event, cx: &mut App) {
                 state.layout.apply_project_ui(&layout);
             });
         }
-        if let Some((port, baud)) = confirmed_device
+        if let Some((port, baud)) = confirmed_connection
             && let Some(project) = cx.global_mut::<CoreService>().status.project.as_mut()
         {
-            project.device.last_port = Some(port);
-            project.device.baud_override = baud;
+            project.connection.last_port = Some(port);
+            project.connection.baud_override = baud;
         }
         if finishes_open {
             cx.global_mut::<CoreService>()

@@ -3,7 +3,7 @@
 //! ADR-0007 allows exactly one place inside a project for ox-tuner's own
 //! files: the `.oxtuner/` directory. That is `project.json`: which INI a tune
 //! was opened with (relative path, SHA-256 and firmware signature), which
-//! device the project last used, and the project's panel layout.
+//! connection the project last used, and the project's panel layout.
 //!
 //! The file is pretty-printed JSON so it can be inspected and diffed next to
 //! `settings.json`. A missing file reads as "no state yet". A malformed file
@@ -30,13 +30,14 @@ pub const STATE_FILE: &str = "project.json";
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
 /// Width of the navigation sidebar, in pixels, for a fresh project.
-pub const DEFAULT_PRIMARY_WIDTH: f32 = 240.;
+pub const DEFAULT_PRIMARY_SIDEBAR_WIDTH: f32 = 240.;
 /// Width of the inspector sidebar, in pixels, for a fresh project.
-pub const DEFAULT_SECONDARY_WIDTH: f32 = 280.;
+pub const DEFAULT_SECONDARY_SIDEBAR_WIDTH: f32 = 280.;
 /// Height of the bottom panel, in pixels, for a fresh project.
-pub const DEFAULT_BOTTOM_HEIGHT: f32 = 180.;
+pub const DEFAULT_BOTTOM_PANEL_HEIGHT: f32 = 180.;
 
-/// Per-project state: definition reference, last-used device and panel layout.
+/// Per-project state: definition reference, last-used connection and panel
+/// layout.
 ///
 /// Passive data, so every field is public. Every section has a default, so a
 /// file that predates a section still reads.
@@ -47,8 +48,8 @@ pub struct ProjectState {
     pub schema_version: u32,
     /// Which definition the tune is interpreted through.
     pub definition: DefinitionRef,
-    /// The device this project last used.
-    pub device: DeviceState,
+    /// The connection this project last used.
+    pub connection: ConnectionState,
     /// The project's panel layout.
     pub ui: UiState,
 }
@@ -58,7 +59,7 @@ impl Default for ProjectState {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             definition: DefinitionRef::default(),
-            device: DeviceState::default(),
+            connection: ConnectionState::default(),
             ui: UiState::default(),
         }
     }
@@ -76,10 +77,10 @@ pub struct DefinitionRef {
     pub signature: String,
 }
 
-/// The device this project last used.
+/// The connection this project last used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct DeviceState {
+pub struct ConnectionState {
     /// Last-used serial port, when one was chosen while this project was open.
     pub last_port: Option<String>,
     /// Baud override paired with that port, when one was set.
@@ -95,17 +96,17 @@ pub struct DeviceState {
 #[serde(default)]
 pub struct UiState {
     /// Navigation sidebar width, in pixels.
-    pub primary_width: f32,
+    pub primary_sidebar_width: f32,
     /// Inspector sidebar width, in pixels.
-    pub secondary_width: f32,
+    pub secondary_sidebar_width: f32,
     /// Bottom panel height, in pixels.
-    pub bottom_height: f32,
+    pub bottom_panel_height: f32,
     /// Whether the navigation sidebar is open.
-    pub primary_visible: bool,
+    pub primary_sidebar_visible: bool,
     /// Whether the inspector sidebar is open.
-    pub secondary_visible: bool,
+    pub secondary_sidebar_visible: bool,
     /// Whether the bottom panel is open.
-    pub bottom_visible: bool,
+    pub bottom_panel_visible: bool,
     /// Whether the table grid draws its Y axis downward.
     pub table_low_at_top: bool,
 }
@@ -113,12 +114,12 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            primary_width: DEFAULT_PRIMARY_WIDTH,
-            secondary_width: DEFAULT_SECONDARY_WIDTH,
-            bottom_height: DEFAULT_BOTTOM_HEIGHT,
-            primary_visible: true,
-            secondary_visible: true,
-            bottom_visible: true,
+            primary_sidebar_width: DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
+            primary_sidebar_visible: true,
+            secondary_sidebar_visible: true,
+            bottom_panel_visible: true,
             table_low_at_top: false,
         }
     }
@@ -235,14 +236,14 @@ mod tests {
             "abc123",
             "speeduino 202501",
         );
-        state.device.last_port = Some("/dev/ttyACM0".to_owned());
-        state.device.baud_override = Some(115_200);
-        state.ui.primary_visible = false;
+        state.connection.last_port = Some("/dev/ttyACM0".to_owned());
+        state.connection.baud_override = Some(115_200);
+        state.ui.primary_sidebar_visible = false;
         state
     }
 
     #[test]
-    fn state_round_trips_with_device_and_layout() {
+    fn state_round_trips_with_connection_and_layout() {
         let root = temp_project("roundtrip");
         let state = populated();
 
@@ -251,6 +252,32 @@ mod tests {
 
         assert_eq!(read, state);
         assert!(!read.definition_matches(b"anything"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The on-disk names are a contract: a reader sees a connection and a
+    /// layout whose fields say which panel they belong to.
+    #[test]
+    fn the_file_names_the_connection_and_the_layout_panels() {
+        let root = temp_project("keys");
+        populated().write(&root).unwrap();
+        let text = fs::read_to_string(root.join(SIDECAR_DIR).join(STATE_FILE)).unwrap();
+
+        for key in [
+            "\"connection\"",
+            "\"last_port\"",
+            "\"primary_sidebar_width\"",
+            "\"secondary_sidebar_width\"",
+            "\"bottom_panel_height\"",
+            "\"primary_sidebar_visible\"",
+            "\"table_low_at_top\"",
+        ] {
+            assert!(text.contains(key), "{key} is written: {text}");
+        }
+        for key in ["\"device\"", "\"primary_width\"", "\"bottom_height\""] {
+            assert!(!text.contains(key), "{key} must not be written: {text}");
+        }
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -312,13 +339,13 @@ mod tests {
         fs::create_dir_all(root.join(SIDECAR_DIR)).unwrap();
         fs::write(
             root.join(SIDECAR_DIR).join(STATE_FILE),
-            r#"{"schema_version": 0, "device": {"last_port": "/dev/ttyACM0"}}"#,
+            r#"{"schema_version": 0, "connection": {"last_port": "/dev/ttyACM0"}}"#,
         )
         .unwrap();
 
         let read = ProjectState::read(&root).unwrap().expect("readable");
         assert_eq!(read.schema_version, STATE_SCHEMA_VERSION);
-        assert_eq!(read.device.last_port.as_deref(), Some("/dev/ttyACM0"));
+        assert_eq!(read.connection.last_port.as_deref(), Some("/dev/ttyACM0"));
 
         fs::remove_dir_all(&root).unwrap();
     }

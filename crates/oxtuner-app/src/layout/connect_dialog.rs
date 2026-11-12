@@ -29,7 +29,8 @@ use gpui_kit::{
     Styled as _, Window, div, px,
 };
 use oxtuner_core::{
-    ConnectionView, DeviceView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict,
+    ConnectionView, FailureCode, LinkMode, PortChoice, PortView, ProjectConnection,
+    SignatureVerdict,
 };
 
 use crate::core::{self, CoreService, TestResult};
@@ -77,10 +78,10 @@ struct DialogModel {
 }
 
 impl DialogModel {
-    fn new(device: DeviceView) -> Self {
+    fn new(connection: ProjectConnection) -> Self {
         Self {
             mode: Mode::Serial,
-            selected_port: device.last_port,
+            selected_port: connection.last_port,
         }
     }
 
@@ -111,19 +112,19 @@ impl DialogModel {
     reason = "the connect dialog builds its mode, port, test and status sections in one place"
 )]
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
-    // The device is per project: each project remembers the ECU it talks to.
-    let device = CoreService::status(cx)
+    // The connection is per project: each project remembers the ECU it talks to.
+    let connection = CoreService::status(cx)
         .project
         .as_ref()
-        .map(|project| project.device.clone())
+        .map(|project| project.connection.clone())
         .unwrap_or_default();
-    let last_port = device.last_port.clone();
+    let last_port = connection.last_port.clone();
     // The pickers own their selection; the dialog reads it each frame.
-    let baud_index = device
+    let baud_index = connection
         .baud_override
         .and_then(|baud| BAUDS.iter().position(|rate| *rate == baud))
         .unwrap_or(2);
-    let model = Rc::new(RefCell::new(DialogModel::new(device)));
+    let model = Rc::new(RefCell::new(DialogModel::new(connection)));
     core::refresh_ports(cx);
 
     let baud_state = cx.new(|cx| {
@@ -183,7 +184,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             let model = model.borrow();
             (model.mode, model.port_choice(&ports, baud))
         };
-        // The remembered device is a hint, never a constraint: when the port is
+        // The remembered connection is a hint, never a constraint: when the port is
         // not on this machine the dialog says so instead of silently picking
         // another ECU's port.
         let port_hint = last_port.as_ref().map(|last| {

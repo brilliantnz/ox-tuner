@@ -75,7 +75,8 @@ pub use project::{
     TUNE_FILE,
 };
 pub use sidecar::{
-    DEFAULT_BOTTOM_HEIGHT, DEFAULT_PRIMARY_WIDTH, DEFAULT_SECONDARY_WIDTH, DefinitionRef,
-    DeviceState, ProjectState, SIDECAR_DIR, STATE_FILE, STATE_SCHEMA_VERSION, UiState,
+    ConnectionState, DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+    DEFAULT_SECONDARY_SIDEBAR_WIDTH, DefinitionRef, ProjectState, SIDECAR_DIR, STATE_FILE,
+    STATE_SCHEMA_VERSION, UiState,
 };
 pub use xml::{Attr, Document, Element, Node, XmlError, XmlErrorKind};

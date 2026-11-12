@@ -859,9 +859,9 @@ struct CommandTxn {
     journal: Journal,
 }
 
-/// A serial device a project should open next time.
+/// A serial connection a project should reopen next time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RememberedDevice {
+struct SavedConnection {
     port: String,
     baud: u32,
 }
@@ -877,9 +877,9 @@ struct EcuConnection {
     link_label: String,
     /// What to remember in the project's state once the handshake succeeds.
     ///
-    /// Only a serial link names a device a later session can reopen; a custom
-    /// link belongs to the application and is never persisted.
-    device: Option<RememberedDevice>,
+    /// Only a serial link names a connection a later session can reopen; a
+    /// custom link belongs to the application and is never persisted.
+    saved_connection: Option<SavedConnection>,
     custom_link: bool,
     definition_signature: String,
     behavior: String,
@@ -965,8 +965,8 @@ impl Live {
                 thread,
                 replies,
                 link_label: link.label(),
-                device: match link {
-                    PortChoice::Serial { port, baud } => Some(RememberedDevice {
+                saved_connection: match link {
+                    PortChoice::Serial { port, baud } => Some(SavedConnection {
                         port: port.clone(),
                         baud: *baud,
                     }),

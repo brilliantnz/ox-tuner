@@ -157,13 +157,13 @@ impl Project {
     /// Returns [`ProjectError::Sidecar`] when the state file cannot be
     /// written. A standalone tune keeps the device in memory only, and a
     /// sidecar from a newer build is left untouched.
-    pub fn set_device(
+    pub fn set_connection(
         &mut self,
         port: Option<String>,
         baud: Option<u32>,
     ) -> Result<(), ProjectError> {
-        self.state.device.last_port = port;
-        self.state.device.baud_override = baud;
+        self.state.connection.last_port = port;
+        self.state.connection.baud_override = baud;
         self.persist_state()
     }
 
