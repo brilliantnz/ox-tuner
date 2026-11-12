@@ -725,8 +725,8 @@ fn split_numbers<'a>(
         }
         // Units must be quoted; an unquoted text token still takes a numeric
         // slot so the dialect's sloppier files keep parsing, but it shifts
-        // every later field and is worth a warning. `Number::parse` already
-        // ran, so this only inspects its result.
+        // every later field and is worth a warning. Parsing once here keeps
+        // that warning from costing a second parse.
         let number = Number::parse(field);
         if matches!(number, Number::Expression { .. }) && !crate::fields::is_expression_field(field)
         {
