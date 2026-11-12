@@ -40,6 +40,16 @@ pub struct CreateRequest {
     pub expected_signature: Option<String>,
 }
 
+impl CreateRequest {
+    /// The folder the project would occupy.
+    ///
+    /// The name is trimmed the way creation trims it, so a log line and the
+    /// folder that creation writes name the same path.
+    pub fn root(&self) -> PathBuf {
+        self.parent.join(self.name.trim())
+    }
+}
+
 impl Project {
     /// Creates a project folder and opens it.
     ///
@@ -60,7 +70,7 @@ impl Project {
     /// file cannot be written. A failure removes what creation wrote.
     pub fn create(request: &CreateRequest) -> Result<Self, ProjectError> {
         let name = validate_name(&request.name)?;
-        let root = request.parent.join(&name);
+        let root = request.root();
         ensure_target_empty(&root)?;
 
         let root_existed = root.exists();
@@ -80,9 +90,14 @@ impl Project {
     }
 
     /// Writes the scaffold, then opens it through the normal open path so a
-    /// created project is exactly an opened one. The state file is written
-    /// last, once the project provably opens: no failure past that point is
-    /// possible, so rollback never meets a half-built folder.
+    /// created project is exactly an opened one.
+    ///
+    /// Everything is validated and built in memory first — the definition
+    /// parses, the include and signature gates pass, the tune serializes — and
+    /// only then is anything written. A refusal therefore touches no disk, and
+    /// rollback only has to cover I/O failures. The state file is written last,
+    /// once the project provably opens: no failure past that point is possible,
+    /// so rollback never meets a half-built folder.
     fn scaffold(
         root: &Path,
         name: &str,
@@ -90,10 +105,7 @@ impl Project {
         written: &mut Vec<PathBuf>,
     ) -> Result<Self, ProjectError> {
         let config = root.join(CONFIG_DIR);
-        create_tracked(written, config.clone())?;
-
         let definition_path = config.join(MAIN_DEFINITION);
-        write_tracked(written, definition_path, &request.ini_bytes)?;
 
         let text = oxtuner_ini::source::decode(&request.ini_bytes).text;
         let settings = SettingsContext::new();
@@ -129,13 +141,24 @@ impl Project {
                 source,
             }
         })?;
-        let bytes = document.save()?;
-        write_tracked(written, root.join(TUNE_FILE), &bytes)?;
+        let tune_bytes = document.save()?;
 
-        let properties = format!(
-            "# Created by OxTuner.\nprojectName={name}\nsignature={}\n",
-            definition.signature
-        );
+        // Nothing below is a validation step: from here on, a failure means the
+        // disk refused a write and rollback removes what was written.
+        create_tracked(written, config.clone())?;
+        write_tracked(written, definition_path, &request.ini_bytes)?;
+        write_tracked(written, root.join(TUNE_FILE), &tune_bytes)?;
+
+        // The signature is trimmed: a definition can carry a trailing NUL,
+        // which a Java-properties file must not hold (a reader would see it as
+        // part of the value and report the project as corrupt).
+        let signature = definition.signature.trim();
+        let mut properties = format!("# Created by OxTuner.\nprojectName={name}\n");
+        if !signature.is_empty() {
+            properties.push_str("signature=");
+            properties.push_str(signature);
+            properties.push('\n');
+        }
         write_tracked(written, config.join(PROPERTIES_FILE), properties.as_bytes())?;
 
         for dir in SCAFFOLD_DIRS {

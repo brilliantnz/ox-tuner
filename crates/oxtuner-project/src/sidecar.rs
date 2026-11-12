@@ -161,7 +161,7 @@ impl ProjectState {
             Err(error) => return Err(error),
         };
 
-        let state: Self = serde_json::from_str(&text).map_err(|error| {
+        let mut state: Self = serde_json::from_str(&text).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("the project state is malformed: {error}"),
@@ -177,6 +177,9 @@ impl ProjectState {
                 ),
             ));
         }
+        // An older file is read as it stands and stamped with the current
+        // version, so the next write cannot keep a stale number alive.
+        state.schema_version = STATE_SCHEMA_VERSION;
 
         Ok(Some(state))
     }
@@ -299,6 +302,23 @@ mod tests {
 
         let error = ProjectState::read(&root).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_older_schema_reads_and_is_stamped_with_the_current_version() {
+        let root = temp_project("older-schema");
+        fs::create_dir_all(root.join(SIDECAR_DIR)).unwrap();
+        fs::write(
+            root.join(SIDECAR_DIR).join(STATE_FILE),
+            r#"{"schema_version": 0, "device": {"last_port": "/dev/ttyACM0"}}"#,
+        )
+        .unwrap();
+
+        let read = ProjectState::read(&root).unwrap().expect("readable");
+        assert_eq!(read.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(read.device.last_port.as_deref(), Some("/dev/ttyACM0"));
 
         fs::remove_dir_all(&root).unwrap();
     }

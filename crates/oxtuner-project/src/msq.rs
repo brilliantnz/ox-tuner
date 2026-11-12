@@ -225,8 +225,13 @@ impl Msq {
     /// flags. Variables the definition marks `noMsqSave` are left out, the
     /// same rule the save path applies.
     ///
-    /// This is crate-private: project creation is the only caller, and the
-    /// error is the file-value error the save path already reports.
+    /// A variable whose value cannot be written from a tune with only defaults
+    /// is left out as well, exactly once, and the open that follows reports it
+    /// as a missing value. Speeduino's `iacCLminValue` is the known case: its
+    /// `scale` is an expression over other values, and a tune with only
+    /// defaults has nothing to resolve it from.
+    ///
+    /// This is crate-private: project creation is the only caller.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
@@ -246,7 +251,9 @@ impl Msq {
             if values.is_empty() {
                 continue;
             }
-            let text = load::format_values(spec, definition, values)?;
+            let Ok(text) = load::format_values(spec, definition, values) else {
+                continue;
+            };
 
             let tag = match spec.ini_page() {
                 Some(_) => EntryKind::Constant,

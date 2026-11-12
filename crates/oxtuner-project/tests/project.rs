@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
-use oxtuner_project::{CreateRequest, IssueKind, Project, ProjectError, ProjectState, TUNE_FILE};
+use oxtuner_project::{
+    CreateRequest, IssueKind, Project, ProjectError, ProjectState, TUNE_FILE, UiState,
+};
 
 const MAIN_DEFINITION: &str = r#"
 [MegaTune]
@@ -1272,4 +1274,79 @@ page = 1
         "{error}"
     );
     assert!(!sandbox.path().join("Includes").exists());
+}
+
+#[test]
+fn the_ui_section_is_per_project_and_survives_a_reopen() {
+    let dir = project_dir("ui-state");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(project.state().ui.primary_visible);
+
+    let ui = UiState {
+        primary_width: 300.0,
+        secondary_width: 200.0,
+        bottom_height: 260.0,
+        primary_visible: false,
+        secondary_visible: true,
+        bottom_visible: false,
+        table_low_at_top: true,
+    };
+    project.set_ui(ui.clone()).expect("the layout persists");
+    drop(project);
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert_eq!(reopened.state().ui, ui);
+}
+
+/// Creating a project from the real Speeduino definition runs only on the
+/// owner's machine.
+///
+/// Set `OXTUNER_REFERENCE_DEFINITION` to the definition file and run
+/// `cargo test -p oxtuner-project -- --ignored`. The definition is read, never
+/// written, and the project goes to a temporary directory.
+#[test]
+#[ignore = "needs a local definition file (OXTUNER_REFERENCE_DEFINITION)"]
+fn a_project_created_from_the_reference_definition_opens_clean() {
+    let Ok(source) = std::env::var("OXTUNER_REFERENCE_DEFINITION") else {
+        return;
+    };
+    let bytes = fs::read(source).expect("the reference definition is readable");
+
+    let sandbox = TempDir::new("create-reference");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Reference".to_owned(),
+        ini_bytes: bytes,
+        expected_signature: None,
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    assert!(
+        !project.definition().pages.is_empty(),
+        "the definition declares at least one page"
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| !issue.message.contains("presentation attribute")),
+        "every presentation attribute must resolve on a scaffolded tune: {:?}",
+        project.report().warnings
+    );
+
+    let tune = fs::read(project.tune_path()).expect("the scaffolded tune is readable");
+    drop(project);
+
+    let root = sandbox.path().join("Reference");
+    let mut reopened = Project::open(&root).expect("the created project reopens");
+    assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+    let outcome = reopened.save().expect("an unedited scaffold saves");
+    assert_eq!(outcome.cells, 0);
+    assert_eq!(
+        fs::read(reopened.tune_path()).expect("the tune is readable"),
+        tune,
+        "opening and saving a scaffold must not rewrite it"
+    );
 }
