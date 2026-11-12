@@ -99,8 +99,8 @@ impl Frame {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameError::TooLarge`] when the payload exceeds
-    /// [`MAX_PAYLOAD`].
+    /// Returns [`FrameError::TooLarge`] when the payload exceeds the cap this
+    /// build accepts.
     pub fn encode(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
         if payload.len() > MAX_PAYLOAD {
             return Err(FrameError::TooLarge {
@@ -201,6 +201,7 @@ impl FrameDecoder {
         // fed in pieces anyway, and this keeps a single huge slice from being
         // copied into the buffer before the first length check.
         if bytes.len() > MAX_PAYLOAD + 6 {
+            self.buffer.clear();
             return Err(FrameError::TooLarge {
                 declared: bytes.len(),
                 limit: MAX_PAYLOAD + 6,
@@ -295,6 +296,24 @@ mod tests {
         let frames = decoder.push(&encoded).expect("the next frame parses");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].payload, b"ok");
+    }
+
+    #[test]
+    fn an_oversized_push_drops_a_partial_frame() {
+        let encoded = Frame::encode(b"hello").expect("encodes");
+        let mut decoder = FrameDecoder::new();
+        let first = decoder.push(&encoded[..4]).expect("no frame yet");
+        assert!(first.is_empty());
+        assert_eq!(decoder.pending(), 4);
+
+        let error = decoder
+            .push(&vec![0u8; MAX_PAYLOAD + 7])
+            .expect_err("too many bytes for one frame");
+
+        assert!(matches!(error, FrameError::TooLarge { .. }));
+        assert_eq!(decoder.pending(), 0, "the wedged bytes are dropped");
+        let frames = decoder.push(&encoded).expect("the next frame parses");
+        assert_eq!(frames.len(), 1);
     }
 
     #[test]
