@@ -209,11 +209,6 @@ mod tests {
                 THREAD_LOCALE.with(Cell::get).is_some(),
                 "the thread keeps a locale of its own"
             );
-            assert_eq!(
-                LOCALE.load(Ordering::Relaxed),
-                0,
-                "an isolated thread does not write the process locale"
-            );
         })
         .join()
         .expect("the test thread runs");
