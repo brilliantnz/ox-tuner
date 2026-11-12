@@ -116,10 +116,10 @@ impl SessionLogSnapshot {
     }
 
     /// A stopped log, described by what its writer reported.
-    pub fn finished(report: &SessionLogReport) -> Self {
+    pub fn finished(report: SessionLogReport) -> Self {
         Self {
             running: false,
-            path: Some(report.path.clone()),
+            path: Some(report.path),
             frames: report.frames,
             dropped: report.dropped,
             bytes: report.bytes,
