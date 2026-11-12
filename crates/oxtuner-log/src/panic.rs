@@ -52,9 +52,27 @@ fn record(info: &PanicHookInfo<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+    /// Puts the hook from before the test back, even when the test panics.
+    struct HookRestore(Option<Hook>);
+
+    impl Drop for HookRestore {
+        fn drop(&mut self) {
+            if let Some(hook) = self.0.take() {
+                set_hook(hook);
+            }
+        }
+    }
 
     #[test]
     fn a_panic_is_recorded_in_the_ring_before_the_previous_hook_runs() {
@@ -64,17 +82,24 @@ mod tests {
             .with(filter)
             .with(crate::store::StoreLayer::new(store.clone()));
 
-        // Quiet the inherited hook so the test output keeps only failures.
-        let original = take_hook();
-        set_hook(Box::new(|_| {}));
+        // Quiet the inherited hook for this test only, and restore it
+        // unconditionally when the guard drops.
+        let _restore = HookRestore(Some(take_hook()));
+
+        let previous_ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&previous_ran);
+        set_hook(Box::new(move |_| flag.store(true, Ordering::Relaxed)));
         install();
 
         let panicked = tracing::subscriber::with_default(subscriber, || {
             catch_unwind(|| panic!("hook test")).is_err()
         });
-        set_hook(original);
 
         assert!(panicked);
+        assert!(
+            previous_ran.load(Ordering::Relaxed),
+            "the hook that was installed before this one still ran"
+        );
         let snapshot = store.snapshot();
         let record = snapshot
             .records
