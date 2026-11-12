@@ -334,15 +334,19 @@ impl TuneImages {
             let Some(spec) = self.layout.variable(name) else {
                 continue;
             };
+            let mut failed = false;
 
             if matches!(spec.shape, EntryShape::Text { .. }) {
                 let saved = self.baseline.text(name).ok().map(str::to_owned);
                 let current = self.working.text(name).ok().map(str::to_owned);
                 if let (Some(saved), Some(current)) = (saved, current)
                     && saved != current
-                    && self.working.set_text(name, &saved).is_ok()
                 {
-                    reverted += 1;
+                    if self.working.set_text(name, &saved).is_ok() {
+                        reverted += 1;
+                    } else {
+                        failed = true;
+                    }
                 }
             } else {
                 let count = spec
@@ -363,6 +367,7 @@ impl TuneImages {
                     }
 
                     if self.working.set_raw_at(name, index, saved).is_err() {
+                        failed = true;
                         continue;
                     }
 
@@ -372,8 +377,10 @@ impl TuneImages {
 
             // A conflict mark asks the reader to review a cell. The values are
             // at the file baseline now, so the mark belongs to the discard
-            // too, the way a whole-tune revert drops every conflict.
-            if let Some(variable) = self.layout.index(name) {
+            // too, the way a whole-tune revert drops every conflict. A failed
+            // write leaves the mark in place: it would otherwise point at a
+            // value that did not move.
+            if !failed && let Some(variable) = self.layout.index(name) {
                 self.overlays.retain(|key, overlay| {
                     key.variable != variable || *overlay != Overlay::Conflict
                 });
