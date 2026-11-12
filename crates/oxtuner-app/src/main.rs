@@ -91,6 +91,10 @@ fn main() {
         // restart, and System follows the OS from here on.
         theme::register(&paths, cx);
 
+        // One discovery for the process; every command reads this instance
+        // instead of asking the platform again.
+        AppPaths::install(cx, paths);
+
         // The headless core: one thread that owns the open project (definition
         // and tune) and the ECU session. Started before the first window so a
         // view can never render core state that has nowhere to come from.

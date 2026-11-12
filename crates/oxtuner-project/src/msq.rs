@@ -1,16 +1,17 @@
 //! The `.msq` document model over the raw-preserving XML tree.
 //!
-//! A `.msq` is thin XML: a `<versionInfo>` header, one leading **unnumbered**
-//! `<page>` that holds the PC variables (or the same page written
-//! `number="-1"`), then one `<page number="N">` per calibration page (0-based),
-//! and a `<settings>` snapshot. Values are user units keyed by name; there are
-//! no offsets in the file.
+//! A `.msq` is thin XML: a `<versionInfo>` header, one `<page>` that holds the
+//! PC variables (unnumbered, or written `number="-1"`), one `<page number="N">`
+//! per calibration page (0-based), and a `<settings>` snapshot. The PC page's
+//! position varies. The reference project writes it last with `number="-1"`,
+//! while other writers put an unnumbered one first. Values are user units keyed
+//! by name; there are no offsets in the file.
 //!
 //! Two rules make the file layer trustworthy:
 //!
 //! - **Pages are addressed by their `number` attribute, never by document
-//!   order.** The leading PC page breaks any "the Nth `<page>` is page N"
-//!   assumption (P10 finding 3).
+//!   order.** The PC page's variable position breaks any "the Nth `<page>` is
+//!   page N" assumption (P10 finding 3).
 //! - **The document is kept, not rebuilt.** This type exposes values and the
 //!   one text mutation the save path needs; everything else — unknown
 //!   attributes, comments, the `<bibliography>`, elements from a newer
@@ -33,7 +34,7 @@ use crate::xml::{Document, Element, Node, XmlError};
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EntryPage {
-    /// The leading page without a `number` attribute (PC variables).
+    /// The PC-variable page: unnumbered, or written `number="-1"`.
     Pc,
     /// A numbered calibration page, 0-based as written in the file.
     Numbered(MsqPage),
@@ -50,10 +51,10 @@ impl fmt::Display for EntryPage {
 
 /// The address a `<page>` element declares.
 ///
-/// `TunerStudio` writes the leading page unnumbered; another writer may spell
-/// the same page `number="-1"`. A negative number is therefore the PC page
-/// rather than a calibration page. A number that is not an integer
-/// at all is left to the consistency check, which blocks it by name.
+/// Some writers leave the page unnumbered; others spell it `number="-1"`,
+/// which is how the reference project records it. A negative number is
+/// therefore the PC page rather than a calibration page. A number that is not
+/// an integer at all is left to the consistency check, which blocks it by name.
 fn page_address(element: &Element) -> Option<EntryPage> {
     match element.attr("number") {
         Some(number) => match number.trim().parse::<i64>() {
@@ -296,8 +297,8 @@ impl Msq {
     /// Number of PC-variable pages (normally exactly one).
     ///
     /// A page is the PC page when it has no `number` attribute or a negative
-    /// one: `TunerStudio` writes the leading unnumbered page, and
-    /// `number="-1"` spells the same thing.
+    /// one: an unnumbered page and `number="-1"` name the same thing, wherever
+    /// the writer placed it.
     pub fn pc_page_count(&self) -> usize {
         self.page_elements()
             .filter(|element| page_address(element) == Some(EntryPage::Pc))
@@ -556,6 +557,11 @@ impl Msq {
     /// tune opened with the default, the user may edit it, and saving must
     /// write that edit instead of pretending it does not exist. The new
     /// element carries only `name`; `TunerStudio` reads the rest from the INI.
+    ///
+    /// A page element the document lacks stays an error. Page order and
+    /// attributes belong to the writer, and a synthesized `<page>` could
+    /// disagree with the file's own layout, so the caller gets a clean
+    /// [`MsqError::EntryNotFound`] instead of a guessed page.
     ///
     /// # Errors
     ///

@@ -53,6 +53,7 @@ impl fmt::Display for CellState {
 }
 
 /// Aggregate state of one page.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageState {
     /// Page number as written in the INI.
@@ -66,6 +67,7 @@ pub struct PageState {
 }
 
 /// A status bar's worth of information.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuneStatus {
     /// Overall state.
@@ -188,7 +190,6 @@ impl StateTable {
         }
     }
 
-    /// The state of one cell.
     /// Derived state of one cell.
     ///
     /// # Errors

@@ -93,6 +93,7 @@ pub enum TableEvent {
 }
 
 /// A realtime operating point, for the overlay slot.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RealtimePoint {
     /// Definition row.

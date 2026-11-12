@@ -37,6 +37,7 @@ use crate::{EntryShape, IniPage, Tune, TuneError, TuneLayout, VariableSpec};
 const MAX_PAGE_BYTES: usize = 65_536;
 
 /// What one page decode did.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeReport {
     /// Variables whose values were taken from the page.
@@ -302,7 +303,7 @@ pub fn patch_page(
     page: IniPage,
     base: &[u8],
     tune: &Tune,
-    variables: &[String],
+    variables: &[impl AsRef<str>],
 ) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
@@ -319,7 +320,7 @@ pub fn patch_page(
     let mut bytes = base[..size].to_vec();
     let changed: std::collections::HashSet<String> = variables
         .iter()
-        .map(|name| name.to_ascii_lowercase())
+        .map(|name| name.as_ref().to_ascii_lowercase())
         .collect();
 
     // Apply changed scalars, arrays and text first, then merge changed bits

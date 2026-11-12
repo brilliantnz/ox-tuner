@@ -326,14 +326,19 @@ impl TuneImages {
     /// Returns how many values moved; a text variable counts as one. A variable
     /// the layout does not know, or one whose images disagree about its shape,
     /// is skipped — there is nothing safe to copy for it.
+    ///
+    /// Each move goes through the normal setter, so the edit log records the
+    /// discard's timestamp, not the original edit's. That is deliberate: the
+    /// log answers when a value last changed, and a revert did change it.
     #[expect(
         clippy::float_cmp,
         reason = "a cell is skipped only when its stored raw value is identical"
     )]
-    pub fn revert_variables(&mut self, names: &[String]) -> usize {
+    pub fn revert_variables(&mut self, names: &[impl AsRef<str>]) -> usize {
         let mut reverted = 0;
 
         for name in names {
+            let name = name.as_ref();
             let Some(spec) = self.layout.variable(name) else {
                 continue;
             };

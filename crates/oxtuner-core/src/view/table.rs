@@ -23,7 +23,7 @@ impl TableView {
         let definition = project.definition();
         if let Some(table) = definition
             .tables
-            .get_ci(name)
+            .get_ignore_case(name)
             .or_else(|| {
                 definition.tables.values().find(|table| {
                     table
@@ -44,7 +44,7 @@ impl TableView {
             return Self::from_table(project, table);
         }
 
-        if let Some(curve) = definition.curves.get_ci(name) {
+        if let Some(curve) = definition.curves.get_ignore_case(name) {
             return Self::from_curve(project, curve);
         }
 
@@ -61,7 +61,7 @@ impl TableView {
 
         // A menu's `VE Table` is a dialog whose panel holds the map; opening it
         // by the dialog name must still reach the grid inside.
-        if let Some(dialog) = definition.dialogs.get_ci(name)
+        if let Some(dialog) = definition.dialogs.get_ignore_case(name)
             && let Some(embedded) =
                 crate::menu::embedded_target(&dialog.name, definition, &mut HashSet::new())
         {
@@ -78,7 +78,7 @@ impl TableView {
         axis: AxisKind,
     ) -> Result<String, String> {
         let definition = project.definition();
-        if let Some(table) = definition.tables.get_ci(name).or_else(|| {
+        if let Some(table) = definition.tables.get_ignore_case(name).or_else(|| {
             definition.tables.values().find(|table| {
                 table
                     .map_id
@@ -95,7 +95,7 @@ impl TableView {
                 .ok_or_else(|| format!("table `{}` has no {} axis bins", table.id, axis.as_str()));
         }
 
-        if let Some(curve) = definition.curves.get_ci(name) {
+        if let Some(curve) = definition.curves.get_ignore_case(name) {
             return match axis {
                 AxisKind::X => curve.x_bins.as_ref().map(|bins| bins.array.clone()),
                 AxisKind::Y => curve.y_bins.first().map(|bins| bins.array.clone()),

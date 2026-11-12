@@ -705,8 +705,8 @@ impl ChartState {
     }
 
     /// The series the chart would draw now, in legend order.
-    pub fn series(&self, cx: &App) -> Vec<ChartSeries> {
-        self.resolve_series(cx)
+    pub fn series(&self) -> Vec<ChartSeries> {
+        self.resolve_series()
     }
 
     /// A compact status line for a host toolbar or a test.
@@ -758,7 +758,7 @@ impl ChartState {
         ids
     }
 
-    fn resolve_series(&self, _cx: &App) -> Vec<ChartSeries> {
+    fn resolve_series(&self) -> Vec<ChartSeries> {
         let channels = self.history.channels();
         self.selected_ids_in(&channels)
             .into_iter()
@@ -932,7 +932,7 @@ impl ChartState {
             .gap_2()
             .items_center()
             .flex_wrap()
-            .children(series.iter().enumerate().map(|(index, series)| {
+            .children(series.iter().map(|series| {
                 let id = series.id.clone();
                 let color = series.color;
                 let visible = series.visible;
@@ -952,7 +952,7 @@ impl ChartState {
                 };
                 div()
                     .id(ElementId::Name(
-                        format!("chart-legend-{index}-{}", series.id).into(),
+                        format!("chart-legend-{}", series.id).into(),
                     ))
                     .flex()
                     .items_center()
@@ -1550,7 +1550,7 @@ impl Render for ChartState {
         reason = "the chart composes legend, controls, body and focus in one retained render"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let series = self.resolve_series(cx);
+        let series = self.resolve_series();
         let window_range = self.window();
         let legend = self.render_legend(&series, cx);
         let controls = self.render_controls(cx);

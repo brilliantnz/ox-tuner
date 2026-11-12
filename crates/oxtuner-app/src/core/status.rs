@@ -177,10 +177,10 @@ impl CoreStatus {
 
     /// Clears the pending open if `op` is its answer.
     ///
-    /// Returns whether the loading state ended, so the caller knows a repaint
-    /// is needed. An answer to an older request is ignored.
-    pub(crate) fn finish_pending_project(&mut self, op: Option<OpId>) -> bool {
-        self.finish_pending_project_at(op.map(OpId::get))
+    /// The caller repaints on every answer, so the result is not returned.
+    /// [`Self::finish_pending_project_at`] keeps it for the tests.
+    pub(crate) fn finish_pending_project(&mut self, op: Option<OpId>) {
+        self.finish_pending_project_at(op.map(OpId::get));
     }
 
     fn finish_pending_project_at(&mut self, op: Option<u64>) -> bool {
@@ -201,6 +201,25 @@ impl CoreStatus {
     /// Clears the pending open after a command that never reached the core.
     pub(crate) fn cancel_pending_project(&mut self) {
         self.pending_project = None;
+    }
+
+    /// Clears the pending open when its answer never arrived.
+    ///
+    /// Returns whether this call cleared the state. Only the request with the
+    /// same op expires, so a newer open keeps its splash.
+    pub(crate) fn expire_pending_project(&mut self, op: OpId) -> bool {
+        self.expire_pending_project_at(op.get())
+    }
+
+    fn expire_pending_project_at(&mut self, op: u64) -> bool {
+        let waiting = self
+            .pending_project
+            .as_ref()
+            .is_some_and(|pending| pending.op == Some(op));
+        if waiting {
+            self.pending_project = None;
+        }
+        waiting
     }
 }
 pub(super) enum Update {

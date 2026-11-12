@@ -214,7 +214,7 @@ impl Visit for FieldVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Profile;
+    use crate::config::{Profile, Verbosity};
     use tracing_subscriber::layer::SubscriberExt as _;
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn the_layer_captures_the_message_fields_and_op() {
         let store = LogStore::new(10);
-        let filter = crate::filter::default_filter(Profile::Debug, false);
+        let filter = crate::filter::default_filter(Profile::Debug, Verbosity::Normal);
         let subscriber = tracing_subscriber::registry()
             .with(filter)
             .with(StoreLayer::new(store.clone()));
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn the_default_filter_keeps_dependency_records_out_of_the_ring() {
         let store = LogStore::new(10);
-        let filter = crate::filter::default_filter(Profile::Debug, false);
+        let filter = crate::filter::default_filter(Profile::Debug, Verbosity::Normal);
         let subscriber = tracing_subscriber::registry()
             .with(filter)
             .with(StoreLayer::new(store.clone()));

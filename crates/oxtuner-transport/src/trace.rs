@@ -250,6 +250,14 @@ impl Trace {
         &self.frames
     }
 
+    /// Consumes the trace, returning its frames.
+    ///
+    /// A replay takes ownership this way so each frame can move into the
+    /// pending buffer instead of being cloned on every read.
+    pub fn into_frames(self) -> Vec<TraceFrame> {
+        self.frames
+    }
+
     /// The header lines, including the format marker.
     pub fn headers(&self) -> &[String] {
         &self.headers

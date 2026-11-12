@@ -43,6 +43,31 @@ pub enum FilePolicy {
     Off,
 }
 
+/// How much the workspace logs.
+///
+/// `Normal` is the profile default; `Verbose` raises the workspace to debug.
+/// An enum rather than a `bool` so a third mode (for example a trace level)
+/// does not change every signature.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "normal and verbose are the whole contract until a third mode exists"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verbosity {
+    /// The level the profile chooses.
+    #[default]
+    Normal,
+    /// Debug level for the workspace, normally from the persisted setting.
+    Verbose,
+}
+
+impl Verbosity {
+    /// Whether this is the verbose level.
+    pub const fn is_verbose(self) -> bool {
+        matches!(self, Self::Verbose)
+    }
+}
+
 /// Configuration for the process-wide logging pipeline.
 ///
 /// Build it with [`LogConfig::new`] and the builder methods. The directory is
@@ -53,7 +78,7 @@ pub struct LogConfig {
     directory: PathBuf,
     profile: Profile,
     file: FilePolicy,
-    verbose: bool,
+    verbosity: Verbosity,
     ring_capacity: usize,
 }
 
@@ -64,7 +89,7 @@ impl LogConfig {
             directory: directory.into(),
             profile: Profile::current(),
             file: FilePolicy::Auto,
-            verbose: false,
+            verbosity: Verbosity::Normal,
             ring_capacity: 5_000,
         }
     }
@@ -84,10 +109,10 @@ impl LogConfig {
         self
     }
 
-    /// Starts with the verbose level, normally from the persisted setting.
+    /// Starts at the given verbosity, normally from the persisted setting.
     #[must_use]
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
+    pub fn with_verbosity(mut self, verbosity: Verbosity) -> Self {
+        self.verbosity = verbosity;
         self
     }
 
@@ -117,8 +142,8 @@ impl LogConfig {
         }
     }
 
-    pub(crate) fn verbose(&self) -> bool {
-        self.verbose
+    pub(crate) fn verbosity(&self) -> Verbosity {
+        self.verbosity
     }
 
     pub(crate) fn ring_capacity(&self) -> usize {

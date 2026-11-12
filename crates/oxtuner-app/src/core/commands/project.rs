@@ -1,6 +1,7 @@
 //! Definition and project lifecycle commands.
 
 use std::path::Path;
+use std::time::Duration;
 
 use gpui_kit::{App, PathPromptOptions};
 use oxtuner_core::FailureCode;
@@ -8,6 +9,12 @@ use rust_i18n::t;
 
 use super::{handle_or_report, report_failure, send};
 use crate::core::CoreService;
+
+/// How long the opening splash waits for the core's answer.
+///
+/// A real open parses a definition, so this is generous. The point is that an
+/// answer lost by the event stream cannot leave the splash up forever.
+const PROJECT_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Asks the core to open a project folder.
 ///
@@ -30,6 +37,26 @@ pub(crate) fn open_project(path: &Path, cx: &mut App) {
             cx.global_mut::<CoreService>()
                 .status
                 .pending_project_sent(op);
+
+            let pending_path = path.to_path_buf();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(PROJECT_OPEN_TIMEOUT).await;
+                let expired = cx.update(|cx| {
+                    cx.global_mut::<CoreService>()
+                        .status
+                        .expire_pending_project(op)
+                });
+                if expired {
+                    tracing::warn!(
+                        %op,
+                        path = %pending_path.display(),
+                        "the project open did not answer; the opening state was cleared"
+                    );
+                    cx.update(crate::app::window::notify_main);
+                }
+            })
+            .detach();
+
             cx.refresh_windows();
         }
         Err(error) => {

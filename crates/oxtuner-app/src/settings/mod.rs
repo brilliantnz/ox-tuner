@@ -10,6 +10,11 @@
 //! component would draw its own gradient strip and lead padding, and this app
 //! already owns its window chrome.
 //!
+//! Platform note: on Linux a client-side title bar needs
+//! `window_decorations: Some(WindowDecorations::Client)`, or the compositor
+//! draws a second, server-side caption above it. Windows and macOS ignore the
+//! option.
+//!
 //! Only settings that work today appear here. The theme is read from and
 //! written to `settings.json`, so the choice survives a restart, further
 //! sections arrive with the features they configure.
@@ -81,11 +86,6 @@ pub(crate) fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(720.), px(640.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        // titlebar: Some(titlebar_options(t!("app.settings.window_title"))),
-        // app_owns_titlebar_drag: true,
-        // Linux only: without this the compositor adds a second, server-side
-        // caption above our own. Windows and macOS ignore it.
-        // window_decorations: Some(WindowDecorations::Client),
         kind: WindowKind::Floating,
         is_resizable: true,
         window_min_size: Some(size(px(620.), px(460.))),

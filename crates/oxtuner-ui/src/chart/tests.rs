@@ -105,7 +105,7 @@ fn open(
 fn the_default_selection_is_the_five_live_channels(cx: &mut TestAppContext) {
     let (_handle, chart, _events) = open(cx, history());
 
-    let series = cx.update(|cx| chart.read(cx).series(cx));
+    let series = cx.update(|cx| chart.read(cx).series());
     let ids: Vec<&str> = series.iter().map(|series| series.id.as_str()).collect();
 
     assert_eq!(ids, ["RPM", "MAP", "CLT", "TPS", "AFR"]);
@@ -139,7 +139,7 @@ fn the_default_selection_does_not_take_both_spellings_of_one_sensor(cx: &mut Tes
     );
     let (_handle, chart, _events) = open(cx, history);
 
-    let series = cx.update(|cx| chart.read(cx).series(cx));
+    let series = cx.update(|cx| chart.read(cx).series());
     let ids: Vec<&str> = series.iter().map(|series| series.id.as_str()).collect();
 
     assert_eq!(ids, ["rpm", "map", "coolant", "tps", "afr"]);
@@ -342,7 +342,7 @@ fn the_series_list_follows_a_definition_reload(cx: &mut TestAppContext) {
         chart.update(cx, |chart, cx| chart.set_history(next, cx));
     });
 
-    let series = cx.update(|cx| chart.read(cx).series(cx));
+    let series = cx.update(|cx| chart.read(cx).series());
     let ids: Vec<&str> = series.iter().map(|series| series.id.as_str()).collect();
     assert_eq!(ids, ["rpm", "tps"]);
 }

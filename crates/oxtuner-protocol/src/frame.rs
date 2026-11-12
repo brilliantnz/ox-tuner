@@ -193,6 +193,13 @@ impl FrameDecoder {
     /// caller that keeps feeding a wedged buffer would otherwise re-hit the
     /// same bad bytes forever; after a reset, the next `push` starts clean.
     ///
+    /// One call accepts at most one maximum-sized frame: the whole slice must
+    /// fit [`MAX_PAYLOAD`] plus a header and CRC. A caller draining a stream
+    /// therefore feeds one frame per call, and may split that frame across
+    /// calls freely because the length header drives reassembly. The protocol
+    /// itself reads each reply a header at a time and never uses this decoder,
+    /// so this is the contract for replay and test streams.
+    ///
     /// # Errors
     ///
     /// Returns a [`FrameError`] when the bytes contain an invalid frame.

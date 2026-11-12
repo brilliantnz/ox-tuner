@@ -126,9 +126,9 @@ const SIGNATURE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// How long the line must be quiet to end an unframed text reply.
 ///
-/// 50 ms is far longer than the gap between bytes at 115200 baud (0.09 ms) and
-/// far shorter than a user would notice.
-const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
+/// The transport owns the value; the signature reply and controller commands
+/// share the same quiet window.
+const SIGNATURE_QUIET: Duration = oxtuner_transport::READ_UNTIL_QUIET;
 
 /// How long a controller command waits for its first reply byte.
 ///
@@ -137,7 +137,7 @@ const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
 const COMMAND_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long a controller command's reply may be quiet before it ends.
-const COMMAND_REPLY_QUIET: Duration = Duration::from_millis(50);
+const COMMAND_REPLY_QUIET: Duration = oxtuner_transport::READ_UNTIL_QUIET;
 
 /// The most bytes one controller command's reply is drained into.
 const COMMAND_REPLY_MAX: usize = 1024;
@@ -234,7 +234,7 @@ impl MsProtocol {
             }
         }
 
-        let pages = build_pages(definition, behavior, &variables);
+        let pages = build_pages(definition, behavior, &variables)?;
         // Burning a page before it may be left is not something this build can
         // do inside a read or write conversation, so say so before a port is
         // opened instead of failing on the first page switch.
@@ -265,7 +265,10 @@ impl MsProtocol {
                 .blocking_factor
                 .and_then(|factor| usize::try_from(factor).ok())
                 .filter(|factor| *factor > 0)
-                .unwrap_or(FALLBACK_BLOCKING_FACTOR),
+                .unwrap_or(FALLBACK_BLOCKING_FACTOR)
+                // A chunk must fit the 16-bit count field, so an oversized
+                // definition is clamped instead of failing every read.
+                .min(usize::from(u16::MAX)),
             inter_write_delay: definition
                 .comms
                 .inter_write_delay_ms
@@ -388,16 +391,15 @@ impl MsProtocol {
         while offset < size {
             let chunk = self.blocking_factor.min(size - offset);
             let count = u16::try_from(chunk).map_err(|_| {
-                ProtocolError::Unsupported(format!("page {page} is larger than one conversation"))
+                ProtocolError::Unsupported(format!(
+                    "page {page} needs a chunk larger than the 16-bit count field"
+                ))
             })?;
-            let part = self.read_page(
-                io,
-                page,
-                u16::try_from(offset).map_err(|_| {
-                    ProtocolError::Unsupported(format!("page {page} is larger than 64 KiB"))
-                })?,
-                count,
-            )?;
+            let start = u16::try_from(offset).map_err(|_| {
+                ProtocolError::Unsupported(format!("page {page} is larger than 64 KiB"))
+            })?;
+            let part = self.read_page(io, page, start, count)?;
+
             bytes.extend_from_slice(&part);
             offset += chunk;
         }
@@ -453,7 +455,7 @@ impl MsProtocol {
                 reply.to_vec()
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request, "page CRC")?;
+                let payload = self.converse(io, &request)?;
                 self.data_payload(&payload, 4, "page CRC")?.to_vec()
             }
         };
@@ -530,7 +532,7 @@ impl MsProtocol {
                         io.read_exact_timeout(&mut byte, self.block_read_timeout)?;
                     }
                     LinkMode::Envelope => {
-                        let payload = self.converse(io, &request, "page select")?;
+                        let payload = self.converse(io, &request)?;
                         self.data_payload(&payload, 1, "page select")?;
                     }
                 }
@@ -573,7 +575,6 @@ impl MsProtocol {
         &mut self,
         io: &mut dyn Transport,
         request: &[u8],
-        _operation: &'static str,
     ) -> Result<Vec<u8>, ProtocolError> {
         let framed = Frame::encode(request)?;
         io.write_all(&framed)?;
@@ -692,29 +693,41 @@ impl Protocol for MsProtocol {
                 }
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request, "signature")?;
-                // The firmware prefixes most replies with a return code, the
-                // signature included; a firmware that does not is accepted too.
+                let payload = self.converse(io, &request)?;
+                // Padding before the text (NULs and line breaks) is not a
+                // refusal: some firmware sends a line ending before the
+                // signature. What follows the padding either starts the
+                // signature or is a return code.
+                let start = payload
+                    .iter()
+                    .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+                    .unwrap_or(payload.len());
+                let payload = &payload[start..];
                 match payload.split_first() {
-                    Some((0, rest)) => rest.to_vec(),
-                    _ => payload,
+                    Some((&code, _)) if !code.is_ascii_graphic() && code != b' ' => {
+                        return Err(ProtocolError::ReturnCode {
+                            code,
+                            operation: "signature",
+                        });
+                    }
+                    _ => payload.to_vec(),
                 }
             }
         };
 
-        let text: String = reply
+        // Padding before the text (NULs, line breaks and spaces) is not part
+        // of the signature; a legacy path can carry it too. Stop at the first
+        // non-printable byte after that: firmware pads the tail with NULs, and
+        // nothing past the first one belongs to the signature.
+        let start = reply
             .iter()
-            .map(|byte| {
-                if byte.is_ascii_graphic() || *byte == b' ' {
-                    char::from(*byte)
-                } else {
-                    '\0'
-                }
-            })
+            .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+            .unwrap_or(reply.len());
+        let text: String = reply[start..]
+            .iter()
+            .map_while(|byte| (byte.is_ascii_graphic() || *byte == b' ').then(|| char::from(*byte)))
             .collect();
-        let signature = text
-            .trim_matches(|character: char| character == '\0' || character.is_whitespace())
-            .to_owned();
+        let signature = text.trim_end().to_owned();
         if signature.is_empty() {
             return Err(ProtocolError::UnexpectedReply(
                 "the signature reply is empty".to_owned(),
@@ -758,7 +771,7 @@ impl Protocol for MsProtocol {
                 Ok(bytes)
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request, "page read")?;
+                let payload = self.converse(io, &request)?;
                 Ok(self.data_payload(&payload, size, "page read")?.to_vec())
             }
         }
@@ -793,15 +806,20 @@ impl Protocol for MsProtocol {
         }
 
         self.activate(io, page)?;
-        for (index, chunk) in data.chunks(self.blocking_factor.max(1)).enumerate() {
-            let chunk_offset = u32::from(offset).saturating_add(
-                u32::try_from(index)
-                    .unwrap_or(u32::MAX)
-                    .saturating_mul(u32::try_from(self.blocking_factor).unwrap_or(u32::MAX)),
-            );
-            let chunk_offset = u16::try_from(chunk_offset).map_err(|_| {
-                ProtocolError::Unsupported("the write offset does not fit the wire".to_owned())
-            })?;
+        let blocking = self.blocking_factor.max(1);
+        for (index, chunk) in data.chunks(blocking).enumerate() {
+            let relative = index
+                .checked_mul(blocking)
+                .and_then(|relative| u32::try_from(relative).ok())
+                .ok_or_else(|| {
+                    ProtocolError::Unsupported("the write offset does not fit the wire".to_owned())
+                })?;
+            let chunk_offset = u32::from(offset)
+                .checked_add(relative)
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| {
+                    ProtocolError::Unsupported("the write offset does not fit the wire".to_owned())
+                })?;
             let chunk_len = u16::try_from(chunk.len()).map_err(|_| {
                 ProtocolError::Unsupported("the write chunk does not fit the wire".to_owned())
             })?;
@@ -816,7 +834,7 @@ impl Protocol for MsProtocol {
             match self.link {
                 LinkMode::Legacy => io.write_all(&request)?,
                 LinkMode::Envelope => {
-                    let payload = self.converse(io, &request, "page write")?;
+                    let payload = self.converse(io, &request)?;
                     self.expect_ok(&payload, "page write")?;
                 }
             }
@@ -854,7 +872,7 @@ impl Protocol for MsProtocol {
         match self.link {
             LinkMode::Legacy => io.write_all(&request)?,
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request, "burn")?;
+                let payload = self.converse(io, &request)?;
                 // The framed protocol answers a successful burn with
                 // `SERIAL_RC_BURN_OK` (0x04), not the general OK code.
                 match payload.first() {
@@ -905,7 +923,7 @@ impl Protocol for MsProtocol {
                 Ok(bytes)
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request, "realtime read")?;
+                let payload = self.converse(io, &request)?;
                 Ok(self.data_payload(&payload, size, "realtime read")?.to_vec())
             }
         }

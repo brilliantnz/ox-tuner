@@ -139,11 +139,11 @@ impl EventTx {
 /// with [`CoreError::Stopped`]. The lock is uncontended in normal operation —
 /// one short critical section per command.
 #[derive(Debug, Default)]
-pub(crate) struct Gate {
+pub(crate) struct SendGate {
     closed: Mutex<bool>,
 }
 
-impl Gate {
+impl SendGate {
     /// Runs `accept` while the queue is still open, or reports `Stopped`.
     ///
     /// # Panics
@@ -184,7 +184,7 @@ impl Gate {
 pub struct CoreHandle {
     pub(crate) commands: MTx<mpsc::Array<Envelope>>,
     pub(crate) next_op: Arc<AtomicU64>,
-    pub(crate) gate: Arc<Gate>,
+    pub(crate) gate: Arc<SendGate>,
     pub(crate) stop: Arc<StopFlag>,
 }
 
@@ -199,6 +199,12 @@ impl CoreHandle {
     ///
     /// Never blocks: a full queue is refused rather than waited on, because the
     /// caller is the UI thread.
+    ///
+    /// One edge crosses handles. A concurrent [`CoreHandle::shutdown`] holds
+    /// the command gate while it waits up to its bounded send window, so an
+    /// `execute` from another handle issued in that window waits on the gate
+    /// instead of being refused immediately. The wait is bounded and only
+    /// happens during shutdown.
     ///
     /// # Errors
     ///

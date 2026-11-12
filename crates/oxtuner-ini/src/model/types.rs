@@ -195,11 +195,17 @@ impl Number {
     }
 }
 
+/// Largest magnitude a `f64` still displays as an exact integer.
+///
+/// Above this bound the literal would print in exponent form, so the display
+/// keeps the decimal text as written instead.
+const MAX_EXACT_INTEGER: f64 = 1e15;
+
 /// A whole number in the range the display form treats as an integer.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::as_conversions,
-    reason = "the caller checks fract() == 0 and abs < 1e15 before converting"
+    reason = "the caller checks fract() == 0 and abs() < MAX_EXACT_INTEGER before converting"
 )]
 fn whole_number(value: f64) -> i64 {
     value as i64
@@ -209,7 +215,7 @@ impl fmt::Display for Number {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Literal(value) => {
-                if value.fract() == 0.0 && value.abs() < 1e15 {
+                if value.fract() == 0.0 && value.abs() < MAX_EXACT_INTEGER {
                     write!(formatter, "{}", whole_number(*value))
                 } else {
                     write!(formatter, "{value}")

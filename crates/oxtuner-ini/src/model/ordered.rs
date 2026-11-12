@@ -4,7 +4,7 @@ use std::collections::HashMap;
 ///
 /// `entries` is the source of truth for order and contents. The two maps are
 /// indexes into it: `lookup` answers an exact name, `ci_lookup` answers the
-/// trimmed ASCII-lowercase form `get_ci` falls back to. Both are rebuilt by
+/// trimmed ASCII-lowercase form `get_ignore_case` falls back to. Both are rebuilt by
 /// `insert` and nothing else renames or removes an entry, so they cannot drift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ordered<T> {
@@ -15,7 +15,7 @@ pub struct Ordered<T> {
     /// A hash rather than a lowercased `String` key: building the index must
     /// not allocate once per entry, because a large definition inserts
     /// hundreds of constants during a parse. A hash collision keeps the first
-    /// index and makes `get_ci` fall back to the linear scan, which preserves
+    /// index and makes `get_ignore_case` fall back to the linear scan, which preserves
     /// the first-declaration rule without ever changing a result.
     ci_lookup: HashMap<u64, usize>,
 }
@@ -24,7 +24,7 @@ pub struct Ordered<T> {
 ///
 /// `eq_ignore_ascii_case` folds only A–Z, and so does this; non-ASCII bytes
 /// are hashed unchanged. The name is hashed untrimmed at insertion and the
-/// query trimmed at lookup, which is exactly the comparison `get_ci` makes.
+/// query trimmed at lookup, which is exactly the comparison `get_ignore_case` makes.
 fn ci_hash(name: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in name.as_bytes() {
@@ -61,7 +61,7 @@ impl<T> Ordered<T> {
 
         let position = self.entries.len();
         // The case-insensitive index keeps the first declaration: two names
-        // that differ only by case are distinct entries, and a `get_ci` has
+        // that differ only by case are distinct entries, and a `get_ignore_case` has
         // always returned the earlier one.
         self.ci_lookup.entry(ci_hash(&name)).or_insert(position);
         self.lookup.insert(name.clone(), position);
@@ -83,7 +83,7 @@ impl<T> Ordered<T> {
     /// trimmed ASCII-folded form. That is the semantics the previous linear
     /// scan had: candidates were never trimmed, so a name with surrounding
     /// spaces only matched an equally spaced query.
-    pub fn get_ci(&self, name: &str) -> Option<&T> {
+    pub fn get_ignore_case(&self, name: &str) -> Option<&T> {
         if let Some(found) = self.get(name) {
             return Some(found);
         }
@@ -117,7 +117,7 @@ impl<T> Ordered<T> {
 
     /// Whether the name is present (exact or case-insensitive).
     pub fn contains(&self, name: &str) -> bool {
-        self.get_ci(name).is_some()
+        self.get_ignore_case(name).is_some()
     }
 
     /// Entries in definition order.

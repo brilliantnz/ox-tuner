@@ -25,6 +25,7 @@ struct Cell {
 }
 
 /// What an accepted edit did.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EditOutcome {
     /// The raw value that was stored.

@@ -44,9 +44,6 @@ use crate::i18n::t;
 pub(crate) fn card(
     id: impl Into<ElementId>,
     title: SharedString,
-    // The definition id used to sit under the title. Kept here for when the
-    // panel id is worth showing again.
-    // subtitle: SharedString,
     rows: Vec<AnyElement>,
     cx: &App,
 ) -> AnyElement {
@@ -68,16 +65,6 @@ pub(crate) fn card(
                     .text_color(theme.foreground)
                     .child(title),
             ),
-            // The definition id used to sit under the title. Keep the builder
-            // here for when the panel id is worth showing again:
-            // .child(
-            //     div()
-            //         .truncate()
-            //         .font_family(theme.mono_font_family.clone())
-            //         .text_xs()
-            //         .text_color(theme.muted_foreground)
-            //         .child(subtitle),
-            // ),
         )
         .children(rows)
         .into_any_element()

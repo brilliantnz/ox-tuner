@@ -141,3 +141,44 @@ pub trait Transport: Send {
 /// 50 ms is far longer than the gap between bytes at 115200 baud (0.09 ms) yet
 /// short enough that a connect does not feel slow.
 pub const READ_UNTIL_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
+
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn open(&mut self) -> Result<(), TransportError> {
+        (**self).open()
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        (**self).write_all(bytes)
+    }
+
+    fn read_exact_timeout(
+        &mut self,
+        buf: &mut [u8],
+        timeout: std::time::Duration,
+    ) -> Result<(), TransportError> {
+        (**self).read_exact_timeout(buf, timeout)
+    }
+
+    fn read_until(
+        &mut self,
+        sink: &mut Vec<u8>,
+        max: usize,
+        terminator: u8,
+        quiet: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> Result<(), TransportError> {
+        (**self).read_until(sink, max, terminator, quiet, timeout)
+    }
+
+    fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        (**self).read_available(buf)
+    }
+
+    fn flush_input(&mut self) {
+        (**self).flush_input();
+    }
+
+    fn close(&mut self) {
+        (**self).close();
+    }
+}

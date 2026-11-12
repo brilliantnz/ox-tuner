@@ -3,12 +3,14 @@ use std::collections::HashMap;
 use oxtuner_ini::{CommandTemplate, Definition};
 
 use crate::behavior::{BurnPlan, CrcReply, EcuBehavior, PageSwitch};
+use crate::error::ProtocolError;
 
 /// What the definition declares about one page.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each flag is an independent page capability, not a state machine"
 )]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpec {
     /// INI page number, 1-based.
@@ -47,7 +49,7 @@ pub(super) fn build_pages(
     definition: &Definition,
     behavior: &dyn EcuBehavior,
     variables: &HashMap<String, u8>,
-) -> Vec<PageCommands> {
+) -> Result<Vec<PageCommands>, ProtocolError> {
     definition
         .pages
         .iter()
@@ -56,7 +58,7 @@ pub(super) fn build_pages(
             let burnable = matches!(behavior.burn(definition, number), BurnPlan::Immediate);
             let crc = behavior.crc(definition, number);
 
-            PageCommands {
+            Ok(PageCommands {
                 switch: behavior.switch_page(definition, number),
                 spec: PageSpec {
                     number,
@@ -71,7 +73,7 @@ pub(super) fn build_pages(
                     page.number,
                     page.identifier.as_ref(),
                     &|name| variables.get(&name.to_ascii_lowercase()).copied(),
-                ),
+                )?,
                 read: page
                     .read_command
                     .clone()
@@ -94,7 +96,7 @@ pub(super) fn build_pages(
                     .clone()
                     .filter(|command| !command.is_empty()),
                 crc_reply: crc.map(|crc| crc.reply),
-            }
+            })
         })
         .collect()
 }

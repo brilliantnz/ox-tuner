@@ -38,6 +38,11 @@ impl SettingsContext {
     ///
     /// Keys are compared case-insensitively, the way the dialect treats
     /// directive names; the caller may pass them in either case.
+    ///
+    /// The `bool` is deliberate rather than an `Off`/`On` enum: the third
+    /// state, "no explicit choice", is the key being absent from the map. A
+    /// richer flag type earns its keep only if the settings surface grows a
+    /// third explicit choice.
     #[must_use]
     pub fn with_overrides(
         mut self,

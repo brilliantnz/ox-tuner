@@ -123,6 +123,7 @@ impl Project {
     /// not evaluate (Speeduino's `{idleRes}`). The last case is safe because
     /// such a value is never loaded from the file nor edited, so the tune holds
     /// no change worth snapshotting.
+    ///
     /// # Errors
     ///
     /// Returns [`ProjectError`] when the tune cannot be serialized.
@@ -156,6 +157,16 @@ impl Project {
         if !self.in_folder {
             return None;
         }
-        Provenance::read(&self.root).ok().flatten()
+        match Provenance::read(&self.root) {
+            Ok(provenance) => provenance,
+            Err(error) => {
+                tracing::debug!(
+                    root = %self.root.display(),
+                    %error,
+                    "the provenance sidecar could not be read"
+                );
+                None
+            }
+        }
     }
 }

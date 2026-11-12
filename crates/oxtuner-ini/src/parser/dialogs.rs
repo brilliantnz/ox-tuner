@@ -245,7 +245,7 @@ pub(crate) fn parse_menu(
                 section.understand(*line);
             }
             "menu" => {
-                index = Some(open_menu(definition, &fields, dialog.as_ref()));
+                index = Some(open_menu(definition, &fields, dialog.as_deref()));
                 group = None;
                 section.understand(*line);
             }
@@ -295,7 +295,7 @@ pub(crate) fn parse_menu(
                 };
                 section.understand(*line);
             }
-            "removeSubMenu" | "updateSubMenuLabel" | "replaceSubMenu" => {
+            "removesubmenu" | "updatesubmenulabel" | "replacesubmenu" => {
                 // Menu overrides (iniSpec 3.78) are recognised and preserved;
                 // applying them belongs to the UI layer.
                 definition
@@ -310,7 +310,7 @@ pub(crate) fn parse_menu(
 }
 
 /// Selects the menu with this title, creating it when it is new.
-fn open_menu(definition: &mut Definition, fields: &[&str], dialog: Option<&String>) -> usize {
+fn open_menu(definition: &mut Definition, fields: &[&str], dialog: Option<&str>) -> usize {
     let title = fields
         .first()
         .map(|field| crate::fields::unquote(field).to_owned())
@@ -341,7 +341,7 @@ fn open_menu(definition: &mut Definition, fields: &[&str], dialog: Option<&Strin
         title,
         conditions,
         items: Vec::new(),
-        dialog: dialog.cloned(),
+        dialog: dialog.map(str::to_owned),
     });
 
     definition.menus.len() - 1
@@ -534,6 +534,27 @@ settingOption = second, \"Second\"
         assert_eq!(menu.items[0].kind, MenuTargetKind::DefinitionTarget);
         assert_eq!(menu.items[1].kind, MenuTargetKind::Standard);
         assert_eq!(menu.items[2].kind, MenuTargetKind::Separator);
+    }
+
+    #[test]
+    fn menu_override_keys_survive_as_raw_comms_entries() {
+        let definition = parse(
+            "[MegaTune]\nsignature = \"x\"\n[Menu]\nremoveSubMenu = \"Old\"\nupdateSubMenuLabel = \"Old\", \"New\"\nreplaceSubMenu = \"Old\", veTable1Tbl\n",
+        );
+
+        assert_eq!(
+            definition.comms.raw.get("menu.removeSubMenu"),
+            Some(&"\"Old\"".to_owned()),
+            "the override keeps its declared spelling and value"
+        );
+        assert_eq!(
+            definition.comms.raw.get("menu.updateSubMenuLabel"),
+            Some(&"\"Old\", \"New\"".to_owned())
+        );
+        assert_eq!(
+            definition.comms.raw.get("menu.replaceSubMenu"),
+            Some(&"\"Old\", veTable1Tbl".to_owned())
+        );
     }
 
     #[test]

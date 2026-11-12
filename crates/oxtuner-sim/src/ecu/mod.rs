@@ -205,7 +205,7 @@ impl SimEcu {
             .and_then(pattern);
         let realtime = realtime_ecu(definition, &variables, wire_order)?;
 
-        let pages = pages::build_pages(definition, &variables, wire_order);
+        let pages = pages::build_pages(definition, &variables, wire_order)?;
 
         if query.is_none() && pages.iter().all(|page| page.read.is_none()) {
             return Err(SimError {

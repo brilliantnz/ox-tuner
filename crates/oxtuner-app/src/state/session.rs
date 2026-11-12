@@ -404,8 +404,12 @@ impl AppState {
     }
 
     /// Writes the current document synchronously (project opened, app quitting).
+    ///
+    /// A debounced write already in flight may rename after this one and leave
+    /// an older snapshot behind. That is acceptable: the state file is a
+    /// convenience, and a lost window position costs one restore.
     pub(crate) fn save(cx: &App) {
-        let global = cx.global::<Self>();
+        let global = cx.global::<AppState>();
         if let Err(error) = store::write_json(&global.path, &global.data) {
             tracing::error!(
                 %error,
@@ -565,7 +569,30 @@ pub(crate) fn schedule_save(cx: &mut App) {
         loop {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
             let generation = SAVE_GENERATION.with(Cell::get);
-            cx.update(|cx| AppState::save(cx));
+
+            // The snapshot is taken on the UI thread so the document stays
+            // coherent. The flush and rename then run on the background
+            // executor: `sync_all` can stall on a busy disk, and the UI thread
+            // has no business waiting for it.
+            let (path, data) = cx.update(|cx| {
+                let global = cx.global::<AppState>();
+                (global.path.clone(), global.data.clone())
+            });
+            let (path, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = store::write_json(&path, &data);
+                    (path, result)
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::error!(
+                    %error,
+                    path = %path.display(),
+                    "could not save application state"
+                );
+            }
+
             // Checked and cleared with no await in between, so a change that
             // arrives later starts a new task rather than being swallowed.
             if SAVE_GENERATION.with(Cell::get) == generation {

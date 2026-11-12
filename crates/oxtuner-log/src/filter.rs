@@ -1,6 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Profile;
+use crate::config::{Profile, Verbosity};
 
 /// The filter chosen for this process.
 pub(crate) struct FilterSetup {
@@ -14,7 +14,7 @@ pub(crate) struct FilterSetup {
 /// `RUST_LOG` wins over the persisted verbose setting. An invalid value falls
 /// back to the default instead of refusing to start, and the warning is logged
 /// once the subscriber is installed.
-pub(crate) fn setup(profile: Profile, verbose: bool) -> FilterSetup {
+pub(crate) fn setup(profile: Profile, verbosity: Verbosity) -> FilterSetup {
     match EnvFilter::try_from_default_env() {
         Ok(filter) => FilterSetup {
             filter,
@@ -22,7 +22,7 @@ pub(crate) fn setup(profile: Profile, verbose: bool) -> FilterSetup {
             warning: None,
         },
         Err(error) => FilterSetup {
-            filter: default_filter(profile, verbose),
+            filter: default_filter(profile, verbosity),
             env_override: false,
             warning: std::env::var_os("RUST_LOG")
                 .is_some()
@@ -38,8 +38,8 @@ pub(crate) fn setup(profile: Profile, verbose: bool) -> FilterSetup {
 /// would be treated as workspace code; the workspace list is small enough that
 /// this is acceptable, and it keeps the default from rotting when a crate is
 /// added.
-pub(crate) fn default_filter(profile: Profile, verbose: bool) -> EnvFilter {
-    let level = if verbose || profile == Profile::Debug {
+pub(crate) fn default_filter(profile: Profile, verbosity: Verbosity) -> EnvFilter {
+    let level = if verbosity.is_verbose() || profile == Profile::Debug {
         "debug"
     } else {
         "info"

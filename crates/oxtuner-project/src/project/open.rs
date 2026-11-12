@@ -350,13 +350,39 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     } else {
         base
     };
-    let base = fs::canonicalize(base).ok()?;
-    let path = fs::canonicalize(base.join(path)).ok()?;
+    let base = match fs::canonicalize(base) {
+        Ok(base) => base,
+        Err(error) => {
+            tracing::debug!(
+                base = %base.display(),
+                %error,
+                "the include base directory could not be resolved"
+            );
+            return None;
+        }
+    };
+    let path = match fs::canonicalize(base.join(path)) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::debug!(include = name, %error, "an include path could not be resolved");
+            return None;
+        }
+    };
     if !path.starts_with(&base) {
         return None;
     }
 
-    let bytes = fs::read(&path).ok()?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(
+                path = %path.display(),
+                %error,
+                "an include file could not be read"
+            );
+            return None;
+        }
+    };
     Some(oxtuner_ini::source::decode(&bytes).text)
 }
 

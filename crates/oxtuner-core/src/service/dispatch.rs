@@ -46,7 +46,7 @@ pub(super) fn handle(
                         .into_iter()
                         .map(|port| PortView {
                             label: port.label().to_owned(),
-                            name: port.name,
+                            name: port.path().to_owned(),
                         })
                         .collect();
                     tracing::debug!(%op, ports = summary.len(), "serial ports listed");

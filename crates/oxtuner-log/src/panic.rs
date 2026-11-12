@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn a_panic_is_recorded_in_the_ring_after_the_previous_hook_runs() {
         let store = crate::LogStore::new(8);
-        let filter = crate::filter::default_filter(crate::Profile::Debug, false);
+        let filter = crate::filter::default_filter(crate::Profile::Debug, crate::Verbosity::Normal);
         let subscriber = tracing_subscriber::registry()
             .with(filter)
             .with(crate::store::StoreLayer::new(store.clone()));

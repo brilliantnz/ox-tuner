@@ -56,13 +56,13 @@ impl Default for SimConfig {
     }
 }
 
-impl From<Scenario> for SimConfig {
-    fn from(scenario: Scenario) -> Self {
+impl From<&Scenario> for SimConfig {
+    fn from(scenario: &Scenario) -> Self {
         Self {
-            signature: scenario.signature,
+            signature: scenario.signature.clone(),
             seed: scenario.seed.unwrap_or(0x5EED_2025),
-            faults: scenario.faults,
-            pages: scenario.pages,
+            faults: scenario.faults.clone(),
+            pages: scenario.pages.clone(),
             burn_pending_samples: 0,
         }
     }
@@ -242,7 +242,7 @@ impl SimTransport {
     ///
     /// Returns [`SimError`] for the same reasons as [`Self::new`].
     pub fn with_scenario(definition: &Definition, scenario: &Scenario) -> Result<Self, SimError> {
-        Self::new(definition, SimConfig::from(scenario.clone()))
+        Self::new(definition, SimConfig::from(scenario))
     }
 
     /// Arms one fault.
@@ -316,7 +316,7 @@ impl SimTransport {
             // The firmware ignores what it does not understand. A framed link
             // says so with an error frame; legacy stays silent.
             return Ok(if framed {
-                Frame::encode(&[0x83]).unwrap_or_default()
+                Self::frame_reply(&[0x83])?
             } else {
                 Vec::new()
             });
@@ -339,7 +339,7 @@ impl SimTransport {
 
         let mut reply = self.respond(request, fault.as_ref(), framed);
         if framed {
-            reply = Self::frame_reply(&reply);
+            reply = Self::frame_reply(&reply)?;
         }
 
         if let Some(fault) = &fault {
@@ -373,8 +373,14 @@ impl SimTransport {
     }
 
     /// Wraps a reply that `respond` built as a *payload*.
-    fn frame_reply(payload: &[u8]) -> Vec<u8> {
-        Frame::encode(payload).unwrap_or_default()
+    ///
+    /// A payload the frame cannot carry becomes a write error instead of an
+    /// empty reply: a silent drop would look like a host timeout, which hides
+    /// which side broke.
+    fn frame_reply(payload: &[u8]) -> Result<Vec<u8>, TransportError> {
+        Frame::encode(payload).map_err(|error| {
+            TransportError::Write(format!("the simulated reply could not be framed: {error}"))
+        })
     }
 
     /// The payload of one response, before framing.

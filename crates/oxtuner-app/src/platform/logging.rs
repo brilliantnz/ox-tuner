@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use gpui_kit::{App, Global};
-use oxtuner_log::{FilePolicy, LogConfig, LogHandle, LogStore};
+use oxtuner_log::{FilePolicy, LogConfig, LogHandle, LogStore, Verbosity};
 
 /// The installed pipeline, kept for the whole process.
 #[derive(Debug)]
@@ -79,8 +79,14 @@ pub fn store(cx: &App) -> Option<LogStore> {
 /// `RUST_LOG` keeps the final say; in that case this is a no-op inside the
 /// logger and only the saved preference changes.
 pub fn set_verbose(cx: &App, verbose: bool) {
+    let verbosity = if verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
+    };
+
     if let Some(handle) = handle(cx)
-        && let Err(error) = handle.set_verbose(verbose)
+        && let Err(error) = handle.set_verbose(verbosity)
     {
         tracing::warn!(%error, "could not change the log filter");
     }

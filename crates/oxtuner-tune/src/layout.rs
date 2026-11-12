@@ -157,6 +157,11 @@ impl Owner {
 /// [`Self::scale`] or [`Self::translate`] means the INI wrote an expression
 /// this build could not evaluate; conversions then fail loudly instead of
 /// pretending the value is unscaled.
+///
+/// Every field is public and the struct is not `#[non_exhaustive]`, so a
+/// caller that builds one owns the invariants: `shape` and `data_type` must
+/// agree on numeric versus text storage, and `address` must fit the page it
+/// names. The layout builder is the implementation that enforces them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariableSpec {
     /// Name as written in the definition.
@@ -247,6 +252,11 @@ impl VariableSpec {
 }
 
 /// One calibration page and the variables it carries.
+///
+/// Every field is public and the struct is not `#[non_exhaustive]`. The
+/// `variables` indices are meaningful only against the [`TuneLayout`] that
+/// built the page, so a caller that constructs one must keep the pair
+/// together; [`Self::cell_count`] ignores an index the layout does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageLayout {
     /// Page number as written in the INI (1-based).
@@ -261,10 +271,20 @@ pub struct PageLayout {
 
 impl PageLayout {
     /// Number of cells on the page.
+    ///
+    /// An index the layout does not have contributes nothing: the page may
+    /// outlive the layout it was built from, and a stale index is not worth a
+    /// panic in a view. A debug build asserts the mismatch so the layout bug
+    /// behind it does not hide as a short scrollbar.
     pub fn cell_count(&self, layout: &TuneLayout) -> usize {
         self.variables
             .iter()
-            .map(|index| layout.variables[*index].element_count())
+            .filter_map(|index| {
+                let spec = layout.variables.get(*index);
+                debug_assert!(spec.is_some(), "stale variable index {index}");
+                spec
+            })
+            .map(VariableSpec::element_count)
             .sum()
     }
 }
@@ -781,7 +801,7 @@ fn default_raw(
     if let Some(raw) = definition
         .extensions
         .raw_defaults
-        .get_ci(name)
+        .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
     {
         return raw;
@@ -790,7 +810,7 @@ fn default_raw(
     if let Some(user) = definition
         .extensions
         .defaults
-        .get_ci(name)
+        .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {

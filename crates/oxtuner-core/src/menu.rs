@@ -299,7 +299,7 @@ fn condition_gates(conditions: &[String]) -> (Option<String>, Option<String>) {
 /// one id for two of them has no unambiguous answer. An unknown target is kept
 /// visible as [`MenuNodeKind::Missing`].
 fn resolve(id: String, label: String, target: &str, definition: &Definition) -> MenuNode {
-    if let Some(table) = definition.tables.get_ci(target) {
+    if let Some(table) = definition.tables.get_ignore_case(target) {
         return MenuNode {
             id,
             label,
@@ -328,7 +328,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             children: Vec::new(),
         };
     }
-    if let Some(curve) = definition.curves.get_ci(target) {
+    if let Some(curve) = definition.curves.get_ignore_case(target) {
         return MenuNode {
             id,
             label,
@@ -342,7 +342,7 @@ fn resolve(id: String, label: String, target: &str, definition: &Definition) -> 
             children: Vec::new(),
         };
     }
-    if let Some(dialog) = definition.dialogs.get_ci(target) {
+    if let Some(dialog) = definition.dialogs.get_ignore_case(target) {
         let embedded = embedded_target(&dialog.name, definition, &mut HashSet::new());
         return MenuNode {
             id,
@@ -404,7 +404,7 @@ fn is_help_topic(definition: &Definition, target: &str) -> bool {
 
 /// The table a target names, by table id or by 3-D map id.
 fn table_by_target<'a>(target: &str, definition: &'a Definition) -> Option<&'a Table> {
-    definition.tables.get_ci(target).or_else(|| {
+    definition.tables.get_ignore_case(target).or_else(|| {
         definition.tables.values().find(|table| {
             table
                 .map_id
@@ -439,7 +439,7 @@ pub(crate) fn embedded_target(
     if !visited.insert(name.to_ascii_lowercase()) {
         return None;
     }
-    let dialog = definition.dialogs.get_ci(name)?;
+    let dialog = definition.dialogs.get_ignore_case(name)?;
     for row in &dialog.rows {
         if row.kind != RowKind::EmbeddedPanel {
             continue;
@@ -455,7 +455,7 @@ pub(crate) fn embedded_target(
                 detail,
             });
         }
-        if let Some(curve) = definition.curves.get_ci(target)
+        if let Some(curve) = definition.curves.get_ignore_case(target)
             && let Some(detail) = curve_detail(curve, definition)
         {
             return Some(EmbeddedTarget {
@@ -496,7 +496,7 @@ fn curve_detail(curve: &Curve, definition: &Definition) -> Option<MenuDetail> {
 fn constant_shape<'a>(definition: &'a Definition, name: &str) -> Option<&'a Shape> {
     definition
         .constants
-        .get_ci(name)
+        .get_ignore_case(name)
         .map(|constant| &constant.shape)
 }
 

@@ -28,7 +28,7 @@ mod panic;
 mod record;
 mod store;
 
-pub use config::{FilePolicy, LogConfig, Profile};
+pub use config::{FilePolicy, LogConfig, Profile, Verbosity};
 pub use error::LogError;
 pub use init::{LogControl, LogHandle, init};
 pub use record::{LogBufferSnapshot, LogRecord};

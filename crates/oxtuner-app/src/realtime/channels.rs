@@ -30,6 +30,12 @@ struct ChannelRow {
     search: String,
 }
 
+/// How many matching rows the picker lists at once.
+///
+/// A definition can declare thousands of channels; the cap keeps one repaint
+/// from building a card per match while the search narrows the list.
+const MAX_PICKER_ROWS: usize = 400;
+
 /// Opens the picker for `chart`.
 #[expect(
     clippy::too_many_lines,
@@ -72,7 +78,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
         let items: Vec<_> = rows
             .iter()
             .filter(|row| query.is_empty() || row.search.contains(&query))
-            .take(400)
+            .take(MAX_PICKER_ROWS)
             .map(|row| {
                 let selected = chart.read(cx).is_selected(&row.name);
                 let name = row.name.clone();
@@ -92,7 +98,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
             .collect();
 
         let muted = cx.theme().muted_foreground;
-        let count = chart.read(cx).series(cx).len();
+        let count = chart.read(cx).series().len();
 
         dialog
             .title(t!("app.realtime.channels_title"))

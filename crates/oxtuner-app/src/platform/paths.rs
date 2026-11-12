@@ -160,7 +160,27 @@ impl AppPaths {
             .map_or(0, |duration| duration.as_millis());
         self.traces_dir().join(format!("session-{millis}.trace"))
     }
+
+    /// Installs the resolved paths for the process.
+    ///
+    /// The binary discovers them once, before the first window, so later code
+    /// reads the same instance instead of asking the platform again.
+    pub fn install(cx: &mut gpui_kit::App, paths: Self) {
+        cx.set_global(paths);
+    }
+
+    /// The paths installed by [`Self::install`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when called before [`Self::install`]. The binary installs them
+    /// before any command can run.
+    pub fn get(cx: &gpui_kit::App) -> &Self {
+        cx.global::<Self>()
+    }
 }
+
+impl gpui_kit::Global for AppPaths {}
 
 #[cfg(test)]
 mod tests {
