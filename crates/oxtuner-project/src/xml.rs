@@ -198,11 +198,7 @@ pub struct Element {
 
 impl Element {
     /// Builds an element whose opening tag is generated from `attrs`.
-    #[expect(
-        clippy::self_named_constructors,
-        reason = "the constructor names the node it makes, next to self_closing"
-    )]
-    pub fn element(name: &str, attrs: &[(&str, &str)]) -> Self {
+    pub fn new(name: &str, attrs: &[(&str, &str)]) -> Self {
         Self::build(name, attrs, false)
     }
 

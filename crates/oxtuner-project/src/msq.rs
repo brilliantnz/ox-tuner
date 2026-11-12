@@ -594,7 +594,7 @@ impl Msq {
             });
         };
 
-        let mut element = Element::element(tag, &[("name", name)]);
+        let mut element = Element::new(tag, &[("name", name)]);
         element.set_text(text);
         // A self-closing `<page …/>` must be opened first, or the serializer
         // would keep emitting it unchanged and the new entry would be lost.
