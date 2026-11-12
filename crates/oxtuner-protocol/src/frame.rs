@@ -48,8 +48,10 @@ pub enum FrameError {
     },
     /// The payload is larger than the maximum frame payload.
     TooLarge {
-        /// The length field's value.
+        /// The length the caller or the length field asked for.
         declared: usize,
+        /// The limit it exceeded.
+        limit: usize,
     },
     /// The CRC did not match.
     Crc {
@@ -70,9 +72,10 @@ impl std::fmt::Display for FrameError {
                 formatter,
                 "the frame declares {declared} payload byte(s) but carries {actual}"
             ),
-            Self::TooLarge { declared } => {
-                write!(formatter, "the frame declares {declared} payload bytes")
-            }
+            Self::TooLarge { declared, limit } => write!(
+                formatter,
+                "{declared} payload byte(s) exceed the {limit} byte limit"
+            ),
             Self::Crc { carried, computed } => write!(
                 formatter,
                 "the frame carries CRC 0x{carried:08x}, the payload computes 0x{computed:08x}"
@@ -100,10 +103,12 @@ impl Frame {
         if payload.len() > MAX_PAYLOAD {
             return Err(FrameError::TooLarge {
                 declared: payload.len(),
+                limit: MAX_PAYLOAD,
             });
         }
         let length = u16::try_from(payload.len()).map_err(|_| FrameError::TooLarge {
             declared: payload.len(),
+            limit: MAX_PAYLOAD,
         })?;
         let crc = crc32(payload);
         let mut bytes = Vec::with_capacity(payload.len() + 6);
@@ -128,7 +133,10 @@ impl Frame {
         }
         let declared = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
         if declared > MAX_PAYLOAD {
-            return Err(FrameError::TooLarge { declared });
+            return Err(FrameError::TooLarge {
+                declared,
+                limit: MAX_PAYLOAD,
+            });
         }
         let expected = declared + 6;
         if bytes.len() != expected {
@@ -193,6 +201,7 @@ impl FrameDecoder {
         if bytes.len() > MAX_PAYLOAD + 6 {
             return Err(FrameError::TooLarge {
                 declared: bytes.len(),
+                limit: MAX_PAYLOAD + 6,
             });
         }
         self.buffer.extend_from_slice(bytes);
@@ -205,7 +214,10 @@ impl FrameDecoder {
             let declared = Frame::length([self.buffer[0], self.buffer[1]]);
             if declared > MAX_PAYLOAD {
                 self.buffer.clear();
-                return Err(FrameError::TooLarge { declared });
+                return Err(FrameError::TooLarge {
+                    declared,
+                    limit: MAX_PAYLOAD,
+                });
             }
             let total = declared + 6;
             if self.buffer.len() < total {
@@ -292,6 +304,10 @@ mod tests {
             .expect_err("too many bytes for one frame");
 
         assert!(matches!(error, FrameError::TooLarge { .. }));
+        assert!(
+            error.to_string().contains(&(MAX_PAYLOAD + 6).to_string()),
+            "the message names the limit: {error}"
+        );
         assert_eq!(decoder.pending(), 0);
     }
 

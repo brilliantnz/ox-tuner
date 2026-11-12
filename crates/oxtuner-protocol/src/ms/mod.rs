@@ -584,7 +584,11 @@ impl MsProtocol {
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
         if length > crate::frame::MAX_PAYLOAD {
-            return Err(FrameError::TooLarge { declared: length }.into());
+            return Err(FrameError::TooLarge {
+                declared: length,
+                limit: crate::frame::MAX_PAYLOAD,
+            }
+            .into());
         }
         let mut rest = vec![0u8; length + 4];
         io.read_exact_timeout(&mut rest, self.block_read_timeout)?;
