@@ -74,7 +74,7 @@ impl std::fmt::Display for FrameError {
             ),
             Self::TooLarge { declared, limit } => write!(
                 formatter,
-                "{declared} payload byte(s) exceed the {limit} byte limit"
+                "{declared} byte(s) exceed the {limit} byte limit"
             ),
             Self::Crc { carried, computed } => write!(
                 formatter,
