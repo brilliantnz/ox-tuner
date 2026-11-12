@@ -715,9 +715,15 @@ impl Protocol for MsProtocol {
             }
         };
 
-        // Stop at the first non-printable byte: firmware pads the reply with
-        // NULs, and nothing after that byte belongs to the signature.
-        let text: String = reply
+        // Padding before the text (NULs, line breaks and spaces) is not part
+        // of the signature; a legacy path can carry it too. Stop at the first
+        // non-printable byte after that: firmware pads the tail with NULs, and
+        // nothing past the first one belongs to the signature.
+        let start = reply
+            .iter()
+            .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+            .unwrap_or(reply.len());
+        let text: String = reply[start..]
             .iter()
             .map_while(|byte| (byte.is_ascii_graphic() || *byte == b' ').then(|| char::from(*byte)))
             .collect();

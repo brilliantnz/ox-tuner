@@ -95,7 +95,7 @@ fn framed_reply_text(payload: &[u8]) -> String {
     format!("RX 0 {}\n", hex.join(" "))
 }
 
-fn envelope_protocol() -> MsProtocol {
+fn protocol() -> MsProtocol {
     let definition = Definition::parse(
         "\
 [MegaTune]
@@ -115,9 +115,24 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     .expect("parses");
     let behavior = BehaviorKind::select(&definition).expect("a family");
 
-    MsProtocol::new(&definition, behavior.as_dyn())
-        .expect("complete")
-        .with_link_mode(LinkMode::Envelope)
+    MsProtocol::new(&definition, behavior.as_dyn()).expect("complete")
+}
+
+fn envelope_protocol() -> MsProtocol {
+    protocol().with_link_mode(LinkMode::Envelope)
+}
+
+#[test]
+fn a_legacy_signature_reply_tolerates_leading_padding() {
+    let mut protocol = protocol();
+    let trace = Trace::parse("RX 0 0d 0a 73 70 65 65 64 75 69 6e 6f 20 32 30 32 35 30 31\n")
+        .expect("a trace");
+    let mut io = ReplayTransport::new(trace);
+    io.open().expect("opens");
+
+    let signature = protocol.signature(&mut io).expect("reads the signature");
+
+    assert_eq!(signature, "speeduino 202501");
 }
 
 #[test]
