@@ -101,6 +101,10 @@ pub struct SessionLogReport {
 
 impl SessionLogSnapshot {
     /// A log that just started, with no frames written yet.
+    ///
+    /// `path` is the file the core reported for the previous run until the new
+    /// run reports its own, so a caller may pass the last snapshot's path and
+    /// keep the display while the start is in flight.
     pub fn running(path: Option<PathBuf>) -> Self {
         Self {
             running: true,
