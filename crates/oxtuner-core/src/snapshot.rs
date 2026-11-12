@@ -17,7 +17,10 @@ use oxtuner_project::Project;
 /// How many snapshots one project keeps.
 pub(crate) const MAX_SNAPSHOTS: usize = 50;
 
-/// The next unused suffix for a snapshot temporary in this process.
+/// The next unused sequence for a snapshot write in this process.
+///
+/// It backs both the final name (write order) and the temporary suffix
+/// (uniqueness); fetching once keeps the two in step.
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Why a snapshot could not be written.
@@ -161,21 +164,11 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotE
 
 /// Snapshots in `root`, oldest first. Unreadable directories are empty.
 ///
-/// A pre-sequence name sorts after a same-timestamp sequenced name because `-`
-/// sorts before `.`, but the timestamp still dominates in practice.
+/// Order comes from the parsed timestamp and sequence, so different labels in
+/// one millisecond stay in write order. A pre-sequence name has no sequence and
+/// falls back to lexical order for the tie.
 pub(crate) fn list(root: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(directory(root))
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("msq"))
-        })
-        .collect();
-    paths.sort();
-    paths
+    sorted_snapshots(&directory(root))
 }
 
 /// Drops the oldest snapshots over [`MAX_SNAPSHOTS`].
@@ -183,6 +176,20 @@ pub(crate) fn list(root: &Path) -> Vec<PathBuf> {
 /// An interrupted write leaves a `*.tmp` file behind, which this and [`list`]
 /// ignore. It is not swept: a live writer's temporary looks the same.
 fn prune(directory: &Path) {
+    let mut paths = sorted_snapshots(directory);
+    while paths.len() > MAX_SNAPSHOTS {
+        if let Some(oldest) = paths.first().cloned() {
+            if let Err(error) = fs::remove_file(&oldest) {
+                tracing::warn!(%error, path = %oldest.display(), "could not prune a snapshot");
+                break;
+            }
+            paths.remove(0);
+        }
+    }
+}
+
+/// The snapshot files in `directory`, oldest first.
+fn sorted_snapshots(directory: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = fs::read_dir(directory)
         .into_iter()
         .flatten()
@@ -193,16 +200,34 @@ fn prune(directory: &Path) {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("msq"))
         })
         .collect();
-    paths.sort();
-    while paths.len() > MAX_SNAPSHOTS {
-        if let Some(oldest) = paths.first().cloned() {
-            if let Err(error) = fs::remove_file(&oldest) {
-                tracing::warn!(%error, path = %oldest.display(), "could not prune a snapshot");
-                break;
-            }
-            paths.remove(0);
-        }
-    }
+    paths.sort_by(|left, right| {
+        snapshot_order(left)
+            .cmp(&snapshot_order(right))
+            .then_with(|| left.cmp(right))
+    });
+    paths
+}
+
+/// The `(timestamp, sequence)` a snapshot name carries.
+///
+/// A pre-sequence name has no numeric sequence, so it sorts as zero and falls
+/// back to the lexical tiebreak.
+fn snapshot_order(path: &Path) -> (u128, u64) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return (0, 0);
+    };
+    let stamp = name
+        .strip_prefix("snapshot-")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|stamp| stamp.parse().ok())
+        .unwrap_or(0);
+    let sequence = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('-'))
+        .and_then(|(_, sequence)| sequence.parse().ok())
+        .unwrap_or(0);
+    (stamp, sequence)
 }
 
 #[cfg(test)]
@@ -279,6 +304,27 @@ mod tests {
             listed,
             [first, second],
             "padded sequences sort in write order"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_newer_sequence_sorts_before_a_later_label() {
+        let root = temp_dir();
+        let snapshots = directory(&root);
+        fs::create_dir_all(&snapshots).expect("directory");
+        let older = snapshot_path(&snapshots, "write", 1_700_000_000_000, 5);
+        let newer = snapshot_path(&snapshots, "burn", 1_700_000_000_000, 6);
+        fs::write(&older, b"x").expect("write");
+        fs::write(&newer, b"x").expect("write");
+
+        let listed = list(&root);
+
+        assert_eq!(
+            listed,
+            [older, newer],
+            "the sequence decides the order when the timestamp ties"
         );
 
         let _ = fs::remove_dir_all(&root);
