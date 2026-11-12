@@ -36,9 +36,9 @@ impl std::fmt::Debug for RecordingTransport {
 
 impl RecordingTransport {
     /// Wraps `inner` and starts the clock.
-    pub fn new(inner: Box<dyn Transport>) -> Self {
+    pub fn new(inner: impl Transport + 'static) -> Self {
         Self {
-            inner,
+            inner: Box::new(inner),
             started: Instant::now(),
             frames: Vec::new(),
             headers: vec!["# ox-tuner trace v1".to_owned()],
@@ -220,5 +220,25 @@ mod tests {
 
         assert!(debug.contains("frames: 1"), "{debug}");
         assert!(!debug.contains("TraceFrame"), "{debug}");
+    }
+
+    #[test]
+    fn a_recording_that_hits_the_frame_cap_is_marked_truncated() {
+        let source = ReplayTransport::new(Trace::new());
+        let mut recorder = RecordingTransport::new(source);
+        recorder.open().expect("opens");
+
+        for _ in 0..=MAX_TRACE_FRAMES {
+            recorder.write_all(&[0x51]).expect("writes");
+        }
+
+        assert!(recorder.is_truncated());
+        assert_eq!(recorder.len(), MAX_TRACE_FRAMES);
+
+        let trace = recorder.trace();
+        assert_eq!(
+            trace.headers().last().map(String::as_str),
+            Some("# truncated after 250000 frames")
+        );
     }
 }

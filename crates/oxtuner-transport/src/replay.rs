@@ -17,8 +17,7 @@ use crate::trace::{Direction, Trace};
 /// spaces replies by their recorded offsets when a test needs the real cadence.
 #[derive(Debug)]
 pub struct ReplayTransport {
-    trace: Trace,
-    cursor: usize,
+    frames: VecDeque<crate::trace::TraceFrame>,
     pending: VecDeque<u8>,
     open: bool,
     started: Option<std::time::Instant>,
@@ -29,8 +28,7 @@ impl ReplayTransport {
     /// Replays `trace`.
     pub fn new(trace: Trace) -> Self {
         Self {
-            trace,
-            cursor: 0,
+            frames: trace.into_frames().into(),
             pending: VecDeque::new(),
             open: false,
             started: None,
@@ -47,14 +45,12 @@ impl ReplayTransport {
 
     /// How many frames are left to consume.
     pub fn remaining(&self) -> usize {
-        self.trace.frames().len().saturating_sub(self.cursor)
+        self.frames.len()
     }
 
     /// The next unwritten frame, if the trace has one.
     fn next_frame(&mut self) -> Option<crate::trace::TraceFrame> {
-        let frame = self.trace.frames().get(self.cursor)?.clone();
-        self.cursor += 1;
-        Some(frame)
+        self.frames.pop_front()
     }
 
     /// Whether anything is queued for the host to read.
@@ -75,10 +71,9 @@ impl ReplayTransport {
                     self.pending.extend(frame.bytes);
                     return;
                 }
-                // A TX frame in the trace is the host's own write; the replay
-                // already delivered it when the caller wrote the same bytes.
-                // Skipping it keeps the parser tolerant of an out-of-order
-                // recording without inventing a reply.
+                // A TX frame still here was never matched by a write; the
+                // caller either skipped that command or the trace omits its
+                // request. Skip it rather than inventing a reply.
                 Direction::Tx => {}
             }
         }
@@ -91,11 +86,29 @@ impl Transport for ReplayTransport {
         Ok(())
     }
 
-    fn write_all(&mut self, _bytes: &[u8]) -> Result<(), TransportError> {
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         if !self.open {
             return Err(TransportError::NotOpen);
         }
-        Ok(())
+        // A trace that records the host's write lets a replay prove the
+        // conversation too, not just the replies. A trace without that frame
+        // stays permissive, because a hand-written reply fixture need not
+        // carry the request.
+        match self.frames.front() {
+            Some(frame) if frame.direction == Direction::Tx => {
+                if frame.bytes == bytes {
+                    self.frames.pop_front();
+                    Ok(())
+                } else {
+                    Err(TransportError::Write(format!(
+                        "the replay expected the host to write {} byte(s), got {}",
+                        frame.bytes.len(),
+                        bytes.len()
+                    )))
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     fn read_exact_timeout(
@@ -230,5 +243,15 @@ mod tests {
                 expected: 4
             }
         ));
+    }
+
+    #[test]
+    fn a_write_that_does_not_match_the_trace_is_reported() {
+        let mut transport = ReplayTransport::new(trace());
+        transport.open().expect("opens");
+
+        let error = transport.write_all(&[0x52]).expect_err("wrong command");
+
+        assert!(matches!(error, TransportError::Write(_)), "{error}");
     }
 }

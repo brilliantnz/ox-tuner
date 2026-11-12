@@ -52,7 +52,10 @@ fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortInfo {
     /// Device path (`/dev/cu.usbmodem21201`, `COM3`).
-    pub name: String,
+    ///
+    /// Private so a later metadata field (manufacturer, serial number) can be
+    /// added without a second accessor or a breaking change. Use [`Self::label`].
+    name: String,
 }
 
 impl PortInfo {
@@ -221,14 +224,14 @@ impl Transport for SerialTransport {
     ) -> Result<(), TransportError> {
         let before = sink.len();
         let deadline = Instant::now() + timeout;
-        self.set_timeout(quiet)?;
         let mut buffer = [0u8; 128];
 
         loop {
             if sink.len() - before >= max {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return if sink.len() == before {
                     Err(TransportError::Timeout {
                         got: 0,
@@ -238,6 +241,10 @@ impl Transport for SerialTransport {
                     Ok(())
                 };
             }
+            // Re-arm the OS timeout for whichever comes first, the quiet
+            // window or the conversation deadline, so a late reply cannot
+            // overshoot the deadline by a whole quiet period.
+            self.set_timeout(quiet.min(deadline - now))?;
 
             // Never read more than the caller asked to keep: bytes taken
             // from the OS and then discarded would desynchronise the next

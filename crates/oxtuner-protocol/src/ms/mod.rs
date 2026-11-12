@@ -126,9 +126,9 @@ const SIGNATURE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// How long the line must be quiet to end an unframed text reply.
 ///
-/// 50 ms is far longer than the gap between bytes at 115200 baud (0.09 ms) and
-/// far shorter than a user would notice.
-const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
+/// The transport owns the value; the signature reply and controller commands
+/// share the same quiet window.
+const SIGNATURE_QUIET: Duration = oxtuner_transport::READ_UNTIL_QUIET;
 
 /// How long a controller command waits for its first reply byte.
 ///
@@ -137,7 +137,7 @@ const SIGNATURE_QUIET: Duration = Duration::from_millis(50);
 const COMMAND_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// How long a controller command's reply may be quiet before it ends.
-const COMMAND_REPLY_QUIET: Duration = Duration::from_millis(50);
+const COMMAND_REPLY_QUIET: Duration = oxtuner_transport::READ_UNTIL_QUIET;
 
 /// The most bytes one controller command's reply is drained into.
 const COMMAND_REPLY_MAX: usize = 1024;
