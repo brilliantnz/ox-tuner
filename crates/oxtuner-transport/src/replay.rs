@@ -2,6 +2,10 @@
 //!
 //! Replay is the hardware-evidence path in CI: a session recorded on a real ECU
 //! runs again through the same protocol code, without the ECU (ADR-0012).
+//!
+//! Host writes are validated against the next recorded TX frame, so the replay
+//! proves the whole conversation, not only the replies. Reads are permissive:
+//! a TX frame no write matched is skipped rather than turned into a fake reply.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -101,9 +105,9 @@ impl Transport for ReplayTransport {
                     Ok(())
                 } else {
                     Err(TransportError::Write(format!(
-                        "the replay expected the host to write {} byte(s), got {}",
-                        frame.bytes.len(),
-                        bytes.len()
+                        "the replay expected the host to write {:02x?}, got {:02x?}",
+                        &frame.bytes[..frame.bytes.len().min(8)],
+                        &bytes[..bytes.len().min(8)]
                     )))
                 }
             }

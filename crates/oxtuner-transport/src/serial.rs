@@ -63,6 +63,14 @@ impl PortInfo {
     pub fn label(&self) -> &str {
         &self.name
     }
+
+    /// The device path, which is the port's stable identity.
+    ///
+    /// Equal to [`Self::label`] until a backend can report a product
+    /// description; the two are separate accessors so they may diverge then.
+    pub fn path(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Which port and baud rate to open.
