@@ -21,6 +21,16 @@ pub struct Logging {
 
 impl Global for Logging {}
 
+/// Whether the logging pipeline also writes a run file.
+#[expect(clippy::exhaustive_enums, reason = "the file policy is a closed set")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOutput {
+    /// Write a file automatically when the build profile asks for one.
+    Auto,
+    /// Write a run file even when the profile would not.
+    On,
+}
+
 /// How the first filter is chosen before the saved preference is applied.
 #[expect(
     clippy::exhaustive_enums,
@@ -39,11 +49,10 @@ pub enum StartLevel {
 /// Returns `None` when the log directory cannot be created. The app still
 /// starts; it just has no file and no in-memory tail. The caller must keep the
 /// handle alive or hand it to [`install`].
-pub fn init(directory: &Path, log_file: bool, start: StartLevel) -> Option<LogHandle> {
-    let policy = if log_file {
-        FilePolicy::On
-    } else {
-        FilePolicy::Auto
+pub fn init(directory: &Path, file: FileOutput, start: StartLevel) -> Option<LogHandle> {
+    let policy = match file {
+        FileOutput::Auto => FilePolicy::Auto,
+        FileOutput::On => FilePolicy::On,
     };
     let config = LogConfig::new(directory)
         .with_file(policy)

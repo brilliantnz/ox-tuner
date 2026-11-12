@@ -25,7 +25,11 @@ fn main() {
     // The flags and paths are read before anything is built, so the log
     // pipeline can start before the documents load.
     let auto_sim = std::env::args().any(|argument| argument == "--sim");
-    let log_file = std::env::args().any(|argument| argument == "--log-file");
+    let file_output = if std::env::args().any(|argument| argument == "--log-file") {
+        logging::FileOutput::On
+    } else {
+        logging::FileOutput::Auto
+    };
     let paths = AppPaths::discover();
 
     // The pipeline installs the subscriber, so this must happen before the
@@ -36,7 +40,7 @@ fn main() {
     // stops the non-blocking writer.
     let log_handle = logging::init(
         paths.log_dir(),
-        log_file,
+        file_output,
         logging::StartLevel::ProfileDefault,
     );
 
