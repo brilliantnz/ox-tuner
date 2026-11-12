@@ -319,10 +319,13 @@ impl TuneImages {
     ///
     /// This is the one-document discard: a table's cells or a dialog's
     /// constants go back to the saved tune, and every other variable keeps its
-    /// edits. Conflict marks for the reverted variables go with their values.
-    /// Returns how many cells moved. A variable the layout does not know, or
-    /// one whose images disagree about its shape, is skipped — there is nothing
-    /// safe to copy for it.
+    /// edits. Conflict marks for the reverted variables go with their values,
+    /// unless a read or write failed: that variable keeps its mark so the
+    /// reader can still see what did not move.
+    ///
+    /// Returns how many values moved; a text variable counts as one. A variable
+    /// the layout does not know, or one whose images disagree about its shape,
+    /// is skipped — there is nothing safe to copy for it.
     #[expect(
         clippy::float_cmp,
         reason = "a cell is skipped only when its stored raw value is identical"
@@ -339,14 +342,16 @@ impl TuneImages {
             if matches!(spec.shape, EntryShape::Text { .. }) {
                 let saved = self.baseline.text(name).ok().map(str::to_owned);
                 let current = self.working.text(name).ok().map(str::to_owned);
-                if let (Some(saved), Some(current)) = (saved, current)
-                    && saved != current
-                {
-                    if self.working.set_text(name, &saved).is_ok() {
-                        reverted += 1;
-                    } else {
-                        failed = true;
+                if let (Some(saved), Some(current)) = (saved, current) {
+                    if saved != current {
+                        if self.working.set_text(name, &saved).is_ok() {
+                            reverted += 1;
+                        } else {
+                            failed = true;
+                        }
                     }
+                } else {
+                    failed = true;
                 }
             } else {
                 let count = spec
@@ -360,6 +365,7 @@ impl TuneImages {
                         self.baseline.raw_at(name, index),
                         self.working.raw_at(name, index),
                     ) else {
+                        failed = true;
                         continue;
                     };
                     if saved == current {
