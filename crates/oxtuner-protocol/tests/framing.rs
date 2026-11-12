@@ -151,3 +151,15 @@ fn a_signature_reply_stops_at_the_first_padding_byte() {
 
     assert_eq!(signature, "speeduino 202501");
 }
+
+#[test]
+fn a_signature_reply_tolerates_leading_padding() {
+    let mut protocol = envelope_protocol();
+    let trace = Trace::parse(&framed_reply_text(b"\r\n\0speeduino 202501")).expect("a trace");
+    let mut io = ReplayTransport::new(trace);
+    io.open().expect("opens");
+
+    let signature = protocol.signature(&mut io).expect("reads the signature");
+
+    assert_eq!(signature, "speeduino 202501");
+}

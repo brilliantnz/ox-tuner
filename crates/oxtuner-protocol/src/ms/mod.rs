@@ -694,19 +694,23 @@ impl Protocol for MsProtocol {
             }
             LinkMode::Envelope => {
                 let payload = self.converse(io, &request)?;
-                // The firmware normally prefixes the signature with a return
-                // code, and a firmware that answers with the text alone is
-                // accepted too. A non-printable first byte can only be a
-                // refusal, never the start of a signature.
+                // Padding before the text (NULs and line breaks) is not a
+                // refusal: some firmware sends a line ending before the
+                // signature. What follows the padding either starts the
+                // signature or is a return code.
+                let start = payload
+                    .iter()
+                    .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
+                    .unwrap_or(payload.len());
+                let payload = &payload[start..];
                 match payload.split_first() {
-                    Some((0, rest)) => rest.to_vec(),
                     Some((&code, _)) if !code.is_ascii_graphic() && code != b' ' => {
                         return Err(ProtocolError::ReturnCode {
                             code,
                             operation: "signature",
                         });
                     }
-                    _ => payload,
+                    _ => payload.to_vec(),
                 }
             }
         };
