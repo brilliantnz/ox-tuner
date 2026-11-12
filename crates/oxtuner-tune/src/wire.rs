@@ -704,6 +704,34 @@ name = string, ASCII, 4, 4
     }
 
     #[test]
+    fn a_big_endian_page_decodes_and_encodes_in_wire_order() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = big
+nPages = 1
+pageSize = 4
+page = 1
+rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(layout.clone()));
+        let bytes = [0x27, 0x10, 0, 0];
+
+        decode_page(&layout, IniPage::FIRST, &bytes, &mut tune).expect("decodes");
+        assert_eq!(tune.raw_at("rpm", 0).unwrap(), 10_000.0);
+
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+        assert_eq!(&encoded[..2], &[0x27, 0x10]);
+    }
+
+    #[test]
     fn a_mask_covers_only_the_bits_inside_the_word() {
         assert_eq!(bit_mask(0, 0), 1);
         assert_eq!(bit_mask(0, 15), 0xFFFF);
