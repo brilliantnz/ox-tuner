@@ -75,7 +75,7 @@ impl TraceFrame {
 }
 
 /// A recorded session.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trace {
     frames: Vec<TraceFrame>,
     /// Free-form header lines, kept so a saved trace can be re-saved unchanged.
@@ -98,6 +98,12 @@ impl std::fmt::Display for TraceError {
 }
 
 impl std::error::Error for TraceError {}
+
+impl Default for Trace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Trace {
     /// An empty trace with the format header.
@@ -379,6 +385,13 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("signature"))
         );
+    }
+
+    #[test]
+    fn a_default_trace_still_carries_the_format_header() {
+        let text = Trace::default().to_text();
+
+        assert!(text.starts_with("# ox-tuner trace v1"), "{text}");
     }
 
     #[test]
