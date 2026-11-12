@@ -129,8 +129,8 @@ impl Trace {
 
     /// Parses the text format.
     ///
-    /// Comments and blank lines are kept as headers, so `parse` followed by
-    /// `to_string` preserves the notes that make a trace useful.
+    /// Comment lines are kept as headers, so `parse` followed by `to_string`
+    /// preserves the notes that make a trace useful. Blank lines are dropped.
     ///
     /// # Errors
     ///
