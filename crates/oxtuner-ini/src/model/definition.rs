@@ -77,6 +77,12 @@ pub struct Definition {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+impl Default for Definition {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// A numeric PC-variable default converted to the byte the command expects.
 #[expect(
     clippy::cast_possible_truncation,
