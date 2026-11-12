@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::fields::{CommandTemplate, split_fields};
-use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Ordered, ReferenceTable};
+use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, ReferenceTable};
 
 use super::SectionParser;
 
@@ -388,11 +388,6 @@ pub(crate) fn parse_datalog(
         }
     }
 }
-
-/// Keeps the `Ordered` import meaningful for the type-level documentation above.
-const _: fn() = || {
-    let _: Option<Ordered<u8>> = None;
-};
 
 #[cfg(test)]
 mod tests {
