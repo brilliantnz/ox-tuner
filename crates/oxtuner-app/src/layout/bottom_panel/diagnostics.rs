@@ -99,7 +99,9 @@ impl SubsystemFilter {
     fn matches(self, target: &str) -> bool {
         match self {
             Self::All => true,
-            Self::Named(index) => subsystem_of(target) == SUBSYSTEMS[index],
+            Self::Named(index) => SUBSYSTEMS
+                .get(index)
+                .is_some_and(|name| subsystem_of(target) == *name),
         }
     }
 }
