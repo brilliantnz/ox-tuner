@@ -198,22 +198,29 @@ mod tests {
         keys
     }
 
-    /// A misspelt key renders the key itself instead of the sentence, and
-    /// nothing fails at compile time. This catches it in CI.
     #[test]
-    fn an_unknown_locale_falls_back_to_english_on_an_isolated_thread() {
+    fn an_unknown_locale_falls_back_to_english_without_touching_the_global() {
         std::thread::spawn(|| {
             isolate_thread();
             set_locale("zz");
 
             assert_eq!(locale(), "en");
+            assert!(
+                THREAD_LOCALE.with(Cell::get).is_some(),
+                "the thread keeps a locale of its own"
+            );
+            assert_eq!(
+                LOCALE.load(Ordering::Relaxed),
+                0,
+                "an isolated thread does not write the process locale"
+            );
         })
         .join()
         .expect("the test thread runs");
-
-        assert_eq!(locale(), "en", "the global locale is untouched");
     }
 
+    /// A misspelt key renders the key itself instead of the sentence, and
+    /// nothing fails at compile time. This catches it in CI.
     #[test]
     fn every_key_the_code_asks_for_exists() {
         let available = messages(locale());
