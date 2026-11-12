@@ -969,7 +969,7 @@ impl TableModel {
     }
 
     /// Moves the cursor in **display** coordinates, extending the selection when
-    /// `extend` is set.
+    /// `extend` is [`Extend::Keep`].
     pub fn move_cursor(&mut self, display_row_delta: isize, column_delta: isize, extend: Extend) {
         let rows = self.rows();
         let columns = self.columns();
