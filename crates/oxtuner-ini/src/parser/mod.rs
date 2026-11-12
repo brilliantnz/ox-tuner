@@ -395,7 +395,11 @@ fn apply_extension_flags(definition: &mut Definition) {
     } = definition;
 
     for (name, constant) in constants.iter_mut() {
-        if extensions.read_only.contains(name) {
+        if extensions
+            .read_only
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(name))
+        {
             constant.flags.controller_priority |= true;
         }
         if extensions.controller_priority.contains(name) {

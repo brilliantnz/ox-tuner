@@ -118,8 +118,13 @@ pub struct Extensions {
 
 impl Extensions {
     /// Whether a constant is controller-owned.
+    ///
+    /// The dialect writes the name as declared, but constants are matched
+    /// case-insensitively elsewhere, so this lookup is too.
     pub fn is_read_only(&self, name: &str) -> bool {
-        self.read_only.contains(name)
+        self.read_only
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(name))
     }
 
     /// Whether a change to `name` needs the ECU power-cycled before it takes
@@ -131,5 +136,25 @@ impl Extensions {
         self.power_cycle
             .iter()
             .any(|entry| entry.eq_ignore_ascii_case(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::SettingsContext;
+
+    #[test]
+    fn read_only_matches_a_constant_declared_in_another_case() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 288\npage = 1\nengineMake = scalar, U08, 0, \"\", 1.0, 0\n[ConstantsExtensions]\nreadOnly = enginemake\n";
+
+        let definition = crate::parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .constant("engineMake")
+                .is_some_and(|constant| constant.flags.controller_priority),
+            "the extension names the constant in another case"
+        );
+        assert!(definition.extensions.is_read_only("ENGINEMAKE"));
     }
 }
