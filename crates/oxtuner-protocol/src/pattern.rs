@@ -9,7 +9,7 @@
 //! "p%2i%2o%2c"  ──▶  ['p'] [page: u8, u8] [offset: u16] [count: u16]
 //! ```
 
-use oxtuner_ini::{CommandTemplate, Placeholder, Segment};
+use oxtuner_ini::{CommandTemplate, Placeholder, Segment, WireOrder};
 
 /// One recognised piece of a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,20 +24,6 @@ enum Part {
     Count,
     /// `%v` / `%2v`: the payload bytes.
     Values,
-}
-
-/// The wire order of the 16-bit command arguments.
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "the dialect defines exactly two byte orders"
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WireOrder {
-    /// Least significant byte first, the dialect default.
-    #[default]
-    LittleEndian,
-    /// Most significant byte first, for `forceBigEndianProtocol`.
-    BigEndian,
 }
 
 /// A command template that can be matched against wire bytes.

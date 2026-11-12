@@ -412,16 +412,10 @@ impl CommandTemplate {
                     bytes.extend_from_slice(&arguments.page.to_be_bytes());
                 }
                 Segment::Placeholder(Placeholder::Offset) => {
-                    bytes.extend_from_slice(&word_bytes(
-                        arguments.offset,
-                        arguments.force_big_endian,
-                    ));
+                    bytes.extend_from_slice(&word_bytes(arguments.offset, arguments.wire_order));
                 }
                 Segment::Placeholder(Placeholder::Count) => {
-                    bytes.extend_from_slice(&word_bytes(
-                        arguments.count,
-                        arguments.force_big_endian,
-                    ));
+                    bytes.extend_from_slice(&word_bytes(arguments.count, arguments.wire_order));
                 }
                 Segment::Placeholder(Placeholder::Values) => {
                     bytes.extend_from_slice(arguments.values);
@@ -445,13 +439,26 @@ impl CommandTemplate {
     }
 }
 
+/// The wire order of the 16-bit command arguments.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialect defines exactly two byte orders"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireOrder {
+    /// Least significant byte first, the dialect default.
+    #[default]
+    LittleEndian,
+    /// Most significant byte first, for `forceBigEndianProtocol`.
+    BigEndian,
+}
+
 /// Values substituted into a command template at send time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandArguments<'a> {
     /// Page identifier, written as `[canId][page]` for `%2i`.
     pub page: u16,
-    /// Start offset for `%2o`. Little-endian on the wire unless
-    /// [`Self::force_big_endian`] is set.
+    /// Start offset for `%2o`.
     pub offset: u16,
     /// Byte count for `%2c`. Same wire order as [`Self::offset`].
     pub count: u16,
@@ -459,17 +466,14 @@ pub struct CommandArguments<'a> {
     pub values: &'a [u8],
     /// The definition's `forceBigEndianProtocol`: offsets and lengths go on
     /// the wire big-endian instead of the dialect's little-endian default.
-    /// Callers pass `protocol.force_big_endian_protocol`.
-    pub force_big_endian: bool,
+    pub wire_order: WireOrder,
 }
 
-/// One 16-bit command argument on the wire: little-endian unless the
-/// definition forces the big-endian protocol.
-fn word_bytes(value: u16, force_big_endian: bool) -> [u8; 2] {
-    if force_big_endian {
-        value.to_be_bytes()
-    } else {
-        value.to_le_bytes()
+/// One 16-bit command argument on the wire.
+fn word_bytes(value: u16, wire_order: WireOrder) -> [u8; 2] {
+    match wire_order {
+        WireOrder::LittleEndian => value.to_le_bytes(),
+        WireOrder::BigEndian => value.to_be_bytes(),
     }
 }
 
@@ -547,7 +551,7 @@ mod tests {
                     offset: 0x0004,
                     count: 0x0003,
                     values: &[],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )
@@ -566,7 +570,7 @@ mod tests {
                     page: 1,
                     offset: 4,
                     count: 3,
-                    force_big_endian: true,
+                    wire_order: WireOrder::BigEndian,
                     ..CommandArguments::default()
                 },
                 &|_| None,
@@ -611,7 +615,7 @@ mod tests {
                     offset: 2,
                     count: 3,
                     values: &[9, 8, 7],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )
@@ -633,7 +637,7 @@ mod tests {
                     offset: 0,
                     count: 2,
                     values: &[0xAB, 0xCD],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )

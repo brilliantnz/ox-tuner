@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oxtuner_ini::{CommandArguments, CommandTemplate, Definition};
+use oxtuner_ini::{CommandArguments, CommandTemplate, Definition, WireOrder};
 use oxtuner_transport::{Transport, TransportError};
 
 mod commands;
@@ -177,7 +177,7 @@ pub struct MsProtocol {
     block_read_timeout: Duration,
     page_activation_delay: Duration,
     port_open_delay: Duration,
-    force_big_endian: bool,
+    wire_order: WireOrder,
     realtime: Option<Realtime>,
     link: LinkMode,
     reply_code: ReplyCode,
@@ -272,7 +272,11 @@ impl MsProtocol {
                 .map_or(Duration::ZERO, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
-            force_big_endian: definition.comms.force_big_endian_protocol,
+            wire_order: if definition.comms.force_big_endian_protocol {
+                WireOrder::BigEndian
+            } else {
+                WireOrder::LittleEndian
+            },
             realtime,
             link: default_link(definition),
             reply_code: behavior.reply_code(definition),
@@ -451,6 +455,8 @@ impl MsProtocol {
             CrcReply::RawLittleEndian => {
                 u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             }
+            // Refused before any read; the arm is defensive so a new link mode
+            // cannot silently fall through to a raw parse.
             CrcReply::HexText => {
                 return Err(unsupported_text_crc(page));
             }
@@ -539,7 +545,7 @@ impl MsProtocol {
                     offset,
                     count,
                     values,
-                    force_big_endian: self.force_big_endian,
+                    wire_order: self.wire_order,
                 },
                 &|name| self.variables.get(&name.to_ascii_lowercase()).copied(),
             )
