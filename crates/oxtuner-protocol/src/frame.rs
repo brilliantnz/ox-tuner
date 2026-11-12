@@ -14,7 +14,7 @@
 use crate::crc32::crc32;
 use crate::error::ProtocolError;
 
-/// The largest frame this build accepts.
+/// The largest payload this build accepts.
 ///
 /// A Speeduino's serial buffer is 257 bytes, and a page read adds the return
 /// code and the frame overhead on top; 4 KiB leaves room for a larger board
@@ -48,8 +48,9 @@ pub enum FrameError {
     },
     /// The bytes asked for are larger than the limit that applies to them.
     TooLarge {
-        /// The payload length the caller asked for, or the whole frame length
-        /// the length field declares.
+        /// The payload length the caller asked for, the whole byte count one
+        /// [`FrameDecoder::push`] call was fed, or the payload length the
+        /// length field declares.
         declared: usize,
         /// The limit it exceeded.
         limit: usize,
