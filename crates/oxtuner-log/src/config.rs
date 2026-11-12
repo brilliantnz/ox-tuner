@@ -46,7 +46,8 @@ pub enum FilePolicy {
 /// Configuration for the process-wide logging pipeline.
 ///
 /// Build it with [`LogConfig::new`] and the builder methods. The directory is
-/// created when [`init`](crate::init) runs.
+/// created when [`init`](crate::init) runs, and only when a run file is wanted:
+/// [`FilePolicy::Off`] touches no filesystem path.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     directory: PathBuf,
