@@ -752,7 +752,10 @@ impl DialogEditor {
         };
 
         let mut lane = div()
-            .id(format!("constant-control-{}-{}", dialog.id, field.variable))
+            .id(format!(
+                "constant-control-{}-{}-{}",
+                dialog.id, index, field.variable
+            ))
             .w_48()
             .flex_shrink_0()
             .flex()
