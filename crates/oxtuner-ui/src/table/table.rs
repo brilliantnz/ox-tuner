@@ -435,7 +435,6 @@ impl Table {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
         let extend = extend_from_shift(modifiers.shift);
-        let tab_direction = direction_from_shift(modifiers.shift);
 
         if self.model.axis_editing().is_some() {
             match key {
@@ -478,7 +477,7 @@ impl Table {
                             self.request_edits(edits, cx);
                         }
                         if key == "tab" {
-                            self.model.tab(tab_direction);
+                            self.model.tab(direction_from_shift(modifiers.shift));
                             self.ensure_cursor_visible();
                         }
                     }
@@ -519,7 +518,7 @@ impl Table {
             "right" | "l" => self.model.move_cursor(0, 1, extend),
             "up" | "k" => self.model.move_cursor(-1, 0, extend),
             "down" | "j" => self.model.move_cursor(1, 0, extend),
-            "tab" => self.model.tab(tab_direction),
+            "tab" => self.model.tab(direction_from_shift(modifiers.shift)),
             "enter" => {
                 self.model.begin_edit(None);
             }
