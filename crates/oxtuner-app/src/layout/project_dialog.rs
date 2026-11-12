@@ -71,33 +71,30 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             ),
         };
 
-        let recent_list =
-            if recent.is_empty() {
-                div()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(t!("app.project.no_recent"))
-                    .into_any_element()
-            } else {
-                v_flex()
-                    .gap_1()
-                    .children(recent.clone().into_iter().take(8).enumerate().map(
-                        |(index, path)| {
-                            let label = project::display_name(&path);
-                            let detail = path.display().to_string();
-                            Button::new(("project-recent", index))
-                                .label(label)
-                                .ghost()
-                                .tooltip(detail)
-                                .on_click(move |_, window, cx| {
-                                    project::open(path.clone(), cx);
-                                    window.close_dialog(cx);
-                                })
-                                .into_any_element()
-                        },
-                    ))
-                    .into_any_element()
-            };
+        let recent_list = if recent.is_empty() {
+            div()
+                .text_sm()
+                .text_color(muted)
+                .child(t!("app.project.no_recent"))
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_1()
+                .children(recent.clone().into_iter().take(8).map(|path| {
+                    let label = project::display_name(&path);
+                    let detail = path.display().to_string();
+                    Button::new(format!("project-recent-{}", path.display()))
+                        .label(label)
+                        .ghost()
+                        .tooltip(detail)
+                        .on_click(move |_, window, cx| {
+                            project::open(path.clone(), cx);
+                            window.close_dialog(cx);
+                        })
+                        .into_any_element()
+                }))
+                .into_any_element()
+        };
 
         dialog
             .title(t!("app.project.title"))

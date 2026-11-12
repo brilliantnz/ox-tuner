@@ -752,7 +752,7 @@ impl DialogEditor {
         };
 
         let mut lane = div()
-            .id(("constant-control", index))
+            .id(format!("constant-control-{}", field.variable))
             .w_48()
             .flex_shrink_0()
             .flex()
@@ -923,14 +923,14 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
         .iter()
         .enumerate()
         .filter(|(_, command)| command.gates.visible)
-        .map(|(index, command)| {
+        .map(|(_, command)| {
             let blocked =
                 command_block_reason(command, dialog.writable, can_reach_ecu, writes_enabled);
             let message = show_message(command);
             let dialog_id = dialog.id.clone();
             let command_name = command.command.clone();
 
-            let mut button = Button::new(("dialog-command", index))
+            let mut button = Button::new(format!("dialog-command-{}", command.command))
                 .label(t!("app.dialog.run"))
                 .ghost();
 
