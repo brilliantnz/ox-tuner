@@ -781,3 +781,8 @@ pub(crate) struct Envelope {
     pub(crate) op: OpId,
     pub(crate) command: CommandRequest,
 }
+
+/// Slowest realtime poll rate the core accepts, in Hz.
+pub const MIN_POLL_HZ: u32 = 1;
+/// Fastest realtime poll rate the core accepts, in Hz.
+pub const MAX_POLL_HZ: u32 = 100;

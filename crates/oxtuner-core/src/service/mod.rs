@@ -664,7 +664,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 /// the same polled frames rather than running a second schedule.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The slowest and fastest accepted poll rates.
+/// The slowest and fastest accepted poll intervals.
+///
+/// These are the intervals for [`MAX_POLL_HZ`](crate::MAX_POLL_HZ) and
+/// [`MIN_POLL_HZ`](crate::MIN_POLL_HZ); the test below keeps them in step.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
@@ -1166,3 +1169,20 @@ mod tune;
 
 use dispatch::{handle, refresh_menu, send};
 use ecu::{next_wait, service_live, teardown};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_poll_interval_limits_match_the_published_rate_range() {
+        assert_eq!(
+            u32::try_from(MIN_POLL_INTERVAL.as_millis()).unwrap_or(u32::MAX),
+            1_000 / crate::MAX_POLL_HZ
+        );
+        assert_eq!(
+            u32::try_from(MAX_POLL_INTERVAL.as_millis()).unwrap_or(u32::MAX),
+            1_000 / crate::MIN_POLL_HZ
+        );
+    }
+}

@@ -1,19 +1,12 @@
 //! The event boundary: failure records, the status fold and its follow-up commands.
 
 use gpui_kit::App;
-use oxtuner_core::{Event, FailureCode, OpId, PortChoice};
+use oxtuner_core::{Event, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
 
 use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
 use super::service::CoreService;
 use super::status::{JournalView, TraceSaved, Update};
 
-/// The slowest and fastest poll rates the connection dialog offers, in Hz.
-///
-/// The core clamps the same range. Clamping here as well keeps the interval
-/// sane before the command is sent instead of waiting for the core's reply.
-const MIN_POLL_HZ: u32 = 1;
-/// See [`MIN_POLL_HZ`].
-const MAX_POLL_HZ: u32 = 100;
 /// One second in milliseconds, for the poll interval.
 const MILLIS_PER_SECOND: u32 = 1_000;
 
