@@ -198,6 +198,22 @@ mod tests {
         keys
     }
 
+    #[test]
+    fn an_isolated_thread_keeps_its_own_locale_when_the_code_is_unknown() {
+        std::thread::spawn(|| {
+            isolate_thread();
+            set_locale("zz");
+
+            assert_eq!(locale(), "en");
+            assert!(
+                THREAD_LOCALE.with(Cell::get).is_some(),
+                "the thread keeps a locale of its own"
+            );
+        })
+        .join()
+        .expect("the test thread runs");
+    }
+
     /// A misspelt key renders the key itself instead of the sentence, and
     /// nothing fails at compile time. This catches it in CI.
     #[test]

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
+use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
 
 mod conflict;
 mod state;
@@ -319,10 +319,13 @@ impl TuneImages {
     ///
     /// This is the one-document discard: a table's cells or a dialog's
     /// constants go back to the saved tune, and every other variable keeps its
-    /// edits. Conflict marks for the reverted variables go with their values.
-    /// Returns how many cells moved. A variable the layout does not know, or
-    /// one whose images disagree about its shape, is skipped — there is nothing
-    /// safe to copy for it.
+    /// edits. Conflict marks for the reverted variables go with their values,
+    /// unless a read or write failed: that variable keeps its mark so the
+    /// reader can still see what did not move.
+    ///
+    /// Returns how many values moved; a text variable counts as one. A variable
+    /// the layout does not know, or one whose images disagree about its shape,
+    /// is skipped — there is nothing safe to copy for it.
     #[expect(
         clippy::float_cmp,
         reason = "a cell is skipped only when its stored raw value is identical"
@@ -334,34 +337,56 @@ impl TuneImages {
             let Some(spec) = self.layout.variable(name) else {
                 continue;
             };
-            let count = spec
-                .shape
-                .dimensions()
-                .map_or(1, |(columns, rows)| columns.saturating_mul(rows))
-                .max(1);
+            let mut failed = false;
 
-            for index in 0..count {
-                let (Ok(saved), Ok(current)) = (
-                    self.baseline.raw_at(name, index),
-                    self.working.raw_at(name, index),
-                ) else {
-                    continue;
-                };
-                if saved == current {
-                    continue;
+            if matches!(spec.shape, EntryShape::Text { .. }) {
+                let saved = self.baseline.text(name).ok().map(str::to_owned);
+                let current = self.working.text(name).ok().map(str::to_owned);
+                if let (Some(saved), Some(current)) = (saved, current) {
+                    if saved != current {
+                        if self.working.set_text(name, &saved).is_ok() {
+                            reverted += 1;
+                        } else {
+                            failed = true;
+                        }
+                    }
+                } else {
+                    failed = true;
                 }
+            } else {
+                let count = spec
+                    .shape
+                    .dimensions()
+                    .map_or(1, |(columns, rows)| columns.saturating_mul(rows))
+                    .max(1);
 
-                if self.working.set_raw_at(name, index, saved).is_err() {
-                    continue;
+                for index in 0..count {
+                    let (Ok(saved), Ok(current)) = (
+                        self.baseline.raw_at(name, index),
+                        self.working.raw_at(name, index),
+                    ) else {
+                        failed = true;
+                        continue;
+                    };
+                    if saved == current {
+                        continue;
+                    }
+
+                    if self.working.set_raw_at(name, index, saved).is_err() {
+                        failed = true;
+                        continue;
+                    }
+
+                    reverted += 1;
                 }
-
-                reverted += 1;
             }
 
             // A conflict mark asks the reader to review a cell. The values are
             // at the file baseline now, so the mark belongs to the discard
-            // too, the way a whole-tune revert drops every conflict.
-            if let Some(variable) = self.layout.index(name) {
+            // too, the way a whole-tune revert drops every conflict. A failed
+            // write leaves the mark in place: it would otherwise point at a
+            // value that did not move.
+            if !failed && let Some(variable) = self.layout.index(name) {
                 self.overlays.retain(|key, overlay| {
                     key.variable != variable || *overlay != Overlay::Conflict
                 });

@@ -67,7 +67,7 @@ mod tests {
         }
 
         let window = TimeWindow::new(3.0, 6.0);
-        let series = history.extract(&["rpm".to_owned()], window, 100);
+        let series = history.extract(&["rpm"], window, 100);
 
         assert_eq!(series.len(), 1);
         let times: Vec<f64> = series[0].points.iter().map(|sample| sample.t).collect();
@@ -79,7 +79,7 @@ mod tests {
         let history = history(4);
         history.push_aligned(0.0, vec![1.0, 2.0, 3.0]);
 
-        let series = history.extract(&["nope".to_owned()], TimeWindow::new(0.0, 1.0), 10);
+        let series = history.extract(&["nope"], TimeWindow::new(0.0, 1.0), 10);
 
         assert_eq!(series.len(), 1);
         assert!(
@@ -145,7 +145,7 @@ mod tests {
             history.push_aligned(f64::from(step), vec![f64::from(step) * 10.0, 1.0, 14.0]);
         }
 
-        let nearest = history.nearest(&["rpm".to_owned(), "afr".to_owned()], 2.1);
+        let nearest = history.nearest(&["rpm", "afr"], 2.1);
 
         assert_eq!(nearest[0].sample.map(|sample| sample.t), Some(2.0));
         assert_eq!(nearest[0].sample.map(|sample| sample.v), Some(20.0));

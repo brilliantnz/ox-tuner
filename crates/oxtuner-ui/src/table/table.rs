@@ -34,10 +34,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button, button::ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler,
@@ -61,7 +60,9 @@ use super::style::TableStyle;
 // use super::heatmap::contrast_text;
 // Unused; see the note above `contrast_text` in `heatmap.rs` before restoring
 // it.
-use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
+use super::model::{
+    BulkOp, CellPos, Edge, Editing, Extend, HistoryStep, MoveDirection, TableModel,
+};
 
 /// What the table asks its owner to do.
 #[expect(
@@ -139,14 +140,6 @@ impl Focusable for Table {
     }
 }
 
-/// Text input for the in-cell editor.
-///
-/// The edit lives in a borderless kit [`Input`], so a cell edit behaves like
-/// any text field: arrows move the caret, Home and End jump, text can be
-/// selected, cut and pasted, and IME composition is the kit's problem. The
-/// table owns only the contract around it — Enter commits, Tab commits and
-/// moves, Escape cancels — and both Tab and Escape reach [`Table::handle_key`]
-/// because a single-line input propagates them.
 /// Text input for the in-cell editor.
 ///
 /// The table draws its own editor instead of an `Input`, so it registers this
@@ -264,11 +257,13 @@ impl Table {
     }
 
     /// The model, for status lines and tests.
+    #[must_use]
     pub fn model(&self) -> &TableModel {
         &self.model
     }
 
     /// The heat-constrained colours in use.
+    #[must_use]
     pub fn style(&self) -> &TableStyle {
         &self.style
     }
@@ -369,7 +364,10 @@ impl Table {
         };
         match self.model.paste_edits(&text) {
             Ok(edits) => self.request_edits(edits, cx),
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
@@ -382,7 +380,10 @@ impl Table {
                 }
                 cx.notify();
             }
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
@@ -414,7 +415,10 @@ impl Table {
                     self.request_axis_edits(axis, edits, cx);
                 }
             }
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
@@ -430,7 +434,7 @@ impl Table {
     pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
-        let extend = modifiers.shift;
+        let extend = extend_from_shift(modifiers.shift);
 
         if self.model.axis_editing().is_some() {
             match key {
@@ -467,21 +471,18 @@ impl Table {
 
         if self.model.editing().is_some() {
             match key {
-                "enter" | "tab" => {
-                    let forward = key != "tab" || !modifiers.shift;
-                    match self.model.commit_edit() {
-                        Ok(edits) => {
-                            if !edits.is_empty() {
-                                self.request_edits(edits, cx);
-                            }
-                            if key == "tab" {
-                                self.model.tab(forward);
-                                self.ensure_cursor_visible();
-                            }
+                "enter" | "tab" => match self.model.commit_edit() {
+                    Ok(edits) => {
+                        if !edits.is_empty() {
+                            self.request_edits(edits, cx);
                         }
-                        Err(_) => self.model.mark_edit_invalid(),
+                        if key == "tab" {
+                            self.model.tab(direction_from_shift(modifiers.shift));
+                            self.ensure_cursor_visible();
+                        }
                     }
-                }
+                    Err(_) => self.model.mark_edit_invalid(),
+                },
                 "escape" => self.model.cancel_edit(),
                 "backspace" => self.model.pop_char(),
                 _ => {}
@@ -517,15 +518,15 @@ impl Table {
             "right" | "l" => self.model.move_cursor(0, 1, extend),
             "up" | "k" => self.model.move_cursor(-1, 0, extend),
             "down" | "j" => self.model.move_cursor(1, 0, extend),
-            "tab" => self.model.tab(!modifiers.shift),
+            "tab" => self.model.tab(direction_from_shift(modifiers.shift)),
             "enter" => {
                 self.model.begin_edit(None);
             }
             "escape" => self.model.collapse_selection(),
-            "home" => self.model.move_to_edge(true, extend),
-            "end" => self.model.move_to_edge(false, extend),
-            "pageup" => self.model.move_page(false, extend),
-            "pagedown" => self.model.move_page(true, extend),
+            "home" => self.model.move_to_edge(Edge::First, extend),
+            "end" => self.model.move_to_edge(Edge::Last, extend),
+            "pageup" => self.model.move_page(MoveDirection::Backward, extend),
+            "pagedown" => self.model.move_page(MoveDirection::Forward, extend),
             // Printable text starts an edit when the platform handler delivers
             // it; see `replace_text_in_range`.
             _ => {}
@@ -856,13 +857,27 @@ impl Table {
     }
 }
 
+/// Whether Shift extends the selection.
+fn extend_from_shift(shift: bool) -> Extend {
+    if shift { Extend::Keep } else { Extend::Replace }
+}
+
+/// Which way Shift-Tab moves.
+fn direction_from_shift(shift: bool) -> MoveDirection {
+    if shift {
+        MoveDirection::Backward
+    } else {
+        MoveDirection::Forward
+    }
+}
+
 impl Render for Table {
     #[expect(
         clippy::too_many_lines,
         reason = "the grid composes headers, rows, cells and input in one retained render"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Some(table) = self.model.table().cloned() else {
+        let Some(table) = self.model.table() else {
             return div().size_full().into_any_element();
         };
 
@@ -941,16 +956,7 @@ impl Render for Table {
             .bg(theme.secondary)
             .flex()
             .items_center()
-            .justify_center()
-            .child(
-                Button::new("re-bins")
-                    .icon(IconName::Move3d)
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .h_full()
-                    .rounded_none(),
-            );
+            .justify_center();
 
         let header_band = h_flex()
             .h(px(AXIS_HEIGHT))

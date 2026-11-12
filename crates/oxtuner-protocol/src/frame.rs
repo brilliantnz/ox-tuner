@@ -14,7 +14,7 @@
 use crate::crc32::crc32;
 use crate::error::ProtocolError;
 
-/// The largest frame this build accepts.
+/// The largest payload this build accepts.
 ///
 /// A Speeduino's serial buffer is 257 bytes, and a page read adds the return
 /// code and the frame overhead on top; 4 KiB leaves room for a larger board
@@ -46,10 +46,14 @@ pub enum FrameError {
         /// What the slice carries.
         actual: usize,
     },
-    /// The payload is larger than the maximum frame payload.
+    /// The bytes asked for are larger than the limit that applies to them.
     TooLarge {
-        /// The length field's value.
+        /// The payload length the caller asked for, the whole byte count one
+        /// [`FrameDecoder::push`] call was fed, or the payload length the
+        /// length field declares.
         declared: usize,
+        /// The limit it exceeded.
+        limit: usize,
     },
     /// The CRC did not match.
     Crc {
@@ -70,9 +74,10 @@ impl std::fmt::Display for FrameError {
                 formatter,
                 "the frame declares {declared} payload byte(s) but carries {actual}"
             ),
-            Self::TooLarge { declared } => {
-                write!(formatter, "the frame declares {declared} payload bytes")
-            }
+            Self::TooLarge { declared, limit } => write!(
+                formatter,
+                "{declared} byte(s) exceed the {limit} byte limit"
+            ),
             Self::Crc { carried, computed } => write!(
                 formatter,
                 "the frame carries CRC 0x{carried:08x}, the payload computes 0x{computed:08x}"
@@ -85,7 +90,7 @@ impl std::error::Error for FrameError {}
 
 impl From<FrameError> for ProtocolError {
     fn from(error: FrameError) -> Self {
-        Self::BadFrame(error.to_string())
+        Self::BadFrame(error)
     }
 }
 
@@ -94,16 +99,18 @@ impl Frame {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameError::TooLarge`] when the payload exceeds
-    /// [`MAX_PAYLOAD`].
+    /// Returns [`FrameError::TooLarge`] when the payload exceeds the cap this
+    /// build accepts.
     pub fn encode(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
         if payload.len() > MAX_PAYLOAD {
             return Err(FrameError::TooLarge {
                 declared: payload.len(),
+                limit: MAX_PAYLOAD,
             });
         }
         let length = u16::try_from(payload.len()).map_err(|_| FrameError::TooLarge {
             declared: payload.len(),
+            limit: MAX_PAYLOAD,
         })?;
         let crc = crc32(payload);
         let mut bytes = Vec::with_capacity(payload.len() + 6);
@@ -128,7 +135,10 @@ impl Frame {
         }
         let declared = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
         if declared > MAX_PAYLOAD {
-            return Err(FrameError::TooLarge { declared });
+            return Err(FrameError::TooLarge {
+                declared,
+                limit: MAX_PAYLOAD,
+            });
         }
         let expected = declared + 6;
         if bytes.len() != expected {
@@ -191,8 +201,10 @@ impl FrameDecoder {
         // fed in pieces anyway, and this keeps a single huge slice from being
         // copied into the buffer before the first length check.
         if bytes.len() > MAX_PAYLOAD + 6 {
+            self.buffer.clear();
             return Err(FrameError::TooLarge {
                 declared: bytes.len(),
+                limit: MAX_PAYLOAD + 6,
             });
         }
         self.buffer.extend_from_slice(bytes);
@@ -205,7 +217,10 @@ impl FrameDecoder {
             let declared = Frame::length([self.buffer[0], self.buffer[1]]);
             if declared > MAX_PAYLOAD {
                 self.buffer.clear();
-                return Err(FrameError::TooLarge { declared });
+                return Err(FrameError::TooLarge {
+                    declared,
+                    limit: MAX_PAYLOAD,
+                });
             }
             let total = declared + 6;
             if self.buffer.len() < total {
@@ -284,6 +299,24 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_push_drops_a_partial_frame() {
+        let encoded = Frame::encode(b"hello").expect("encodes");
+        let mut decoder = FrameDecoder::new();
+        let first = decoder.push(&encoded[..4]).expect("no frame yet");
+        assert!(first.is_empty(), "a partial push completes no frame");
+        assert_eq!(decoder.pending(), 4);
+
+        let error = decoder
+            .push(&vec![0u8; MAX_PAYLOAD + 7])
+            .expect_err("too many bytes for one frame");
+
+        assert!(matches!(error, FrameError::TooLarge { .. }));
+        assert_eq!(decoder.pending(), 0, "the wedged bytes are dropped");
+        let frames = decoder.push(&encoded).expect("the next frame parses");
+        assert_eq!(frames.len(), 1);
+    }
+
+    #[test]
     fn the_decoder_rejects_a_push_larger_than_any_frame() {
         let mut decoder = FrameDecoder::new();
 
@@ -292,6 +325,10 @@ mod tests {
             .expect_err("too many bytes for one frame");
 
         assert!(matches!(error, FrameError::TooLarge { .. }));
+        assert!(
+            error.to_string().contains(&(MAX_PAYLOAD + 6).to_string()),
+            "the message names the limit: {error}"
+        );
         assert_eq!(decoder.pending(), 0);
     }
 

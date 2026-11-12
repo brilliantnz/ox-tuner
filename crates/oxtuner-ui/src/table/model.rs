@@ -48,6 +48,7 @@ pub struct Selection {
 
 impl Selection {
     /// A selection of one cell.
+    #[must_use]
     pub fn single(at: CellPos) -> Self {
         Self {
             anchor: at,
@@ -57,6 +58,7 @@ impl Selection {
 
     /// `(top, left, bottom, right)`, normalized so the anchor may be after the
     /// cursor.
+    #[must_use]
     pub fn bounds(self) -> (usize, usize, usize, usize) {
         (
             self.anchor.row.min(self.cursor.row),
@@ -67,12 +69,14 @@ impl Selection {
     }
 
     /// Whether `cell` is inside the rectangle.
+    #[must_use]
     pub fn contains(self, cell: CellPos) -> bool {
         let (top, left, bottom, right) = self.bounds();
         (top..=bottom).contains(&cell.row) && (left..=right).contains(&cell.column)
     }
 
     /// Number of cells in the rectangle.
+    #[must_use]
     pub fn cell_count(self) -> usize {
         let (top, left, bottom, right) = self.bounds();
         (bottom - top + 1) * (right - left + 1)
@@ -278,6 +282,42 @@ struct HistoryEntry {
 /// How many commands the grid remembers.
 const HISTORY_LIMIT: usize = 100;
 
+/// Which end of the table an edge move targets.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an edge move goes to the first or the last row"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The first displayed row.
+    First,
+    /// The last displayed row.
+    Last,
+}
+
+/// Whether a move extends the selection or replaces it.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a move either extends the selection or collapses it"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extend {
+    /// Keep the anchor and move the cursor.
+    Keep,
+    /// Collapse the selection to the moved cell.
+    Replace,
+}
+
+/// Which way a page or tab move goes.
+#[expect(clippy::exhaustive_enums, reason = "a row move is forward or backward")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveDirection {
+    /// Later rows or cells.
+    Forward,
+    /// Earlier rows or cells.
+    Backward,
+}
+
 /// The table grid's model.
 pub struct TableModel {
     table: Option<TableView>,
@@ -321,6 +361,7 @@ impl Default for TableModel {
 
 impl TableModel {
     /// An empty model with no table.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             table: None,
@@ -377,12 +418,14 @@ impl TableModel {
     }
 
     /// The formatted value of one cell.
+    #[must_use]
     pub fn display(&self, cell: CellPos) -> Option<Arc<str>> {
         self.index_of(cell)
             .and_then(|index| self.display.get(index).cloned())
     }
 
     /// The accessible label of one cell.
+    #[must_use]
     pub fn aria(&self, cell: CellPos) -> Option<Arc<str>> {
         self.index_of(cell)
             .and_then(|index| self.aria.get(index).cloned())
@@ -405,31 +448,37 @@ impl TableModel {
     }
 
     /// The rendered snapshot.
+    #[must_use]
     pub fn table(&self) -> Option<&TableView> {
         self.table.as_ref()
     }
 
     /// Rows in the table.
+    #[must_use]
     pub fn rows(&self) -> usize {
         self.table.as_ref().map_or(0, |table| table.rows)
     }
 
     /// Columns in the table.
+    #[must_use]
     pub fn columns(&self) -> usize {
         self.table.as_ref().map_or(0, |table| table.cols)
     }
 
     /// The current selection.
+    #[must_use]
     pub fn selection(&self) -> Selection {
         self.selection
     }
 
     /// The in-progress edit, when there is one.
+    #[must_use]
     pub fn editing(&self) -> Option<&Editing> {
         self.editing.as_ref()
     }
 
     /// The in-progress header edit, when there is one.
+    #[must_use]
     pub fn axis_editing(&self) -> Option<&AxisEditing> {
         self.axis_editing.as_ref()
     }
@@ -446,11 +495,13 @@ impl TableModel {
     /// The default (`false`) is the chart orientation: the lowest bin at the
     /// bottom and the highest at the top. Flipped draws the lowest bin at the
     /// top, spreadsheet style.
+    #[must_use]
     pub fn flip_y(&self) -> bool {
         self.flip_y
     }
 
     /// The last command's result, until the next input.
+    #[must_use]
     pub fn action(&self) -> Option<GridAction> {
         self.action
     }
@@ -481,11 +532,13 @@ impl TableModel {
     }
 
     /// Whether there is a command to undo.
+    #[must_use]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
     /// Whether there is a command to redo.
+    #[must_use]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -518,6 +571,7 @@ impl TableModel {
 
     /// The displayed value, including an optimistic edit not yet echoed by the
     /// core, or a value a paired curve is dragging in this cell.
+    #[must_use]
     pub fn value(&self, cell: CellPos) -> f64 {
         if let Some((preview, value)) = self.preview
             && preview == cell
@@ -561,6 +615,7 @@ impl TableModel {
     }
 
     /// The core's write state for one cell.
+    #[must_use]
     pub fn state(&self, cell: CellPos) -> CellState {
         let Some(table) = &self.table else {
             return CellState::Unknown;
@@ -577,6 +632,7 @@ impl TableModel {
     }
 
     /// Whether the cell differs from the file baseline.
+    #[must_use]
     pub fn changed(&self, cell: CellPos) -> bool {
         let Some(table) = &self.table else {
             return false;
@@ -593,11 +649,13 @@ impl TableModel {
     }
 
     /// Whether edits are allowed.
+    #[must_use]
     pub fn is_writable(&self) -> bool {
         self.table.as_ref().is_some_and(|table| table.writable)
     }
 
     /// Bins along one axis.
+    #[must_use]
     pub fn axis_len(&self, axis: AxisKind) -> usize {
         self.table.as_ref().map_or(0, |table| match axis {
             AxisKind::X => table.x_axis.values.len(),
@@ -606,6 +664,7 @@ impl TableModel {
     }
 
     /// A bin value, including an optimistic edit not yet echoed by the core.
+    #[must_use]
     pub fn axis_value(&self, axis: AxisKind, index: usize) -> f64 {
         let key = (matches!(axis, AxisKind::X), index);
         if let Some(value) = self.pending_axis.get(&key) {
@@ -625,6 +684,7 @@ impl TableModel {
     /// A realtime follower resolves each channel to a value and then to a bin
     /// with [`TableModel::realtime_cell`]; the grid itself never names a
     /// channel.
+    #[must_use]
     pub fn axis_channel(&self, axis: AxisKind) -> Option<&str> {
         self.table.as_ref().and_then(|table| match axis {
             AxisKind::X => table.x_axis.channel.as_deref(),
@@ -633,18 +693,21 @@ impl TableModel {
     }
 
     /// The column whose bin sits closest to a live X value, ties going down.
+    #[must_use]
     pub fn nearest_column(&self, x_value: f64) -> Option<usize> {
         let table = self.table.as_ref()?;
         nearest_bin(&table.x_axis.values, x_value)
     }
 
     /// The definition row whose bin sits closest to a live Y value.
+    #[must_use]
     pub fn nearest_row(&self, y_value: f64) -> Option<usize> {
         let table = self.table.as_ref()?;
         nearest_bin(&table.y_axis.values, y_value)
     }
 
     /// The cell a live `(x, y)` point sits on, for the realtime follower.
+    #[must_use]
     pub fn realtime_cell(&self, x_value: f64, y_value: f64) -> Option<CellPos> {
         Some(CellPos {
             row: self.nearest_row(y_value)?,
@@ -689,6 +752,7 @@ impl TableModel {
     }
 
     /// Whether an axis bin can be edited.
+    #[must_use]
     pub fn is_axis_writable(&self, axis: AxisKind, index: usize) -> bool {
         if !self.is_writable() {
             return false;
@@ -700,6 +764,7 @@ impl TableModel {
     ///
     /// `TunerStudio` lets a bin hold any value, but a flat or falling bin makes
     /// the ECU interpolate backwards. The grid warns rather than refuses.
+    #[must_use]
     pub fn axis_monotonic(&self, axis: AxisKind) -> bool {
         use std::cmp::Ordering;
 
@@ -769,6 +834,7 @@ impl TableModel {
     }
 
     /// The text being typed, cell or header bin.
+    #[must_use]
     pub fn edit_text(&self) -> Option<&str> {
         self.editing
             .as_ref()
@@ -849,6 +915,7 @@ impl TableModel {
     }
 
     /// The data row drawn at `display_row`.
+    #[must_use]
     pub fn data_row(&self, display_row: usize) -> usize {
         let rows = self.rows();
         if rows == 0 {
@@ -862,6 +929,7 @@ impl TableModel {
     }
 
     /// The display row a data row is drawn at.
+    #[must_use]
     pub fn display_row(&self, data_row: usize) -> usize {
         let rows = self.rows();
         if rows == 0 {
@@ -901,8 +969,8 @@ impl TableModel {
     }
 
     /// Moves the cursor in **display** coordinates, extending the selection when
-    /// `extend` is set.
-    pub fn move_cursor(&mut self, display_row_delta: isize, column_delta: isize, extend: bool) {
+    /// `extend` is [`Extend::Keep`].
+    pub fn move_cursor(&mut self, display_row_delta: isize, column_delta: isize, extend: Extend) {
         let rows = self.rows();
         let columns = self.columns();
         if rows == 0 || columns == 0 {
@@ -918,40 +986,42 @@ impl TableModel {
         };
 
         self.action = None;
-        if extend {
-            self.selection.cursor = cell;
-        } else {
-            self.selection = Selection::single(cell);
-        }
+        self.move_to(cell, extend);
     }
 
     /// Moves to the first or last displayed row.
-    pub fn move_to_edge(&mut self, first: bool, extend: bool) {
-        let display = if first {
-            0
-        } else {
-            self.rows().saturating_sub(1)
+    pub fn move_to_edge(&mut self, edge: Edge, extend: Extend) {
+        let display = match edge {
+            Edge::First => 0,
+            Edge::Last => self.rows().saturating_sub(1),
         };
         let cell = CellPos {
             row: self.data_row(display),
             column: self.selection.cursor.column,
         };
         self.action = None;
-        if extend {
-            self.selection.cursor = cell;
-        } else {
-            self.selection = Selection::single(cell);
-        }
+        self.move_to(cell, extend);
     }
 
     /// Moves one page of displayed rows.
-    pub fn move_page(&mut self, forward: bool, extend: bool) {
-        let delta = PAGE_ROWS as isize;
-        self.move_cursor(if forward { delta } else { -delta }, 0, extend);
+    pub fn move_page(&mut self, direction: MoveDirection, extend: Extend) {
+        let step = match direction {
+            MoveDirection::Forward => PAGE_ROWS as isize,
+            MoveDirection::Backward => -(PAGE_ROWS as isize),
+        };
+        self.move_cursor(step, 0, extend);
+    }
+
+    /// Applies a cursor move, extending or replacing the selection.
+    fn move_to(&mut self, cell: CellPos, extend: Extend) {
+        match extend {
+            Extend::Keep => self.selection.cursor = cell,
+            Extend::Replace => self.selection = Selection::single(cell),
+        }
     }
 
     /// Moves one displayed cell forward or backward, as Tab does.
-    pub fn tab(&mut self, forward: bool) {
+    pub fn tab(&mut self, direction: MoveDirection) {
         let rows = self.rows();
         let columns = self.columns();
         if rows == 0 || columns == 0 {
@@ -959,10 +1029,9 @@ impl TableModel {
         }
         let display = self.display_row(self.selection.cursor.row);
         let index = display * columns + self.selection.cursor.column;
-        let next = if forward {
-            (index + 1).min(rows * columns - 1)
-        } else {
-            index.saturating_sub(1)
+        let next = match direction {
+            MoveDirection::Forward => (index + 1).min(rows * columns - 1),
+            MoveDirection::Backward => index.saturating_sub(1),
         };
         let cell = CellPos {
             row: self.data_row(next / columns),
@@ -1252,6 +1321,7 @@ impl TableModel {
     }
 
     /// Whether the selection has the shape a bulk operation needs.
+    #[must_use]
     pub fn bulk_available(&self, op: BulkOp) -> bool {
         if self.table.is_none() || !self.is_writable() {
             return false;
@@ -1270,6 +1340,7 @@ impl TableModel {
     }
 
     /// Whether an axis has enough bins to respace.
+    #[must_use]
     pub fn can_rebin(&self, axis: AxisKind) -> bool {
         self.table.is_some() && self.is_writable() && self.axis_len(axis) >= 3
     }
@@ -1340,7 +1411,6 @@ impl TableModel {
         Ok(after)
     }
 
-    /// The selection as tab-separated values.
     /// Copies the selection as tab-separated values, in displayed order.
     pub fn copy_text(&mut self) -> Option<String> {
         let table = self.table.as_ref()?;
@@ -1932,20 +2002,20 @@ mod tests {
         // Start from the lowest bin, which is drawn last.
         model.select(CellPos { row: 0, column: 0 });
 
-        model.move_cursor(-1, 0, false);
+        model.move_cursor(-1, 0, Extend::Replace);
         assert_eq!(
             model.selection().cursor,
             CellPos { row: 1, column: 0 },
             "moving up reaches the next higher data row"
         );
 
-        model.move_to_edge(true, false);
+        model.move_to_edge(Edge::First, Extend::Replace);
         assert_eq!(
             model.selection().cursor.row,
             3,
             "Home is the top display row, the highest bin"
         );
-        model.move_to_edge(false, false);
+        model.move_to_edge(Edge::Last, Extend::Replace);
         assert_eq!(
             model.selection().cursor.row,
             0,
@@ -1960,7 +2030,7 @@ mod tests {
         model.set_table(table(4, 2));
 
         assert_eq!(model.display_row(0), 0);
-        model.move_cursor(1, 0, false);
+        model.move_cursor(1, 0, Extend::Replace);
         assert_eq!(model.selection().cursor.row, 1);
     }
 
@@ -1969,11 +2039,11 @@ mod tests {
         let mut model = TableModel::new();
         model.set_flip_y(true);
         model.set_table(table(2, 2));
-        model.tab(true);
+        model.tab(MoveDirection::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
-        model.tab(true);
+        model.tab(MoveDirection::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 1, column: 0 });
-        model.tab(false);
+        model.tab(MoveDirection::Backward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
     }
 

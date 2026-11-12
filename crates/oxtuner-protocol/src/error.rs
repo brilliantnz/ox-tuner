@@ -5,6 +5,8 @@ use std::fmt;
 use oxtuner_ini::CommandEncodeError;
 use oxtuner_transport::TransportError;
 
+use crate::frame::FrameError;
+
 /// Why a conversation produced no usable answer.
 ///
 /// The variants name what the caller can decide: reconnect, reject the reply,
@@ -19,7 +21,10 @@ pub enum ProtocolError {
     /// The reply arrived but does not fit the expected shape.
     UnexpectedReply(String),
     /// A framed reply failed its CRC or its length did not add up.
-    BadFrame(String),
+    ///
+    /// The [`FrameError`] keeps the carried and computed values, so a caller
+    /// can report what disagreed rather than re-parsing the text.
+    BadFrame(FrameError),
     /// The ECU answered with a non-zero return code.
     ReturnCode {
         /// The code the ECU sent.
@@ -59,7 +64,7 @@ impl fmt::Display for ProtocolError {
             Self::Transport(error) => write!(formatter, "{error}"),
             Self::Unsupported(what) => write!(formatter, "{what}"),
             Self::UnexpectedReply(message) => write!(formatter, "unexpected reply: {message}"),
-            Self::BadFrame(message) => write!(formatter, "bad frame: {message}"),
+            Self::BadFrame(error) => write!(formatter, "bad frame: {error}"),
             Self::ReturnCode { code, operation } => {
                 write!(formatter, "the ECU refused {operation} (code 0x{code:02x})")
             }
@@ -73,6 +78,7 @@ impl std::error::Error for ProtocolError {
         match self {
             Self::Transport(error) => Some(error),
             Self::Encoding(error) => Some(error),
+            Self::BadFrame(error) => Some(error),
             _ => None,
         }
     }

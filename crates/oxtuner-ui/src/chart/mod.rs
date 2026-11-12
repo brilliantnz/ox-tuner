@@ -782,9 +782,9 @@ impl ChartState {
     fn snapshot_ranges(&mut self) {
         let window = self.window();
         for id in self.selected_ids() {
-            let points =
-                self.history
-                    .extract(std::slice::from_ref(&id), window, self.config.max_points);
+            let points = self
+                .history
+                .extract(&[id.as_str()], window, self.config.max_points);
             if let Some(points) = points.first() {
                 let range = range_of(points);
                 self.locked_ranges.insert(id, range);
@@ -1019,11 +1019,7 @@ impl ChartState {
                 for (index, series) in visible.iter().enumerate() {
                     let points = self
                         .history
-                        .extract(
-                            std::slice::from_ref(&series.id),
-                            window,
-                            self.config.max_points,
-                        )
+                        .extract(&[series.id.as_str()], window, self.config.max_points)
                         .into_iter()
                         .next()
                         .unwrap_or_default();
@@ -1047,11 +1043,7 @@ impl ChartState {
                     .iter()
                     .map(|series| {
                         self.history
-                            .extract(
-                                std::slice::from_ref(&series.id),
-                                window,
-                                self.config.max_points,
-                            )
+                            .extract(&[series.id.as_str()], window, self.config.max_points)
                             .into_iter()
                             .next()
                             .unwrap_or_default()
@@ -1110,7 +1102,7 @@ impl ChartState {
             hover_fraction.and_then(|fraction| nearest(&samples, time_window.time_at(fraction)));
         let current = self
             .history
-            .latest_values(std::slice::from_ref(&series.id))
+            .latest_values(&[series.id.as_str()])
             .into_iter()
             .next()
             .and_then(|nearest| nearest.sample);
@@ -1475,10 +1467,10 @@ impl ChartState {
         let point = self.hover_point()?;
         let fraction = self.hover_fraction()?;
         let time = window.time_at(fraction);
-        let ids: Vec<String> = series
+        let ids: Vec<&str> = series
             .iter()
             .filter(|series| series.visible)
-            .map(|series| series.id.clone())
+            .map(|series| series.id.as_str())
             .collect();
         if ids.is_empty() {
             return None;

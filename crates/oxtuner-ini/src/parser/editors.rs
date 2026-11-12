@@ -135,11 +135,12 @@ fn insert_table(definition: &mut Definition, section: &mut SectionParser, table:
         );
     }
     let id = table.id.clone();
+    let line = table.line;
     if definition.tables.insert(&id, table).is_some() {
         section.error(
             "duplicate-name",
             format!("table `{id}` is declared more than once; the later wins"),
-            0,
+            line,
         );
     }
 }
@@ -273,11 +274,12 @@ fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve:
         );
     }
     let name = curve.name.clone();
+    let line = curve.line;
     if definition.curves.insert(&name, curve).is_some() {
         section.error(
             "duplicate-name",
             format!("curve `{name}` is declared more than once; the later wins"),
-            0,
+            line,
         );
     }
 }

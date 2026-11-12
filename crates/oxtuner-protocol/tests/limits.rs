@@ -52,6 +52,67 @@ impl EcuBehavior for HexTextBehavior {
     }
 }
 
+/// A firmware that needs the previous page burned before it will switch.
+struct BurnBeforeSwitchBehavior;
+
+impl EcuBehavior for BurnBeforeSwitchBehavior {
+    fn name(&self) -> &'static str {
+        "burn-before-switch"
+    }
+
+    fn matches(&self, _definition: &Definition) -> Match {
+        Match::Exact
+    }
+
+    fn handshake(&self, _definition: &Definition) -> Vec<CommandTemplate> {
+        Vec::new()
+    }
+
+    fn crc(&self, _definition: &Definition, _page: u8) -> Option<Crc> {
+        None
+    }
+
+    fn switch_page(&self, _definition: &Definition, _page: u8) -> PageSwitch {
+        PageSwitch::BurnBeforeSwitch
+    }
+
+    fn burn(&self, _definition: &Definition, _page: u8) -> BurnPlan {
+        BurnPlan::Immediate
+    }
+
+    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
+        ReplyCode::Leading
+    }
+}
+
+#[test]
+fn burn_before_switch_paging_is_refused_when_the_protocol_is_built() {
+    let definition = Definition::parse(
+        "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+pageReadCommand = \"p%2i%2o%2c\"
+burnCommand = \"b%2i\"
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+",
+        &SettingsContext::new(),
+    )
+    .expect("parses");
+
+    let error =
+        MsProtocol::new(&definition, &BurnBeforeSwitchBehavior).expect_err("not implemented");
+
+    assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
+    assert!(error.to_string().contains("page 1"), "{error}");
+    assert!(error.to_string().contains("not implemented"), "{error}");
+}
+
 #[test]
 fn a_realtime_offset_above_the_wire_field_is_refused() {
     let definition = Definition::parse(

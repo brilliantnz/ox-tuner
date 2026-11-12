@@ -94,6 +94,10 @@ as_conversions = "warn"
 cast_possible_truncation = "warn"
 cast_sign_loss = "warn"
 module_name_repetitions = "allow"
+# `#[must_use]` goes on the table model's getters, the `is_*`/`can_*` ones
+# included: ignoring one means a question was asked and thrown away. The
+# candidate lint stays off elsewhere because it also flags conversions and
+# lookups whose result is fine to ignore.
 must_use_candidate = "allow"
 module_inception = "allow"
 enum_glob_use = "allow"

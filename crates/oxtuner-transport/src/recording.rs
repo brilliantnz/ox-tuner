@@ -27,10 +27,10 @@ impl std::fmt::Debug for RecordingTransport {
             .debug_struct("RecordingTransport")
             .field("inner", &"<dyn Transport>")
             .field("started", &self.started)
-            .field("frames", &self.frames)
+            .field("frames", &self.frames.len())
             .field("headers", &self.headers)
             .field("truncated", &self.truncated)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -207,5 +207,18 @@ mod tests {
         assert_eq!(saved.frames().len(), 2);
         assert_eq!(saved.frames()[0].bytes, vec![0x51]);
         assert_eq!(saved.frames()[1].bytes, b"speed");
+    }
+
+    #[test]
+    fn debug_reports_the_frame_count_not_every_frame() {
+        let trace = Trace::parse("TX 0 51\nRX 0 73\n").expect("a trace");
+        let mut recorder = RecordingTransport::new(Box::new(ReplayTransport::new(trace)));
+        recorder.open().expect("opens");
+        recorder.write_all(&[0x51]).expect("writes");
+
+        let debug = format!("{recorder:?}");
+
+        assert!(debug.contains("frames: 1"), "{debug}");
+        assert!(!debug.contains("TraceFrame"), "{debug}");
     }
 }

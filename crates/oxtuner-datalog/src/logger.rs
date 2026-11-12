@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossfire::{TrySendError, spsc};
+use crossfire::{RecvTimeoutError, TrySendError, spsc};
 
 use crate::csv::{LogColumn, header, row};
 
@@ -100,21 +100,29 @@ pub struct SessionLogReport {
 }
 
 impl SessionLogSnapshot {
-    /// Builds a snapshot, for callers that keep their own copy (the app's
-    /// output panel does, after a stop event).
-    pub fn new(
-        running: bool,
-        path: Option<PathBuf>,
-        frames: u64,
-        dropped: u64,
-        bytes: u64,
-    ) -> Self {
+    /// A log that just started, with no frames written yet.
+    ///
+    /// `path` is the file the core reported for the previous run until the new
+    /// run reports its own, so a caller may pass the last snapshot's path and
+    /// keep the display while the start is in flight.
+    pub fn running(path: Option<PathBuf>) -> Self {
         Self {
-            running,
+            running: true,
             path,
-            frames,
-            dropped,
-            bytes,
+            frames: 0,
+            dropped: 0,
+            bytes: 0,
+        }
+    }
+
+    /// A stopped log, described by what its writer reported.
+    pub fn finished(report: SessionLogReport) -> Self {
+        Self {
+            running: false,
+            path: Some(report.path),
+            frames: report.frames,
+            dropped: report.dropped,
+            bytes: report.bytes,
         }
     }
 }
@@ -332,9 +340,9 @@ fn writer_loop(
     let mut frames = 0u64;
     let mut bytes = 0u64;
 
-    while let Ok(message) = receiver.recv() {
-        match message {
-            Message::Frame { time, values } => {
+    loop {
+        match receiver.recv_timeout(FLUSH_INTERVAL) {
+            Ok(Message::Frame { time, values }) => {
                 let line = row(time, columns, &values);
                 writer.write_all(line.as_bytes())?;
                 frames = frames.saturating_add(1);
@@ -344,7 +352,11 @@ fn writer_loop(
                 status.inner.frames.store(frames, Ordering::Relaxed);
                 status.inner.bytes.store(bytes, Ordering::Relaxed);
             }
-            Message::Stop => break,
+            // The sender is gone or Stop arrived: finish and flush.
+            Ok(Message::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            // A quiet queue still gets its buffered rows written, so a crash
+            // cannot lose the last half second of a session.
+            Err(RecvTimeoutError::Timeout) => {}
         }
 
         if since_flush >= FLUSH_ROWS || last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -356,4 +368,30 @@ fn writer_loop(
 
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quiet_writer_flushes_its_rows_on_the_interval() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("session.csv");
+        let columns = vec![LogColumn::new("rpm", "rpm")];
+        let logger = Logger::start(&path, columns, LogStatus::new()).expect("starts");
+        assert!(logger.try_log(0.0, &[1000.0]));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&path).is_ok_and(|text| text.contains("1000")) {
+            assert!(
+                Instant::now() < deadline,
+                "the row never reached the file while the queue was quiet"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let report = logger.stop().expect("stops");
+        assert_eq!(report.frames, 1);
+    }
 }

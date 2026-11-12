@@ -223,8 +223,8 @@ impl Curve {
             "down" => self.nudge(if coarse { -10 } else { -1 }, cx),
             "pageup" => self.nudge(10, cx),
             "pagedown" => self.nudge(-10, cx),
-            "home" => self.move_to_edge(true, cx),
-            "end" => self.move_to_edge(false, cx),
+            "home" => self.move_to_first(cx),
+            "end" => self.move_to_last(cx),
             "escape" => self.cancel_drag(cx),
             _ => {}
         }
@@ -240,13 +240,18 @@ impl Curve {
         }
     }
 
-    fn move_to_edge(&mut self, first: bool, cx: &mut Context<'_, Self>) {
-        let count = self.model.point_count();
-        if count == 0 {
-            return;
-        }
+    fn move_to_first(&mut self, cx: &mut Context<'_, Self>) {
+        self.move_to_index(0, cx);
+    }
 
-        let index = if first { 0 } else { count - 1 };
+    fn move_to_last(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(last) = self.model.point_count().checked_sub(1) else {
+            return;
+        };
+        self.move_to_index(last, cx);
+    }
+
+    fn move_to_index(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         if self.model.select(index) {
             self.model.set_hovered(None);
             cx.emit(CurveEvent::SelectionChanged { index });
@@ -416,11 +421,10 @@ impl Curve {
     }
 
     #[expect(
-        clippy::needless_pass_by_value,
         clippy::too_many_lines,
-        reason = "the snapshot is consumed by one visual pass that keeps the plot together"
+        reason = "one visual pass draws the header, grid, curve and handles together"
     )]
-    fn render_curve(&mut self, snapshot: CurveSnapshot, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_curve(&self, snapshot: &CurveSnapshot, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let count = self.model.point_count();
         let selected = self.model.selected().min(count.saturating_sub(1));
@@ -672,7 +676,7 @@ impl Curve {
         } else {
             Y_AXIS_WIDTH
         };
-        let aria = match active.and_then(|index| self.readout(&snapshot, index)) {
+        let aria = match active.and_then(|index| self.readout(snapshot, index)) {
             Some(readout) => format!(
                 "{} curve, {} points, point {} of {}, {}",
                 snapshot.title(),
@@ -696,7 +700,7 @@ impl Curve {
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
             )
-            .child(self.render_header(&snapshot, active, &theme))
+            .child(self.render_header(snapshot, active, &theme))
             .child(
                 h_flex()
                     .flex_1()
@@ -763,7 +767,7 @@ impl Curve {
 
 impl Render for Curve {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Some(snapshot) = self.model.snapshot().cloned() else {
+        let Some(snapshot) = self.model.snapshot() else {
             return Self::render_empty(cx);
         };
 

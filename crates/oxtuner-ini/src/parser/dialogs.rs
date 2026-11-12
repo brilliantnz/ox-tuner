@@ -39,7 +39,7 @@ pub(crate) fn parse_setting_groups(
                     || (*name).to_owned(),
                     |field| crate::fields::unquote(field).to_owned(),
                 );
-                definition.setting_groups.insert(
+                let replaced = definition.setting_groups.insert(
                     name.to_owned(),
                     SettingGroup {
                         name: name.to_owned(),
@@ -47,6 +47,16 @@ pub(crate) fn parse_setting_groups(
                         options: Vec::new(),
                     },
                 );
+                if replaced.is_some() {
+                    section.error(
+                        "duplicate-name",
+                        format!(
+                            "setting group `{name}` is declared more than once; the later \
+                             declaration replaces the earlier one"
+                        ),
+                        *line,
+                    );
+                }
                 current = Some(name.to_owned());
                 section.understand(*line);
             }
@@ -101,12 +111,10 @@ pub(crate) fn parse_dialogs(
         // `dialog = name, "Title", layout` opens a block; every other line is a
         // row or a bare keyword.
         let assignment = crate::fields::split_assignment(text);
-        let is_dialog = assignment
-            .as_ref()
-            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("dialog"));
 
-        if is_dialog {
-            let (_, value) = assignment.unwrap_or_default();
+        if let Some((key, value)) = assignment
+            && key.eq_ignore_ascii_case("dialog")
+        {
             let fields = split_fields(value);
 
             let Some(name) = fields.first().copied() else {
@@ -440,6 +448,7 @@ pub(crate) fn parse_key_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Severity;
     use crate::settings::SettingsContext;
 
     fn parse(text: &str) -> Definition {
@@ -456,6 +465,35 @@ mod tests {
         assert_eq!(group.label, "Controller");
         assert_eq!(group.options.len(), 2);
         assert_eq!(group.options[1].name, "mcu_stm32");
+    }
+
+    #[test]
+    fn a_duplicate_setting_group_is_reported_and_the_later_one_wins() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+
+[SettingGroups]
+settingGroup = mcu, \"First\"
+settingOption = first, \"First\"
+settingGroup = mcu, \"Second\"
+settingOption = second, \"Second\"
+",
+        );
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "duplicate-name")
+            .expect("the second declaration is reported");
+        assert_eq!(diagnostic.line, Some(7));
+        assert_eq!(diagnostic.severity, Severity::Error);
+
+        let group = definition.setting_groups.get("mcu").expect("group");
+        assert_eq!(group.label, "Second");
+        assert_eq!(group.options.len(), 1);
+        assert_eq!(group.options[0].name, "second");
     }
 
     #[test]

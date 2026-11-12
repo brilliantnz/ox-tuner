@@ -106,6 +106,36 @@ proptest! {
 }
 
 #[test]
+fn a_text_value_outside_iso_8859_1_names_the_variable() {
+    let spec = layout()
+        .variable("label")
+        .expect("label is in the definition");
+
+    let error = format_values(spec, definition(), &Values::Text("→".to_owned()))
+        .expect_err("the arrow has no ISO-8859-1 byte");
+
+    assert!(error.to_string().contains("`label`"), "{error}");
+    assert!(error.to_string().contains("ISO-8859-1"), "{error}");
+}
+
+#[test]
+fn a_bit_label_outside_iso_8859_1_names_the_variable() {
+    let definition = parse_str(
+        "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 8\npage = 1\nmode = bits, U08, 0, [0:0], \"→\"\n",
+        &SettingsContext::new(),
+    )
+    .expect("the definition parses");
+    let layout = TuneLayout::build(&definition, &|_| None);
+    let spec = layout.variable("mode").expect("mode is in the definition");
+
+    let error = format_values(spec, &definition, &Values::Numbers(vec![0.0]))
+        .expect_err("the label has no ISO-8859-1 byte");
+
+    assert!(error.to_string().contains("`mode`"), "{error}");
+    assert!(error.to_string().contains("ISO-8859-1"), "{error}");
+}
+
+#[test]
 fn a_deeply_nested_document_is_rejected_without_overflowing_the_stack() {
     let deep = format!("{}{}", "<a>".repeat(1_000), "</a>".repeat(1_000));
     assert!(Msq::parse(format!("<msq>{deep}</msq>").as_bytes()).is_err());

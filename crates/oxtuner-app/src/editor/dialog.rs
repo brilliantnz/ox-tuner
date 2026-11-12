@@ -752,7 +752,10 @@ impl DialogEditor {
         };
 
         let mut lane = div()
-            .id(("constant-control", index))
+            .id(format!(
+                "constant-control-{}-{}-{}",
+                dialog.id, index, field.variable
+            ))
             .w_48()
             .flex_shrink_0()
             .flex()
@@ -921,18 +924,24 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
     let rows: Vec<AnyElement> = dialog
         .actions
         .iter()
-        .enumerate()
-        .filter(|(_, command)| command.gates.visible)
-        .map(|(index, command)| {
+        .filter(|command| command.gates.visible)
+        .map(|command| {
             let blocked =
                 command_block_reason(command, dialog.writable, can_reach_ecu, writes_enabled);
             let message = show_message(command);
             let dialog_id = dialog.id.clone();
             let command_name = command.command.clone();
+            let command_label = command.label.clone();
 
-            let mut button = Button::new(("dialog-command", index))
-                .label(t!("app.dialog.run"))
-                .ghost();
+            // A dialog that declares the same command with the same label
+            // twice would share this id; that would be one row's worth of UI
+            // written twice, not two commands.
+            let mut button = Button::new(format!(
+                "dialog-command-{}-{}-{}",
+                dialog.id, command.command, command.label
+            ))
+            .label(t!("app.dialog.run"))
+            .ghost();
 
             match blocked {
                 Some(reason) => {
@@ -940,7 +949,15 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
                 }
                 None => {
                     button = button.on_click(move |_, _, cx| {
-                        send_command(&dialog_id, &command_name, message.clone(), cx);
+                        send_command(
+                            CommandRef {
+                                dialog: &dialog_id,
+                                command: &command_name,
+                                label: &command_label,
+                            },
+                            message.clone(),
+                            cx,
+                        );
                     });
                 }
             }
@@ -979,8 +996,22 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
     ))
 }
 
+/// The names one command button publishes under.
+#[derive(Clone, Copy)]
+struct CommandRef<'a> {
+    dialog: &'a str,
+    command: &'a str,
+    label: &'a str,
+}
+
 /// Sends a command button's action and shows its declared message.
-fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut App) {
+fn send_command(target: CommandRef<'_>, message: Option<String>, cx: &mut App) {
+    let CommandRef {
+        dialog,
+        command,
+        label,
+    } = target;
+
     if crate::core::run_controller_command(dialog, command, cx)
         && let Some(message) = message
     {
@@ -991,7 +1022,7 @@ fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut A
                 message,
             )
             .key(NotificationKey::named(format!(
-                "dialog-command-{dialog}-{command}"
+                "dialog-command-{dialog}-{command}-{label}"
             ))),
             cx,
         );

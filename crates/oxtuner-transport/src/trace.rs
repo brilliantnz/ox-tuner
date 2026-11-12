@@ -75,7 +75,7 @@ impl TraceFrame {
 }
 
 /// A recorded session.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trace {
     frames: Vec<TraceFrame>,
     /// Free-form header lines, kept so a saved trace can be re-saved unchanged.
@@ -85,19 +85,28 @@ pub struct Trace {
 /// Why a trace could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError {
-    /// One-based line number.
-    pub line: usize,
+    /// One-based line number, when the problem is in the text.
+    pub line: Option<usize>,
     /// What was wrong with it.
     pub message: String,
 }
 
 impl std::fmt::Display for TraceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "trace line {}: {}", self.line, self.message)
+        match self.line {
+            Some(line) => write!(formatter, "trace line {line}: {}", self.message),
+            None => formatter.write_str(&self.message),
+        }
     }
 }
 
 impl std::error::Error for TraceError {}
+
+impl Default for Trace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Trace {
     /// An empty trace with the format header.
@@ -123,8 +132,8 @@ impl Trace {
 
     /// Parses the text format.
     ///
-    /// Comments and blank lines are kept as headers, so `parse` followed by
-    /// `to_string` preserves the notes that make a trace useful.
+    /// Comment lines are kept as headers, so `parse` followed by `to_string`
+    /// preserves the notes that make a trace useful. Blank lines are dropped.
     ///
     /// # Errors
     ///
@@ -133,7 +142,7 @@ impl Trace {
     pub fn parse(text: &str) -> Result<Self, TraceError> {
         if text.len() > MAX_TRACE_BYTES {
             return Err(TraceError {
-                line: 0,
+                line: None,
                 message: format!(
                     "the trace is {} bytes, the limit is {MAX_TRACE_BYTES}",
                     text.len()
@@ -159,7 +168,7 @@ impl Trace {
             // Three characters per hex byte plus the direction and offset.
             if line.len() > MAX_FRAME_BYTES.saturating_mul(3).saturating_add(32) {
                 return Err(TraceError {
-                    line: number,
+                    line: Some(number),
                     message: "the frame line is longer than any frame may be".to_owned(),
                 });
             }
@@ -170,7 +179,7 @@ impl Trace {
                 Some("RX") => Direction::Rx,
                 Some(other) => {
                     return Err(TraceError {
-                        line: number,
+                        line: Some(number),
                         message: format!("expected TX or RX, found {other:?}"),
                     });
                 }
@@ -182,12 +191,12 @@ impl Trace {
                     .parse::<u64>()
                     .map(Duration::from_millis)
                     .map_err(|_| TraceError {
-                        line: number,
+                        line: Some(number),
                         message: format!("{value:?} is not a millisecond offset"),
                     })?,
                 None => {
                     return Err(TraceError {
-                        line: number,
+                        line: Some(number),
                         message: "the frame has no millisecond offset".to_owned(),
                     });
                 }
@@ -197,32 +206,32 @@ impl Trace {
             for field in fields {
                 if bytes.len() >= MAX_FRAME_BYTES {
                     return Err(TraceError {
-                        line: number,
+                        line: Some(number),
                         message: format!("the frame exceeds {MAX_FRAME_BYTES} bytes"),
                     });
                 }
                 let byte = u8::from_str_radix(field, 16).map_err(|_| TraceError {
-                    line: number,
+                    line: Some(number),
                     message: format!("{field:?} is not a hex byte"),
                 })?;
                 bytes.push(byte);
             }
             if bytes.is_empty() {
                 return Err(TraceError {
-                    line: number,
+                    line: Some(number),
                     message: "the frame has no bytes".to_owned(),
                 });
             }
             total_bytes = total_bytes.saturating_add(bytes.len());
             if total_bytes > MAX_TRACE_BYTES {
                 return Err(TraceError {
-                    line: number,
+                    line: Some(number),
                     message: format!("the trace exceeds {MAX_TRACE_BYTES} bytes"),
                 });
             }
             if trace.frames.len() >= MAX_TRACE_FRAMES {
                 return Err(TraceError {
-                    line: number,
+                    line: Some(number),
                     message: format!("the trace exceeds {MAX_TRACE_FRAMES} frames"),
                 });
             }
@@ -382,6 +391,13 @@ mod tests {
     }
 
     #[test]
+    fn a_default_trace_still_carries_the_format_header() {
+        let text = Trace::default().to_text();
+
+        assert!(text.starts_with("# ox-tuner trace v1"), "{text}");
+    }
+
+    #[test]
     fn a_frame_line_larger_than_one_frame_is_rejected() {
         let mut text = String::from("RX 0 ");
         text.push_str(&"00 ".repeat(MAX_FRAME_BYTES + 100));
@@ -412,10 +428,20 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_text_error_prints_without_a_line() {
+        let error = TraceError {
+            line: None,
+            message: "the trace is too large".to_owned(),
+        };
+
+        assert_eq!(error.to_string(), "the trace is too large");
+    }
+
+    #[test]
     fn a_bad_byte_names_its_line() {
         let error = Trace::parse("TX 0 zz").expect_err("not hex");
 
-        assert_eq!(error.line, 1);
+        assert_eq!(error.line, Some(1));
         assert!(error.message.contains("zz"));
     }
 

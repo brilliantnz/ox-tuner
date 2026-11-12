@@ -181,6 +181,29 @@ mod tests {
     }
 
     #[test]
+    fn a_full_journal_rotates_instead_of_growing() {
+        let directory = temp_dir();
+        let path = directory.join("write-journal.log");
+        let journal = Journal::new(&path);
+
+        let full = usize::try_from(MAX_JOURNAL_BYTES).expect("the limit fits a usize");
+        fs::write(&path, vec![b'x'; full]).expect("fill the journal");
+        journal.append(&entry("begin")).expect("append");
+
+        let rotated = path.with_extension("log.1");
+        assert!(rotated.exists(), "a full journal is kept as .log.1");
+        assert_eq!(
+            fs::metadata(&rotated).expect("metadata").len(),
+            MAX_JOURNAL_BYTES
+        );
+
+        let read = journal.read(10).expect("read");
+        assert_eq!(read.len(), 1, "the live journal holds only the new entry");
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_truncated_last_line_does_not_hide_earlier_entries() {
         let directory = temp_dir();
         let path = directory.join("write-journal.log");

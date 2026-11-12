@@ -5,7 +5,7 @@ use crate::error::ProtocolError;
 /// Where the realtime block lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtimeSpec {
-    /// The command that fetches it.
+    /// The definition's `ochBlockSize`: payload bytes in one reply.
     pub block_size: u16,
     /// The definition's `outputChannelStartOffset`.
     pub start_offset: u16,

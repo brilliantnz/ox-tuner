@@ -80,7 +80,7 @@ pub(crate) fn parse_identification(
                 definition
                     .comms
                     .raw
-                    .insert(key.to_owned(), value.to_owned());
+                    .insert(key.to_ascii_lowercase(), value.to_owned());
                 section.understand(*line);
             }
         }
@@ -203,13 +203,12 @@ impl PageTable {
             .max(highest_override);
 
         if declared != 0 && listed != declared {
-            section.note(
+            section.note_section(
                 "page-size-count",
                 format!(
                     "`nPages` is {declared} but `pageSize` lists {} entries",
                     self.sizes.len()
                 ),
-                0,
             );
         }
 

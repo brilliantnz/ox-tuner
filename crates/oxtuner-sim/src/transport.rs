@@ -198,7 +198,6 @@ impl SimTransport {
     pub fn new(definition: &Definition, config: SimConfig) -> Result<Self, SimError> {
         let signature = config
             .signature
-            .clone()
             .unwrap_or_else(|| definition.signature.clone());
         let ecu = SimEcu::new(definition, signature)?;
         let sizes: Vec<(u8, u32)> = definition

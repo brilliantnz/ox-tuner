@@ -9,7 +9,7 @@ use crate::behavior::{BurnPlan, CrcReply, EcuBehavior, PageSwitch};
     clippy::struct_excessive_bools,
     reason = "each flag is an independent page capability, not a state machine"
 )]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageSpec {
     /// INI page number, 1-based.
     pub number: u8,

@@ -93,12 +93,13 @@ impl Render for DragPanelPreview {
 /// affordances a close action needs.
 fn close_button(
     cx: &App,
-    ix: usize,
     group: TabGroupContext,
     panel: PanelId,
     shared: Rc<SkinShared>,
 ) -> impl IntoElement {
-    let button = Button::new(("close-tab", ix))
+    // The panel's entity id, not the tab index: closing a tab must not move
+    // every later close button onto a different element.
+    let button = Button::new(("close-tab", panel.as_u64()))
         .icon(IconName::Close)
         .xsmall()
         .tab_stop(false)
@@ -578,7 +579,6 @@ impl TabGroupSkin {
                                 |this| {
                                     this.suffix_on_hover().suffix(close_button(
                                         cx,
-                                        ix,
                                         group.clone(),
                                         panel.panel_id(cx),
                                         Rc::clone(&self.shared),

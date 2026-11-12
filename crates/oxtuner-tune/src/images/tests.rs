@@ -24,6 +24,7 @@ pageSize = 288
 page = 1
 a = scalar, U08, 0, "", 1, 0, 0, 255, 0
 b = scalar, U08, 1, "", 1, 0, 0, 255, 0
+label = string, ASCII, 8
 
 [PcVariables]
 pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
@@ -208,6 +209,20 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
             images.working().scalar_raw("b").unwrap(),
             0.0,
             "the variable the caller did not name keeps its edit"
+        );
+    }
+
+    #[test]
+    fn reverting_a_text_variable_restores_the_baseline_text() {
+        let mut images = images();
+        images.working_mut().set_text("label", "edited").unwrap();
+
+        let reverted = images.revert_variables(&["label".to_owned()]);
+
+        assert_eq!(reverted, 1);
+        assert!(
+            images.working().text("label").unwrap().is_empty(),
+            "the text went back to the saved tune"
         );
     }
 

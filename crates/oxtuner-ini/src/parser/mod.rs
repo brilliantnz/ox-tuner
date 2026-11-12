@@ -213,10 +213,10 @@ fn dispatch(
             for (line, text) in lines {
                 section.count_entry();
                 if let Some((key, value)) = crate::fields::split_assignment(text) {
-                    definition
-                        .comms
-                        .raw
-                        .insert(key.trim_ascii().to_owned(), value.trim_ascii().to_owned());
+                    definition.comms.raw.insert(
+                        key.trim_ascii().to_ascii_lowercase(),
+                        value.trim_ascii().to_owned(),
+                    );
                     section.understand(*line);
                 } else {
                     section.unrecognized_line(*line, text);
@@ -298,6 +298,17 @@ impl SectionParser {
             code,
             message,
             line,
+            &self.name,
+        ));
+    }
+
+    /// Records an informational note about the section as a whole, for a fact
+    /// that belongs to no single line.
+    pub(crate) fn note_section(&mut self, code: &'static str, message: impl Into<String>) {
+        self.diagnostics.push(Diagnostic::section_wide(
+            Severity::Note,
+            code,
+            message,
             &self.name,
         ));
     }
@@ -388,10 +399,7 @@ fn apply_extension_flags(definition: &mut Definition) {
     } = definition;
 
     for (name, constant) in constants.iter_mut() {
-        if extensions.read_only.contains(name) {
-            constant.flags.controller_priority |= true;
-        }
-        if extensions.controller_priority.contains(name) {
+        if extensions.is_read_only(name) || extensions.is_controller_priority(name) {
             constant.flags.controller_priority = true;
         }
     }
@@ -690,5 +698,54 @@ mod tests {
         let constants = definition.coverage.section("Constants").expect("row");
         assert_eq!(constants.understood, constants.entries);
         assert_eq!(definition.coverage.percent(), 100.0);
+    }
+
+    #[test]
+    fn a_page_count_mismatch_has_no_line_and_keeps_its_section() {
+        let text =
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 2\npageSize = 288\npage = 1\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "page-size-count")
+            .expect("the mismatch is reported");
+        assert_eq!(diagnostic.line, None);
+        assert_eq!(diagnostic.section.as_deref(), Some("Constants"));
+        assert!(!diagnostic.to_string().contains("0: "));
+    }
+
+    #[test]
+    fn a_duplicate_table_or_curve_names_the_redeclaration_line() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+
+[TableEditor]
+table = t, m, \"T\"
+zBins = z
+table = t, m, \"T\"
+zBins = z
+
+[CurveEditor]
+curve = c, \"C\"
+xBins = x
+yBins = y
+curve = c, \"C\"
+xBins = x
+yBins = y
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let lines: Vec<Option<u32>> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "duplicate-name")
+            .map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(lines, vec![Some(7), Some(14)]);
     }
 }

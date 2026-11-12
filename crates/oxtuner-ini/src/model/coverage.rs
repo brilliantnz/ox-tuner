@@ -116,20 +116,80 @@ pub struct Extensions {
     pub suppress_config_error_verbiage: bool,
 }
 
+/// Whether one of the name sets holds `name`.
+///
+/// The dialect writes names as declared, but constants are matched
+/// case-insensitively elsewhere, so these lookups are too.
+///
+/// The largest of these sets in the reference definitions holds 114 names
+/// (`requiresPowerCycle` in the 202501 Speeduino file); the others are single
+/// digits. The scan avoids lowercasing a copy of every set on each parse and
+/// keeps one helper for the three lookups. If a set ever grows past a few
+/// hundred names, lowercase the sets once per parse and use
+/// `BTreeSet::contains`.
+fn set_contains(set: &BTreeSet<String>, name: &str) -> bool {
+    set.iter().any(|entry| entry.eq_ignore_ascii_case(name))
+}
+
 impl Extensions {
     /// Whether a constant is controller-owned.
+    #[must_use]
     pub fn is_read_only(&self, name: &str) -> bool {
-        self.read_only.contains(name)
+        set_contains(&self.read_only, name)
+    }
+
+    /// Whether the controller overwrites `name` on every connect.
+    #[must_use]
+    pub fn is_controller_priority(&self, name: &str) -> bool {
+        set_contains(&self.controller_priority, name)
     }
 
     /// Whether a change to `name` needs the ECU power-cycled before it takes
     /// effect.
-    ///
-    /// The dialect writes the name as declared, but constants are matched
-    /// case-insensitively elsewhere, so this lookup is too.
+    #[must_use]
     pub fn requires_power_cycle(&self, name: &str) -> bool {
-        self.power_cycle
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(name))
+        set_contains(&self.power_cycle, name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::SettingsContext;
+
+    #[test]
+    fn read_only_matches_a_constant_declared_in_another_case() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+engineMake = scalar, U08, 0, \"\", 1.0, 0
+boostTarget = scalar, U08, 1, \"\", 1.0, 0
+
+[ConstantsExtensions]
+readOnly = enginemake
+controllerPriority = boosttarget
+";
+
+        let definition = crate::parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .constant("engineMake")
+                .is_some_and(|constant| constant.flags.controller_priority),
+            "the extension names the constant in another case"
+        );
+        assert!(
+            definition
+                .constant("boostTarget")
+                .is_some_and(|constant| constant.flags.controller_priority),
+            "controllerPriority folds case too"
+        );
+        assert!(definition.extensions.is_read_only("ENGINEMAKE"));
+        assert!(definition.extensions.is_controller_priority("BOOSTTARGET"));
+        assert!(!definition.extensions.requires_power_cycle("BOOSTTARGET"));
     }
 }

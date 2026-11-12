@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::fields::{CommandTemplate, split_fields};
-use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Ordered, ReferenceTable};
+use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, ReferenceTable};
 
 use super::SectionParser;
 
@@ -206,7 +206,7 @@ pub(crate) fn parse_reference_tables(
                 );
                 continue;
             };
-            definition.reference_tables.insert(
+            let replaced = definition.reference_tables.insert(
                 name,
                 ReferenceTable {
                     name: name.to_owned(),
@@ -217,6 +217,16 @@ pub(crate) fn parse_reference_tables(
                     ..ReferenceTable::default()
                 },
             );
+            if replaced.is_some() {
+                section.error(
+                    "duplicate-name",
+                    format!(
+                        "reference table `{name}` is declared more than once; the later \
+                         declaration replaces the earlier one"
+                    ),
+                    *line,
+                );
+            }
             current = Some(name.to_owned());
             section.understand(*line);
             continue;
@@ -227,10 +237,7 @@ pub(crate) fn parse_reference_tables(
             lowered.as_str(),
             "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
         ) {
-            definition
-                .comms
-                .raw
-                .insert(key.to_owned(), value.to_owned());
+            definition.comms.raw.insert(lowered, value.to_owned());
             section.understand(*line);
             continue;
         }
@@ -392,11 +399,6 @@ pub(crate) fn parse_datalog(
     }
 }
 
-/// Keeps the `Ordered` import meaningful for the type-level documentation above.
-const _: fn() = || {
-    let _: Option<Ordered<u8>> = None;
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +460,48 @@ mod tests {
     }
 
     #[test]
+    fn reference_table_commands_share_one_lowercase_key() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+
+[ReferenceTables]
+referenceTable = clt, \"CLT\"
+tableWriteCommand = \"W\"
+tableBlockingFactor = 8
+solutionsLabel = \"CLT\"
+",
+        );
+
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("tablewritecommand")
+                .map(String::as_str),
+            Some("\"W\"")
+        );
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("tableblockingfactor")
+                .map(String::as_str),
+            Some("8")
+        );
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("referenceTable.clt.solutionsLabel")
+                .map(String::as_str),
+            Some("\"CLT\""),
+            "synthetic keys keep the spelling of the names they embed"
+        );
+    }
+
+    #[test]
     fn a_datalog_entry_inherits_the_category_above_it() {
         let definition = parse(
             "[MegaTune]\nsignature = \"x\"\n[Datalog]\ncategory = \"Fuel\"\nentry = rpm, \"RPM\", int, %.0f\n",
@@ -468,5 +512,32 @@ mod tests {
             Some("Fuel")
         );
         assert_eq!(definition.datalog_entries[0].label, "RPM");
+    }
+
+    #[test]
+    fn a_duplicate_reference_table_is_reported_and_the_later_one_wins() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+
+[ReferenceTables]
+referenceTable = clt, \"First\"
+tableIdentifier = 1, \"First\"
+referenceTable = clt, \"Second\"
+tableIdentifier = 2, \"Second\"
+",
+        );
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "duplicate-name")
+            .expect("the second declaration is reported");
+        assert_eq!(diagnostic.line, Some(7));
+
+        let table = definition.reference_tables.get("clt").expect("table");
+        assert_eq!(table.title.as_deref(), Some("Second"));
+        assert_eq!(table.identifiers, vec![(2, "Second".to_owned())]);
     }
 }

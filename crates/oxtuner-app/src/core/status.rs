@@ -438,21 +438,11 @@ impl CoreStatus {
             Update::Snapshots(paths) => self.snapshots = paths,
             Update::Log { running, report } => {
                 if let Some(report) = report {
-                    self.last_log = Some(SessionLogSnapshot::new(
-                        running,
-                        Some(report.path),
-                        report.frames,
-                        report.dropped,
-                        report.bytes,
-                    ));
+                    self.last_log = Some(SessionLogSnapshot::finished(report));
                 }
                 if running {
-                    self.last_log = Some(SessionLogSnapshot::new(
-                        true,
+                    self.last_log = Some(SessionLogSnapshot::running(
                         self.last_log.as_ref().and_then(|log| log.path.clone()),
-                        0,
-                        0,
-                        0,
                     ));
                 }
             }

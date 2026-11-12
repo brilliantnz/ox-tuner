@@ -21,8 +21,8 @@ mod table;
 mod tests;
 
 pub use model::{
-    AxisEditing, AxisTarget, BulkOp, CellPos, EditError, EditOp, Editing, GridAction, HistoryStep,
-    PAGE_ROWS, Selection, TableModel, parse_edit,
+    AxisEditing, AxisTarget, BulkOp, CellPos, Edge, EditError, EditOp, Editing, Extend, GridAction,
+    HistoryStep, MoveDirection, PAGE_ROWS, Selection, TableModel, parse_edit,
 };
 pub use style::TableStyle;
 pub use table::{RealtimePoint, Table, TableEvent};

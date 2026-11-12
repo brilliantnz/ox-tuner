@@ -31,7 +31,7 @@ use realtime::{Realtime, build_realtime};
 
 use crate::behavior::{CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
 use crate::error::ProtocolError;
-use crate::frame::Frame;
+use crate::frame::{Frame, FrameError};
 
 /// How the bytes are framed on the wire.
 #[expect(
@@ -212,8 +212,12 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
-    /// definition or a declared realtime size or offset does not fit the wire,
-    /// or [`ProtocolError::Encoding`] when a handshake command cannot be
+    /// definition or a declared realtime size or offset does not fit the wire.
+    ///
+    /// It also returns [`ProtocolError::Unsupported`] when the firmware's page
+    /// switch needs a burn: a session cannot honour that switch for any page,
+    /// so the whole definition is refused rather than only the affected page.
+    /// Returns [`ProtocolError::Encoding`] when a handshake command cannot be
     /// encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
@@ -231,6 +235,19 @@ impl MsProtocol {
         }
 
         let pages = build_pages(definition, behavior, &variables);
+        // Burning a page before it may be left is not something this build can
+        // do inside a read or write conversation, so say so before a port is
+        // opened instead of failing on the first page switch.
+        if let Some(page) = pages
+            .iter()
+            .find(|entry| entry.switch == PageSwitch::BurnBeforeSwitch)
+        {
+            return Err(ProtocolError::Unsupported(format!(
+                "this firmware must burn page {} before it is left; burn-before-switch paging is \
+                 not implemented",
+                page.spec.number
+            )));
+        }
         let handshake = build_handshake(definition, behavior, &variables)?;
         let realtime = build_realtime(definition)?;
 
@@ -302,9 +319,9 @@ impl MsProtocol {
         self.link
     }
 
-    /// The pages the definition declares.
-    pub fn pages(&self) -> Vec<PageSpec> {
-        self.pages.iter().map(|page| page.spec.clone()).collect()
+    /// The pages the definition declares, in definition order.
+    pub fn pages(&self) -> impl ExactSizeIterator<Item = PageSpec> + '_ {
+        self.pages.iter().map(|page| page.spec)
     }
 
     /// One page, when declared.
@@ -338,34 +355,31 @@ impl MsProtocol {
         self.port_open_delay
     }
 
-    /// Sends one `[ControllerCommands]` action.
+    /// Reads a whole page.
     ///
-    /// Each command string is encoded in order and written as its own
-    /// conversation. On a legacy link the dialect declares no reply length, so
-    /// any reply is drained until quiet; on an envelope link the reply is read
-    /// as one frame. Silence is not a failure: several controller actions (a
-    /// reset, for one) never answer.
+    /// The read is chunked at the blocking factor and the chunks are
+    /// concatenated in order, so a page larger than one conversation still
+    /// reads completely.
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError`] when a command cannot be encoded or the link
-    /// fails. A timeout with no bytes is treated as a command that does not
-    /// reply.
+    /// Returns [`ProtocolError::Unsupported`] when the page is not declared or
+    /// has no read command, and any [`ProtocolError`] a chunked read returns.
     pub fn read_page_all(
         &mut self,
         io: &mut dyn Transport,
         page: u8,
     ) -> Result<Vec<u8>, ProtocolError> {
-        let spec = self
+        let (readable, size) = self
             .page(page)
-            .cloned()
+            .map(|spec| (spec.readable, spec.size))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
-        if !spec.readable {
+        if !readable {
             return Err(ProtocolError::Unsupported(format!(
                 "page {page} has no read command"
             )));
         }
-        let size = usize::try_from(spec.size).unwrap_or(0);
+        let size = usize::try_from(size).unwrap_or(0);
         // A definition can state a page size up to `u32::MAX`; do not reserve
         // that up front. The read itself is chunked and fails on the first
         // offset that no longer fits the wire.
@@ -483,8 +497,9 @@ impl MsProtocol {
     /// require.
     ///
     /// `ReadBeforeUse` sends a one-byte read of the target page: the legacy
-    /// protocol uses that read to select the page. `BurnBeforeSwitch` refuses
-    /// the switch here; only the core's burn path may perform it.
+    /// protocol uses that read to select the page. `BurnBeforeSwitch` is
+    /// refused here; [`MsProtocol::new`] already rejects such a definition, so
+    /// this arm is a guard against a behavior that starts reporting it later.
     fn activate(&mut self, io: &mut dyn Transport, page: u8) -> Result<(), ProtocolError> {
         if self.last_page == Some(page) {
             return Ok(());
@@ -493,7 +508,7 @@ impl MsProtocol {
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.switch, entry.identifier, entry.read.clone()))
+            .map(|entry| (entry.switch, entry.identifier, entry.read.as_ref()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
 
         if !self.page_activation_delay.is_zero() {
@@ -507,7 +522,7 @@ impl MsProtocol {
                         "page {page} must be selected by a read, but has no read command"
                     ))
                 })?;
-                let request = self.encode(&command, u16::from_be_bytes(identifier), 0, 1, &[])?;
+                let request = self.encode(command, u16::from_be_bytes(identifier), 0, 1, &[])?;
                 match self.link {
                     LinkMode::Legacy => {
                         io.write_all(&request)?;
@@ -522,7 +537,8 @@ impl MsProtocol {
             }
             PageSwitch::BurnBeforeSwitch => {
                 return Err(ProtocolError::Unsupported(format!(
-                    "this firmware must burn page {page} before switching away, and burning is                      not part of a read session"
+                    "page {page} needs a burn before the switch, and a burn is not part of a \
+                     read session"
                 )));
             }
         }
@@ -572,10 +588,11 @@ impl MsProtocol {
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
         if length > crate::frame::MAX_PAYLOAD {
-            return Err(ProtocolError::BadFrame(format!(
-                "the reply declares {length} payload bytes, the limit is {}",
-                crate::frame::MAX_PAYLOAD
-            )));
+            return Err(FrameError::TooLarge {
+                declared: length,
+                limit: crate::frame::MAX_PAYLOAD,
+            }
+            .into());
         }
         let mut rest = vec![0u8; length + 4];
         io.read_exact_timeout(&mut rest, self.block_read_timeout)?;
@@ -644,12 +661,12 @@ impl MsProtocol {
 
 impl Protocol for MsProtocol {
     fn signature(&mut self, io: &mut dyn Transport) -> Result<String, ProtocolError> {
-        let command = self.signature_command.clone().ok_or_else(|| {
+        let command = self.signature_command.as_ref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no queryCommand, so the signature cannot be read".to_owned(),
             )
         })?;
-        let request = self.encode(&command, 0, 0, 0, &[])?;
+        let request = self.encode(command, 0, 0, 0, &[])?;
         io.flush_input();
 
         let reply = match self.link {
@@ -713,20 +730,19 @@ impl Protocol for MsProtocol {
         offset: u16,
         len: u16,
     ) -> Result<Vec<u8>, ProtocolError> {
-        let (spec, identifier, command) = self
+        let (size, identifier, command) = self
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.spec.clone(), entry.identifier, entry.read.clone()))
+            .map(|entry| (entry.spec.size, entry.identifier, entry.read.clone()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
         let command = command.ok_or_else(|| {
             ProtocolError::Unsupported(format!("page {page} has no read command"))
         })?;
         let end = u32::from(offset).saturating_add(u32::from(len));
-        if end > spec.size {
+        if end > size {
             return Err(ProtocolError::Unsupported(format!(
-                "page {page} holds {} byte(s); {len} at {offset} does not fit",
-                spec.size
+                "page {page} holds {size} byte(s); {len} at {offset} does not fit"
             )));
         }
 
@@ -758,11 +774,11 @@ impl Protocol for MsProtocol {
         if data.is_empty() {
             return Ok(());
         }
-        let (spec, identifier, command) = self
+        let (size, identifier, command) = self
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.spec.clone(), entry.identifier, entry.write.clone()))
+            .map(|entry| (entry.spec.size, entry.identifier, entry.write.clone()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
         let command = command.ok_or_else(|| {
             ProtocolError::Unsupported(format!("page {page} has no write command"))
@@ -770,10 +786,9 @@ impl Protocol for MsProtocol {
         let end = u32::from(offset)
             .checked_add(u32::try_from(data.len()).unwrap_or(u32::MAX))
             .ok_or_else(|| ProtocolError::Unsupported("the write range overflows".to_owned()))?;
-        if end > spec.size {
+        if end > size {
             return Err(ProtocolError::Unsupported(format!(
-                "page {page} holds {} byte(s); the write ends at {end}",
-                spec.size
+                "page {page} holds {size} byte(s); the write ends at {end}"
             )));
         }
 
@@ -867,7 +882,7 @@ impl Protocol for MsProtocol {
     }
 
     fn read_realtime(&mut self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
-        let realtime = self.realtime.clone().ok_or_else(|| {
+        let realtime = self.realtime.as_ref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no ochGetCommand/ochBlockSize pair".to_owned(),
             )

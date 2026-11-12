@@ -24,7 +24,7 @@ use std::time::Duration;
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
 use oxtuner_protocol::{
-    BehaviorKind, LinkMode, MsProtocol, Protocol, ProtocolError, RawCommandReport,
+    BehaviorKind, LinkMode, MsProtocol, PageSpec, Protocol, ProtocolError, RawCommandReport,
 };
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
@@ -408,8 +408,11 @@ fn read_every_page(
     transport: &mut RecordingTransport,
     stop: &AtomicBool,
 ) -> Result<Vec<PageRead>, (IoOutcome, bool)> {
+    // A snapshot of the specs, so the iterator's borrow of the protocol ends
+    // before the first read borrows it mutably.
+    let specs: Vec<PageSpec> = protocol.pages().collect();
     let mut pages = Vec::new();
-    for spec in protocol.pages() {
+    for spec in specs {
         if stop.load(Ordering::Relaxed) {
             return Err((
                 IoOutcome::Failed(IoFailure {

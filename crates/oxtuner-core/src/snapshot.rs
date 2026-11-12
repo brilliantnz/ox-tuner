@@ -252,6 +252,35 @@ mod tests {
     }
 
     #[test]
+    fn pruning_keeps_the_newest_snapshots_and_drops_the_rest() {
+        let directory = temp_dir();
+        let stamp = 1_700_000_000_000;
+        let total = MAX_SNAPSHOTS + 3;
+
+        for sequence in 0..total {
+            let sequence = u64::try_from(sequence).expect("a small count");
+            let path = snapshot_path(&directory, "write", stamp, sequence);
+            fs::write(&path, b"snapshot").expect("write a snapshot");
+        }
+
+        prune(&directory);
+
+        let remaining = sorted_snapshots(&directory);
+        assert_eq!(remaining.len(), MAX_SNAPSHOTS);
+        assert_eq!(
+            remaining.first(),
+            Some(&snapshot_path(&directory, "write", stamp, 3)),
+            "the oldest three are pruned"
+        );
+        let newest = u64::try_from(total - 1).expect("a small count");
+        assert_eq!(
+            remaining.last(),
+            Some(&snapshot_path(&directory, "write", stamp, newest)),
+            "the newest snapshot survives"
+        );
+    }
+
+    #[test]
     fn the_snapshot_directory_is_the_project_sidecar() {
         let root = Path::new("/projects/roadster");
 
