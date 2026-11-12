@@ -400,3 +400,31 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
         "a refused create leaves no folder behind"
     );
 }
+
+#[test]
+fn the_project_view_carries_the_remembered_device() {
+    let dir = project_dir("device", TUNE);
+    dir.write(
+        ".oxtuner/project.json",
+        r#"{"schema_version": 1, "device": {"last_port": "/dev/ttyACM0", "baud_override": 115200}}"#,
+    );
+
+    let core = Harness::start();
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+
+    assert_eq!(summary.device.last_port.as_deref(), Some("/dev/ttyACM0"));
+    assert_eq!(summary.device.baud_override, Some(115_200));
+}
+
+#[test]
+fn a_project_without_state_has_no_remembered_device() {
+    let dir = project_dir("no-device", TUNE);
+
+    let core = Harness::start();
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+
+    assert_eq!(summary.device.last_port, None);
+    assert_eq!(summary.device.baud_override, None);
+}

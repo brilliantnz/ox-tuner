@@ -41,7 +41,7 @@ pub use ops::{
 };
 pub(crate) use ops::{CommandRequest, Envelope};
 pub use project::{
-    ConflictReport, ConnectionView, DefinitionView, KeyActionInfo, PortView, ProjectView,
-    ReadReport, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
+    ConflictReport, ConnectionView, DefinitionView, DeviceView, KeyActionInfo, PortView,
+    ProjectView, ReadReport, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
     ReferenceTableView, SignatureVerdict,
 };

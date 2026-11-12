@@ -238,8 +238,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
     let finishes_open = matches!(&update, Update::Opened(_) | Update::Failed(_));
-    // Remember the port that worked, so the next dialog opens on it.
-    let persist_port = match &update {
+    // The core persisted this device into the project's state; mirror it in the
+    // open view so a dialog opened in the same session starts from it too.
+    let confirmed_device = match &update {
         Update::Connected(connection) if !connection.custom => {
             let baud = cx
                 .global::<CoreService>()
@@ -257,6 +258,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
+        if let Some((port, baud)) = confirmed_device
+            && let Some(project) = cx.global_mut::<CoreService>().status.project.as_mut()
+        {
+            project.device.last_port = Some(port);
+            project.device.baud_override = baud;
+        }
         if finishes_open {
             cx.global_mut::<CoreService>()
                 .status
@@ -272,12 +279,6 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         cx.refresh_windows();
     }
 
-    if let Some((port, baud)) = persist_port {
-        crate::settings::preferences::AppSettings::update(cx, |settings| {
-            settings.connection.last_port = Some(port);
-            settings.connection.baud_override = baud;
-        });
-    }
     if auto_connect {
         connect_to_simulator(cx);
     }
@@ -288,13 +289,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         read_all(cx);
     }
     if poll {
-        // The connection settings hold the user's poll rate; the core clamps it
-        // to the same range.
-        let hz = cx
-            .global::<crate::settings::preferences::AppSettings>()
-            .settings()
-            .connection
-            .poll_rate_hz
+        // The user's poll rate lives in the global connection settings; the
+        // core clamps it to the same range.
+        let hz = crate::settings::preferences::AppSettings::global_poll_rate_hz(cx)
             .clamp(MIN_POLL_HZ, MAX_POLL_HZ);
         start_realtime(MILLIS_PER_SECOND / hz, cx);
     }

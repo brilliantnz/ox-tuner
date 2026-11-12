@@ -463,6 +463,14 @@ pub(super) fn on_reply(
                     view: summary,
                 },
             );
+            // A connect that answered is the one worth reopening next time;
+            // remembering it in the project keeps each project on its own ECU.
+            if let Session::Project(project) = session
+                && let Some(device) = &live.connection.device
+                && let Err(error) = project.set_device(Some(device.port.clone()), Some(device.baud))
+            {
+                tracing::warn!(%error, "the project device could not be persisted");
+            }
             true
         }
         (PendingKind::Connect, IoOutcome::Failed(failure)) => {

@@ -167,8 +167,10 @@ app:
       en: Scanning for serial ports…
     no_ports:
       en: No serial ports found. Plug in the ECU and refresh.
-    last_port:
-      en: 'Last successful port: %{port}'
+    project_port:
+      en: 'This project last talked to this ECU on %{port}.'
+    project_port_missing:
+      en: 'This project last used %{port}, which is not on this machine. Pick the port this ECU is on now.'
     baud:
       en: Baud Rate
     baud_hint:

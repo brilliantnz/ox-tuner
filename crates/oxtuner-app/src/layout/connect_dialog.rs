@@ -28,11 +28,12 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, ElementId, FontWeight, IntoElement as _, ParentElement as _,
     Styled as _, Window, div, px,
 };
-use oxtuner_core::{ConnectionView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict};
+use oxtuner_core::{
+    ConnectionView, DeviceView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict,
+};
 
 use crate::core::{self, CoreService, TestResult};
 use crate::i18n::t;
-use crate::settings::preferences::{AppSettings, ConnectionSettings};
 
 /// The baud rates the dialog offers.
 const BAUDS: [u32; 6] = [9_600, 57_600, 115_200, 230_400, 500_000, 1_000_000];
@@ -76,10 +77,10 @@ struct DialogModel {
 }
 
 impl DialogModel {
-    fn new(connection: ConnectionSettings) -> Self {
+    fn new(device: DeviceView) -> Self {
         Self {
             mode: Mode::Serial,
-            selected_port: connection.last_port,
+            selected_port: device.last_port,
         }
     }
 
@@ -110,13 +111,18 @@ impl DialogModel {
     reason = "the connect dialog builds its mode, port, test and status sections in one place"
 )]
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
-    let defaults = cx.global::<AppSettings>().connection().clone();
-    let last_port = defaults.last_port.clone();
-    let model = Rc::new(RefCell::new(DialogModel::new(defaults.clone())));
+    // The device is per project: each project remembers the ECU it talks to.
+    let device = CoreService::status(cx)
+        .project
+        .as_ref()
+        .map(|project| project.device.clone())
+        .unwrap_or_default();
+    let last_port = device.last_port.clone();
+    let model = Rc::new(RefCell::new(DialogModel::new(device.clone())));
     core::refresh_ports(cx);
 
     // The pickers own their selection; the dialog reads it each frame.
-    let baud_index = defaults
+    let baud_index = device
         .baud_override
         .and_then(|baud| BAUDS.iter().position(|rate| *rate == baud))
         .unwrap_or(2);
@@ -177,6 +183,13 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             let model = model.borrow();
             (model.mode, model.port_choice(&ports, baud))
         };
+        // The remembered device is a hint, never a constraint: when the port is
+        // not on this machine the dialog says so instead of silently picking
+        // another ECU's port.
+        let port_hint = last_port.as_ref().map(|last| {
+            let present = ports.iter().any(|port| port.name == *last);
+            (last.clone(), present)
+        });
 
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
@@ -303,12 +316,16 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                                 .children(rows),
                         ),
                 )
-                .when_some(last_port.clone(), |this, last| {
+                .when_some(port_hint, |this, (last, present)| {
                     this.child(
                         div()
                             .text_xs()
-                            .text_color(muted)
-                            .child(t!("app.connect.last_port", port = last)),
+                            .text_color(if present { muted } else { danger })
+                            .child(if present {
+                                t!("app.connect.project_port", port = last)
+                            } else {
+                                t!("app.connect.project_port_missing", port = last)
+                            }),
                     )
                 })
                 .into_any_element()

@@ -156,6 +156,17 @@ pub struct ProjectView {
     pub skipped: usize,
     /// Non-fatal findings, ready for the output panel.
     pub warnings: Vec<String>,
+    /// The device this project last used, when state has it.
+    pub device: DeviceView,
+}
+
+/// The project's remembered device: what the connect dialog starts from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceView {
+    /// Serial port last opened from this project.
+    pub last_port: Option<String>,
+    /// Baud rate paired with that port.
+    pub baud_override: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

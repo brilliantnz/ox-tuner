@@ -92,14 +92,15 @@ mod view;
 pub use contract::{
     AxisEdit, AxisKind, AxisView, BurnReport, CellEdit, ConflictReport, ConflictResolution,
     ConnectionView, ControllerActionReport, CoreCommand, CurveAxes, DefinitionCommand,
-    DefinitionView, DialogAction, DialogEmbed, DialogField, DialogFieldKind, DialogFieldTone,
-    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
-    DialogUnmodeledRow, DialogView, DialogWidget, DialogWidgetKind, EcuCommand, Event, Failure,
-    FailureCode, FrontPageGauge, GateState, GaugeTemplate, ImportReport, IndicatorSpec,
-    JournalCommand, JournalEntry, KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ,
-    MIN_POLL_HZ, OpId, PortView, ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier,
-    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport,
-    SafetyCommand, SaveReport, SignatureVerdict, TableView, TuneCommand, WriteReport,
+    DefinitionView, DeviceView, DialogAction, DialogEmbed, DialogField, DialogFieldKind,
+    DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption,
+    DialogSelectOption, DialogUnmodeledRow, DialogView, DialogWidget, DialogWidgetKind, EcuCommand,
+    Event, Failure, FailureCode, FrontPageGauge, GateState, GaugeTemplate, ImportReport,
+    IndicatorSpec, JournalCommand, JournalEntry, KeyActionInfo, LifecycleCommand, LogCommand,
+    MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortView, ProjectCommand, ProjectView, ReadReport,
+    ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
+    RejectReason, RevertReport, SafetyCommand, SaveReport, SignatureVerdict, TableView,
+    TuneCommand, WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
