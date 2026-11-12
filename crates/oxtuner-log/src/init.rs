@@ -146,22 +146,28 @@ impl LogControl {
 /// cannot be prepared, and [`LogError::Init`] when a subscriber is already
 /// installed.
 pub fn init(config: &LogConfig) -> Result<LogHandle, LogError> {
-    fs::create_dir_all(config.directory()).map_err(LogError::Directory)?;
-
     let now = OffsetDateTime::now_utc();
-    if let Err(error) = file::prune(config.directory(), now) {
-        // The subscriber does not exist yet, so stderr is the only place this
-        // can go. A failed prune must not stop the application from starting.
-        #[expect(
-            clippy::print_stderr,
-            reason = "the logging subscriber is not installed yet, so tracing cannot report this"
-        )]
-        {
-            eprintln!("ox-tuner: could not prune old log files: {error}");
+    let file_enabled = config.file_enabled();
+
+    // Nothing touches the filesystem when no run file was asked for: a
+    // read-only config directory must not stop the application from starting.
+    if file_enabled {
+        fs::create_dir_all(config.directory()).map_err(LogError::Directory)?;
+
+        if let Err(error) = file::prune(config.directory(), now) {
+            // The subscriber does not exist yet, so stderr is the only place
+            // this can go. A failed prune must not stop the application from
+            // starting.
+            #[expect(
+                clippy::print_stderr,
+                reason = "the logging subscriber is not installed yet, so tracing cannot report this"
+            )]
+            {
+                eprintln!("ox-tuner: could not prune old log files: {error}");
+            }
         }
     }
 
-    let file_enabled = config.file_enabled();
     let (file_sink, path, guard, file_dropped) = if file_enabled {
         let run = RunFile::create(config.directory(), now).map_err(LogError::File)?;
         let path = run.path().to_path_buf();
