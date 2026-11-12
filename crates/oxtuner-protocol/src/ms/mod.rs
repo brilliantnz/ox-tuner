@@ -315,9 +315,9 @@ impl MsProtocol {
         self.link
     }
 
-    /// The pages the definition declares.
-    pub fn pages(&self) -> Vec<PageSpec> {
-        self.pages.iter().map(|page| page.spec.clone()).collect()
+    /// The pages the definition declares, in definition order.
+    pub fn pages(&self) -> impl ExactSizeIterator<Item = PageSpec> + '_ {
+        self.pages.iter().map(|page| page.spec)
     }
 
     /// One page, when declared.
