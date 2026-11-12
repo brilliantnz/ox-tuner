@@ -141,14 +141,6 @@ impl Focusable for Table {
 
 /// Text input for the in-cell editor.
 ///
-/// The edit lives in a borderless kit [`Input`], so a cell edit behaves like
-/// any text field: arrows move the caret, Home and End jump, text can be
-/// selected, cut and pasted, and IME composition is the kit's problem. The
-/// table owns only the contract around it — Enter commits, Tab commits and
-/// moves, Escape cancels — and both Tab and Escape reach [`Table::handle_key`]
-/// because a single-line input propagates them.
-/// Text input for the in-cell editor.
-///
 /// The table draws its own editor instead of an `Input`, so it registers this
 /// handler through a canvas to receive composed text (IME) and platform paste.
 /// The edit language is ASCII, so a UTF-16 index is a byte index and the caret

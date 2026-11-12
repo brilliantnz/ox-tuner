@@ -1340,7 +1340,6 @@ impl TableModel {
         Ok(after)
     }
 
-    /// The selection as tab-separated values.
     /// Copies the selection as tab-separated values, in displayed order.
     pub fn copy_text(&mut self) -> Option<String> {
         let table = self.table.as_ref()?;
