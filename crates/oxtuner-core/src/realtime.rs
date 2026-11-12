@@ -815,6 +815,34 @@ flag = bits, {storage}, 0, [{range}]
     }
 
     #[test]
+    fn a_big_endian_storage_word_is_read_in_wire_order() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = big
+nPages = 1
+pageSize = 2
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 2
+flag = bits, S16, 0, [15:15]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let decoder = RealtimeDecoder::new(&definition);
+
+        let frame = decoder.decode(&[0x80, 0x00], 1);
+
+        assert_eq!(frame.value("flag").unwrap().value, 1.0);
+    }
+
+    #[test]
     fn a_u64_bit_field_reads_the_exact_word() {
         let definition = parse_str(
             "\
