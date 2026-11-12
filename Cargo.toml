@@ -94,9 +94,9 @@ as_conversions = "warn"
 cast_possible_truncation = "warn"
 cast_sign_loss = "warn"
 module_name_repetitions = "allow"
-# `#[must_use]` is written where dropping the result would lose the caller's
-# work. The candidate lint stays off for the rest: it also flags conversions
-# and lookups whose result is fine to ignore.
+# `#[must_use]` goes on pure table getters whose ignored result is always a
+# mistake. The candidate lint stays off for the rest: it also flags
+# `is_*`/lookup helpers where ignoring the result is fine.
 must_use_candidate = "allow"
 module_inception = "allow"
 enum_glob_use = "allow"
