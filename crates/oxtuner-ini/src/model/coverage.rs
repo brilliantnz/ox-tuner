@@ -120,6 +120,11 @@ pub struct Extensions {
 ///
 /// The dialect writes names as declared, but constants are matched
 /// case-insensitively elsewhere, so these lookups are too.
+///
+/// The sets hold a handful of names in real definitions (the largest observed
+/// is 115), so the scan avoids lowercasing a copy of every set on each parse
+/// and keeps one helper for the three lookups. If a set ever grows enough to
+/// matter, lowercase the sets once per parse and use `BTreeSet::contains`.
 fn set_contains(set: &BTreeSet<String>, name: &str) -> bool {
     set.iter().any(|entry| entry.eq_ignore_ascii_case(name))
 }
