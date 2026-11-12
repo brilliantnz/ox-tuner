@@ -8,6 +8,7 @@
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +16,9 @@ use oxtuner_project::Project;
 
 /// How many snapshots one project keeps.
 pub(crate) const MAX_SNAPSHOTS: usize = 50;
+
+/// The next unused suffix for a snapshot temporary in this process.
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Why a snapshot could not be written.
 #[derive(Debug)]
@@ -117,9 +121,11 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotE
         .unwrap_or_default();
     let path = directory.join(format!("snapshot-{stamp}-{label}.msq"));
 
-    // Written through a sibling temp file so a crash cannot leave a half a
-    // snapshot where a restore would find it.
-    let temporary = path.with_extension("msq.tmp");
+    // Written through a sibling temp file so a crash cannot leave half a
+    // snapshot where a restore would find it. The sequence keeps two writers
+    // from sharing one temporary if snapshots ever overlap.
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("msq.{}.{sequence}.tmp", std::process::id()));
     fs::write(&temporary, bytes).map_err(|source| {
         let _ = fs::remove_file(&temporary);
         SnapshotError::Write {
