@@ -104,7 +104,7 @@ pub(crate) fn adopt_ecu_tune(cx: &mut App) {
 
 /// Saves the session trace to the app's trace directory.
 pub(crate) fn save_trace(cx: &mut App) {
-    let path = crate::platform::paths::AppPaths::discover().next_trace_path();
+    let path = crate::platform::paths::AppPaths::get(cx).next_trace_path();
 
     send(cx, FailureCode::TraceFailed, "save-trace", move |handle| {
         handle.save_trace(path)

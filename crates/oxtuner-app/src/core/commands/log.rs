@@ -10,7 +10,7 @@ use crate::platform::paths::AppPaths;
 /// Starts a session log beside the project, or in the app's log folder.
 pub(crate) fn start_log(cx: &mut App) {
     let directory = CoreService::status(cx).project.as_ref().map_or_else(
-        || AppPaths::discover().logs_dir,
+        || AppPaths::get(cx).logs_dir.clone(),
         |project| project.root.join(".ox-tuner").join("logs"),
     );
 

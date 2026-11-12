@@ -234,7 +234,6 @@ impl AppLayout {
                 .ghost()
                 .small()
                 .disabled(pending)
-                // .selected(primary)
                 .tooltip(tooltip(
                     "toggle-primary-sidebar",
                     t!("app.panels.toggle_primary_sidebar"),

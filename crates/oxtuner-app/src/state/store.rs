@@ -11,6 +11,7 @@ use std::{
     fs::{self, File},
     io::{self, Write as _},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -66,8 +67,14 @@ pub(crate) fn quarantine(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn temp_path(path: &Path) -> PathBuf {
+    // A unique name per write: the debounced state save runs on the background
+    // executor while the quit path may still write synchronously. A shared temp
+    // file would let the two interleave and rename a torn document over the
+    // target.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
+    name.push(format!(".{}.{id}.tmp", std::process::id()));
     PathBuf::from(name)
 }
 
@@ -130,9 +137,15 @@ mod tests {
         let loaded = read_json::<Sample>(&path).expect("read").expect("present");
 
         assert_eq!(loaded, sample);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("nested"))
+            .expect("read the directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "settings.json")
+            .collect();
         assert!(
-            !dir.join("nested/settings.json.tmp").exists(),
-            "the temp file must be renamed away"
+            leftovers.is_empty(),
+            "the temp file must be renamed away: {leftovers:?}"
         );
     }
 

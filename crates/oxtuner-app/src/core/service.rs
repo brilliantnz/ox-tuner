@@ -12,6 +12,7 @@ use oxtuner_core::{
 
 use super::event;
 use super::status::CoreStatus;
+use crate::platform::paths::AppPaths;
 
 #[cfg(test)]
 use oxtuner_core::{DialogView, Failure, FailureCode, SaveReport, TableView};
@@ -161,11 +162,17 @@ impl CoreService {
 /// start, its handle is `None` and every command reports a failure.
 pub fn start(cx: &mut App, auto_sim: bool) {
     let writes_enabled = crate::settings::preferences::AppSettings::writes_enabled(cx);
-    let paths = crate::platform::paths::AppPaths::discover();
+    let (journal_dir, definition_cache_dir) = {
+        let paths = AppPaths::get(cx);
+        (
+            paths.config_dir.join("write-journal.log"),
+            paths.definition_cache_dir(),
+        )
+    };
     let config = CoreConfig {
         writes_enabled,
-        journal_dir: Some(paths.config_dir.join("write-journal.log")),
-        definition_cache_dir: Some(paths.definition_cache_dir()),
+        journal_dir: Some(journal_dir),
+        definition_cache_dir: Some(definition_cache_dir),
         ..CoreConfig::default()
     };
     let (service, pump) = match oxtuner_core::start(&config) {

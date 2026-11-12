@@ -351,6 +351,7 @@ impl AppSettings {
         let settings = &cx.global::<Self>().settings;
         if let Err(error) = store::write_json(&path, settings) {
             tracing::error!(%error, path = %path.display(), "could not save settings");
+            crate::notifications::settings_save_failed(cx);
         }
     }
 

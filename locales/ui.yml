@@ -675,6 +675,10 @@ app:
   settings:
     window_title:
       en: Settings
+    save_failed:
+      en: Settings were not saved
+    save_failed_detail:
+      en: The change applies to this session only. Check that the settings file is writable.
     page:
       appearance:
         en: Appearance

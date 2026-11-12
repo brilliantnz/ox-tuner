@@ -420,3 +420,19 @@ fn a_failed_open_clears_the_loading_state_but_keeps_the_old_project() {
     );
     assert!(status.failure.is_some());
 }
+
+#[test]
+fn a_lost_open_answer_expires_only_its_own_request() {
+    let mut status = CoreStatus::default();
+    status.begin_pending_project(Path::new("/projects/roadster"));
+    status.pending_project.as_mut().unwrap().op = Some(7);
+
+    assert!(
+        !status.expire_pending_project_at(8),
+        "another request's timeout must not clear this one"
+    );
+    assert!(status.pending_project.is_some());
+
+    assert!(status.expire_pending_project_at(7));
+    assert!(status.pending_project.is_none());
+}

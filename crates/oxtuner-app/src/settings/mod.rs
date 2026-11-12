@@ -81,11 +81,6 @@ pub(crate) fn open(cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(720.), px(640.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        // titlebar: Some(titlebar_options(t!("app.settings.window_title"))),
-        // app_owns_titlebar_drag: true,
-        // Linux only: without this the compositor adds a second, server-side
-        // caption above our own. Windows and macOS ignore it.
-        // window_decorations: Some(WindowDecorations::Client),
         kind: WindowKind::Floating,
         is_resizable: true,
         window_min_size: Some(size(px(620.), px(460.))),

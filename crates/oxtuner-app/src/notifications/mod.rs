@@ -63,6 +63,22 @@ pub(crate) fn unread(cx: &App) -> usize {
     cx.global::<Notifications>().store.unread()
 }
 
+/// Reports that the settings document could not be written.
+///
+/// The change is live in memory either way, so the notice says the value lasts
+/// only for this session instead of undoing what the user just chose.
+pub(crate) fn settings_save_failed(cx: &mut App) {
+    publish(
+        NotificationDraft::new(
+            NotificationSeverity::Error,
+            t!("app.settings.save_failed").to_string(),
+            t!("app.settings.save_failed_detail").to_string(),
+        )
+        .key(NotificationKey::named("settings-save")),
+        cx,
+    );
+}
+
 /// Adds one policy draft to the inbox and shows its toast.
 ///
 /// The toast and the bell row are the same record: a retry that aggregates

@@ -7,6 +7,16 @@ use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start
 use super::service::CoreService;
 use super::status::{JournalView, TraceSaved, Update};
 
+/// The slowest and fastest poll rates the connection dialog offers, in Hz.
+///
+/// The core clamps the same range. Clamping here as well keeps the interval
+/// sane before the command is sent instead of waiting for the core's reply.
+const MIN_POLL_HZ: u32 = 1;
+/// See [`MIN_POLL_HZ`].
+const MAX_POLL_HZ: u32 = 100;
+/// One second in milliseconds, for the poll interval.
+const MILLIS_PER_SECOND: u32 = 1_000;
+
 /// Writes the diagnostic anchor for the outcomes that carry a details action.
 ///
 /// A notification's "Show details" opens Diagnostics filtered by `op`. That
@@ -195,10 +205,11 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         &update,
         Update::Failed(failure) if failure.code == FailureCode::ImportNeedsConsent
     ) {
-        cx.global::<CoreService>().pending_import.clone()
+        cx.global_mut::<CoreService>().pending_import.take()
     } else {
         None
     };
+    let needs_import_consent = import_consent.is_some();
     let refresh_status = match &update {
         Update::Opened(_)
         | Update::PagesRead(_)
@@ -243,7 +254,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
                 .status
                 .finish_pending_project(event_op);
         }
-        if let Some(path) = import_consent.clone() {
+        if let Some(path) = import_consent {
             cx.global_mut::<CoreService>().status.import_consent = Some(path);
         }
         if let Some(root) = remember {
@@ -269,14 +280,15 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         read_all(cx);
     }
     if poll {
-        // The connection settings hold the user's poll rate; the core clamps it.
+        // The connection settings hold the user's poll rate; the core clamps it
+        // to the same range.
         let hz = cx
             .global::<crate::settings::preferences::AppSettings>()
             .settings()
             .connection
             .poll_rate_hz
-            .clamp(1, 100);
-        start_realtime(1000 / hz, cx);
+            .clamp(MIN_POLL_HZ, MAX_POLL_HZ);
+        start_realtime(MILLIS_PER_SECOND / hz, cx);
     }
     if refresh_status {
         refresh_tune_status(cx);
@@ -292,7 +304,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             }
         });
     }
-    if import_consent.is_some() {
+    if needs_import_consent {
         cx.defer(|cx| {
             if let Some(window) = crate::app::window::main(cx) {
                 window
