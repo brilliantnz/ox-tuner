@@ -45,18 +45,34 @@ pub(crate) struct PlatformDirs {
     pub(crate) data_local_base: PathBuf,
     pub(crate) cache_base: PathBuf,
     pub(crate) home: PathBuf,
+    /// The user's Documents folder, when the platform reports one.
+    ///
+    /// `None` on a Linux desktop without XDG user directories configured;
+    /// [`Self::documents`] then answers `home/Documents`, which is where that
+    /// desktop would put it.
+    pub(crate) documents: Option<PathBuf>,
 }
 
 impl PlatformDirs {
     /// Reads the current machine's base directories.
     pub(crate) fn discover() -> Option<Self> {
         let base = directories::BaseDirs::new()?;
+        let documents = directories::UserDirs::new()
+            .and_then(|dirs| dirs.document_dir().map(Path::to_path_buf));
         Some(Self {
             config_base: base.config_dir().to_path_buf(),
             data_local_base: base.data_local_dir().to_path_buf(),
             cache_base: base.cache_dir().to_path_buf(),
             home: base.home_dir().to_path_buf(),
+            documents,
         })
+    }
+
+    /// The Documents folder, with the conventional location as the fallback.
+    pub(crate) fn documents(&self) -> PathBuf {
+        self.documents
+            .clone()
+            .unwrap_or_else(|| self.home.join("Documents"))
     }
 }
 
@@ -70,6 +86,7 @@ pub struct AppPaths {
     pub(crate) config_dir: PathBuf,
     pub(crate) cache_dir: PathBuf,
     pub(crate) logs_dir: PathBuf,
+    pub(crate) projects_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -84,6 +101,7 @@ impl AppPaths {
                 config_dir: PathBuf::from(".oxtuner"),
                 cache_dir: PathBuf::from(".oxtuner/cache"),
                 logs_dir: PathBuf::from(".oxtuner/logs"),
+                projects_dir: PathBuf::from("OxTunerProjects"),
             },
             |dirs| Self::resolve(Platform::current(), &dirs),
         )
@@ -95,24 +113,40 @@ impl AppPaths {
     /// and Logs. Windows uses `OxTuner` under Roaming (settings), Local (cache
     /// and logs). Linux follows the XDG convention: lowercase `oxtuner` under
     /// `~/.config`, `~/.cache` and `~/.local/state`.
+    ///
+    /// New projects default to `Documents/OxTunerProjects` on every platform:
+    /// the folder is user data that people back up and copy between machines,
+    /// so it lives where their other documents do.
     pub(crate) fn resolve(platform: Platform, dirs: &PlatformDirs) -> Self {
+        let projects_dir = dirs.documents().join("OxTunerProjects");
         match platform {
             Platform::Macos => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
                 cache_dir: dirs.cache_base.join("OxTuner"),
                 logs_dir: dirs.home.join("Library/Logs/OxTuner"),
+                projects_dir,
             },
             Platform::Windows => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
                 cache_dir: dirs.data_local_base.join("OxTuner").join("cache"),
                 logs_dir: dirs.data_local_base.join("OxTuner").join("logs"),
+                projects_dir,
             },
             Platform::Linux => Self {
                 config_dir: dirs.config_base.join("oxtuner"),
                 cache_dir: dirs.cache_base.join("oxtuner"),
                 logs_dir: dirs.home.join(".local/state/oxtuner/logs"),
+                projects_dir,
             },
         }
+    }
+
+    /// The folder the new-project dialog starts in.
+    ///
+    /// A default, never a constraint: the dialog lets the user save a project
+    /// anywhere and remembers whatever folder was used.
+    pub fn projects_dir(&self) -> &Path {
+        &self.projects_dir
     }
 
     /// The user-editable application settings.
@@ -210,6 +244,16 @@ mod tests {
             data_local_base: PathBuf::from(local),
             cache_base: PathBuf::from(cache),
             home: PathBuf::from(home),
+            documents: Some(PathBuf::from(home).join("Documents")),
+        }
+    }
+
+    /// The same bases as [`dirs`], with no Documents folder reported: a Linux
+    /// desktop without XDG user directories.
+    fn dirs_without_documents(config: &str, local: &str, cache: &str, home: &str) -> PlatformDirs {
+        PlatformDirs {
+            documents: None,
+            ..dirs(config, local, cache, home)
         }
     }
 
@@ -251,6 +295,10 @@ mod tests {
             paths.themes_dir(),
             PathBuf::from("/Users/me/Library/Application Support/OxTuner/themes")
         );
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/Users/me/Documents/OxTunerProjects")
+        );
     }
 
     #[test]
@@ -279,6 +327,12 @@ mod tests {
                 .join("OxTuner")
                 .join("logs")
         );
+        assert_eq!(
+            paths.projects_dir(),
+            PathBuf::from(r"C:\Users\me")
+                .join("Documents")
+                .join("OxTunerProjects")
+        );
     }
 
     #[test]
@@ -296,6 +350,43 @@ mod tests {
         assert_eq!(
             paths.logs_dir,
             PathBuf::from("/home/me/.local/state/oxtuner/logs")
+        );
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/home/me/Documents/OxTunerProjects")
+        );
+    }
+
+    #[test]
+    fn a_missing_documents_folder_falls_back_to_home_documents() {
+        let dirs = dirs_without_documents(
+            "/home/me/.config",
+            "/home/me/.local/share",
+            "/home/me/.cache",
+            "/home/me",
+        );
+        let paths = AppPaths::resolve(Platform::Linux, &dirs);
+
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/home/me/Documents/OxTunerProjects")
+        );
+    }
+
+    #[test]
+    fn a_reported_documents_folder_wins_over_the_fallback() {
+        let mut dirs = dirs(
+            "/home/me/.config",
+            "/home/me/.local/share",
+            "/home/me/.cache",
+            "/home/me",
+        );
+        dirs.documents = Some(PathBuf::from("/mnt/data/Docs"));
+        let paths = AppPaths::resolve(Platform::Linux, &dirs);
+
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/mnt/data/Docs/OxTunerProjects")
         );
     }
 
