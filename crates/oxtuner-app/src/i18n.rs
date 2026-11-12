@@ -201,6 +201,20 @@ mod tests {
     /// A misspelt key renders the key itself instead of the sentence, and
     /// nothing fails at compile time. This catches it in CI.
     #[test]
+    fn an_unknown_locale_falls_back_to_english_on_an_isolated_thread() {
+        std::thread::spawn(|| {
+            isolate_thread();
+            set_locale("zz");
+
+            assert_eq!(locale(), "en");
+        })
+        .join()
+        .expect("the test thread runs");
+
+        assert_eq!(locale(), "en", "the global locale is untouched");
+    }
+
+    #[test]
     fn every_key_the_code_asks_for_exists() {
         let available = messages(locale());
         let mut missing = Vec::new();

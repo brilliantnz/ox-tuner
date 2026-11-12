@@ -627,3 +627,75 @@ fn session_status(
         })
         .into_any_element()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ports() -> Vec<PortView> {
+        vec![
+            PortView {
+                name: "/dev/cu.first".to_owned(),
+                label: "first".to_owned(),
+            },
+            PortView {
+                name: "/dev/cu.second".to_owned(),
+                label: "second".to_owned(),
+            },
+        ]
+    }
+
+    fn serial_model(selected: Option<&str>) -> DialogModel {
+        DialogModel {
+            mode: Mode::Serial,
+            selected_port: selected.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_remembered_port_is_kept_when_the_scan_still_lists_it() {
+        let choice = serial_model(Some("/dev/cu.second"))
+            .port_choice(&ports(), 115_200)
+            .expect("a port");
+
+        assert!(matches!(
+            choice,
+            PortChoice::Serial { ref port, baud } if port == "/dev/cu.second" && baud == 115_200
+        ));
+    }
+
+    #[test]
+    fn a_remembered_port_that_is_gone_falls_back_to_the_first_scan_result() {
+        let choice = serial_model(Some("/dev/cu.missing"))
+            .port_choice(&ports(), 57_600)
+            .expect("a port");
+
+        assert!(matches!(
+            choice,
+            PortChoice::Serial { ref port, .. } if port == "/dev/cu.first"
+        ));
+    }
+
+    #[test]
+    fn no_scanned_port_means_no_serial_choice() {
+        assert!(serial_model(None).port_choice(&[], 115_200).is_none());
+        assert!(
+            serial_model(Some("/dev/cu.first"))
+                .port_choice(&[], 115_200)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn simulator_mode_ignores_the_scanned_ports() {
+        let model = DialogModel {
+            mode: Mode::Simulator,
+            selected_port: None,
+        };
+
+        let choice = model.port_choice(&[], 115_200).expect("the simulator link");
+
+        assert!(!choice.is_serial());
+        assert_eq!(choice.label(), crate::link::simulator().label());
+    }
+}
