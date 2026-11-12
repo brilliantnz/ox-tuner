@@ -931,6 +931,7 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
             let message = show_message(command);
             let dialog_id = dialog.id.clone();
             let command_name = command.command.clone();
+            let command_label = command.label.clone();
 
             let mut button = Button::new(format!(
                 "dialog-command-{}-{}-{}",
@@ -945,7 +946,13 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
                 }
                 None => {
                     button = button.on_click(move |_, _, cx| {
-                        send_command(&dialog_id, &command_name, message.clone(), cx);
+                        send_command(
+                            &dialog_id,
+                            &command_name,
+                            &command_label,
+                            message.clone(),
+                            cx,
+                        );
                     });
                 }
             }
@@ -985,7 +992,7 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
 }
 
 /// Sends a command button's action and shows its declared message.
-fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut App) {
+fn send_command(dialog: &str, command: &str, label: &str, message: Option<String>, cx: &mut App) {
     if crate::core::run_controller_command(dialog, command, cx)
         && let Some(message) = message
     {
@@ -996,7 +1003,7 @@ fn send_command(dialog: &str, command: &str, message: Option<String>, cx: &mut A
                 message,
             )
             .key(NotificationKey::named(format!(
-                "dialog-command-{dialog}-{command}"
+                "dialog-command-{dialog}-{command}-{label}"
             ))),
             cx,
         );
