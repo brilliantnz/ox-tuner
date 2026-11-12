@@ -10,6 +10,7 @@ use crate::definition_cache::{DefinitionCache, DefinitionSource, IncludeRecorder
 use crate::flags;
 use crate::load::{self};
 use crate::msq::Msq;
+use crate::sidecar::ProjectState;
 
 use super::{
     CONFIG_DIR, MAIN_DEFINITION, PC_VALUES_FILE, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE,
@@ -126,6 +127,13 @@ impl Project {
             "project open phases"
         );
 
+        let mut state = read_state(root);
+        state.set_definition(
+            super::sidecar_definition_path(root, &definition_path),
+            crate::hash::hex(&definition_digest),
+            definition.signature.clone(),
+        );
+
         Ok(Self {
             root: root.to_owned(),
             definition_path,
@@ -137,6 +145,7 @@ impl Project {
             msq,
             images,
             report: loaded.report,
+            state,
             in_folder: true,
         })
     }
@@ -220,6 +229,15 @@ impl Project {
             "project open phases"
         );
 
+        // Standalone state is memory-only: a bare tune file must not sprout a
+        // sidecar beside it.
+        let mut state = read_state(&root);
+        state.set_definition(
+            super::sidecar_definition_path(&root, definition_path),
+            crate::hash::hex(&definition_digest),
+            definition.signature.clone(),
+        );
+
         Ok(Self {
             root,
             definition_path: definition_path.to_owned(),
@@ -231,6 +249,7 @@ impl Project {
             msq,
             images,
             report: loaded.report,
+            state,
             in_folder: false,
         })
     }
@@ -398,6 +417,26 @@ fn snapshot_settings(msq: &Msq, project: &[(String, bool)]) -> SettingsContext {
     overrides.extend(settings_overrides(&msq.settings()));
 
     SettingsContext::new().with_overrides(overrides)
+}
+
+/// Reads the project's persisted state, starting fresh when it is missing or
+/// unreadable.
+///
+/// A corrupt sidecar is a debug line, not an open failure: the tune is
+/// calibration data, the state file is a convenience, and the next write
+/// heals it.
+fn read_state(root: &Path) -> ProjectState {
+    match ProjectState::read(root) {
+        Ok(state) => state.unwrap_or_default(),
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                %error,
+                "the project state could not be read and starts fresh"
+            );
+            ProjectState::default()
+        }
+    }
 }
 
 /// The optional files a project keeps beside its definition.

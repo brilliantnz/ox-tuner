@@ -9,7 +9,7 @@
 //! restructured (ADR-0007), and the only writes inside the project are:
 //!
 //! - `CurrentTune.msq` — and only the constants whose values changed;
-//! - `.oxtuner/provenance` — which INI was used, by hash and signature.
+//! - `.oxtuner/project.json` — which INI was used, plus the project's device and UI state.
 //!
 //! A caller may additionally pass a cache directory; the parsed definition is
 //! then memoized there, never inside the project (ADR-0026).
@@ -29,7 +29,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use oxtuner_ini::{Definition, IniError, SettingsContext};
 use oxtuner_tune::{TuneError, TuneImages};
@@ -38,6 +38,7 @@ use crate::check::LoadReport;
 use crate::definition_cache::DefinitionSource;
 use crate::load::FileValueError;
 use crate::msq::{Msq, MsqError};
+use crate::sidecar::ProjectState;
 
 /// The tune file inside a project.
 pub const TUNE_FILE: &str = "CurrentTune.msq";
@@ -220,6 +221,7 @@ pub struct Project {
     msq: Msq,
     images: TuneImages,
     report: LoadReport,
+    state: ProjectState,
     in_folder: bool,
 }
 
@@ -229,6 +231,15 @@ mod open;
 mod save;
 
 pub(crate) use open::read_include;
+
+/// The definition path as stored in the sidecar: relative to the project root.
+fn sidecar_definition_path(root: &Path, definition: &Path) -> String {
+    definition
+        .strip_prefix(root)
+        .unwrap_or(definition)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
 
 #[cfg(test)]
 mod tests;

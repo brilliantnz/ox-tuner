@@ -73,5 +73,8 @@ pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInf
 pub use project::{
     CONFIG_DIR, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome, TUNE_FILE,
 };
-pub use sidecar::{PROVENANCE_FILE, Provenance, SIDECAR_DIR};
+pub use sidecar::{
+    DEFAULT_BOTTOM_HEIGHT, DEFAULT_PRIMARY_WIDTH, DEFAULT_SECONDARY_WIDTH, DefinitionRef,
+    DeviceState, ProjectState, SIDECAR_DIR, STATE_FILE, STATE_SCHEMA_VERSION, UiState,
+};
 pub use xml::{Attr, Document, Element, Node, XmlError, XmlErrorKind};

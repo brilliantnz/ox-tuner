@@ -1,4 +1,4 @@
-//! SHA-256 for sidecar provenance and cache keys.
+//! SHA-256 for sidecar state and cache keys.
 //!
 //! Provided by the `sha2` crate, whose aarch64 and x86 backends use the CPU's
 //! SHA instructions. The portable implementation this module used to carry ran

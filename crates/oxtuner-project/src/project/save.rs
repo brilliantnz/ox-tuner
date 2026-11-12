@@ -3,7 +3,7 @@ use oxtuner_tune::TuneDiff;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
-use crate::sidecar::Provenance;
+use crate::sidecar::ProjectState;
 
 use super::{Project, ProjectError, SaveOutcome};
 
@@ -85,17 +85,12 @@ impl Project {
         self.msq = document;
 
         if self.in_folder {
-            let relative = self
-                .definition_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&self.definition_path);
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            let provenance = Provenance {
-                definition: relative,
-                definition_sha256: self.definition_digest.clone(),
-                signature: self.definition.signature.clone(),
-            };
-            provenance
+            self.state.set_definition(
+                super::sidecar_definition_path(&self.root, &self.definition_path),
+                self.definition_digest.clone(),
+                self.definition.signature.clone(),
+            );
+            self.state
                 .write(&self.root)
                 .map_err(|source| ProjectError::Sidecar {
                     path: self.root.join(crate::sidecar::SIDECAR_DIR),
@@ -152,21 +147,37 @@ impl Project {
         document.save().map_err(ProjectError::Msq)
     }
 
-    /// The sidecar provenance recorded for this project, when any.
-    pub fn provenance(&self) -> Option<Provenance> {
-        if !self.in_folder {
-            return None;
+    /// The project's persisted state: definition reference, device and UI.
+    pub fn state(&self) -> &ProjectState {
+        &self.state
+    }
+
+    /// Remembers which device the project uses and persists it.
+    ///
+    /// Only the device section changes; the definition reference and the UI
+    /// layout the file already holds are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::Sidecar`] when the state file cannot be
+    /// written. A standalone tune keeps the device in memory only.
+    pub fn set_device(
+        &mut self,
+        port: Option<String>,
+        baud: Option<u32>,
+    ) -> Result<(), ProjectError> {
+        self.state.device.last_port = port;
+        self.state.device.baud_override = baud;
+
+        if self.in_folder {
+            self.state
+                .write(&self.root)
+                .map_err(|source| ProjectError::Sidecar {
+                    path: self.root.join(crate::sidecar::SIDECAR_DIR),
+                    source,
+                })?;
         }
-        match Provenance::read(&self.root) {
-            Ok(provenance) => provenance,
-            Err(error) => {
-                tracing::debug!(
-                    root = %self.root.display(),
-                    %error,
-                    "the provenance sidecar could not be read"
-                );
-                None
-            }
-        }
+
+        Ok(())
     }
 }

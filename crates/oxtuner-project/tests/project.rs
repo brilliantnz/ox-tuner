@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
-use oxtuner_project::{IssueKind, Project, ProjectError, TUNE_FILE};
+use oxtuner_project::{IssueKind, Project, ProjectError, ProjectState, TUNE_FILE};
 
 const MAIN_DEFINITION: &str = r#"
 [MegaTune]
@@ -276,22 +276,58 @@ fn saving_without_edits_leaves_the_tune_byte_identical() {
 }
 
 #[test]
-fn a_save_records_provenance_inside_the_sidecar() {
-    let dir = project_dir("provenance");
+fn a_save_records_project_state_inside_the_sidecar() {
+    let dir = project_dir("state");
     let definition_bytes =
         fs::read(dir.path().join("projectCfg/mainController.ini")).expect("the INI is readable");
     let mut project = Project::open(dir.path()).expect("the project opens");
-    assert!(project.provenance().is_none());
+    assert_eq!(project.state().device.last_port, None);
 
     project.save().expect("the project saves");
 
-    let provenance = project.provenance().expect("provenance was written");
-    assert_eq!(provenance.definition, "projectCfg/mainController.ini");
+    let state = project.state();
+    assert_eq!(state.definition.path, "projectCfg/mainController.ini");
+    assert_eq!(state.definition.sha256, hex(&sha256(&definition_bytes)));
+    assert_eq!(state.definition.signature, "speeduino 202501");
+
+    let reread = ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was written");
+    assert_eq!(&reread, state);
+}
+
+#[test]
+fn a_corrupt_sidecar_does_not_block_opening_and_heals_on_save() {
+    let dir = project_dir("corrupt-state");
+    dir.write(".oxtuner/project.json", "{ not json");
+
+    let mut project = Project::open(dir.path()).expect("the project still opens");
+    assert!(project.state().device.last_port.is_none());
+    assert_eq!(project.state().definition.signature, "speeduino 202501");
+
+    project.save().expect("the save heals the file");
+
+    let healed = ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was rewritten");
+    assert_eq!(&healed, project.state());
+}
+
+#[test]
+fn the_device_section_survives_a_reopen() {
+    let dir = project_dir("device-state");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .set_device(Some("/dev/ttyACM0".to_owned()), Some(115_200))
+        .expect("the device persists");
+    drop(project);
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
     assert_eq!(
-        provenance.definition_sha256,
-        hex(&sha256(&definition_bytes))
+        reopened.state().device.last_port.as_deref(),
+        Some("/dev/ttyACM0")
     );
-    assert_eq!(provenance.signature, "speeduino 202501");
+    assert_eq!(reopened.state().device.baud_override, Some(115_200));
 }
 
 #[test]
@@ -315,7 +351,7 @@ fn a_write_stays_inside_the_project_and_its_sidecar() {
         [
             "project",
             "project/.oxtuner",
-            "project/.oxtuner/provenance",
+            "project/.oxtuner/project.json",
             "project/CurrentTune.msq",
             "project/projectCfg",
             "project/projectCfg/mainController.ini",
@@ -509,12 +545,12 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
     assert!(project.settings().is_active("CELSIUS"));
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
     assert_close(project.tune().scalar_user("tempUnits").unwrap(), 1.0);
-    assert!(project.provenance().is_none());
+    assert!(project.state().device.last_port.is_none());
 
     project.tune_mut().set_user("tempUnits", 4.0).unwrap();
     let outcome = project.save().expect("the edit saves");
     assert_eq!(outcome.variables, ["tempUnits"]);
-    assert!(project.provenance().is_none());
+    assert!(project.state().device.last_port.is_none());
     assert!(!dir.path().join(".oxtuner").exists());
 }
 
