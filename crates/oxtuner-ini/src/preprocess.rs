@@ -324,7 +324,11 @@ impl BlockComment {
     /// [`strip_line_comments`]. Each removed comment becomes one space, which
     /// keeps adjacent tokens apart and makes a comment-only line blank.
     fn strip(&mut self, line: &str, line_number: u32) -> String {
-        let assignment = assignment_index(line);
+        let assignment = if self.open.is_none() {
+            assignment_index(line)
+        } else {
+            None
+        };
         let mut cleaned = String::with_capacity(line.len());
         let mut in_quotes = false;
         let mut escaped = false;
