@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_locale_falls_back_to_english_in_an_isolated_thread() {
+    fn an_isolated_thread_keeps_its_own_locale_when_the_code_is_unknown() {
         std::thread::spawn(|| {
             isolate_thread();
             set_locale("zz");
