@@ -107,6 +107,18 @@ impl fmt::Display for FileValueError {
 
 impl std::error::Error for FileValueError {}
 
+impl FileValueError {
+    /// The variable the value belongs to.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::NoLabel { name, .. }
+            | Self::WrongElementCount { name, .. }
+            | Self::Text { name, .. }
+            | Self::Label { name, .. } => name,
+        }
+    }
+}
+
 /// Loads every value the definition and the file agree about.
 pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     let mut report = crate::check::check(msq, definition);

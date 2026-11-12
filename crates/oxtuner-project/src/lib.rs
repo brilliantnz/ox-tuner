@@ -71,7 +71,8 @@ pub use encoding::EncodeError;
 pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};
 pub use project::{
-    CONFIG_DIR, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome, TUNE_FILE,
+    CONFIG_DIR, CreateRequest, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome,
+    TUNE_FILE,
 };
 pub use sidecar::{
     DEFAULT_BOTTOM_HEIGHT, DEFAULT_PRIMARY_WIDTH, DEFAULT_SECONDARY_WIDTH, DefinitionRef,

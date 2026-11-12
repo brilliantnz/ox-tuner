@@ -90,6 +90,25 @@ pub enum ProjectError {
         /// The expected path.
         path: PathBuf,
     },
+    /// The project name is not usable as a folder name.
+    InvalidName {
+        /// The name that was rejected.
+        name: String,
+        /// Why the name was rejected.
+        reason: &'static str,
+    },
+    /// The target folder exists and already holds files.
+    TargetNotEmpty {
+        /// The path that was inspected.
+        path: PathBuf,
+    },
+    /// The definition's signature differs from the ECU's.
+    SignatureMismatch {
+        /// The signature the ECU reported.
+        expected: String,
+        /// The signature the definition declares.
+        found: String,
+    },
     /// A file could not be read or written.
     Io {
         /// The file involved.
@@ -153,6 +172,18 @@ impl fmt::Display for ProjectError {
                     path.display()
                 )
             }
+            Self::InvalidName { name, reason } => {
+                write!(formatter, "invalid project name `{name}`: {reason}")
+            }
+            Self::TargetNotEmpty { path } => write!(
+                formatter,
+                "the target folder {} already holds files",
+                path.display()
+            ),
+            Self::SignatureMismatch { expected, found } => write!(
+                formatter,
+                "the ECU reports `{expected}`, the definition declares `{found}`"
+            ),
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Msq(error) => write!(formatter, "{error}"),
             Self::Ini(error) => write!(formatter, "the definition could not be parsed: {error}"),
@@ -180,6 +211,9 @@ impl std::error::Error for ProjectError {
             | Self::MissingDefinition { .. }
             | Self::AmbiguousDefinition { .. }
             | Self::MissingTune { .. }
+            | Self::InvalidName { .. }
+            | Self::TargetNotEmpty { .. }
+            | Self::SignatureMismatch { .. }
             | Self::ReadOnly { .. } => None,
         }
     }
@@ -226,10 +260,12 @@ pub struct Project {
 }
 
 mod access;
+mod create;
 mod detect;
 mod open;
 mod save;
 
+pub use create::CreateRequest;
 pub(crate) use open::read_include;
 
 /// The definition path as stored in the sidecar: relative to the project root.

@@ -19,12 +19,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
-use oxtuner_ini::SettingsContext;
-use oxtuner_tune::MsqPage;
+use oxtuner_ini::{Definition, SettingsContext};
+use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, VariableSpec};
 
 use crate::encoding::{self, EncodeError};
 use crate::flags;
+use crate::load::{self, FileValueError};
 use crate::xml::{Document, Element, Node, XmlError};
 
 /// A `.msq` page address: the unnumbered PC page, or a numbered calibration page.
@@ -209,7 +211,97 @@ impl From<EncodeError> for MsqError {
     }
 }
 
+/// The file format a scaffolded tune declares, matching the observed writer.
+const SCAFFOLD_FILE_FORMAT: &str = "5.0";
+/// The namespace observed on tunes the reference writer produces.
+const SCAFFOLD_NAMESPACE: &str = "http://www.msefi.com/:msq";
+
 impl Msq {
+    /// Builds a new tune document with every value at its definition default.
+    ///
+    /// The document mirrors what the reference writer produces: an unnumbered
+    /// PC page first, one numbered page per definition page carrying the
+    /// definition's page sizes, and a `<settings>` snapshot of the active
+    /// flags. Variables the definition marks `noMsqSave` are left out, the
+    /// same rule the save path applies.
+    ///
+    /// This is crate-private: project creation is the only caller, and the
+    /// error is the file-value error the save path already reports.
+    pub(crate) fn scaffold(
+        definition: &Definition,
+        settings: &SettingsContext,
+    ) -> Result<Self, FileValueError> {
+        let tune = Tune::from_definition(definition);
+        let layout = Arc::clone(tune.layout());
+
+        let mut pc_entries: Vec<Element> = Vec::new();
+        let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
+        for spec in layout.variables() {
+            if spec.no_msq_save {
+                continue;
+            }
+            let Some(values) = tune.value(&spec.name) else {
+                continue;
+            };
+            if values.is_empty() {
+                continue;
+            }
+            let text = load::format_values(spec, definition, values)?;
+
+            let tag = match spec.ini_page() {
+                Some(_) => EntryKind::Constant,
+                None => EntryKind::PcVariable,
+            };
+            let element = entry_element(spec, tag, &text);
+
+            match spec.ini_page() {
+                Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
+                None => pc_entries.push(element),
+            }
+        }
+
+        let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
+        push_child(
+            &mut root.children,
+            1,
+            Element::self_closing("bibliography", &[("author", "OxTuner")]),
+        );
+        push_child(&mut root.children, 1, version_element(definition));
+
+        let pc_page = if pc_entries.is_empty() {
+            Element::self_closing("page", &[])
+        } else {
+            page_element(None, None, pc_entries)
+        };
+        push_child(&mut root.children, 1, pc_page);
+
+        for page in &definition.pages {
+            let Some(ini) = IniPage::new(page.number) else {
+                continue;
+            };
+            let number = ini.to_msq().get();
+            let entries = pages.remove(&number).unwrap_or_default();
+            let size = page.size.to_string();
+            let numbered = if entries.is_empty() {
+                Element::self_closing("page", &[("number", &number.to_string()), ("size", &size)])
+            } else {
+                page_element(Some(&number.to_string()), Some(&size), entries)
+            };
+            push_child(&mut root.children, 1, numbered);
+        }
+
+        push_child(&mut root.children, 1, settings_element(settings));
+
+        let document = Document {
+            declaration: Some("xml version=\"1.0\" encoding=\"ISO-8859-1\"".to_owned()),
+            nodes: vec![
+                Node::Text("\n".to_owned()),
+                Node::Element(root),
+                Node::Text("\n".to_owned()),
+            ],
+        };
+        Ok(Self { document })
+    }
     /// Parses `.msq` bytes (ISO-8859-1) into the document model.
     ///
     /// # Errors
@@ -614,6 +706,91 @@ impl Msq {
     }
 }
 
+/// A `<constant>` or `<pcVariable>` element for one formatted value.
+///
+/// Arrays carry their `cols`/`rows` shape, the same attributes the reference
+/// writer stores; scalars and labels need only their name.
+fn entry_element(spec: &VariableSpec, kind: EntryKind, text: &str) -> Element {
+    let cols_text;
+    let rows_text;
+    let mut attrs: Vec<(&str, &str)> = vec![("name", spec.name.as_str())];
+    if let EntryShape::Array { cols, rows } = spec.shape {
+        cols_text = cols.to_string();
+        rows_text = rows.to_string();
+        attrs.push(("cols", cols_text.as_str()));
+        attrs.push(("rows", rows_text.as_str()));
+    }
+
+    let mut element = Element::new(kind.element(), &attrs);
+    element.set_text(text);
+    element
+}
+
+/// A `<page>` element with its entries, indented one level deeper.
+fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>) -> Element {
+    let mut attrs: Vec<(&str, &str)> = Vec::new();
+    if let Some(number) = number {
+        attrs.push(("number", number));
+    }
+    if let Some(size) = size {
+        attrs.push(("size", size));
+    }
+
+    let mut page = Element::new("page", &attrs);
+    for entry in entries {
+        push_child(&mut page.children, 2, entry);
+    }
+    page.children.push(Node::Text("\n    ".to_owned()));
+    page
+}
+
+/// The `<versionInfo>` header for a scaffolded tune.
+fn version_element(definition: &Definition) -> Element {
+    let pages = definition.pages.len().to_string();
+    Element::self_closing(
+        "versionInfo",
+        &[
+            ("fileFormat", SCAFFOLD_FILE_FORMAT),
+            (
+                "firmwareInfo",
+                definition
+                    .version_info
+                    .as_deref()
+                    .unwrap_or(definition.signature.as_str()),
+            ),
+            ("nPages", &pages),
+            ("signature", definition.signature.as_str()),
+        ],
+    )
+}
+
+/// The `<settings>` snapshot for the active flags.
+fn settings_element(settings: &SettingsContext) -> Element {
+    let active = settings.active_flags();
+    if active.is_empty() {
+        return Element::self_closing("settings", &[]);
+    }
+
+    let mut element = Element::self_closing("settings", &[]);
+    element.open();
+    for flag in active {
+        let flag = flag.as_str();
+        push_child(
+            &mut element.children,
+            2,
+            Element::self_closing("setting", &[("name", flag), ("value", flag)]),
+        );
+    }
+    element.children.push(Node::Text("\n    ".to_owned()));
+    element
+}
+
+/// Appends an indented child element to a parent's children.
+fn push_child(children: &mut Vec<Node>, depth: usize, element: Element) {
+    children.push(Node::Text(format!("\n{}", "    ".repeat(depth))));
+    children.push(Node::Element(element));
+}
+
 fn attribute_usize(element: &Element, name: &str) -> Option<usize> {
     element.attr(name)?.trim().parse().ok()
 }
@@ -898,6 +1075,63 @@ mod tests {
                 found: "tune".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn scaffold_emits_a_document_that_checks_clean() {
+        let definition = scaffold_definition();
+        let settings = SettingsContext::new();
+        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+
+        let info = msq.version_info().expect("the header is present");
+        assert_eq!(info.file_format, "5.0");
+        assert_eq!(info.signature, "speeduino 202501");
+        assert_eq!(info.n_pages, Some(2));
+        assert_eq!(msq.pages().len(), 2);
+        assert_eq!(msq.pc_page_count(), 1);
+
+        let report = crate::check(&msq, &definition);
+        assert!(!report.is_read_only(), "{:?}", report.blockers);
+
+        let entries = msq.entries();
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        for name in ["rpmhigh", "reqFuel", "aeMode", "note", "table", "b"] {
+            assert!(names.contains(&name), "{name} is scaffolded");
+        }
+
+        let table = entries
+            .iter()
+            .find(|entry| entry.name == "table")
+            .expect("the array is present");
+        assert_eq!((table.cols, table.rows), (Some(2), Some(2)));
+
+        // The document survives a save and re-parse.
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        assert_eq!(reparsed.version_info().expect("the header survives"), info);
+    }
+
+    fn scaffold_definition() -> Definition {
+        let text = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 128, 288
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
+note = string, ASCII, 8
+table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+page = 2
+b = scalar, U08, 0, "", 1, 0, 0, 255, 0
+
+[PcVariables]
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+"#;
+        oxtuner_ini::parse_str_with_includes(text, &SettingsContext::new(), &|_: &str| None)
+            .expect("the fixture parses")
     }
 
     #[test]

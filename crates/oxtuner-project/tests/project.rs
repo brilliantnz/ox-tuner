@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
-use oxtuner_project::{IssueKind, Project, ProjectError, ProjectState, TUNE_FILE};
+use oxtuner_project::{CreateRequest, IssueKind, Project, ProjectError, ProjectState, TUNE_FILE};
 
 const MAIN_DEFINITION: &str = r#"
 [MegaTune]
@@ -1073,4 +1073,128 @@ fn copy_tree(from: &Path, to: &Path) {
             fs::copy(entry.path(), target).expect("file is copyable");
         }
     }
+}
+
+#[test]
+fn creating_a_project_scaffolds_the_reference_layout() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+
+[PcVariables]
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+"#;
+
+    let sandbox = TempDir::new("create");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_bytes: DEFINITION.as_bytes().to_vec(),
+        expected_signature: Some("speeduino 202501".to_owned()),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let root = sandbox.path().join("Roadster");
+    assert!(root.join(TUNE_FILE).is_file());
+    assert!(root.join("projectCfg/mainController.ini").is_file());
+    for dir in ["DataLogs", "dashboard", "TuneView"] {
+        assert!(root.join(dir).is_dir(), "{dir} is scaffolded");
+    }
+    assert!(root.join(".oxtuner/project.json").is_file());
+
+    let properties =
+        fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties exist");
+    assert!(properties.contains("projectName=Roadster"));
+    assert!(properties.contains("speeduino 202501"));
+
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    assert_close(project.tune().scalar_user("reqFuel").unwrap(), 0.0);
+    assert_eq!(
+        project.state().definition.path,
+        "projectCfg/mainController.ini"
+    );
+    drop(project);
+
+    let reopened = Project::open(&root).expect("the created project reopens");
+    assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+}
+
+#[test]
+fn creating_a_project_refuses_a_target_that_holds_files() {
+    let sandbox = TempDir::new("create-nonempty");
+    let target = sandbox.path().join("Taken");
+    fs::create_dir_all(&target).expect("the target exists");
+    fs::write(target.join("existing.txt"), "x").expect("the target holds a file");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Taken".to_owned(),
+        ini_bytes: Vec::new(),
+        expected_signature: None,
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetNotEmpty { .. })
+    ));
+    assert!(target.join("existing.txt").is_file());
+}
+
+#[test]
+fn creating_a_project_refuses_an_unusable_name() {
+    let sandbox = TempDir::new("create-bad-name");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "../escape".to_owned(),
+        ini_bytes: Vec::new(),
+        expected_signature: None,
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::InvalidName { .. })
+    ));
+    assert!(sandbox.path().read_dir().unwrap().next().is_none());
+}
+
+#[test]
+fn creating_a_project_checks_the_detected_signature() {
+    let sandbox = TempDir::new("create-mismatch");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Mismatch".to_owned(),
+        ini_bytes: b"[MegaTune]\nsignature = \"speeduino 202501\"\n".to_vec(),
+        expected_signature: Some("other 9999".to_owned()),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::SignatureMismatch { .. })
+    ));
+    assert!(
+        !sandbox.path().join("Mismatch").exists(),
+        "a failed create leaves nothing behind"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_an_unreadable_definition() {
+    let sandbox = TempDir::new("create-bad-ini");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Broken".to_owned(),
+        ini_bytes: b"this is not an ini file\n".to_vec(),
+        expected_signature: None,
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::Ini(_))
+    ));
+    assert!(
+        !sandbox.path().join("Broken").exists(),
+        "a failed create leaves nothing behind"
+    );
 }
