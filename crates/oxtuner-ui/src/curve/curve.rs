@@ -416,11 +416,10 @@ impl Curve {
     }
 
     #[expect(
-        clippy::needless_pass_by_value,
         clippy::too_many_lines,
-        reason = "the snapshot is consumed by one visual pass that keeps the plot together"
+        reason = "one visual pass draws the header, grid, curve and handles together"
     )]
-    fn render_curve(&mut self, snapshot: CurveSnapshot, cx: &mut Context<'_, Self>) -> AnyElement {
+    fn render_curve(&self, snapshot: &CurveSnapshot, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let count = self.model.point_count();
         let selected = self.model.selected().min(count.saturating_sub(1));
@@ -672,7 +671,7 @@ impl Curve {
         } else {
             Y_AXIS_WIDTH
         };
-        let aria = match active.and_then(|index| self.readout(&snapshot, index)) {
+        let aria = match active.and_then(|index| self.readout(snapshot, index)) {
             Some(readout) => format!(
                 "{} curve, {} points, point {} of {}, {}",
                 snapshot.title(),
@@ -696,7 +695,7 @@ impl Curve {
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.handle_key(event, cx)),
             )
-            .child(self.render_header(&snapshot, active, &theme))
+            .child(self.render_header(snapshot, active, &theme))
             .child(
                 h_flex()
                     .flex_1()
@@ -763,7 +762,7 @@ impl Curve {
 
 impl Render for Curve {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Some(snapshot) = self.model.snapshot().cloned() else {
+        let Some(snapshot) = self.model.snapshot() else {
             return Self::render_empty(cx);
         };
 

@@ -854,7 +854,7 @@ impl Render for Table {
         reason = "the grid composes headers, rows, cells and input in one retained render"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Some(table) = self.model.table().cloned() else {
+        let Some(table) = self.model.table() else {
             return div().size_full().into_any_element();
         };
 
