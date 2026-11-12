@@ -109,6 +109,11 @@ pub enum ProjectError {
         /// The signature the definition declares.
         found: String,
     },
+    /// The definition pulls in `#include` files that creation cannot copy.
+    DefinitionNeedsIncludes {
+        /// The include names the definition asked for.
+        names: Vec<String>,
+    },
     /// A file could not be read or written.
     Io {
         /// The file involved.
@@ -184,6 +189,11 @@ impl fmt::Display for ProjectError {
                 formatter,
                 "the ECU reports `{expected}`, the definition declares `{found}`"
             ),
+            Self::DefinitionNeedsIncludes { names } => write!(
+                formatter,
+                "the definition includes {}; copy the whole definition folder instead",
+                names.join(", ")
+            ),
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Msq(error) => write!(formatter, "{error}"),
             Self::Ini(error) => write!(formatter, "the definition could not be parsed: {error}"),
@@ -214,6 +224,7 @@ impl std::error::Error for ProjectError {
             | Self::InvalidName { .. }
             | Self::TargetNotEmpty { .. }
             | Self::SignatureMismatch { .. }
+            | Self::DefinitionNeedsIncludes { .. }
             | Self::ReadOnly { .. } => None,
         }
     }

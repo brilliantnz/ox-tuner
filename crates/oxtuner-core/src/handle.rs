@@ -22,6 +22,7 @@ use std::{
 };
 
 use crossfire::{AsyncRx, MTx, Rx, SendTimeoutError, TrySendError, Tx, mpsc, spsc};
+use oxtuner_project::CreateRequest;
 
 use crate::contract::{CellEdit, CommandRequest, CoreCommand, Envelope, Event, OpId};
 use crate::service::CoreError;
@@ -261,6 +262,20 @@ impl CoreHandle {
     /// command cannot be queued.
     pub fn open_project(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send_request(CommandRequest::OpenProject { path: path.into() })
+    }
+
+    /// Creates a project folder in the core, then opens it.
+    ///
+    /// The core parses the definition, writes the scaffold and owns the
+    /// resulting project. The reply is [`crate::Event::ProjectOpened`] or
+    /// [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn create_project(&self, request: CreateRequest) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::CreateProject { request })
     }
 
     /// Writes the open project's changed values back to its tune file.

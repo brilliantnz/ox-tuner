@@ -15,7 +15,7 @@ use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId, ProjectView,
     SaveReport, start,
 };
-use oxtuner_project::TUNE_FILE;
+use oxtuner_project::{CreateRequest, TUNE_FILE};
 
 /// How long a test waits for an event before failing.
 const WAIT: Duration = Duration::from_secs(10);
@@ -65,6 +65,18 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
         <setting name="CELSIUS" value="CELSIUS"/>
     </settings>
 </msq>
+"#;
+
+/// A single-page definition without `#include`, the only shape creation copies.
+const CREATE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 128
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 "#;
 
 /// The same tune, written for another firmware.
@@ -327,4 +339,64 @@ fn a_project_failure_is_not_a_dead_core() {
     let event = core.next();
     assert_eq!(event.op(), Some(op));
     assert!(matches!(event, Event::DefinitionLoaded { .. }));
+}
+
+#[test]
+fn creating_a_project_scaffolds_it_and_leaves_it_open() {
+    let dir = TempDir::new("create");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Roadster".to_owned(),
+            ini_bytes: CREATE_DEFINITION.as_bytes().to_vec(),
+            expected_signature: Some("speeduino 202501".to_owned()),
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let summary = opened(&event);
+    let root = dir.path().join("Roadster");
+    assert_eq!(summary.root, root);
+    assert!(summary.in_project);
+    assert!(!summary.read_only, "{:?}", summary.read_only_reasons);
+    assert_eq!(summary.definition.signature, "speeduino 202501");
+    assert!(root.join(TUNE_FILE).is_file());
+    assert!(root.join("projectCfg/mainController.ini").is_file());
+    assert!(root.join(".oxtuner/project.json").is_file());
+
+    // The created project is a live session: Save answers like any other.
+    let op = core.handle.save_tune().expect("the save is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+    assert!(matches!(event, Event::TuneSaved { .. }), "{event:?}");
+}
+
+#[test]
+fn a_refused_create_reports_the_reason_and_writes_nothing() {
+    let dir = TempDir::new("create-refused");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Mismatch".to_owned(),
+            ini_bytes: CREATE_DEFINITION.as_bytes().to_vec(),
+            expected_signature: Some("other firmware".to_owned()),
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (reason, message) = failure(&event);
+    assert_eq!(reason, FailureCode::ProjectRejected);
+    assert!(message.contains("other firmware"), "{message}");
+    assert!(
+        !dir.path().join("Mismatch").exists(),
+        "a refused create leaves no folder behind"
+    );
 }

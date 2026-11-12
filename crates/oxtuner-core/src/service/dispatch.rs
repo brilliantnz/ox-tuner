@@ -535,49 +535,54 @@ pub(super) fn handle(
             match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
                     let cache_hit = project.definition_source() == DefinitionSource::Cache;
-                    // The old session's frame belongs to another definition and
-                    // must be gone before the new menu is evaluated.
-                    teardown(
-                        live,
+                    adopt_project(
+                        project,
+                        op,
+                        cache_hit,
                         session,
+                        live,
                         safety,
                         journal_dir,
-                        latest,
                         events,
+                        latest,
                         history,
                         log,
+                        report,
+                        last_menu,
                     );
-                    let summary = ProjectView::from_project(&project, latest.get().as_deref());
-                    tracing::info!(
-                        %op,
-                        root = %summary.root.display(),
-                        signature = %summary.definition.signature,
-                        loaded = summary.loaded,
-                        skipped = summary.skipped,
-                        warnings = summary.warnings.len(),
-                        read_only = summary.read_only,
-                        cache_hit,
-                        "project opened"
-                    );
-                    configure_history(history, project.definition());
-                    *session = Session::Project(Box::new(project));
-                    last_menu.clone_from(&summary.definition.menu);
-                    report.projects_opened += 1;
-                    send(events, Event::ProjectOpened { op, view: summary });
                 }
                 Err(error) => {
-                    tracing::warn!(%op, path = %path.display(), %error, "project rejected");
-                    report.failures += 1;
-                    send(
+                    reject_project(&path, &error, op, report, events);
+                }
+            }
+            Outcome::Continue
+        }
+        CommandRequest::CreateProject { request } => {
+            // The definition parse, the scaffold write and the definition-cache
+            // store all belong on the core thread.
+            let root = request.parent.join(request.name.trim());
+            let _span =
+                tracing::debug_span!("core_create_project", %op, path = %root.display()).entered();
+            match Project::create(&request) {
+                Ok(project) => {
+                    adopt_project(
+                        project,
+                        op,
+                        false,
+                        session,
+                        live,
+                        safety,
+                        journal_dir,
                         events,
-                        Event::Failed {
-                            op,
-                            failure: Failure {
-                                code: FailureCode::ProjectRejected,
-                                message: error.to_string(),
-                            },
-                        },
+                        latest,
+                        history,
+                        log,
+                        report,
+                        last_menu,
                     );
+                }
+                Err(error) => {
+                    reject_project(&root, &error, op, report, events);
                 }
             }
             Outcome::Continue
@@ -1019,6 +1024,80 @@ pub(super) fn handle(
             Outcome::Continue
         }
     }
+}
+
+/// Makes a freshly opened or created project the live session.
+///
+/// The old session's frame belongs to another definition and must be gone
+/// before the new menu is evaluated.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the install path mirrors the dispatcher's queue fields"
+)]
+fn adopt_project(
+    project: Project,
+    op: OpId,
+    cache_hit: bool,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    safety: &mut Safety,
+    journal_dir: Option<&std::path::Path>,
+    events: &EventTx,
+    latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
+    report: &mut CoreReport,
+    last_menu: &mut Vec<MenuNode>,
+) {
+    teardown(
+        live,
+        session,
+        safety,
+        journal_dir,
+        latest,
+        events,
+        history,
+        log,
+    );
+    let summary = ProjectView::from_project(&project, latest.get().as_deref());
+    tracing::info!(
+        %op,
+        root = %summary.root.display(),
+        signature = %summary.definition.signature,
+        loaded = summary.loaded,
+        skipped = summary.skipped,
+        warnings = summary.warnings.len(),
+        read_only = summary.read_only,
+        cache_hit,
+        "project opened"
+    );
+    configure_history(history, project.definition());
+    *session = Session::Project(Box::new(project));
+    last_menu.clone_from(&summary.definition.menu);
+    report.projects_opened += 1;
+    send(events, Event::ProjectOpened { op, view: summary });
+}
+
+/// Reports a project that could not be opened or created.
+fn reject_project(
+    path: &std::path::Path,
+    error: &oxtuner_project::ProjectError,
+    op: OpId,
+    report: &mut CoreReport,
+    events: &EventTx,
+) {
+    tracing::warn!(%op, path = %path.display(), %error, "project rejected");
+    report.failures += 1;
+    send(
+        events,
+        Event::Failed {
+            op,
+            failure: Failure {
+                code: FailureCode::ProjectRejected,
+                message: error.to_string(),
+            },
+        },
+    );
 }
 
 pub(super) fn refuse(

@@ -8,6 +8,7 @@
 //! written, and a failure past that point removes what creation wrote, so a
 //! failed create leaves no half-built folder behind.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,12 @@ impl Project {
     /// The folder is `parent/name`. It must not exist or must be empty; the
     /// name must be a usable folder name on every desktop OS. When the ECU
     /// reported a signature, the definition must declare the same one.
+    ///
+    /// The definition is parsed twice — once to scaffold the tune, once by
+    /// the open that proves the folder is readable — and the second parse does
+    /// not use the definition cache. Creation is a one-shot user action, so the
+    /// few milliseconds are not worth a cache parameter here; later opens of
+    /// the same project are cached normally.
     ///
     /// # Errors
     ///
@@ -90,9 +97,22 @@ impl Project {
 
         let text = oxtuner_ini::source::decode(&request.ini_bytes).text;
         let settings = SettingsContext::new();
-        let resolver = |name: &str| super::read_include(&config, name);
+        // The parser resolves `#include` through a `Fn` resolver, so the names
+        // it asks for are recorded through interior mutability.
+        let includes = RefCell::new(Vec::new());
+        let resolver = |name: &str| {
+            includes.borrow_mut().push(name.to_owned());
+            super::read_include(&config, name)
+        };
         let definition = oxtuner_ini::parse_str_with_includes(&text, &settings, &resolver)
             .map_err(ProjectError::Ini)?;
+
+        // Creation copies one file. A definition that pulls in more would open
+        // with those pages missing, so it is refused instead of half-built.
+        let includes = includes.into_inner();
+        if !includes.is_empty() {
+            return Err(ProjectError::DefinitionNeedsIncludes { names: includes });
+        }
 
         if let Some(expected) = &request.expected_signature
             && definition.signature.trim() != expected.trim()

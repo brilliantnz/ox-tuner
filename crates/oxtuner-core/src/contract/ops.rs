@@ -110,6 +110,16 @@ pub(crate) enum CommandRequest {
         /// The project folder (a directory containing `projectCfg/`).
         path: PathBuf,
     },
+    /// Create a project folder, then open it.
+    ///
+    /// Indexing, parsing and writing happen on the core thread. The reply is
+    /// [`super::Event::ProjectOpened`], or [`super::Event::Failed`] with
+    /// [`super::FailureCode::ProjectRejected`]; a failed create leaves no
+    /// folder behind and the previous session untouched.
+    CreateProject {
+        /// The definition bytes copied into `projectCfg/`.
+        request: oxtuner_project::CreateRequest,
+    },
     /// Write the open project's changed values back to its tune file.
     ///
     /// Only variables that differ from the baseline are touched, so an unedited
@@ -425,6 +435,17 @@ pub enum ProjectCommand {
         /// The project folder.
         path: PathBuf,
     },
+    /// Create a project folder and open it.
+    Create {
+        /// The folder the project is created inside.
+        parent: PathBuf,
+        /// Display name, also used as the folder name.
+        name: String,
+        /// The user-supplied definition bytes copied into `projectCfg/`.
+        ini_bytes: Vec<u8>,
+        /// Signature the ECU reported, when the project came from a detection.
+        expected_signature: Option<String>,
+    },
     /// Write changed values back to the tune file.
     Save,
     /// List the project snapshots, oldest first.
@@ -637,6 +658,7 @@ impl CoreCommand {
             Self::Definition(DefinitionCommand::Load { .. }) => "load-definition",
             Self::Definition(DefinitionCommand::Unload) => "unload-definition",
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
+            Self::Project(ProjectCommand::Create { .. }) => "create-project",
             Self::Project(ProjectCommand::Save) => "save-tune",
             Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
             Self::Tune(TuneCommand::ReadTable { .. }) => "read-table",
@@ -686,6 +708,19 @@ impl From<CoreCommand> for CommandRequest {
             },
             CoreCommand::Definition(DefinitionCommand::Unload) => Self::UnloadDefinition,
             CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
+            CoreCommand::Project(ProjectCommand::Create {
+                parent,
+                name,
+                ini_bytes,
+                expected_signature,
+            }) => Self::CreateProject {
+                request: oxtuner_project::CreateRequest {
+                    parent,
+                    name,
+                    ini_bytes,
+                    expected_signature,
+                },
+            },
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
             CoreCommand::Project(ProjectCommand::ListSnapshots) => Self::ListSnapshots,
             CoreCommand::Tune(TuneCommand::ReadTable { name }) => Self::ReadTable { name },

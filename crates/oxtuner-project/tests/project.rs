@@ -1245,3 +1245,31 @@ fn a_standalone_tune_ignores_a_neighboring_sidecar() {
     .expect("the tune opens");
     assert!(project.state().device.last_port.is_none());
 }
+
+#[test]
+fn creating_a_project_refuses_a_definition_with_includes() {
+    const INCLUDING: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#include page2.ini
+"#;
+
+    let sandbox = TempDir::new("create-includes");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Includes".to_owned(),
+        ini_bytes: INCLUDING.as_bytes().to_vec(),
+        expected_signature: None,
+    };
+    let error = Project::create(&request).expect_err("an include cannot be copied");
+    assert!(
+        matches!(&error, ProjectError::DefinitionNeedsIncludes { names } if names == &["page2.ini"]),
+        "{error}"
+    );
+    assert!(!sandbox.path().join("Includes").exists());
+}
