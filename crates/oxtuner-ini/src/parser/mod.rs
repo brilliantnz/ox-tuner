@@ -304,7 +304,7 @@ impl SectionParser {
 
     /// Records an informational note about the section as a whole, for a fact
     /// that belongs to no single line.
-    pub(crate) fn note_file(&mut self, code: &'static str, message: impl Into<String>) {
+    pub(crate) fn note_section(&mut self, code: &'static str, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::section_wide(
             Severity::Note,
             code,

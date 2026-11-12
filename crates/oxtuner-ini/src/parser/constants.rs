@@ -203,7 +203,7 @@ impl PageTable {
             .max(highest_override);
 
         if declared != 0 && listed != declared {
-            section.note_file(
+            section.note_section(
                 "page-size-count",
                 format!(
                     "`nPages` is {declared} but `pageSize` lists {} entries",
