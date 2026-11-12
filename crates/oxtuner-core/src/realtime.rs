@@ -583,14 +583,13 @@ fn read_value(
     }
 }
 
-/// Reads one storage word as an unsigned bit pattern.
-fn read_bits(
+/// Reads one storage word into a little-endian byte buffer.
+fn ordered_word(
     bytes: &[u8],
     offset: usize,
-    storage: DataType,
+    width: usize,
     endianness: Endianness,
-) -> Option<u64> {
-    let width = usize::try_from(storage.size()).unwrap_or(usize::MAX);
+) -> Option<[u8; 8]> {
     let slice = bytes.get(offset..offset.checked_add(width)?)?;
     let mut ordered = [0u8; 8];
     match endianness {
@@ -601,6 +600,18 @@ fn read_bits(
             }
         }
     }
+    Some(ordered)
+}
+
+/// Reads one storage word as an unsigned bit pattern.
+fn read_bits(
+    bytes: &[u8],
+    offset: usize,
+    storage: DataType,
+    endianness: Endianness,
+) -> Option<u64> {
+    let width = usize::try_from(storage.size()).unwrap_or(usize::MAX);
+    let ordered = ordered_word(bytes, offset, width, endianness)?;
     Some(match storage {
         DataType::U08 | DataType::S08 | DataType::M08 => u64::from(ordered[0]),
         DataType::U16 | DataType::S16 => u64::from(u16::from_le_bytes([ordered[0], ordered[1]])),
@@ -625,16 +636,7 @@ fn read_raw(
     endianness: Endianness,
 ) -> Option<f64> {
     let width = usize::try_from(data_type.size()).unwrap_or(usize::MAX);
-    let slice = bytes.get(offset..offset.checked_add(width)?)?;
-    let mut ordered = [0u8; 8];
-    match endianness {
-        Endianness::Little => ordered[..width].copy_from_slice(slice),
-        Endianness::Big => {
-            for index in 0..width {
-                ordered[index] = slice[width - 1 - index];
-            }
-        }
-    }
+    let ordered = ordered_word(bytes, offset, width, endianness)?;
     Some(match data_type {
         DataType::U08 | DataType::M08 => f64::from(ordered[0]),
         DataType::S08 => f64::from(ordered[0].cast_signed()),
