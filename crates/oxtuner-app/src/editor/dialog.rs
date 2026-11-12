@@ -752,7 +752,7 @@ impl DialogEditor {
         };
 
         let mut lane = div()
-            .id(format!("constant-control-{}", field.variable))
+            .id(format!("constant-control-{}-{}", dialog.id, field.variable))
             .w_48()
             .flex_shrink_0()
             .flex()
@@ -930,9 +930,10 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
             let dialog_id = dialog.id.clone();
             let command_name = command.command.clone();
 
-            let mut button = Button::new(format!("dialog-command-{}", command.command))
-                .label(t!("app.dialog.run"))
-                .ghost();
+            let mut button =
+                Button::new(format!("dialog-command-{}-{}", dialog.id, command.command))
+                    .label(t!("app.dialog.run"))
+                    .ghost();
 
             match blocked {
                 Some(reason) => {
