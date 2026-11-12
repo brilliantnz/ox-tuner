@@ -303,7 +303,7 @@ mod tests {
         let encoded = Frame::encode(b"hello").expect("encodes");
         let mut decoder = FrameDecoder::new();
         let first = decoder.push(&encoded[..4]).expect("no frame yet");
-        assert!(first.is_empty());
+        assert!(first.is_empty(), "a partial push completes no frame");
         assert_eq!(decoder.pending(), 4);
 
         let error = decoder
