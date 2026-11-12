@@ -18,7 +18,10 @@ use std::{
 };
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, point, px, size};
-use oxtuner_project::UiState;
+use oxtuner_project::{
+    DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PRIMARY_SIDEBAR_WIDTH, DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+    UiState,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,10 +39,6 @@ pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 /// second keeps a drag from causing a write per frame while still surviving a
 /// crash with at most this much lost.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
-
-pub(crate) const DEFAULT_PRIMARY_SIDEBAR_WIDTH: f32 = 240.;
-pub(crate) const DEFAULT_SECONDARY_SIDEBAR_WIDTH: f32 = 280.;
-pub(crate) const DEFAULT_BOTTOM_PANEL_HEIGHT: f32 = 180.;
 
 /// Width limits of the primary (navigation) sidebar.
 pub(crate) const PRIMARY_SIDEBAR_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
@@ -701,6 +700,36 @@ mod tests {
             },
             decoded
         );
+    }
+
+    #[test]
+    fn the_state_file_names_the_layout_panels() {
+        let encoded = serde_json::to_string(&LayoutState::default()).expect("serialize");
+
+        for key in [
+            "\"primary_sidebar_width\"",
+            "\"secondary_sidebar_width\"",
+            "\"bottom_panel_height\"",
+            "\"primary_sidebar_visible\"",
+            "\"secondary_sidebar_visible\"",
+            "\"bottom_panel_visible\"",
+        ] {
+            assert!(encoded.contains(key), "{key} is written: {encoded}");
+        }
+        for key in [
+            "\"primary_width\"",
+            "\"secondary_width\"",
+            "\"bottom_height\"",
+            "\"primary_visible\"",
+            "\"secondary_visible\"",
+            "\"bottom_visible\"",
+            "\"table_low_at_top\"",
+        ] {
+            assert!(
+                !encoded.contains(key),
+                "{key} must not be written: {encoded}"
+            );
+        }
     }
 
     #[test]

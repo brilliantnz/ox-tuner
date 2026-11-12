@@ -358,7 +358,7 @@ impl Render for AppLayout {
     )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
-        let (primary, secondary, bottom) = (
+        let (primary_sidebar, secondary_sidebar, bottom_panel) = (
             layout.primary_sidebar(),
             layout.secondary_sidebar(),
             layout.bottom_panel(),
@@ -405,7 +405,7 @@ impl Render for AppLayout {
                             .when(primary_sidebar_visible, |this| {
                                 this.child(
                                     resizable_panel()
-                                        .size(primary)
+                                        .size(primary_sidebar)
                                         .size_range(
                                             px(PRIMARY_SIDEBAR_WIDTH_RANGE.start)
                                                 ..px(PRIMARY_SIDEBAR_WIDTH_RANGE.end),
@@ -449,7 +449,7 @@ impl Render for AppLayout {
                                                     .when(bottom_panel_visible, |this| {
                                                         this.child(
                                                             resizable_panel()
-                                                                .size(bottom)
+                                                                .size(bottom_panel)
                                                                 .size_range(
                                                                     px(BOTTOM_PANEL_HEIGHT_RANGE.start)
                                                                         ..px(
@@ -470,7 +470,7 @@ impl Render for AppLayout {
                                         .when(secondary_sidebar_visible, |this| {
                                             this.child(
                                                 resizable_panel()
-                                                    .size(secondary)
+                                                    .size(secondary_sidebar)
                                                     .size_range(
                                                         px(SECONDARY_SIDEBAR_WIDTH_RANGE.start)
                                                             ..px(SECONDARY_SIDEBAR_WIDTH_RANGE.end),

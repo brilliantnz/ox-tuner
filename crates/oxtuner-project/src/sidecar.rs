@@ -271,11 +271,21 @@ mod tests {
             "\"secondary_sidebar_width\"",
             "\"bottom_panel_height\"",
             "\"primary_sidebar_visible\"",
+            "\"secondary_sidebar_visible\"",
+            "\"bottom_panel_visible\"",
             "\"table_low_at_top\"",
         ] {
             assert!(text.contains(key), "{key} is written: {text}");
         }
-        for key in ["\"device\"", "\"primary_width\"", "\"bottom_height\""] {
+        for key in [
+            "\"device\"",
+            "\"primary_width\"",
+            "\"secondary_width\"",
+            "\"bottom_height\"",
+            "\"primary_visible\"",
+            "\"secondary_visible\"",
+            "\"bottom_visible\"",
+        ] {
             assert!(!text.contains(key), "{key} must not be written: {text}");
         }
 

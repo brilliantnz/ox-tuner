@@ -142,20 +142,20 @@ impl Project {
         document.save().map_err(ProjectError::Msq)
     }
 
-    /// The project's persisted state: definition reference, device and UI.
+    /// The project's persisted state: definition reference, connection and UI.
     pub fn state(&self) -> &ProjectState {
         &self.state
     }
 
-    /// Remembers which device the project uses and persists it.
+    /// Remembers which connection the project uses and persists it.
     ///
-    /// Only the device section changes; the definition reference and the UI
+    /// Only the connection section changes; the definition reference and the UI
     /// layout the file already holds are kept.
     ///
     /// # Errors
     ///
     /// Returns [`ProjectError::Sidecar`] when the state file cannot be
-    /// written. A standalone tune keeps the device in memory only, and a
+    /// written. A standalone tune keeps the connection in memory only, and a
     /// sidecar from a newer build is left untouched.
     pub fn set_connection(
         &mut self,
