@@ -282,6 +282,42 @@ struct HistoryEntry {
 /// How many commands the grid remembers.
 const HISTORY_LIMIT: usize = 100;
 
+/// Which end of the table an edge move targets.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "an edge move goes to the first or the last row"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The first displayed row.
+    First,
+    /// The last displayed row.
+    Last,
+}
+
+/// Whether a move extends the selection or replaces it.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "a move either extends the selection or collapses it"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extend {
+    /// Keep the anchor and move the cursor.
+    Yes,
+    /// Collapse the selection to the moved cell.
+    No,
+}
+
+/// Which way a page or tab move goes.
+#[expect(clippy::exhaustive_enums, reason = "a row move is forward or backward")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Later rows or cells.
+    Forward,
+    /// Earlier rows or cells.
+    Backward,
+}
+
 /// The table grid's model.
 pub struct TableModel {
     table: Option<TableView>,
@@ -934,7 +970,7 @@ impl TableModel {
 
     /// Moves the cursor in **display** coordinates, extending the selection when
     /// `extend` is set.
-    pub fn move_cursor(&mut self, display_row_delta: isize, column_delta: isize, extend: bool) {
+    pub fn move_cursor(&mut self, display_row_delta: isize, column_delta: isize, extend: Extend) {
         let rows = self.rows();
         let columns = self.columns();
         if rows == 0 || columns == 0 {
@@ -950,40 +986,43 @@ impl TableModel {
         };
 
         self.action = None;
-        if extend {
-            self.selection.cursor = cell;
-        } else {
-            self.selection = Selection::single(cell);
-        }
+        self.move_to(cell, extend);
     }
 
     /// Moves to the first or last displayed row.
-    pub fn move_to_edge(&mut self, first: bool, extend: bool) {
-        let display = if first {
-            0
-        } else {
-            self.rows().saturating_sub(1)
+    pub fn move_to_edge(&mut self, edge: Edge, extend: Extend) {
+        let display = match edge {
+            Edge::First => 0,
+            Edge::Last => self.rows().saturating_sub(1),
         };
         let cell = CellPos {
             row: self.data_row(display),
             column: self.selection.cursor.column,
         };
         self.action = None;
-        if extend {
-            self.selection.cursor = cell;
-        } else {
-            self.selection = Selection::single(cell);
-        }
+        self.move_to(cell, extend);
     }
 
     /// Moves one page of displayed rows.
-    pub fn move_page(&mut self, forward: bool, extend: bool) {
+    pub fn move_page(&mut self, direction: Direction, extend: Extend) {
         let delta = PAGE_ROWS as isize;
-        self.move_cursor(if forward { delta } else { -delta }, 0, extend);
+        let delta = match direction {
+            Direction::Forward => delta,
+            Direction::Backward => -delta,
+        };
+        self.move_cursor(delta, 0, extend);
+    }
+
+    /// Applies a cursor move, extending or replacing the selection.
+    fn move_to(&mut self, cell: CellPos, extend: Extend) {
+        match extend {
+            Extend::Yes => self.selection.cursor = cell,
+            Extend::No => self.selection = Selection::single(cell),
+        }
     }
 
     /// Moves one displayed cell forward or backward, as Tab does.
-    pub fn tab(&mut self, forward: bool) {
+    pub fn tab(&mut self, direction: Direction) {
         let rows = self.rows();
         let columns = self.columns();
         if rows == 0 || columns == 0 {
@@ -991,10 +1030,9 @@ impl TableModel {
         }
         let display = self.display_row(self.selection.cursor.row);
         let index = display * columns + self.selection.cursor.column;
-        let next = if forward {
-            (index + 1).min(rows * columns - 1)
-        } else {
-            index.saturating_sub(1)
+        let next = match direction {
+            Direction::Forward => (index + 1).min(rows * columns - 1),
+            Direction::Backward => index.saturating_sub(1),
         };
         let cell = CellPos {
             row: self.data_row(next / columns),
@@ -1965,20 +2003,20 @@ mod tests {
         // Start from the lowest bin, which is drawn last.
         model.select(CellPos { row: 0, column: 0 });
 
-        model.move_cursor(-1, 0, false);
+        model.move_cursor(-1, 0, Extend::No);
         assert_eq!(
             model.selection().cursor,
             CellPos { row: 1, column: 0 },
             "moving up reaches the next higher data row"
         );
 
-        model.move_to_edge(true, false);
+        model.move_to_edge(Edge::First, Extend::No);
         assert_eq!(
             model.selection().cursor.row,
             3,
             "Home is the top display row, the highest bin"
         );
-        model.move_to_edge(false, false);
+        model.move_to_edge(Edge::Last, Extend::No);
         assert_eq!(
             model.selection().cursor.row,
             0,
@@ -1993,7 +2031,7 @@ mod tests {
         model.set_table(table(4, 2));
 
         assert_eq!(model.display_row(0), 0);
-        model.move_cursor(1, 0, false);
+        model.move_cursor(1, 0, Extend::No);
         assert_eq!(model.selection().cursor.row, 1);
     }
 
@@ -2002,11 +2040,11 @@ mod tests {
         let mut model = TableModel::new();
         model.set_flip_y(true);
         model.set_table(table(2, 2));
-        model.tab(true);
+        model.tab(Direction::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
-        model.tab(true);
+        model.tab(Direction::Forward);
         assert_eq!(model.selection().cursor, CellPos { row: 1, column: 0 });
-        model.tab(false);
+        model.tab(Direction::Backward);
         assert_eq!(model.selection().cursor, CellPos { row: 0, column: 1 });
     }
 

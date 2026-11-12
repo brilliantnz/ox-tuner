@@ -60,7 +60,7 @@ use super::style::TableStyle;
 // use super::heatmap::contrast_text;
 // Unused; see the note above `contrast_text` in `heatmap.rs` before restoring
 // it.
-use super::model::{BulkOp, CellPos, Editing, HistoryStep, TableModel};
+use super::model::{BulkOp, CellPos, Direction, Edge, Editing, Extend, HistoryStep, TableModel};
 
 /// What the table asks its owner to do.
 #[expect(
@@ -429,10 +429,23 @@ impl Table {
 
     /// The keyboard contract, in one place so tests can drive it through real
     /// events and a reader can see the whole rule set.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the keyboard contract reads as one list so a reviewer can check every key"
+    )]
     pub(crate) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
-        let extend = modifiers.shift;
+        let extend = if modifiers.shift {
+            Extend::Yes
+        } else {
+            Extend::No
+        };
+        let tab_direction = if modifiers.shift {
+            Direction::Backward
+        } else {
+            Direction::Forward
+        };
 
         if self.model.axis_editing().is_some() {
             match key {
@@ -469,21 +482,18 @@ impl Table {
 
         if self.model.editing().is_some() {
             match key {
-                "enter" | "tab" => {
-                    let forward = key != "tab" || !modifiers.shift;
-                    match self.model.commit_edit() {
-                        Ok(edits) => {
-                            if !edits.is_empty() {
-                                self.request_edits(edits, cx);
-                            }
-                            if key == "tab" {
-                                self.model.tab(forward);
-                                self.ensure_cursor_visible();
-                            }
+                "enter" | "tab" => match self.model.commit_edit() {
+                    Ok(edits) => {
+                        if !edits.is_empty() {
+                            self.request_edits(edits, cx);
                         }
-                        Err(_) => self.model.mark_edit_invalid(),
+                        if key == "tab" {
+                            self.model.tab(tab_direction);
+                            self.ensure_cursor_visible();
+                        }
                     }
-                }
+                    Err(_) => self.model.mark_edit_invalid(),
+                },
                 "escape" => self.model.cancel_edit(),
                 "backspace" => self.model.pop_char(),
                 _ => {}
@@ -519,15 +529,15 @@ impl Table {
             "right" | "l" => self.model.move_cursor(0, 1, extend),
             "up" | "k" => self.model.move_cursor(-1, 0, extend),
             "down" | "j" => self.model.move_cursor(1, 0, extend),
-            "tab" => self.model.tab(!modifiers.shift),
+            "tab" => self.model.tab(tab_direction),
             "enter" => {
                 self.model.begin_edit(None);
             }
             "escape" => self.model.collapse_selection(),
-            "home" => self.model.move_to_edge(true, extend),
-            "end" => self.model.move_to_edge(false, extend),
-            "pageup" => self.model.move_page(false, extend),
-            "pagedown" => self.model.move_page(true, extend),
+            "home" => self.model.move_to_edge(Edge::First, extend),
+            "end" => self.model.move_to_edge(Edge::Last, extend),
+            "pageup" => self.model.move_page(Direction::Backward, extend),
+            "pagedown" => self.model.move_page(Direction::Forward, extend),
             // Printable text starts an edit when the platform handler delivers
             // it; see `replace_text_in_range`.
             _ => {}
