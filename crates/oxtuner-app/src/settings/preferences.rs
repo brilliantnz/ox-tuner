@@ -198,7 +198,7 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
 /// alone never schedules a render — the refresh is what makes translated
 /// surfaces pick the new strings up.
 pub(crate) fn apply_language(code: &str, cx: &mut App) {
-    gpui_kit::component::set_locale(code);
+    crate::i18n::set_locale(code);
     cx.refresh_windows();
 }
 
