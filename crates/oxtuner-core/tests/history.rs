@@ -194,7 +194,7 @@ fn realtime_frames_fill_the_shared_history() {
         .map(|channel| channel.name.clone())
         .collect();
     assert_eq!(names, ["rpm", "map"]);
-    let ids = vec!["rpm".to_owned(), "map".to_owned()];
+    let ids = ["rpm", "map"];
     let newest = core.history.newest_time().expect("a frame");
     let nearest = core.history.nearest(&ids, newest);
     assert!(nearest.iter().all(|nearest| nearest.sample.is_some()));

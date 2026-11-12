@@ -188,19 +188,19 @@ impl Inner {
         nearest
     }
 
-    fn latest_values(&self, ids: &[String]) -> Vec<NearestSample> {
+    fn latest_values(&self, ids: &[&str]) -> Vec<NearestSample> {
         let Some(newest) = self.newest() else {
             return ids
                 .iter()
                 .map(|id| NearestSample {
-                    id: id.clone(),
+                    id: (*id).to_owned(),
                     sample: None,
                 })
                 .collect();
         };
         ids.iter()
             .map(|id| NearestSample {
-                id: id.clone(),
+                id: (*id).to_owned(),
                 sample: self.nearest(id, newest),
             })
             .collect()
@@ -343,7 +343,7 @@ impl ChartHistory {
     /// a caller can zip it with its legend without re-checking membership.
     pub fn extract(
         &self,
-        ids: &[String],
+        ids: &[&str],
         window: TimeWindow,
         max_points: usize,
     ) -> Vec<SeriesPoints> {
@@ -354,18 +354,18 @@ impl ChartHistory {
     }
 
     /// The nearest sample to `time` for each id, for a hover tooltip.
-    pub fn nearest(&self, ids: &[String], time: f64) -> Vec<NearestSample> {
+    pub fn nearest(&self, ids: &[&str], time: f64) -> Vec<NearestSample> {
         let inner = self.read();
         ids.iter()
             .map(|id| NearestSample {
-                id: id.clone(),
+                id: (*id).to_owned(),
                 sample: inner.nearest(id, time),
             })
             .collect()
     }
 
     /// The value each id holds at the newest frame.
-    pub fn latest_values(&self, ids: &[String]) -> Vec<NearestSample> {
+    pub fn latest_values(&self, ids: &[&str]) -> Vec<NearestSample> {
         self.read().latest_values(ids)
     }
 
