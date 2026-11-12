@@ -39,15 +39,18 @@ pub struct Scenario {
 /// Why a scenario line could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioError {
-    /// One-based line number.
-    pub line: usize,
+    /// One-based line number, when the problem is in the text.
+    pub line: Option<usize>,
     /// What was wrong.
     pub message: String,
 }
 
 impl std::fmt::Display for ScenarioError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "scenario line {}: {}", self.line, self.message)
+        match self.line {
+            Some(line) => write!(formatter, "scenario line {line}: {}", self.message),
+            None => formatter.write_str(&self.message),
+        }
     }
 }
 
@@ -70,7 +73,7 @@ impl Scenario {
                 continue;
             }
             let (key, value) = line.split_once('=').ok_or_else(|| ScenarioError {
-                line: number,
+                line: Some(number),
                 message: "expected `key = value`".to_owned(),
             })?;
             let key = key.trim();
@@ -79,7 +82,7 @@ impl Scenario {
             match key {
                 "seed" => {
                     scenario.seed = Some(value.parse().map_err(|_| ScenarioError {
-                        line: number,
+                        line: Some(number),
                         message: format!("{value:?} is not a seed"),
                     })?);
                 }
@@ -88,7 +91,7 @@ impl Scenario {
                 "fault" => scenario.faults.push(parse_fault(number, value)?),
                 other => {
                     return Err(ScenarioError {
-                        line: number,
+                        line: Some(number),
                         message: format!("unknown directive {other:?}"),
                     });
                 }
@@ -106,7 +109,7 @@ impl Scenario {
     /// parse.
     pub fn load(path: &std::path::Path) -> Result<Self, ScenarioError> {
         let text = std::fs::read_to_string(path).map_err(|error| ScenarioError {
-            line: 0,
+            line: None,
             message: format!("{}: {error}", path.display()),
         })?;
         Self::parse(&text)
@@ -116,17 +119,17 @@ impl Scenario {
 /// `page = 1 : 00 01 02`
 fn parse_page(line: usize, value: &str) -> Result<(u8, Vec<u8>), ScenarioError> {
     let (page, bytes) = value.split_once(':').ok_or_else(|| ScenarioError {
-        line,
+        line: Some(line),
         message: "expected `page = <number> : <hex bytes>`".to_owned(),
     })?;
     let page = page.trim().parse::<u8>().map_err(|_| ScenarioError {
-        line,
+        line: Some(line),
         message: format!("{:?} is not a page number", page.trim()),
     })?;
     let mut data = Vec::new();
     for field in bytes.split_whitespace() {
         let byte = u8::from_str_radix(field, 16).map_err(|_| ScenarioError {
-            line,
+            line: Some(line),
             message: format!("{field:?} is not a hex byte"),
         })?;
         data.push(byte);
@@ -139,7 +142,7 @@ fn parse_fault(line: usize, value: &str) -> Result<FaultRule, ScenarioError> {
     let (body, times) = match value.rsplit_once(" x") {
         Some((body, times)) => {
             let times = times.parse::<u32>().map_err(|_| ScenarioError {
-                line,
+                line: Some(line),
                 message: format!("{times:?} is not a repeat count"),
             })?;
             (body.trim(), times)
@@ -150,26 +153,26 @@ fn parse_fault(line: usize, value: &str) -> Result<FaultRule, ScenarioError> {
     let mut fields = body.split(':');
     let operation = fields.next().unwrap_or_default();
     let fault = fields.next().ok_or_else(|| ScenarioError {
-        line,
+        line: Some(line),
         message: "expected `operation:fault[:argument]`".to_owned(),
     })?;
     let argument = fields.next();
     if fields.next().is_some() {
         return Err(ScenarioError {
-            line,
+            line: Some(line),
             message: "too many fields for a fault".to_owned(),
         });
     }
 
     let operation = SimOp::parse(operation).ok_or_else(|| ScenarioError {
-        line,
+        line: Some(line),
         message: format!("{operation:?} is not an operation"),
     })?;
     let number = || -> Result<usize, ScenarioError> {
         argument
             .and_then(|argument| argument.trim().parse().ok())
             .ok_or_else(|| ScenarioError {
-                line,
+                line: Some(line),
                 message: format!("the `{fault}` fault needs a number"),
             })
     };
@@ -186,7 +189,7 @@ fn parse_fault(line: usize, value: &str) -> Result<FaultRule, ScenarioError> {
         "partial-write" => Fault::PartialWrite { bytes: number()? },
         other => {
             return Err(ScenarioError {
-                line,
+                line: Some(line),
                 message: format!("unknown fault {other:?}"),
             });
         }
@@ -225,7 +228,7 @@ fault = burn:drop x3
     fn an_unknown_directive_names_its_line() {
         let error = Scenario::parse("seed = 1\nwibble = 2\n").expect_err("unknown");
 
-        assert_eq!(error.line, 2);
+        assert_eq!(error.line, Some(2));
         assert!(error.message.contains("wibble"));
     }
 
@@ -233,6 +236,15 @@ fault = burn:drop x3
     fn a_fault_without_its_number_is_rejected() {
         let error = Scenario::parse("fault = read-page:truncate\n").expect_err("no number");
 
-        assert_eq!(error.line, 1);
+        assert_eq!(error.line, Some(1));
+    }
+
+    #[test]
+    fn a_file_load_error_prints_without_a_line_number() {
+        let error = Scenario::load(std::path::Path::new("/nonexistent/oxtuner-scenario.txt"))
+            .expect_err("the file does not exist");
+
+        assert_eq!(error.line, None);
+        assert!(!error.to_string().starts_with("scenario line"), "{error}");
     }
 }
