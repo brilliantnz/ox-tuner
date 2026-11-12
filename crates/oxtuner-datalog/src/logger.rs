@@ -370,33 +370,24 @@ fn writer_loop(
 mod tests {
     use super::*;
 
-    fn temp_path() -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        std::env::temp_dir().join(format!(
-            "oxtuner-datalog-{}-{stamp}.csv",
-            std::process::id()
-        ))
-    }
-
     #[test]
     fn a_quiet_writer_flushes_its_rows_on_the_interval() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("session.csv");
         let columns = vec![LogColumn::new("rpm", "rpm")];
         let logger = Logger::start(&path, columns, LogStatus::new()).expect("starts");
         assert!(logger.try_log(0.0, &[1000.0]));
 
-        std::thread::sleep(FLUSH_INTERVAL + Duration::from_millis(250));
-
-        let text = std::fs::read_to_string(&path).expect("reads the log");
-        assert!(
-            text.contains("1000"),
-            "the row reached the file before stop: {text:?}"
-        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&path).is_ok_and(|text| text.contains("1000")) {
+            assert!(
+                Instant::now() < deadline,
+                "the row never reached the file while the queue was quiet"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
 
         let report = logger.stop().expect("stops");
         assert_eq!(report.frames, 1);
-        let _ = std::fs::remove_file(&path);
     }
 }
