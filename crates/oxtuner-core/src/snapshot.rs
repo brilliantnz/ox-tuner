@@ -98,6 +98,11 @@ pub(crate) fn directory(root: &Path) -> PathBuf {
     root.join(oxtuner_project::SIDECAR_DIR).join("snapshots")
 }
 
+/// The final name of one snapshot.
+fn snapshot_path(directory: &Path, label: &str, stamp: u128, sequence: u64) -> PathBuf {
+    directory.join(format!("snapshot-{stamp}-{label}-{sequence}.msq"))
+}
+
 /// Writes the working image as a snapshot and prunes the oldest files.
 ///
 /// `label` names the operation (`write`, `burn`, `import`, `restore`, `revert`);
@@ -119,12 +124,13 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotE
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
         .unwrap_or_default();
-    let path = directory.join(format!("snapshot-{stamp}-{label}.msq"));
+    // The sequence keeps two writes in one millisecond from sharing the final
+    // name, and the process id keeps their temporaries apart.
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = snapshot_path(&directory, label, stamp, sequence);
 
     // Written through a sibling temp file so a crash cannot leave half a
-    // snapshot where a restore would find it. The sequence keeps two writers
-    // from sharing one temporary if snapshots ever overlap.
-    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    // snapshot where a restore would find it.
     let temporary = path.with_extension(format!("msq.{}.{sequence}.tmp", std::process::id()));
     fs::write(&temporary, bytes).map_err(|source| {
         let _ = fs::remove_file(&temporary);
@@ -229,6 +235,17 @@ mod tests {
         assert!(listed[0].ends_with("snapshot-1-write.msq"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_snapshots_in_one_millisecond_get_distinct_names() {
+        let directory = Path::new("/projects/roadster/.ox-tuner/snapshots");
+        let stamp = 1_700_000_000_000;
+
+        let first = snapshot_path(directory, "write", stamp, 0);
+        let second = snapshot_path(directory, "write", stamp, 1);
+
+        assert_ne!(first, second);
     }
 
     #[test]
