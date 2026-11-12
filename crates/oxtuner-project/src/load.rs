@@ -80,6 +80,11 @@ pub enum FileValueError {
         /// Why the label cannot be written.
         reason: String,
     },
+    /// A page has no INI counterpart, so its values have nowhere to go.
+    UnknownPage {
+        /// The page number with no definition page.
+        page: u16,
+    },
 }
 
 impl fmt::Display for FileValueError {
@@ -101,6 +106,9 @@ impl fmt::Display for FileValueError {
                 formatter,
                 "`{name}`: the label for value {raw} cannot be written: {reason}"
             ),
+            Self::UnknownPage { page } => {
+                write!(formatter, "page {page} has no INI counterpart")
+            }
         }
     }
 }
@@ -108,13 +116,14 @@ impl fmt::Display for FileValueError {
 impl std::error::Error for FileValueError {}
 
 impl FileValueError {
-    /// The variable the value belongs to.
-    pub fn name(&self) -> &str {
+    /// The variable the value belongs to, or the page for a page-level error.
+    pub fn name(&self) -> String {
         match self {
             Self::NoLabel { name, .. }
             | Self::WrongElementCount { name, .. }
             | Self::Text { name, .. }
-            | Self::Label { name, .. } => name,
+            | Self::Label { name, .. } => name.clone(),
+            Self::UnknownPage { page } => format!("page {page}"),
         }
     }
 }

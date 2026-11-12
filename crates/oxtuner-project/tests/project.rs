@@ -75,6 +75,32 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 </msq>
 "#;
 
+/// A single-page definition without includes, for standalone and creation tests.
+const STANDALONE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+/// The tune matching the standalone definition.
+const STANDALONE_TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="tempUnits">1.0</constant>
+    </page>
+    <settings Comment="written by TunerStudio">
+        <setting name="CELSIUS" value="CELSIUS"/>
+    </settings>
+</msq>
+"#;
+
 /// A temporary directory that removes itself, even when a test fails.
 struct TempDir {
     path: PathBuf,
@@ -510,29 +536,6 @@ fn an_entry_missing_from_the_tune_is_appended_on_save() {
 
 #[test]
 fn a_standalone_tune_uses_its_settings_snapshot_and_has_no_sidecar() {
-    const STANDALONE_DEFINITION: &str = r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 64
-page = 1
-#if CELSIUS
-tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
-#endif
-"#;
-    const STANDALONE_TUNE: &str = r#"<msq>
-    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
-    <page number="0" size="64">
-        <constant name="tempUnits">1.0</constant>
-    </page>
-    <settings Comment="written by TunerStudio">
-        <setting name="CELSIUS" value="CELSIUS"/>
-    </settings>
-</msq>
-"#;
-
     let dir = TempDir::new("standalone");
     dir.write("standalone.ini", STANDALONE_DEFINITION);
     dir.write("tune.msq", STANDALONE_TUNE);
@@ -1103,7 +1106,7 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
     let root = sandbox.path().join("Roadster");
     assert!(root.join(TUNE_FILE).is_file());
     assert!(root.join("projectCfg/mainController.ini").is_file());
-    for dir in ["DataLogs", "dashboard", "TuneView"] {
+    for dir in ["dashboard", "TuneView"] {
         assert!(root.join(dir).is_dir(), "{dir} is scaffolded");
     }
     assert!(root.join(".oxtuner/project.json").is_file());
@@ -1197,4 +1200,48 @@ fn creating_a_project_refuses_an_unreadable_definition() {
         !sandbox.path().join("Broken").exists(),
         "a failed create leaves nothing behind"
     );
+}
+
+#[test]
+fn a_newer_sidecar_is_left_untouched() {
+    let dir = project_dir("newer-state");
+    let before = r#"{"schema_version": 999, "device": {"last_port": "/dev/ttyACM0"}}"#;
+    dir.write(".oxtuner/project.json", before);
+
+    let mut project = Project::open(dir.path()).expect("the project still opens");
+    assert!(project.state().device.last_port.is_none());
+
+    project.save().expect("the save succeeds");
+    project
+        .set_device(Some("/dev/ttyUSB0".to_owned()), None)
+        .expect("the device updates in memory");
+    assert_eq!(
+        project.state().device.last_port.as_deref(),
+        Some("/dev/ttyUSB0")
+    );
+
+    let after = fs::read(dir.path().join(".oxtuner/project.json")).expect("the file is kept");
+    assert_eq!(
+        after,
+        before.as_bytes(),
+        "a newer sidecar is never overwritten"
+    );
+}
+
+#[test]
+fn a_standalone_tune_ignores_a_neighboring_sidecar() {
+    let dir = TempDir::new("standalone-neighbor");
+    dir.write("project/tune.msq", STANDALONE_TUNE);
+    dir.write("project/standalone.ini", STANDALONE_DEFINITION);
+    dir.write(
+        "project/.oxtuner/project.json",
+        r#"{"schema_version": 1, "device": {"last_port": "/dev/ttyACM0"}}"#,
+    );
+
+    let project = Project::open_standalone(
+        dir.path().join("project/tune.msq"),
+        dir.path().join("project/standalone.ini"),
+    )
+    .expect("the tune opens");
+    assert!(project.state().device.last_port.is_none());
 }

@@ -290,7 +290,16 @@ impl Msq {
             push_child(&mut root.children, 1, numbered);
         }
 
+        if let Some(leftover) = pages.keys().next() {
+            return Err(FileValueError::UnknownPage { page: *leftover });
+        }
+
         push_child(&mut root.children, 1, settings_element(settings));
+        push_child(
+            &mut root.children,
+            1,
+            Element::self_closing("userComments", &[]),
+        );
 
         let document = Document {
             declaration: Some("xml version=\"1.0\" encoding=\"ISO-8859-1\"".to_owned()),
@@ -745,19 +754,17 @@ fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>)
 }
 
 /// The `<versionInfo>` header for a scaffolded tune.
+///
+/// `firmwareInfo` carries the signature: the INI's `versionInfo` key is the
+/// interrogate command (Speeduino answers `"S"` with the signature), not
+/// firmware text, so only the signature describes the firmware.
 fn version_element(definition: &Definition) -> Element {
     let pages = definition.pages.len().to_string();
     Element::self_closing(
         "versionInfo",
         &[
             ("fileFormat", SCAFFOLD_FILE_FORMAT),
-            (
-                "firmwareInfo",
-                definition
-                    .version_info
-                    .as_deref()
-                    .unwrap_or(definition.signature.as_str()),
-            ),
+            ("firmwareInfo", definition.signature.as_str()),
             ("nPages", &pages),
             ("signature", definition.signature.as_str()),
         ],
@@ -1086,6 +1093,7 @@ mod tests {
         let info = msq.version_info().expect("the header is present");
         assert_eq!(info.file_format, "5.0");
         assert_eq!(info.signature, "speeduino 202501");
+        assert_eq!(info.firmware_info, "speeduino 202501");
         assert_eq!(info.n_pages, Some(2));
         assert_eq!(msq.pages().len(), 2);
         assert_eq!(msq.pc_page_count(), 1);

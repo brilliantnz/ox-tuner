@@ -24,6 +24,9 @@ pub struct Definition {
     /// Command template whose reply is the signature.
     pub query_command: Option<CommandTemplate>,
     /// Firmware version text.
+    ///
+    /// This is the `versionInfo` interrogate command (Speeduino answers
+    /// `"S"`), not a description of the firmware.
     pub version_info: Option<String>,
     /// Byte order of calibration data.
     pub endianness: Endianness,

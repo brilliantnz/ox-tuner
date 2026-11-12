@@ -8,7 +8,8 @@
 //! The file is pretty-printed JSON so it can be inspected and diffed next to
 //! `settings.json`. A missing file reads as "no state yet". A malformed file
 //! is an error the caller falls back from, so a corrupt sidecar never blocks
-//! opening the tune; the next write heals it.
+//! opening the tune; the next write heals it. A file from a newer build is
+//! refused instead and left untouched, so a downgrade cannot destroy it.
 
 use std::fs;
 use std::io;
@@ -147,10 +148,11 @@ impl ProjectState {
     ///
     /// # Errors
     ///
-    /// Returns the I/O error when the sidecar exists but cannot be read, and
-    /// an invalid-data error when it is malformed or follows a newer schema.
-    /// Both mean "start fresh": the caller falls back to the default and the
-    /// next write heals the file.
+    /// Returns the I/O error when the sidecar exists but cannot be read, an
+    /// invalid-data error when it is malformed, and an unsupported error when
+    /// it follows a newer schema. Malformed means "start fresh": the caller
+    /// falls back to the default and the next write heals the file. Newer
+    /// means "hands off": the caller must not overwrite it.
     pub fn read(project_root: &Path) -> io::Result<Option<Self>> {
         let path = project_root.join(SIDECAR_DIR).join(STATE_FILE);
         let text = match fs::read_to_string(&path) {
@@ -166,11 +168,11 @@ impl ProjectState {
             )
         })?;
 
-        if state.schema_version != STATE_SCHEMA_VERSION {
+        if state.schema_version > STATE_SCHEMA_VERSION {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+                io::ErrorKind::Unsupported,
                 format!(
-                    "project state schema {} is not supported",
+                    "project state schema {} needs a newer build; leaving it untouched",
                     state.schema_version
                 ),
             ));
@@ -296,13 +298,13 @@ mod tests {
         state.write(&root).unwrap();
 
         let error = ProjectState::read(&root).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
 
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn unknown_fields_survive_a_read() {
+    fn unknown_fields_are_tolerated_on_read() {
         let root = temp_project("forward-compat");
         fs::create_dir_all(root.join(SIDECAR_DIR)).unwrap();
         fs::write(

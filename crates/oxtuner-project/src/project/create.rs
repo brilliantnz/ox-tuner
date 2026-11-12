@@ -3,7 +3,7 @@
 //! Creation scaffolds the reference layout (ADR-0007): `CurrentTune.msq`
 //! generated from the definition's defaults, `projectCfg/mainController.ini`
 //! copied from the user-supplied file, a minimal `project.properties`, empty
-//! `DataLogs/`, `dashboard/` and `TuneView/` folders, and a fresh
+//! `dashboard/` and `TuneView/` folders, and a fresh
 //! `.oxtuner/project.json`. The definition is parsed before anything is
 //! written, and a failure past that point removes what creation wrote, so a
 //! failed create leaves no half-built folder behind.
@@ -13,16 +13,15 @@ use std::path::{Path, PathBuf};
 
 use oxtuner_ini::SettingsContext;
 
-use super::{
-    CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE,
-    sidecar_definition_path,
-};
-use crate::hash::{hex, sha256};
+use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
 use crate::msq::Msq;
-use crate::sidecar::ProjectState;
 
 /// Empty folders a new project carries for compatible tooling.
-const SCAFFOLD_DIRS: &[&str] = &["DataLogs", "dashboard", "TuneView"];
+///
+/// Neither reference project carries a logs folder at the top level — the
+/// writer recreates what it needs on open — so only the view folders are
+/// scaffolded.
+const SCAFFOLD_DIRS: &[&str] = &["dashboard", "TuneView"];
 
 /// What `Project::create` builds.
 #[derive(Debug, Clone)]
@@ -74,7 +73,9 @@ impl Project {
     }
 
     /// Writes the scaffold, then opens it through the normal open path so a
-    /// created project is exactly an opened one.
+    /// created project is exactly an opened one. The state file is written
+    /// last, once the project provably opens: no failure past that point is
+    /// possible, so rollback never meets a half-built folder.
     fn scaffold(
         root: &Path,
         name: &str,
@@ -85,7 +86,7 @@ impl Project {
         create_tracked(written, config.clone())?;
 
         let definition_path = config.join(MAIN_DEFINITION);
-        write_tracked(written, definition_path.clone(), &request.ini_bytes)?;
+        write_tracked(written, definition_path, &request.ini_bytes)?;
 
         let text = oxtuner_ini::source::decode(&request.ini_bytes).text;
         let settings = SettingsContext::new();
@@ -104,7 +105,7 @@ impl Project {
 
         let document = Msq::scaffold(&definition, &settings).map_err(|source| {
             ProjectError::Unrepresentable {
-                name: source.name().to_owned(),
+                name: source.name(),
                 source,
             }
         })?;
@@ -121,18 +122,17 @@ impl Project {
             create_tracked(written, root.join(dir))?;
         }
 
-        let mut state = ProjectState::default();
-        state.set_definition(
-            sidecar_definition_path(root, &definition_path),
-            hex(&sha256(&request.ini_bytes)),
-            definition.signature,
-        );
-        state.write(root).map_err(|source| ProjectError::Sidecar {
-            path: root.join(crate::sidecar::SIDECAR_DIR),
-            source,
-        })?;
+        let project = Self::open(root)?;
 
-        Self::open(root)
+        project
+            .state
+            .write(root)
+            .map_err(|source| ProjectError::Sidecar {
+                path: root.join(crate::sidecar::SIDECAR_DIR),
+                source,
+            })?;
+
+        Ok(project)
     }
 }
 
@@ -142,7 +142,8 @@ impl Project {
 ///
 /// - empty after trimming, `.` or `..`
 /// - a path separator, NUL or control character
-/// - a Windows-reserved character `< > : " | ? *`
+/// - a Windows-reserved character `< > : " | ? *`, or a reserved device
+///   name (`CON`, `NUL`, `COM1`…) with or without an extension
 /// - a trailing space or dot, which Windows strips
 fn validate_name(name: &str) -> Result<String, ProjectError> {
     let invalid = |reason: &'static str| ProjectError::InvalidName {
@@ -168,6 +169,9 @@ fn validate_name(name: &str) -> Result<String, ProjectError> {
     {
         return Err(invalid("the name holds a reserved character"));
     }
+    if is_windows_device_name(trimmed) {
+        return Err(invalid("the name is reserved by Windows"));
+    }
     if trimmed.ends_with(' ') || trimmed.ends_with('.') {
         return Err(invalid("the name ends with a space or dot"));
     }
@@ -175,7 +179,42 @@ fn validate_name(name: &str) -> Result<String, ProjectError> {
     Ok(trimmed.to_owned())
 }
 
+/// Whether `name` is a Windows-reserved device name, with or without an
+/// extension (`NUL`, `nul.txt` and `COM1` are all refused by Windows).
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 /// Refuses a target that already holds files.
+///
+/// The check and the creation are not atomic, but creation is a deliberate
+/// user action and the worst case is a plain I/O error, never a merged
+/// folder: an existing non-empty folder is always refused.
 fn ensure_target_empty(root: &Path) -> Result<(), ProjectError> {
     match fs::read_dir(root) {
         Ok(mut entries) => {
@@ -252,7 +291,10 @@ mod tests {
 
     #[test]
     fn unusable_names_name_their_reason() {
-        for name in ["", "   ", ".", "..", "a/b", "a\\b", "a:b", "a*b", "trail."] {
+        for name in [
+            "", "   ", ".", "..", "a/b", "a\\b", "a:b", "a*b", "trail.", "NUL", "com1", "nul.txt",
+            "LPT9.csv",
+        ] {
             assert!(
                 matches!(validate_name(name), Err(ProjectError::InvalidName { .. })),
                 "{name:?} must be refused"

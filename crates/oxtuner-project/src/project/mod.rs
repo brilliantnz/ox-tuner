@@ -256,6 +256,11 @@ pub struct Project {
     images: TuneImages,
     report: LoadReport,
     state: ProjectState,
+    /// Whether the state file may be written back.
+    ///
+    /// A sidecar from a newer build reads as the default but is never
+    /// overwritten, so a downgrade cannot destroy it.
+    state_writable: bool,
     in_folder: bool,
 }
 

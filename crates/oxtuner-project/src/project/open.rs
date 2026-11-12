@@ -127,7 +127,7 @@ impl Project {
             "project open phases"
         );
 
-        let mut state = read_state(root);
+        let (mut state, state_writable) = read_state(root);
         state.set_definition(
             super::sidecar_definition_path(root, &definition_path),
             crate::hash::hex(&definition_digest),
@@ -146,6 +146,7 @@ impl Project {
             images,
             report: loaded.report,
             state,
+            state_writable,
             in_folder: true,
         })
     }
@@ -229,9 +230,9 @@ impl Project {
             "project open phases"
         );
 
-        // Standalone state is memory-only: a bare tune file must not sprout a
-        // sidecar beside it.
-        let mut state = read_state(&root);
+        // Standalone state is memory-only: a bare tune file neither sprouts a
+        // sidecar beside it nor adopts the neighbor folder's one.
+        let mut state = ProjectState::default();
         state.set_definition(
             super::sidecar_definition_path(&root, definition_path),
             crate::hash::hex(&definition_digest),
@@ -250,6 +251,7 @@ impl Project {
             images,
             report: loaded.report,
             state,
+            state_writable: false,
             in_folder: false,
         })
     }
@@ -419,22 +421,31 @@ fn snapshot_settings(msq: &Msq, project: &[(String, bool)]) -> SettingsContext {
     SettingsContext::new().with_overrides(overrides)
 }
 
-/// Reads the project's persisted state, starting fresh when it is missing or
-/// unreadable.
+/// Reads the project's persisted state, falling back to a default that starts
+/// fresh when the sidecar is missing or unreadable.
 ///
 /// A corrupt sidecar is a debug line, not an open failure: the tune is
 /// calibration data, the state file is a convenience, and the next write
-/// heals it.
-fn read_state(root: &Path) -> ProjectState {
+/// heals it. A sidecar from a newer build also starts fresh, but the project
+/// remembers not to overwrite it.
+fn read_state(root: &Path) -> (ProjectState, bool) {
     match ProjectState::read(root) {
-        Ok(state) => state.unwrap_or_default(),
+        Ok(state) => (state.unwrap_or_default(), true),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "the project state needs a newer build and stays untouched"
+            );
+            (ProjectState::default(), false)
+        }
         Err(error) => {
             tracing::debug!(
                 root = %root.display(),
                 %error,
                 "the project state could not be read and starts fresh"
             );
-            ProjectState::default()
+            (ProjectState::default(), true)
         }
     }
 }

@@ -90,12 +90,7 @@ impl Project {
                 self.definition_digest.clone(),
                 self.definition.signature.clone(),
             );
-            self.state
-                .write(&self.root)
-                .map_err(|source| ProjectError::Sidecar {
-                    path: self.root.join(crate::sidecar::SIDECAR_DIR),
-                    source,
-                })?;
+            self.persist_state()?;
         }
 
         self.images.commit_baseline();
@@ -155,12 +150,15 @@ impl Project {
     /// Remembers which device the project uses and persists it.
     ///
     /// Only the device section changes; the definition reference and the UI
-    /// layout the file already holds are kept.
+    /// layout the file already holds are kept. Persisting the device on a
+    /// read-only tune is deliberate: read-only guards the calibration, and
+    /// the last-used port is not calibration data.
     ///
     /// # Errors
     ///
     /// Returns [`ProjectError::Sidecar`] when the state file cannot be
-    /// written. A standalone tune keeps the device in memory only.
+    /// written. A standalone tune keeps the device in memory only, and a
+    /// sidecar from a newer build is left untouched.
     pub fn set_device(
         &mut self,
         port: Option<String>,
@@ -168,16 +166,31 @@ impl Project {
     ) -> Result<(), ProjectError> {
         self.state.device.last_port = port;
         self.state.device.baud_override = baud;
+        self.persist_state()
+    }
 
-        if self.in_folder {
-            self.state
-                .write(&self.root)
-                .map_err(|source| ProjectError::Sidecar {
-                    path: self.root.join(crate::sidecar::SIDECAR_DIR),
-                    source,
-                })?;
+    /// Writes the state file, unless there is nowhere or nothing to write.
+    ///
+    /// A standalone tune keeps its state in memory, and a sidecar from a
+    /// newer build stays untouched; both are an `Ok` with a debug line, not
+    /// an error, because the state is a convenience next to the tune.
+    fn persist_state(&self) -> Result<(), ProjectError> {
+        if !self.in_folder {
+            return Ok(());
         }
-
-        Ok(())
+        if !self.state_writable {
+            tracing::debug!(
+                root = %self.root.display(),
+                "the project state needs a newer build and stays untouched"
+            );
+            return Ok(());
+        }
+        self.state
+            .write(&self.root)
+            .map(|_| ())
+            .map_err(|source| ProjectError::Sidecar {
+                path: self.root.join(crate::sidecar::SIDECAR_DIR),
+                source,
+            })
     }
 }
