@@ -1,23 +1,23 @@
 use std::{
     backtrace::Backtrace,
-    panic::{AssertUnwindSafe, PanicHookInfo, catch_unwind, set_hook, take_hook},
+    panic::{PanicHookInfo, set_hook, take_hook},
 };
 
-/// Replaces the panic hook with one that records the panic first.
+/// Replaces the panic hook with one that records the panic.
 ///
-/// The record goes through the same subscriber as every other line, so a
-/// release build with no terminal still has the message, location and
-/// backtrace on disk. The previous hook runs afterwards, which keeps the usual
-/// stderr output for a debug run.
+/// The previous hook runs first, so its stderr output survives even if
+/// recording fails, and the file record follows through the same subscriber as
+/// every other line. A release build with no terminal still has the message,
+/// location and backtrace on disk.
+///
+/// Recording must not panic: `std` aborts as soon as a panic is raised while a
+/// hook is running, before any unwind could be caught.
 pub(crate) fn install() {
     let previous = take_hook();
 
     set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
-        // Recording is best effort: a panic inside the hook would double-panic
-        // and abort before either the file record or the previous hook ran.
-        let _ = catch_unwind(AssertUnwindSafe(|| record(info)));
-
         previous(info);
+        record(info);
     }));
 }
 
@@ -52,9 +52,12 @@ fn record(info: &PanicHookInfo<'_>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        panic::catch_unwind,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -74,8 +77,16 @@ mod tests {
         }
     }
 
+    fn records_the_panic(store: &crate::LogStore) -> bool {
+        store
+            .snapshot()
+            .records
+            .iter()
+            .any(|record| record.message.contains("panic: hook test"))
+    }
+
     #[test]
-    fn a_panic_is_recorded_in_the_ring_before_the_previous_hook_runs() {
+    fn a_panic_is_recorded_in_the_ring_after_the_previous_hook_runs() {
         let store = crate::LogStore::new(8);
         let filter = crate::filter::default_filter(crate::Profile::Debug, false);
         let subscriber = tracing_subscriber::registry()
@@ -86,9 +97,14 @@ mod tests {
         // unconditionally when the guard drops.
         let _restore = HookRestore(Some(take_hook()));
 
-        let previous_ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&previous_ran);
-        set_hook(Box::new(move |_| flag.store(true, Ordering::Relaxed)));
+        // The stand-in previous hook sees the ring before this hook records, so
+        // it can prove the order.
+        let recorded_first = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&recorded_first);
+        let hook_store = store.clone();
+        set_hook(Box::new(move |_| {
+            flag.store(records_the_panic(&hook_store), Ordering::Relaxed);
+        }));
         install();
 
         let panicked = tracing::subscriber::with_default(subscriber, || {
@@ -97,15 +113,17 @@ mod tests {
 
         assert!(panicked);
         assert!(
-            previous_ran.load(Ordering::Relaxed),
-            "the hook that was installed before this one still ran"
+            !recorded_first.load(Ordering::Relaxed),
+            "the previous hook ran before the record was written"
         );
-        let snapshot = store.snapshot();
-        let record = snapshot
+        assert!(records_the_panic(&store), "the record reached the ring");
+        let record = store
+            .snapshot()
             .records
             .iter()
             .find(|record| record.message.contains("panic: hook test"))
-            .expect("the panic is in the ring");
+            .expect("the panic is in the ring")
+            .clone();
         assert_eq!(record.field("panic"), Some("true"));
     }
 }
