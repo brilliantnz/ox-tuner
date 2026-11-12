@@ -324,14 +324,11 @@ impl BlockComment {
     /// [`strip_line_comments`]. Each removed comment becomes one space, which
     /// keeps adjacent tokens apart and makes a comment-only line blank.
     fn strip(&mut self, line: &str, line_number: u32) -> String {
-        let assignment = if self.open.is_none() {
-            assignment_index(line)
-        } else {
-            None
-        };
         let mut cleaned = String::with_capacity(line.len());
         let mut in_quotes = false;
         let mut escaped = false;
+        let mut depth = 0u32;
+        let mut first_equals = None;
         let mut characters = line.char_indices().peekable();
 
         while let Some((index, character)) = characters.next() {
@@ -359,7 +356,22 @@ impl BlockComment {
                     in_quotes = !in_quotes;
                     cleaned.push(character);
                 }
-                ';' if !in_quotes && assignment.is_none_or(|equals| index > equals) => {
+                '{' if !in_quotes => {
+                    depth = depth.saturating_add(1);
+                    cleaned.push(character);
+                }
+                '}' if !in_quotes => {
+                    depth = depth.saturating_sub(1);
+                    cleaned.push(character);
+                }
+                '=' if !in_quotes && depth == 0 => {
+                    first_equals.get_or_insert(index);
+                    cleaned.push(character);
+                }
+                ';' if !in_quotes
+                    && (first_equals.is_some()
+                        || assignment_index(&line[index + 1..]).is_none()) =>
+                {
                     cleaned.push_str(&line[index..]);
                     break;
                 }
@@ -1063,6 +1075,18 @@ mod tests {
     #[test]
     fn a_block_comment_after_a_key_help_semicolon_is_removed() {
         let output = run("key;\"help\" = scalar /* note */\n");
+
+        assert_eq!(output.lines[0].text, "key = scalar");
+        assert!(
+            output.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            output.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_key_help_semicolon_after_a_mid_line_block_comment_is_kept() {
+        let output = run("/* note */ key;\"help\" = scalar\n");
 
         assert_eq!(output.lines[0].text, "key = scalar");
         assert!(
