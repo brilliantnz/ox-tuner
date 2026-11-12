@@ -11,6 +11,8 @@
 
 use oxtuner_ini::{CommandTemplate, Placeholder, Segment, WireOrder};
 
+use crate::error::ProtocolError;
+
 /// One recognised piece of a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
@@ -180,19 +182,30 @@ impl CommandPattern {
 ///
 /// A page that omits the declaration falls back to `[0][page]`, the dialect's
 /// own default, and never invents a CAN id.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::Encoding`] when the declared identifier cannot be
+/// encoded, or [`ProtocolError::Unsupported`] when it does not encode to
+/// exactly two bytes. A declared identifier is never replaced by the default:
+/// doing so would send a page selection the definition did not ask for.
 pub fn page_identifier(
     number: u8,
     identifier: Option<&oxtuner_ini::CommandTemplate>,
     variables: &dyn Fn(&str) -> Option<u8>,
-) -> [u8; 2] {
-    let encoded = identifier.and_then(|command| {
-        command
-            .encode(&oxtuner_ini::CommandArguments::default(), variables)
-            .ok()
-    });
-    match encoded.as_deref() {
-        Some([first, second]) => [*first, *second],
-        _ => [0, number],
+) -> Result<[u8; 2], ProtocolError> {
+    let Some(command) = identifier else {
+        return Ok([0, number]);
+    };
+    let encoded = command
+        .encode(&oxtuner_ini::CommandArguments::default(), variables)
+        .map_err(ProtocolError::Encoding)?;
+    match encoded.as_slice() {
+        [first, second] => Ok([*first, *second]),
+        other => Err(ProtocolError::Unsupported(format!(
+            "the page identifier encodes to {} byte(s); the wire needs exactly two",
+            other.len()
+        ))),
     }
 }
 
@@ -248,5 +261,22 @@ mod tests {
 
         assert_eq!(matched.offset, 0x2000);
         assert_eq!(matched.count, 0x1000);
+    }
+
+    #[test]
+    fn a_declared_page_identifier_must_encode_to_two_bytes() {
+        // `%2o` is a 16-bit field, so this identifier is four bytes wide.
+        let command = CommandTemplate::parse(r#""%2i%2o""#);
+
+        let error = page_identifier(1, Some(&command), &|_| Some(0))
+            .expect_err("the definition is wrong, and the default is not substituted");
+
+        assert!(matches!(error, ProtocolError::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains("exactly two"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_page_identifier_takes_the_dialect_default() {
+        assert_eq!(page_identifier(3, None, &|_| Some(9)), Ok([0, 3]));
     }
 }

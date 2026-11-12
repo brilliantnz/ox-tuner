@@ -3,6 +3,7 @@ use oxtuner_ini::{CommandTemplate, Definition};
 use crate::error::ProtocolError;
 
 /// Where the realtime block lives.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtimeSpec {
     /// The definition's `ochBlockSize`: payload bytes in one reply.

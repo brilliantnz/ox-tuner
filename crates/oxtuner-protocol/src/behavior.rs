@@ -123,6 +123,12 @@ pub enum BurnPlan {
 }
 
 /// Firmware knowledge the definition cannot carry.
+///
+/// The trait is public so a board-specific behavior can live outside this
+/// crate. The two shipped implementations are the ones this build selects on
+/// its own; a downstream implementation is supported when it answers every
+/// question from the definition alone, because the protocol never asks the
+/// ECU for behavior.
 pub trait EcuBehavior: Send + Sync {
     /// A stable name for logs and the connection summary.
     fn name(&self) -> &'static str;

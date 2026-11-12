@@ -4,6 +4,7 @@ use oxtuner_ini::{CommandTemplate, Definition};
 use oxtuner_protocol::{CommandPattern, WireOrder, page_identifier};
 
 use super::pattern_for;
+use crate::SimError;
 
 /// One page's commands.
 #[derive(Debug, Clone)]
@@ -23,42 +24,47 @@ pub(super) fn build_pages(
     definition: &Definition,
     variables: &HashMap<String, u8>,
     wire_order: WireOrder,
-) -> Vec<PageEcu> {
+) -> Result<Vec<PageEcu>, SimError> {
     let pattern = |command: &CommandTemplate| pattern_for(command, variables, wire_order);
 
     definition
         .pages
         .iter()
-        .map(|page| PageEcu {
-            number: page.number,
-            size: usize::try_from(page.size).unwrap_or(0),
-            identifier: page_identifier(page.number, page.identifier.as_ref(), &|name| {
-                variables.get(&name.to_ascii_lowercase()).copied()
-            }),
-            read: page
-                .read_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
-            write: page
-                .chunk_write
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .or(page
-                    .value_write
+        .map(|page| {
+            Ok(PageEcu {
+                number: page.number,
+                size: usize::try_from(page.size).unwrap_or(0),
+                identifier: page_identifier(page.number, page.identifier.as_ref(), &|name| {
+                    variables.get(&name.to_ascii_lowercase()).copied()
+                })
+                .map_err(|error| SimError {
+                    message: error.to_string(),
+                })?,
+                read: page
+                    .read_command
                     .as_ref()
-                    .filter(|command| !command.is_empty()))
-                .and_then(pattern),
-            burn: page
-                .burn_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
-            crc: page
-                .crc_command
-                .as_ref()
-                .filter(|command| !command.is_empty())
-                .and_then(pattern),
+                    .filter(|command| !command.is_empty())
+                    .and_then(pattern),
+                write: page
+                    .chunk_write
+                    .as_ref()
+                    .filter(|command| !command.is_empty())
+                    .or(page
+                        .value_write
+                        .as_ref()
+                        .filter(|command| !command.is_empty()))
+                    .and_then(pattern),
+                burn: page
+                    .burn_command
+                    .as_ref()
+                    .filter(|command| !command.is_empty())
+                    .and_then(pattern),
+                crc: page
+                    .crc_command
+                    .as_ref()
+                    .filter(|command| !command.is_empty())
+                    .and_then(pattern),
+            })
         })
         .collect()
 }
