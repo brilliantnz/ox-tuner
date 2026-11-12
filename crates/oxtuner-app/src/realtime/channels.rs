@@ -92,7 +92,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App, chart: Entity<ChartState>)
             .collect();
 
         let muted = cx.theme().muted_foreground;
-        let count = chart.read(cx).series(cx).len();
+        let count = chart.read(cx).series().len();
 
         dialog
             .title(t!("app.realtime.channels_title"))
