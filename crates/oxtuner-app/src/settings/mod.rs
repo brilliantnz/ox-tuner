@@ -10,6 +10,11 @@
 //! component would draw its own gradient strip and lead padding, and this app
 //! already owns its window chrome.
 //!
+//! Platform note: on Linux a client-side title bar needs
+//! `window_decorations: Some(WindowDecorations::Client)`, or the compositor
+//! draws a second, server-side caption above it. Windows and macOS ignore the
+//! option.
+//!
 //! Only settings that work today appear here. The theme is read from and
 //! written to `settings.json`, so the choice survives a restart, further
 //! sections arrive with the features they configure.

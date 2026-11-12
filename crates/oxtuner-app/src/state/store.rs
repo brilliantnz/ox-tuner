@@ -36,23 +36,32 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
     fs::create_dir_all(parent)?;
 
     let temp = temp_path(path);
-    {
+    let result = (|| {
         let mut file = File::create(&temp)?;
         file.write_all(&bytes)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        drop(file);
+
+        // `rename` replaces an existing file atomically on Unix. Windows refuses
+        // to replace through `std::fs::rename`, so remove the target first; the
+        // previous version is still recoverable from the temp file if that
+        // removal succeeds and the rename then fails.
+        #[cfg(windows)]
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+
+        fs::rename(&temp, path)
+    })();
+
+    // A failed write must not litter the config directory with temp files. The
+    // unique name means the next write will not reuse (and truncate) this one.
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
 
-    // `rename` replaces an existing file atomically on Unix. Windows refuses
-    // to replace through `std::fs::rename`, so remove the target first; the
-    // previous version is still recoverable from the temp file if that removal
-    // succeeds and the rename then fails.
-    #[cfg(windows)]
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-
-    fs::rename(&temp, path)
+    result
 }
 
 /// Moves an unreadable file out of the way and returns its new path.
@@ -186,5 +195,32 @@ mod tests {
         assert!(!path.exists());
         assert!(backup.exists());
         assert!(backup.to_string_lossy().contains("invalid-"));
+    }
+
+    #[test]
+    fn a_failed_write_removes_its_temp_file() {
+        let dir = TempDir::new("cleanup");
+        let path = dir.join("settings.json");
+        fs::create_dir(&path).expect("a directory blocks the rename");
+
+        let error = write_json(
+            &path,
+            &Sample {
+                name: "x".into(),
+                count: 1,
+            },
+        );
+        assert!(error.is_err(), "the rename must fail");
+
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .expect("read the directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "only the target directory remains: {leftovers:?}"
+        );
     }
 }

@@ -404,6 +404,10 @@ impl AppState {
     }
 
     /// Writes the current document synchronously (project opened, app quitting).
+    ///
+    /// A debounced write already in flight may rename after this one and leave
+    /// an older snapshot behind. That is acceptable: the state file is a
+    /// convenience, and a lost window position costs one restore.
     pub(crate) fn save(cx: &App) {
         let global = cx.global::<AppState>();
         if let Err(error) = store::write_json(&global.path, &global.data) {
