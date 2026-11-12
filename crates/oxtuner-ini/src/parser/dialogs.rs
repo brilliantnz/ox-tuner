@@ -101,12 +101,10 @@ pub(crate) fn parse_dialogs(
         // `dialog = name, "Title", layout` opens a block; every other line is a
         // row or a bare keyword.
         let assignment = crate::fields::split_assignment(text);
-        let is_dialog = assignment
-            .as_ref()
-            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("dialog"));
 
-        if is_dialog {
-            let (_, value) = assignment.unwrap_or_default();
+        if let Some((key, value)) = assignment
+            && key.eq_ignore_ascii_case("dialog")
+        {
             let fields = split_fields(value);
 
             let Some(name) = fields.first().copied() else {
