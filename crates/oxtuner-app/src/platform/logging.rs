@@ -31,32 +31,18 @@ pub enum FileOutput {
     On,
 }
 
-/// How the first filter is chosen before the saved preference is applied.
-#[expect(
-    clippy::exhaustive_enums,
-    reason = "the start-up levels are a closed set"
-)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartLevel {
-    /// The build profile's default, the normal start-up choice.
-    ProfileDefault,
-    /// Verbose from the first record.
-    Verbose,
-}
-
 /// Installs the process-wide subscriber.
 ///
 /// Returns `None` when the log directory cannot be created. The app still
 /// starts; it just has no file and no in-memory tail. The caller must keep the
-/// handle alive or hand it to [`install`].
-pub fn init(directory: &Path, file: FileOutput, start: StartLevel) -> Option<LogHandle> {
+/// handle alive or hand it to [`install`]. The filter starts at the profile
+/// default; the saved verbose preference is applied after it loads.
+pub fn init(directory: &Path, file: FileOutput) -> Option<LogHandle> {
     let policy = match file {
         FileOutput::Auto => FilePolicy::Auto,
         FileOutput::On => FilePolicy::On,
     };
-    let config = LogConfig::new(directory)
-        .with_file(policy)
-        .with_verbose(start == StartLevel::Verbose);
+    let config = LogConfig::new(directory).with_file(policy);
 
     match oxtuner_log::init(&config) {
         Ok(handle) => Some(handle),

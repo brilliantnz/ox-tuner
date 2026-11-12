@@ -38,11 +38,7 @@ fn main() {
     // stored verbose preference is applied below, once the settings are read.
     // Keep the handle alive for the process; dropping it flushes the file and
     // stops the non-blocking writer.
-    let log_handle = logging::init(
-        paths.log_dir(),
-        file_output,
-        logging::StartLevel::ProfileDefault,
-    );
+    let log_handle = logging::init(paths.log_dir(), file_output);
 
     // Read after logging: every warning about a corrupt file must be recorded.
     let settings = AppSettings::load(&paths);
