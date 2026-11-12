@@ -99,8 +99,11 @@ pub(crate) fn directory(root: &Path) -> PathBuf {
 }
 
 /// The final name of one snapshot.
+///
+/// The sequence is zero-padded so files written in the same millisecond still
+/// sort in write order.
 fn snapshot_path(directory: &Path, label: &str, stamp: u128, sequence: u64) -> PathBuf {
-    directory.join(format!("snapshot-{stamp}-{label}-{sequence}.msq"))
+    directory.join(format!("snapshot-{stamp}-{label}-{sequence:06}.msq"))
 }
 
 /// Writes the working image as a snapshot and prunes the oldest files.
@@ -246,6 +249,27 @@ mod tests {
         let second = snapshot_path(directory, "write", stamp, 1);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_sequence_keeps_snapshot_names_in_write_order() {
+        let root = temp_dir();
+        let snapshots = directory(&root);
+        fs::create_dir_all(&snapshots).expect("directory");
+        let first = snapshot_path(&snapshots, "write", 1_700_000_000_000, 0);
+        let second = snapshot_path(&snapshots, "write", 1_700_000_000_000, 10);
+        fs::write(&first, b"x").expect("write");
+        fs::write(&second, b"x").expect("write");
+
+        let listed = list(&root);
+
+        assert_eq!(
+            listed,
+            [first, second],
+            "padded sequences sort in write order"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
