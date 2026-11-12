@@ -366,16 +366,16 @@ impl MsProtocol {
         io: &mut dyn Transport,
         page: u8,
     ) -> Result<Vec<u8>, ProtocolError> {
-        let spec = self
+        let (readable, size) = self
             .page(page)
-            .cloned()
+            .map(|spec| (spec.readable, spec.size))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
-        if !spec.readable {
+        if !readable {
             return Err(ProtocolError::Unsupported(format!(
                 "page {page} has no read command"
             )));
         }
-        let size = usize::try_from(spec.size).unwrap_or(0);
+        let size = usize::try_from(size).unwrap_or(0);
         // A definition can state a page size up to `u32::MAX`; do not reserve
         // that up front. The read itself is chunked and fails on the first
         // offset that no longer fits the wire.
@@ -504,7 +504,7 @@ impl MsProtocol {
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.switch, entry.identifier, entry.read.clone()))
+            .map(|entry| (entry.switch, entry.identifier, entry.read.as_ref()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
 
         if !self.page_activation_delay.is_zero() {
@@ -518,7 +518,7 @@ impl MsProtocol {
                         "page {page} must be selected by a read, but has no read command"
                     ))
                 })?;
-                let request = self.encode(&command, u16::from_be_bytes(identifier), 0, 1, &[])?;
+                let request = self.encode(command, u16::from_be_bytes(identifier), 0, 1, &[])?;
                 match self.link {
                     LinkMode::Legacy => {
                         io.write_all(&request)?;
@@ -656,12 +656,12 @@ impl MsProtocol {
 
 impl Protocol for MsProtocol {
     fn signature(&mut self, io: &mut dyn Transport) -> Result<String, ProtocolError> {
-        let command = self.signature_command.clone().ok_or_else(|| {
+        let command = self.signature_command.as_ref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no queryCommand, so the signature cannot be read".to_owned(),
             )
         })?;
-        let request = self.encode(&command, 0, 0, 0, &[])?;
+        let request = self.encode(command, 0, 0, 0, &[])?;
         io.flush_input();
 
         let reply = match self.link {
@@ -725,20 +725,19 @@ impl Protocol for MsProtocol {
         offset: u16,
         len: u16,
     ) -> Result<Vec<u8>, ProtocolError> {
-        let (spec, identifier, command) = self
+        let (size, identifier, command) = self
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.spec.clone(), entry.identifier, entry.read.clone()))
+            .map(|entry| (entry.spec.size, entry.identifier, entry.read.clone()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
         let command = command.ok_or_else(|| {
             ProtocolError::Unsupported(format!("page {page} has no read command"))
         })?;
         let end = u32::from(offset).saturating_add(u32::from(len));
-        if end > spec.size {
+        if end > size {
             return Err(ProtocolError::Unsupported(format!(
-                "page {page} holds {} byte(s); {len} at {offset} does not fit",
-                spec.size
+                "page {page} holds {size} byte(s); {len} at {offset} does not fit"
             )));
         }
 
@@ -770,11 +769,11 @@ impl Protocol for MsProtocol {
         if data.is_empty() {
             return Ok(());
         }
-        let (spec, identifier, command) = self
+        let (size, identifier, command) = self
             .pages
             .iter()
             .find(|entry| entry.spec.number == page)
-            .map(|entry| (entry.spec.clone(), entry.identifier, entry.write.clone()))
+            .map(|entry| (entry.spec.size, entry.identifier, entry.write.clone()))
             .ok_or_else(|| ProtocolError::Unsupported(format!("page {page} is not declared")))?;
         let command = command.ok_or_else(|| {
             ProtocolError::Unsupported(format!("page {page} has no write command"))
@@ -782,10 +781,9 @@ impl Protocol for MsProtocol {
         let end = u32::from(offset)
             .checked_add(u32::try_from(data.len()).unwrap_or(u32::MAX))
             .ok_or_else(|| ProtocolError::Unsupported("the write range overflows".to_owned()))?;
-        if end > spec.size {
+        if end > size {
             return Err(ProtocolError::Unsupported(format!(
-                "page {page} holds {} byte(s); the write ends at {end}",
-                spec.size
+                "page {page} holds {size} byte(s); the write ends at {end}"
             )));
         }
 
@@ -879,7 +877,7 @@ impl Protocol for MsProtocol {
     }
 
     fn read_realtime(&mut self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
-        let realtime = self.realtime.clone().ok_or_else(|| {
+        let realtime = self.realtime.as_ref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no ochGetCommand/ochBlockSize pair".to_owned(),
             )
