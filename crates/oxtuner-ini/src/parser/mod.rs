@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_count_mismatch_has_no_line_because_it_belongs_to_the_file() {
+    fn a_page_count_mismatch_has_no_line_and_keeps_its_section() {
         let text =
             "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 2\npageSize = 288\npage = 1\n";
 
