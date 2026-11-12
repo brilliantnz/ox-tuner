@@ -469,10 +469,9 @@ impl Msq {
             }
             for flag in missing {
                 kept.push(Node::Text("\n        ".to_owned()));
-                kept.push(Node::Element(Element::with_attrs(
+                kept.push(Node::Element(Element::self_closing(
                     "setting",
                     &[("name", &flag), ("value", &flag)],
-                    true,
                 )));
             }
             kept.push(Node::Text("\n    ".to_owned()));
@@ -595,7 +594,7 @@ impl Msq {
             });
         };
 
-        let mut element = Element::with_attrs(tag, &[("name", name)], false);
+        let mut element = Element::element(tag, &[("name", name)]);
         element.set_text(text);
         // A self-closing `<page …/>` must be opened first, or the serializer
         // would keep emitting it unchanged and the new entry would be lost.

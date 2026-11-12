@@ -198,10 +198,22 @@ pub struct Element {
 
 impl Element {
     /// Builds an element whose opening tag is generated from `attrs`.
-    ///
+    #[expect(
+        clippy::self_named_constructors,
+        reason = "the constructor names the node it makes, next to self_closing"
+    )]
+    pub fn element(name: &str, attrs: &[(&str, &str)]) -> Self {
+        Self::build(name, attrs, false)
+    }
+
+    /// Builds a self-closing element whose tag is generated from `attrs`.
+    pub fn self_closing(name: &str, attrs: &[(&str, &str)]) -> Self {
+        Self::build(name, attrs, true)
+    }
+
     /// `raw_open` and `attrs` are filled together: a generated element must
     /// read like a parsed one, or the serializer and [`Self::attr`] disagree.
-    pub fn with_attrs(name: &str, attrs: &[(&str, &str)], self_closing: bool) -> Self {
+    fn build(name: &str, attrs: &[(&str, &str)], self_closing: bool) -> Self {
         let mut raw_open = format!("<{name}");
         let mut parsed = Vec::with_capacity(attrs.len());
         for (key, value) in attrs {
