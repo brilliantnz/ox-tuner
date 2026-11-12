@@ -537,8 +537,8 @@ impl MsProtocol {
             }
             PageSwitch::BurnBeforeSwitch => {
                 return Err(ProtocolError::Unsupported(format!(
-                    "page {page} must be burned before it is left, and a burn is not part of a read \
-                     session"
+                    "page {page} needs a burn before the switch, and a burn is not part of a \
+                     read session"
                 )));
             }
         }
