@@ -94,7 +94,8 @@ impl AppPaths {
     ///
     /// If the platform cannot report a home directory, fall back to a relative
     /// directory rather than panicking: an app that cannot find a place for its
-    /// settings should still start.
+    /// settings should still start. The projects folder is relative too, and the
+    /// new-project dialog shows it, so the user can point it somewhere real.
     pub fn discover() -> Self {
         PlatformDirs::discover().map_or_else(
             || Self {

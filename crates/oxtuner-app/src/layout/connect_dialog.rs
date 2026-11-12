@@ -118,14 +118,14 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         .map(|project| project.device.clone())
         .unwrap_or_default();
     let last_port = device.last_port.clone();
-    let model = Rc::new(RefCell::new(DialogModel::new(device.clone())));
-    core::refresh_ports(cx);
-
     // The pickers own their selection; the dialog reads it each frame.
     let baud_index = device
         .baud_override
         .and_then(|baud| BAUDS.iter().position(|rate| *rate == baud))
         .unwrap_or(2);
+    let model = Rc::new(RefCell::new(DialogModel::new(device)));
+    core::refresh_ports(cx);
+
     let baud_state = cx.new(|cx| {
         SelectState::new(
             BAUDS.iter().map(u32::to_string).collect::<Vec<_>>(),
