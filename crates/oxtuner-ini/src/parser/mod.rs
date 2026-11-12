@@ -213,10 +213,10 @@ fn dispatch(
             for (line, text) in lines {
                 section.count_entry();
                 if let Some((key, value)) = crate::fields::split_assignment(text) {
-                    definition
-                        .comms
-                        .raw
-                        .insert(key.trim_ascii().to_owned(), value.trim_ascii().to_owned());
+                    definition.comms.raw.insert(
+                        key.trim_ascii().to_ascii_lowercase(),
+                        value.trim_ascii().to_owned(),
+                    );
                     section.understand(*line);
                 } else {
                     section.unrecognized_line(*line, text);

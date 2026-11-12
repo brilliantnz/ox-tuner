@@ -231,11 +231,20 @@ fn the_rusefi_dialect_parses_into_the_expected_model() {
     assert!(definition.signature.starts_with("rusEFI"));
 
     // A file-level entry before the first section is kept, not rejected.
+    // Raw communication keys are lowercase, whichever section wrote them.
     assert_eq!(
         definition
             .comms
             .raw
-            .get("enable2ndByteCanID")
+            .get("enable2ndbytecanid")
+            .map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        definition
+            .comms
+            .raw
+            .get("uselegacyftempunits")
             .map(String::as_str),
         Some("false")
     );

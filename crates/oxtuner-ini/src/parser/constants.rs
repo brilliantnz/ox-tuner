@@ -80,7 +80,7 @@ pub(crate) fn parse_identification(
                 definition
                     .comms
                     .raw
-                    .insert(key.to_owned(), value.to_owned());
+                    .insert(key.to_ascii_lowercase(), value.to_owned());
                 section.understand(*line);
             }
         }

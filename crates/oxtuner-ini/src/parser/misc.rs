@@ -227,10 +227,7 @@ pub(crate) fn parse_reference_tables(
             lowered.as_str(),
             "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
         ) {
-            definition
-                .comms
-                .raw
-                .insert(key.to_owned(), value.to_owned());
+            definition.comms.raw.insert(lowered, value.to_owned());
             section.understand(*line);
             continue;
         }
@@ -455,6 +452,39 @@ mod tests {
         assert_eq!(table.bytes_per_adc, Some(2));
         assert_eq!(table.identifiers, vec![(1, "CLT".to_owned())]);
         assert_eq!(table.limits.len(), 1);
+    }
+
+    #[test]
+    fn reference_table_commands_share_one_lowercase_key() {
+        let definition = parse(
+            "[MegaTune]\nsignature = \"x\"\n[ReferenceTables]\nreferenceTable = clt, \"CLT\"\ntableWriteCommand = \"W\"\ntableBlockingFactor = 8\nsolutionsLabel = \"CLT\"\n",
+        );
+
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("tablewritecommand")
+                .map(String::as_str),
+            Some("\"W\"")
+        );
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("tableblockingfactor")
+                .map(String::as_str),
+            Some("8")
+        );
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("referenceTable.clt.solutionsLabel")
+                .map(String::as_str),
+            Some("\"CLT\""),
+            "synthetic keys keep the spelling of the names they embed"
+        );
     }
 
     #[test]
