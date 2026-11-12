@@ -48,6 +48,7 @@ pub struct Selection {
 
 impl Selection {
     /// A selection of one cell.
+    #[must_use]
     pub fn single(at: CellPos) -> Self {
         Self {
             anchor: at,
@@ -57,6 +58,7 @@ impl Selection {
 
     /// `(top, left, bottom, right)`, normalized so the anchor may be after the
     /// cursor.
+    #[must_use]
     pub fn bounds(self) -> (usize, usize, usize, usize) {
         (
             self.anchor.row.min(self.cursor.row),
@@ -67,12 +69,14 @@ impl Selection {
     }
 
     /// Whether `cell` is inside the rectangle.
+    #[must_use]
     pub fn contains(self, cell: CellPos) -> bool {
         let (top, left, bottom, right) = self.bounds();
         (top..=bottom).contains(&cell.row) && (left..=right).contains(&cell.column)
     }
 
     /// Number of cells in the rectangle.
+    #[must_use]
     pub fn cell_count(self) -> usize {
         let (top, left, bottom, right) = self.bounds();
         (bottom - top + 1) * (right - left + 1)
@@ -321,6 +325,7 @@ impl Default for TableModel {
 
 impl TableModel {
     /// An empty model with no table.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             table: None,
@@ -377,12 +382,14 @@ impl TableModel {
     }
 
     /// The formatted value of one cell.
+    #[must_use]
     pub fn display(&self, cell: CellPos) -> Option<Arc<str>> {
         self.index_of(cell)
             .and_then(|index| self.display.get(index).cloned())
     }
 
     /// The accessible label of one cell.
+    #[must_use]
     pub fn aria(&self, cell: CellPos) -> Option<Arc<str>> {
         self.index_of(cell)
             .and_then(|index| self.aria.get(index).cloned())
@@ -405,31 +412,37 @@ impl TableModel {
     }
 
     /// The rendered snapshot.
+    #[must_use]
     pub fn table(&self) -> Option<&TableView> {
         self.table.as_ref()
     }
 
     /// Rows in the table.
+    #[must_use]
     pub fn rows(&self) -> usize {
         self.table.as_ref().map_or(0, |table| table.rows)
     }
 
     /// Columns in the table.
+    #[must_use]
     pub fn columns(&self) -> usize {
         self.table.as_ref().map_or(0, |table| table.cols)
     }
 
     /// The current selection.
+    #[must_use]
     pub fn selection(&self) -> Selection {
         self.selection
     }
 
     /// The in-progress edit, when there is one.
+    #[must_use]
     pub fn editing(&self) -> Option<&Editing> {
         self.editing.as_ref()
     }
 
     /// The in-progress header edit, when there is one.
+    #[must_use]
     pub fn axis_editing(&self) -> Option<&AxisEditing> {
         self.axis_editing.as_ref()
     }
@@ -446,11 +459,13 @@ impl TableModel {
     /// The default (`false`) is the chart orientation: the lowest bin at the
     /// bottom and the highest at the top. Flipped draws the lowest bin at the
     /// top, spreadsheet style.
+    #[must_use]
     pub fn flip_y(&self) -> bool {
         self.flip_y
     }
 
     /// The last command's result, until the next input.
+    #[must_use]
     pub fn action(&self) -> Option<GridAction> {
         self.action
     }
@@ -481,11 +496,13 @@ impl TableModel {
     }
 
     /// Whether there is a command to undo.
+    #[must_use]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
     /// Whether there is a command to redo.
+    #[must_use]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -518,6 +535,7 @@ impl TableModel {
 
     /// The displayed value, including an optimistic edit not yet echoed by the
     /// core, or a value a paired curve is dragging in this cell.
+    #[must_use]
     pub fn value(&self, cell: CellPos) -> f64 {
         if let Some((preview, value)) = self.preview
             && preview == cell
@@ -561,6 +579,7 @@ impl TableModel {
     }
 
     /// The core's write state for one cell.
+    #[must_use]
     pub fn state(&self, cell: CellPos) -> CellState {
         let Some(table) = &self.table else {
             return CellState::Unknown;
@@ -577,6 +596,7 @@ impl TableModel {
     }
 
     /// Whether the cell differs from the file baseline.
+    #[must_use]
     pub fn changed(&self, cell: CellPos) -> bool {
         let Some(table) = &self.table else {
             return false;
@@ -593,11 +613,13 @@ impl TableModel {
     }
 
     /// Whether edits are allowed.
+    #[must_use]
     pub fn is_writable(&self) -> bool {
         self.table.as_ref().is_some_and(|table| table.writable)
     }
 
     /// Bins along one axis.
+    #[must_use]
     pub fn axis_len(&self, axis: AxisKind) -> usize {
         self.table.as_ref().map_or(0, |table| match axis {
             AxisKind::X => table.x_axis.values.len(),
@@ -606,6 +628,7 @@ impl TableModel {
     }
 
     /// A bin value, including an optimistic edit not yet echoed by the core.
+    #[must_use]
     pub fn axis_value(&self, axis: AxisKind, index: usize) -> f64 {
         let key = (matches!(axis, AxisKind::X), index);
         if let Some(value) = self.pending_axis.get(&key) {
@@ -625,6 +648,7 @@ impl TableModel {
     /// A realtime follower resolves each channel to a value and then to a bin
     /// with [`TableModel::realtime_cell`]; the grid itself never names a
     /// channel.
+    #[must_use]
     pub fn axis_channel(&self, axis: AxisKind) -> Option<&str> {
         self.table.as_ref().and_then(|table| match axis {
             AxisKind::X => table.x_axis.channel.as_deref(),
@@ -633,18 +657,21 @@ impl TableModel {
     }
 
     /// The column whose bin sits closest to a live X value, ties going down.
+    #[must_use]
     pub fn nearest_column(&self, x_value: f64) -> Option<usize> {
         let table = self.table.as_ref()?;
         nearest_bin(&table.x_axis.values, x_value)
     }
 
     /// The definition row whose bin sits closest to a live Y value.
+    #[must_use]
     pub fn nearest_row(&self, y_value: f64) -> Option<usize> {
         let table = self.table.as_ref()?;
         nearest_bin(&table.y_axis.values, y_value)
     }
 
     /// The cell a live `(x, y)` point sits on, for the realtime follower.
+    #[must_use]
     pub fn realtime_cell(&self, x_value: f64, y_value: f64) -> Option<CellPos> {
         Some(CellPos {
             row: self.nearest_row(y_value)?,
@@ -689,6 +716,7 @@ impl TableModel {
     }
 
     /// Whether an axis bin can be edited.
+    #[must_use]
     pub fn is_axis_writable(&self, axis: AxisKind, index: usize) -> bool {
         if !self.is_writable() {
             return false;
@@ -700,6 +728,7 @@ impl TableModel {
     ///
     /// `TunerStudio` lets a bin hold any value, but a flat or falling bin makes
     /// the ECU interpolate backwards. The grid warns rather than refuses.
+    #[must_use]
     pub fn axis_monotonic(&self, axis: AxisKind) -> bool {
         use std::cmp::Ordering;
 
@@ -769,6 +798,7 @@ impl TableModel {
     }
 
     /// The text being typed, cell or header bin.
+    #[must_use]
     pub fn edit_text(&self) -> Option<&str> {
         self.editing
             .as_ref()
@@ -849,6 +879,7 @@ impl TableModel {
     }
 
     /// The data row drawn at `display_row`.
+    #[must_use]
     pub fn data_row(&self, display_row: usize) -> usize {
         let rows = self.rows();
         if rows == 0 {
@@ -862,6 +893,7 @@ impl TableModel {
     }
 
     /// The display row a data row is drawn at.
+    #[must_use]
     pub fn display_row(&self, data_row: usize) -> usize {
         let rows = self.rows();
         if rows == 0 {
@@ -1252,6 +1284,7 @@ impl TableModel {
     }
 
     /// Whether the selection has the shape a bulk operation needs.
+    #[must_use]
     pub fn bulk_available(&self, op: BulkOp) -> bool {
         if self.table.is_none() || !self.is_writable() {
             return false;
@@ -1270,6 +1303,7 @@ impl TableModel {
     }
 
     /// Whether an axis has enough bins to respace.
+    #[must_use]
     pub fn can_rebin(&self, axis: AxisKind) -> bool {
         self.table.is_some() && self.is_writable() && self.axis_len(axis) >= 3
     }

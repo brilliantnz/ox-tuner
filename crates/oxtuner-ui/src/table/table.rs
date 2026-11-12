@@ -255,11 +255,13 @@ impl Table {
     }
 
     /// The model, for status lines and tests.
+    #[must_use]
     pub fn model(&self) -> &TableModel {
         &self.model
     }
 
     /// The heat-constrained colours in use.
+    #[must_use]
     pub fn style(&self) -> &TableStyle {
         &self.style
     }
