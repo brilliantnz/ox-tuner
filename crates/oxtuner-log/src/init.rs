@@ -12,7 +12,7 @@ use tracing_subscriber::{
 };
 
 use crate::{
-    config::{LogConfig, Profile},
+    config::{LogConfig, Profile, Verbosity},
     error::LogError,
     file::{self, RunFile},
     filter::{self, FilterSetup},
@@ -79,8 +79,8 @@ impl LogHandle {
     ///
     /// Returns [`LogError::Filter`] when the reloadable filter rejects the new
     /// value.
-    pub fn set_verbose(&self, verbose: bool) -> Result<(), LogError> {
-        self.control.set_verbose(verbose)
+    pub fn set_verbose(&self, verbosity: Verbosity) -> Result<(), LogError> {
+        self.control.set_verbose(verbosity)
     }
 
     /// A frozen copy of the ring, for one render.
@@ -118,12 +118,12 @@ impl LogControl {
     ///
     /// Returns [`LogError::Filter`] when the reloadable filter rejects the new
     /// value.
-    pub fn set_verbose(&self, verbose: bool) -> Result<(), LogError> {
+    pub fn set_verbose(&self, verbosity: Verbosity) -> Result<(), LogError> {
         if self.env_override {
             return Ok(());
         }
 
-        let next = filter::default_filter(self.profile, verbose);
+        let next = filter::default_filter(self.profile, verbosity);
         self.reload
             .reload(next)
             .map_err(|error| LogError::Filter(Box::new(error)))
@@ -186,7 +186,7 @@ pub fn init(config: &LogConfig) -> Result<LogHandle, LogError> {
         filter,
         env_override,
         warning,
-    } = filter::setup(config.profile(), config.verbose());
+    } = filter::setup(config.profile(), config.verbosity());
     let filter_text = filter.to_string();
     let (filter, reload) = reload::Layer::new(filter);
     let store = LogStore::new(config.ring_capacity());
