@@ -272,23 +272,23 @@ fn ordered_constants(count: usize) -> Ordered<usize> {
     constants
 }
 
-/// `Definition::constant`/`channel`/`table` all go through `get_ci`, so a
+/// `Definition::constant`/`channel`/`table` all go through `get_ignore_case`, so a
 /// resolution pass makes this lookup once per reference in the file.
 fn bench_ordered_lookup(criterion: &mut Criterion) {
     let constants = ordered_constants(818);
     let small = ordered_constants(8);
 
     criterion.bench_function("ini_ordered_get_ci_exact", |bencher| {
-        bencher.iter(|| black_box(constants.get_ci(black_box("constant_400"))));
+        bencher.iter(|| black_box(constants.get_ignore_case(black_box("constant_400"))));
     });
     criterion.bench_function("ini_ordered_get_ci_mixed_case", |bencher| {
-        bencher.iter(|| black_box(constants.get_ci(black_box("CoNsTaNt_400"))));
+        bencher.iter(|| black_box(constants.get_ignore_case(black_box("CoNsTaNt_400"))));
     });
     criterion.bench_function("ini_ordered_get_ci_missing", |bencher| {
-        bencher.iter(|| black_box(constants.get_ci(black_box("missing_400"))));
+        bencher.iter(|| black_box(constants.get_ignore_case(black_box("missing_400"))));
     });
     criterion.bench_function("ini_ordered_get_ci_small_mixed_case", |bencher| {
-        bencher.iter(|| black_box(small.get_ci(black_box("CoNsTaNt_4"))));
+        bencher.iter(|| black_box(small.get_ignore_case(black_box("CoNsTaNt_4"))));
     });
 }
 

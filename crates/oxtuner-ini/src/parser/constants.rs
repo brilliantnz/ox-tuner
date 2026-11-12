@@ -654,6 +654,9 @@ fn parse_entry_attributes(
             let (units, numbers) = split_numbers(
                 context.fields.iter().skip(context.index),
                 &mut context.flags,
+                context.key,
+                context.line,
+                section,
             );
             attributes.shape = shape;
             attributes.units = units;
@@ -676,6 +679,9 @@ fn parse_entry_attributes(
             let (units, numbers) = split_numbers(
                 context.fields.iter().skip(context.index),
                 &mut context.flags,
+                context.key,
+                context.line,
+                section,
             );
             attributes.units = units;
             attributes.scale = numbers.first().cloned();
@@ -692,9 +698,16 @@ fn parse_entry_attributes(
 
 /// Splits the trailing fields of a scalar/array entry into units and the numeric
 /// attributes, collecting storage keywords as it goes.
+///
+/// Units must be quoted. An unquoted text token is still read as a number slot,
+/// because the dialect has files that do it, but it is warned about: every
+/// later field then sits one slot to the left of where the file meant it.
 fn split_numbers<'a>(
     fields: impl IntoIterator<Item = &'a str>,
     flags: &mut ConstantFlags,
+    key: &str,
+    line: u32,
+    section: &mut SectionParser,
 ) -> (Text, Vec<Number>) {
     let mut units = Text::Literal(String::new());
     let mut numbers = Vec::new();
@@ -710,7 +723,22 @@ fn split_numbers<'a>(
             seen_units = true;
             continue;
         }
-        numbers.push(Number::parse(field));
+        // Units must be quoted; an unquoted text token still takes a numeric
+        // slot so the dialect's sloppier files keep parsing, but it shifts
+        // every later field and is worth a warning. `Number::parse` already
+        // ran, so this only inspects its result.
+        let number = Number::parse(field);
+        if matches!(number, Number::Expression { .. }) && !crate::fields::is_expression_field(field)
+        {
+            section.warn(
+                "unquoted-units",
+                format!(
+                    "`{key}` has the unquoted text {field:?} where a numeric attribute was expected; quote units so the fields keep their positions"
+                ),
+                line,
+            );
+        }
+        numbers.push(number);
     }
 
     (units, numbers)

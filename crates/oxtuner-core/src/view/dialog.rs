@@ -35,7 +35,7 @@ impl DialogView {
         let definition = project.definition();
         let dialog = definition
             .dialogs
-            .get_ci(name)
+            .get_ignore_case(name)
             .ok_or_else(|| format!("the definition has no dialog named `{name}`"))?;
 
         let mut walk = RowWalk::new(project);
@@ -210,7 +210,7 @@ impl<'project> RowWalk<'project> {
 
         if let Some(table) = definition
             .tables
-            .get_ci(target)
+            .get_ignore_case(target)
             .or_else(|| {
                 definition.tables.values().find(|table| {
                     table
@@ -230,7 +230,7 @@ impl<'project> RowWalk<'project> {
 
         if let Some(curve) = definition
             .curves
-            .get_ci(target)
+            .get_ignore_case(target)
             .map(|curve| curve.name.clone())
             && !self.curves.iter().any(|embed| embed.id == curve)
         {
@@ -270,7 +270,7 @@ impl<'project> RowWalk<'project> {
                 .or_else(|| {
                     definition
                         .pc_variables
-                        .get_ci(variable)
+                        .get_ignore_case(variable)
                         .map(|variable| variable.options.as_ref())
                 })
                 .map(|options| {
@@ -292,7 +292,7 @@ impl<'project> RowWalk<'project> {
             options
         };
 
-        let help = definition.context_help.get_ci(variable).cloned();
+        let help = definition.context_help.get_ignore_case(variable).cloned();
 
         (options, help)
     }
@@ -310,7 +310,7 @@ impl<'project> RowWalk<'project> {
             return;
         }
         let definition = self.project.definition();
-        let Some(dialog) = definition.dialogs.get_ci(name) else {
+        let Some(dialog) = definition.dialogs.get_ignore_case(name) else {
             return;
         };
 
@@ -467,7 +467,7 @@ impl<'project> RowWalk<'project> {
             return;
         };
 
-        if let Some(nested) = definition.dialogs.get_ci(target) {
+        if let Some(nested) = definition.dialogs.get_ignore_case(target) {
             let title = nested
                 .title
                 .as_deref()
@@ -542,7 +542,7 @@ impl<'project> RowWalk<'project> {
             && let Some(nested) = row
                 .fields
                 .first()
-                .and_then(|field| definition.dialogs.get_ci(field))
+                .and_then(|field| definition.dialogs.get_ignore_case(field))
         {
             let title = nested
                 .title
@@ -1004,7 +1004,7 @@ fn command_row(project: &Project, row: &DialogRow, gates: &InheritedGates) -> Di
             && project
                 .definition()
                 .controller_commands
-                .get_ci(&command)
+                .get_ignore_case(&command)
                 .is_some(),
         flags,
     }

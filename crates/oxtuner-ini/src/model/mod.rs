@@ -6,6 +6,15 @@
 //! Order is preserved wherever the dialect makes it meaningful. `[Constants]`
 //! load order drives calibration-file field order, so a `HashMap` alone would
 //! lose information that later crates need.
+//!
+//! # Frozen field sets
+//!
+//! The model structs carry no `#[non_exhaustive]`. A definition is plain data
+//! that the parser alone builds, `serde` round-trips into the project cache,
+//! and every consumer reads. Adding a field is therefore a breaking change for
+//! downstream crates, and the field set stays frozen until the first published
+//! release. The enums next to these structs opt out of `clippy`'s exhaustive
+//! lints for the same reason, so a new variant cannot arrive unnoticed either.
 
 mod channels;
 mod commands;

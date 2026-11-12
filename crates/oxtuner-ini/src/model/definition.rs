@@ -139,12 +139,12 @@ impl Definition {
 
     /// A constant by name.
     pub fn constant(&self, name: &str) -> Option<&Constant> {
-        self.constants.get_ci(name)
+        self.constants.get_ignore_case(name)
     }
 
     /// A channel by name.
     pub fn channel(&self, name: &str) -> Option<&Channel> {
-        self.channels.get_ci(name)
+        self.channels.get_ignore_case(name)
     }
 
     /// Whether a definition that did not just come from the parser is still
@@ -164,7 +164,7 @@ impl Definition {
 
     /// A table by id.
     pub fn table(&self, id: &str) -> Option<&Table> {
-        self.tables.get_ci(id)
+        self.tables.get_ignore_case(id)
     }
 
     /// A raw value substituted for `$name` in a command.
@@ -172,11 +172,11 @@ impl Definition {
     /// PC variables are byte-valued; a `bits` variable's value is the index of
     /// its selected option, which is how `tsCanId` becomes `0x00`.
     pub fn command_variable(&self, name: &str) -> Option<u8> {
-        let variable = self.pc_variables.get_ci(name)?;
+        let variable = self.pc_variables.get_ignore_case(name)?;
         if let Some(value) = self
             .extensions
             .defaults
-            .get_ci(name)
+            .get_ignore_case(name)
             .and_then(Number::literal)
         {
             return Some(variable_byte(value));

@@ -246,7 +246,7 @@ fn resolve<'a>(
     stack: &mut Vec<&'a String>,
     depth: usize,
 ) -> Option<()> {
-    if depth > 32 {
+    if depth > MAX_DEFINE_NESTING {
         return None;
     }
     let (key, _) = lookup(defines, name)?;
@@ -259,11 +259,35 @@ fn resolve<'a>(
     }
 
     stack.push(key);
-    let mut fields = Vec::with_capacity(defines[key.as_str()].len());
-    for field in &defines[key.as_str()] {
+    let fields = resolve_fields(defines, resolved, key, stack, depth);
+    // Pop even when resolution failed: `stack` is the chain of names being
+    // resolved, and a failure deeper in the chain must not leave this name on
+    // it for the caller to trip over.
+    stack.pop();
+    let fields = fields?;
+
+    resolved.insert(key.clone(), fields);
+    Some(())
+}
+
+/// Resolves one level of a define: its own literal fields plus everything its
+/// `$name` references expand to.
+///
+/// The caller owns [`resolve`]'s stack push and pop around this call, so a
+/// failed nested lookup still unwinds the chain.
+fn resolve_fields<'a>(
+    defines: &'a BTreeMap<String, Vec<String>>,
+    resolved: &mut BTreeMap<String, Vec<&'a str>>,
+    key: &str,
+    stack: &mut Vec<&'a String>,
+    depth: usize,
+) -> Option<Vec<&'a str>> {
+    let source = defines.get(key)?;
+    let mut fields = Vec::with_capacity(source.len());
+    for field in source {
         match field.strip_prefix('$').map(str::trim) {
             Some(nested) if !nested.is_empty() => {
-                resolve(defines, resolved, nested, stack, depth + 1);
+                resolve(defines, resolved, nested, stack, depth + 1)?;
                 let (nested_key, _) = lookup(defines, nested)?;
                 let nested_fields = resolved.get(nested_key.as_str())?;
                 fields.extend(nested_fields.iter().copied());
@@ -271,10 +295,7 @@ fn resolve<'a>(
             _ => fields.push(field.as_str()),
         }
     }
-    stack.pop();
-
-    resolved.insert(key.clone(), fields);
-    Some(())
+    Some(fields)
 }
 
 /// The entry a `$name` reference names, with the key it is stored under.
@@ -849,6 +870,13 @@ fn condition_tokens(text: &str) -> Result<Vec<String>, String> {
 /// Independent of the expression parser's cap: this grammar is much smaller,
 /// so the two limits do not need to move together.
 const MAX_CONDITION_NESTING: u32 = 128;
+
+/// How many `$name` references a define may nest through.
+///
+/// A depth cap keeps a hostile definition from exhausting the stack; the cycle
+/// check already refuses a self-referential chain, so this only bounds very
+/// long acyclic ones.
+const MAX_DEFINE_NESTING: usize = 32;
 
 struct ConditionParser<'a> {
     tokens: Vec<String>,

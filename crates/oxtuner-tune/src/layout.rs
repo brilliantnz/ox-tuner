@@ -781,7 +781,7 @@ fn default_raw(
     if let Some(raw) = definition
         .extensions
         .raw_defaults
-        .get_ci(name)
+        .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
     {
         return raw;
@@ -790,7 +790,7 @@ fn default_raw(
     if let Some(user) = definition
         .extensions
         .defaults
-        .get_ci(name)
+        .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {

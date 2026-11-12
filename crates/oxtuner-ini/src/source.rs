@@ -22,6 +22,11 @@ pub struct Decoded {
 ///
 /// A UTF-8 BOM is dropped: it would otherwise become part of the first line and
 /// hide the first `[section]` or `#directive`.
+///
+/// # Panics
+///
+/// Never in practice. The `expect` in the fallback path only asserts a
+/// `std::str::from_utf8` invariant that `Utf8Error::valid_up_to` guarantees.
 pub fn decode(bytes: &[u8]) -> Decoded {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
 
@@ -39,10 +44,11 @@ pub fn decode(bytes: &[u8]) -> Decoded {
                 }
                 Err(error) => {
                     let valid = error.valid_up_to();
-                    // SAFETY-free split: `valid` bytes are known UTF-8.
-                    if let Ok(head) = std::str::from_utf8(&rest[..valid]) {
-                        text.push_str(head);
-                    }
+                    // `valid_up_to` is always a UTF-8 boundary, so this slice
+                    // cannot fail.
+                    let head = std::str::from_utf8(&rest[..valid])
+                        .expect("valid_up_to is a valid UTF-8 boundary");
+                    text.push_str(head);
                     let invalid = error.error_len().unwrap_or(rest.len() - valid);
                     for byte in &rest[valid..valid + invalid] {
                         text.push(char::from(*byte));

@@ -748,4 +748,38 @@ yBins = y
             .collect();
         assert_eq!(lines, vec![Some(7), Some(14)]);
     }
+
+    #[test]
+    fn an_unquoted_units_field_is_warned_about() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 288\npage = 1\nx = scalar, U08, 0, ms, 1.0, 0, 0, 255, 0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "unquoted-units")
+            .expect("the shifted field is reported");
+        assert_eq!(diagnostic.severity, Severity::Warning);
+        assert_eq!(diagnostic.line, Some(7));
+        assert!(diagnostic.message.contains("\"ms\""));
+    }
+
+    #[test]
+    fn an_include_that_cannot_be_resolved_is_reported_on_the_definition() {
+        let text = format!("{}\n#include missing.inc\n", minimal());
+        let resolver = |_: &str| None;
+
+        let definition =
+            parse_str_with_includes(&text, &SettingsContext::new(), &resolver).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "include-not-found")
+            .expect("the unresolved include reaches the frozen definition");
+        assert_eq!(diagnostic.severity, Severity::Note);
+        assert_eq!(diagnostic.line, Some(11));
+        assert!(diagnostic.message.contains("missing.inc"));
+    }
 }

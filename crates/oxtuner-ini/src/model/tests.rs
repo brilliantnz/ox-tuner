@@ -24,7 +24,7 @@ fn a_lookup_falls_back_to_case_insensitive_matching() {
     let mut constants: Ordered<u32> = Ordered::new();
     constants.insert("reqFuel", 1);
 
-    assert_eq!(constants.get_ci("REQFUEL"), Some(&1));
+    assert_eq!(constants.get_ignore_case("REQFUEL"), Some(&1));
     assert_eq!(constants.get("REQFUEL"), None);
 }
 
@@ -35,7 +35,7 @@ fn a_case_insensitive_lookup_returns_the_first_declaration() {
     constants.insert("reqfuel", 2);
     constants.insert("REQFUEL", 3);
 
-    assert_eq!(constants.get_ci("ReqFuel"), Some(&1));
+    assert_eq!(constants.get_ignore_case("ReqFuel"), Some(&1));
     assert_eq!(constants.get("reqfuel"), Some(&2));
     assert_eq!(
         constants.names().collect::<Vec<_>>(),
@@ -50,11 +50,11 @@ fn a_case_insensitive_lookup_trims_the_query_but_not_the_entry() {
     constants.insert(" spaced ", 1);
 
     assert_eq!(
-        constants.get_ci("spaced"),
+        constants.get_ignore_case("spaced"),
         None,
         "a stored name keeps its spaces, matching the linear scan this replaced"
     );
-    assert_eq!(constants.get_ci("  spaced  "), None);
+    assert_eq!(constants.get_ignore_case("  spaced  "), None);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn redefining_a_name_keeps_order_and_the_index_consistent() {
     constants.insert("First", 3);
     constants.insert("first", 10);
 
-    assert_eq!(constants.get_ci("FIRST"), Some(&10));
+    assert_eq!(constants.get_ignore_case("FIRST"), Some(&10));
     assert_eq!(constants.get("First"), Some(&3));
     assert_eq!(
         constants.names().collect::<Vec<_>>(),
@@ -103,7 +103,7 @@ proptest::proptest! {
                 })
                 .copied();
 
-            proptest::prop_assert_eq!(ordered.get_ci(&query).copied(), expected);
+            proptest::prop_assert_eq!(ordered.get_ignore_case(&query).copied(), expected);
         }
     }
 }
