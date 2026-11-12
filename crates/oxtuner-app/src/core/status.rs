@@ -225,7 +225,9 @@ impl CoreStatus {
 pub(super) enum Update {
     Loaded(DefinitionView),
     Tested(ConnectionView),
-    Opened(ProjectView),
+    /// A project opened; boxed because its summary is much larger than the
+    /// other updates.
+    Opened(Box<ProjectView>),
     Saved(SaveReport),
     Table {
         table: Box<TableView>,
@@ -289,7 +291,7 @@ impl CoreStatus {
                 self.menu_revision = self.menu_revision.wrapping_add(1);
             }
             Update::Opened(project) => {
-                self.project = Some(project);
+                self.project = Some(*project);
                 self.definition = None;
                 self.project_missing = false;
                 self.last_save = None;

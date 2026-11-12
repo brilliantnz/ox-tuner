@@ -428,3 +428,55 @@ fn a_project_without_state_has_no_remembered_device() {
     assert_eq!(summary.device.last_port, None);
     assert_eq!(summary.device.baud_override, None);
 }
+
+#[test]
+fn the_project_layout_is_stored_in_its_own_state_file() {
+    let dir = project_dir("layout", TUNE);
+    let core = Harness::start();
+
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+    assert!(summary.ui.primary_visible, "a fresh project starts open");
+
+    let ui = oxtuner_project::UiState {
+        primary_width: 300.0,
+        secondary_width: 260.0,
+        bottom_height: 240.0,
+        primary_visible: false,
+        secondary_visible: true,
+        bottom_visible: true,
+        table_low_at_top: true,
+    };
+    core.handle
+        .set_project_ui(ui.clone())
+        .expect("the layout command is queued");
+
+    // Commands run in order on the core thread, so the save proves the layout
+    // write finished before the file is read.
+    let op = core.handle.save_tune().expect("the save is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+
+    let state = oxtuner_project::ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was written");
+    assert_eq!(state.ui, ui);
+}
+
+#[test]
+fn a_layout_command_with_no_project_open_is_ignored() {
+    let dir = project_dir("layout-no-project", TUNE);
+    let core = Harness::start();
+
+    core.handle
+        .set_project_ui(oxtuner_project::UiState::default())
+        .expect("the command is queued");
+    // A refresh answers after it, proving the command was handled in order.
+    let op = core
+        .handle
+        .refresh_tune_status()
+        .expect("the refresh is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+    assert!(!dir.path().join(".oxtuner").exists());
+}

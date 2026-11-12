@@ -102,6 +102,20 @@ pub(crate) fn save_tune(cx: &mut App) {
         handle.save_tune()
     });
 }
+
+/// Stores the open project's panel layout in its state file.
+///
+/// Called from the debounced layout write, so a drag never sends one command
+/// per frame. The layout is a convenience next to the tune: a refused send is
+/// a debug line, not a notification.
+pub(crate) fn save_project_ui(cx: &mut App, ui: oxtuner_project::UiState) {
+    let Some(handle) = CoreService::handle(cx) else {
+        return;
+    };
+    if let Err(error) = handle.set_project_ui(ui) {
+        tracing::debug!(%error, "the core refused the project layout update");
+    }
+}
 /// Closes the open project (and any standalone definition).
 pub(crate) fn close_project(cx: &mut App) {
     send(

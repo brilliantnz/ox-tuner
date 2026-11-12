@@ -18,10 +18,12 @@ use std::{
 };
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, point, px, size};
+use oxtuner_project::UiState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::store;
+use crate::core::CoreService;
 use crate::platform::paths::AppPaths;
 
 /// Bump when the on-disk shape changes in a way that needs migration.
@@ -324,6 +326,34 @@ impl LayoutState {
         px(clamp(self.bottom_height, BOTTOM_HEIGHT_RANGE))
     }
 
+    /// The project state this layout is stored as.
+    pub(crate) fn to_project_ui(&self) -> UiState {
+        UiState {
+            primary_width: self.primary_width,
+            secondary_width: self.secondary_width,
+            bottom_height: self.bottom_height,
+            primary_visible: self.primary_visible,
+            secondary_visible: self.secondary_visible,
+            bottom_visible: self.bottom_visible,
+            table_low_at_top: self.table_low_at_top,
+        }
+    }
+
+    /// Takes the panel layout a project stored.
+    ///
+    /// The stored numbers are used as they are: [`Self::primary`] and the other
+    /// readers clamp them, so a file edited by hand cannot open a panel at an
+    /// unusable size.
+    pub(crate) fn apply_project_ui(&mut self, ui: &UiState) {
+        self.primary_width = ui.primary_width;
+        self.secondary_width = ui.secondary_width;
+        self.bottom_height = ui.bottom_height;
+        self.primary_visible = ui.primary_visible;
+        self.secondary_visible = ui.secondary_visible;
+        self.bottom_visible = ui.bottom_visible;
+        self.table_low_at_top = ui.table_low_at_top;
+    }
+
     /// Records the width the outer group reports for its first panel: the
     /// primary sidebar.
     ///
@@ -573,10 +603,13 @@ pub(crate) fn schedule_save(cx: &mut App) {
             // The snapshot is taken on the UI thread so the document stays
             // coherent. The flush and rename then run on the background
             // executor: `sync_all` can stall on a busy disk, and the UI thread
-            // has no business waiting for it.
-            let (path, data) = cx.update(|cx| {
+            // has no business waiting for it. The layout also belongs to the
+            // open project, so it is captured with the same snapshot.
+            let (path, data, project_ui) = cx.update(|cx| {
                 let global = cx.global::<AppState>();
-                (global.path.clone(), global.data.clone())
+                let project_ui =
+                    CoreService::project_open(cx).then(|| global.data.layout.to_project_ui());
+                (global.path.clone(), global.data.clone(), project_ui)
             });
             let (path, result) = cx
                 .background_executor()
@@ -591,6 +624,9 @@ pub(crate) fn schedule_save(cx: &mut App) {
                     path = %path.display(),
                     "could not save application state"
                 );
+            }
+            if let Some(ui) = project_ui {
+                cx.update(|cx| crate::core::save_project_ui(cx, ui));
             }
 
             // Checked and cleared with no await in between, so a change that
@@ -860,5 +896,23 @@ mod tests {
         let global = AppState::with(data.clone());
 
         assert_eq!(global.data(), &data);
+    }
+
+    #[test]
+    fn a_layout_round_trips_through_the_project_state() {
+        let layout = LayoutState {
+            primary_width: 300.,
+            secondary_width: 260.,
+            bottom_height: 240.,
+            primary_visible: false,
+            secondary_visible: true,
+            bottom_visible: true,
+            table_low_at_top: true,
+        };
+
+        let mut restored = LayoutState::default();
+        restored.apply_project_ui(&layout.to_project_ui());
+
+        assert_eq!(restored, layout);
     }
 }

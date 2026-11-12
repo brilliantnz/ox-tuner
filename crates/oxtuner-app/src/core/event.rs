@@ -117,7 +117,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             // Remember the folder only after the core opened it: the recent
             // list must not gain paths that turned out not to be projects.
             let root = view.root.clone();
-            (Update::Opened(view), Some(root))
+            (Update::Opened(Box::new(view)), Some(root))
         }
         Event::TuneSaved { outcome, .. } => {
             tracing::info!(
@@ -238,6 +238,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
     let finishes_open = matches!(&update, Update::Opened(_) | Update::Failed(_));
+    // A project carries its own panel layout; standalone tunes keep the
+    // installation's.
+    let project_layout = match &update {
+        Update::Opened(view) if view.in_project => Some(view.ui.clone()),
+        _ => None,
+    };
     // The core persisted this device into the project's state; mirror it in the
     // open view so a dialog opened in the same session starts from it too.
     let confirmed_device = match &update {
@@ -258,6 +264,11 @@ pub(super) fn apply(event: Event, cx: &mut App) {
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
+        if let Some(layout) = project_layout {
+            crate::state::session::AppState::update_global(cx, |state| {
+                state.layout.apply_project_ui(&layout);
+            });
+        }
         if let Some((port, baud)) = confirmed_device
             && let Some(project) = cx.global_mut::<CoreService>().status.project.as_mut()
         {

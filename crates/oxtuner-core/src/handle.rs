@@ -22,7 +22,7 @@ use std::{
 };
 
 use crossfire::{AsyncRx, MTx, Rx, SendTimeoutError, TrySendError, Tx, mpsc, spsc};
-use oxtuner_project::CreateRequest;
+use oxtuner_project::{CreateRequest, UiState};
 
 use crate::contract::{CellEdit, CommandRequest, CoreCommand, Envelope, Event, OpId};
 use crate::service::CoreError;
@@ -276,6 +276,19 @@ impl CoreHandle {
     /// command cannot be queued.
     pub fn create_project(&self, request: CreateRequest) -> Result<OpId, CoreError> {
         self.send_request(CommandRequest::CreateProject { request })
+    }
+
+    /// Stores the open project's panel layout in its state file.
+    ///
+    /// Best effort: there is no reply event, and a project that is not open
+    /// ignores the command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn set_project_ui(&self, ui: UiState) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::SetProjectUi { ui })
     }
 
     /// Writes the open project's changed values back to its tune file.

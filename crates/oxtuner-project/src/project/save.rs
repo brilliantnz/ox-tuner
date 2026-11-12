@@ -3,7 +3,7 @@ use oxtuner_tune::TuneDiff;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
-use crate::sidecar::ProjectState;
+use crate::sidecar::{ProjectState, UiState};
 
 use super::{Project, ProjectError, SaveOutcome};
 
@@ -150,9 +150,7 @@ impl Project {
     /// Remembers which device the project uses and persists it.
     ///
     /// Only the device section changes; the definition reference and the UI
-    /// layout the file already holds are kept. Persisting the device on a
-    /// read-only tune is deliberate: read-only guards the calibration, and
-    /// the last-used port is not calibration data.
+    /// layout the file already holds are kept.
     ///
     /// # Errors
     ///
@@ -166,6 +164,21 @@ impl Project {
     ) -> Result<(), ProjectError> {
         self.state.device.last_port = port;
         self.state.device.baud_override = baud;
+        self.persist_state()
+    }
+
+    /// Replaces the project's panel layout and persists it.
+    ///
+    /// The layout is per project on purpose: the same tune opens with the
+    /// tables and panels the reader arranged for it, whatever another project
+    /// last looked like.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::Sidecar`] when the state file cannot be
+    /// written. A standalone tune keeps the layout in memory only.
+    pub fn set_ui(&mut self, ui: UiState) -> Result<(), ProjectError> {
+        self.state.ui = ui;
         self.persist_state()
     }
 

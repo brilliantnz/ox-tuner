@@ -3,6 +3,7 @@
 use std::{fmt, path::PathBuf};
 
 use oxtuner_ini::SettingsContext;
+use oxtuner_project::UiState;
 use oxtuner_protocol::LinkMode;
 
 use crate::link::PortChoice;
@@ -126,6 +127,14 @@ pub(crate) enum CommandRequest {
     /// tune stays byte-for-byte identical. A read-only session refuses with
     /// [`super::FailureCode::TuneSaveFailed`] and the read-only reasons.
     SaveTune,
+    /// Replace the open project's panel layout in its state file.
+    ///
+    /// Best effort: the layout is a convenience next to the tune, so a write
+    /// failure is logged and answered by nothing. There is no reply event.
+    SetProjectUi {
+        /// The layout to store.
+        ui: UiState,
+    },
     /// Read one table from the open project, shaped for the grid.
     ///
     /// `name` is the table id, its 3-D map id, its cell variable, or a curve
@@ -448,6 +457,11 @@ pub enum ProjectCommand {
     },
     /// Write changed values back to the tune file.
     Save,
+    /// Replace the project's panel layout in its state file.
+    SetUi {
+        /// The layout to store.
+        ui: UiState,
+    },
     /// List the project snapshots, oldest first.
     ListSnapshots,
 }
@@ -660,6 +674,7 @@ impl CoreCommand {
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
             Self::Project(ProjectCommand::Create { .. }) => "create-project",
             Self::Project(ProjectCommand::Save) => "save-tune",
+            Self::Project(ProjectCommand::SetUi { .. }) => "set-project-ui",
             Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
             Self::Tune(TuneCommand::ReadTable { .. }) => "read-table",
             Self::Tune(TuneCommand::ReadDialog { .. }) => "read-dialog",
@@ -722,6 +737,7 @@ impl From<CoreCommand> for CommandRequest {
                 },
             },
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
+            CoreCommand::Project(ProjectCommand::SetUi { ui }) => Self::SetProjectUi { ui },
             CoreCommand::Project(ProjectCommand::ListSnapshots) => Self::ListSnapshots,
             CoreCommand::Tune(TuneCommand::ReadTable { name }) => Self::ReadTable { name },
             CoreCommand::Tune(TuneCommand::ReadDialog { name }) => Self::ReadDialog { name },

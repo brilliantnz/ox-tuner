@@ -47,6 +47,7 @@ fn project() -> ProjectView {
         loaded: 817,
         skipped: 0,
         warnings: Vec::new(),
+        ui: oxtuner_project::UiState::default(),
         device: DeviceView::default(),
     }
 }
@@ -158,7 +159,7 @@ fn a_project_and_a_definition_are_mutually_exclusive() {
     let mut status = CoreStatus::default();
     status.apply(Update::Loaded(summary()));
 
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     assert!(status.project.is_some());
     assert!(
@@ -171,7 +172,7 @@ fn a_project_and_a_definition_are_mutually_exclusive() {
 #[test]
 fn a_save_is_shown_until_the_next_failure() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     status.apply(Update::Saved(SaveReport {
         path: std::path::PathBuf::from("/projects/roadster/CurrentTune.msq"),
@@ -192,7 +193,7 @@ fn a_save_is_shown_until_the_next_failure() {
 #[test]
 fn a_failure_keeps_the_project_that_is_still_open() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
 
@@ -320,7 +321,7 @@ fn a_bad_import_is_not_halted() {
 #[test]
 fn unloading_clears_every_field() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
 
     status.apply(Update::Unloaded);
@@ -360,7 +361,7 @@ fn opening_marks_the_folder_pending_until_its_own_answer_arrives() {
         Some(7)
     );
 
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
     assert!(
         status.finish_pending_project_at(Some(7)),
         "the request's own answer ends the loading state"
@@ -409,7 +410,7 @@ fn a_refused_command_cancels_the_loading_state() {
 #[test]
 fn a_failed_open_clears_the_loading_state_but_keeps_the_old_project() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
     status.begin_pending_project(Path::new("/projects/other"));
     status.pending_project.as_mut().unwrap().op = Some(9);
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));

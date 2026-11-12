@@ -558,9 +558,9 @@ pub(super) fn handle(
             Outcome::Continue
         }
         CommandRequest::CreateProject { request } => {
-            // The definition parse, the scaffold write and the definition-cache
-            // store all belong on the core thread.
-            let root = request.parent.join(request.name.trim());
+            // The definition parse and the scaffold write belong on the core
+            // thread, never on the UI thread.
+            let root = request.root();
             let _span =
                 tracing::debug_span!("core_create_project", %op, path = %root.display()).entered();
             match Project::create(&request) {
@@ -584,6 +584,16 @@ pub(super) fn handle(
                 Err(error) => {
                     reject_project(&root, &error, op, report, events);
                 }
+            }
+            Outcome::Continue
+        }
+        CommandRequest::SetProjectUi { ui } => {
+            if let Session::Project(project) = session
+                && let Err(error) = project.set_ui(ui)
+            {
+                // The layout is a convenience next to the tune, so a write
+                // failure is logged and never fails the session.
+                tracing::warn!(%op, %error, "the project layout could not be persisted");
             }
             Outcome::Continue
         }

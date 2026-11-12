@@ -57,6 +57,12 @@ impl CoreService {
         cx.global::<Self>().handle.clone()
     }
 
+    /// Whether a project is open, so per-project state has somewhere to go.
+    pub(crate) fn project_open(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|service| service.status.project.is_some())
+    }
+
     /// The newest realtime frame, for the live-values view.
     pub(crate) fn latest(cx: &App) -> Option<Arc<RealtimeFrame>> {
         cx.global::<Self>().latest.get()

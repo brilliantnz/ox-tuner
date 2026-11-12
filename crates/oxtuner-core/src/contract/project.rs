@@ -156,6 +156,8 @@ pub struct ProjectView {
     pub skipped: usize,
     /// Non-fatal findings, ready for the output panel.
     pub warnings: Vec<String>,
+    /// The panel layout this project was last read with.
+    pub ui: oxtuner_project::UiState,
     /// The device this project last used, when state has it.
     pub device: DeviceView,
 }
