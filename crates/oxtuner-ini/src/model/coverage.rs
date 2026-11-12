@@ -158,7 +158,21 @@ mod tests {
 
     #[test]
     fn read_only_matches_a_constant_declared_in_another_case() {
-        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 288\npage = 1\nengineMake = scalar, U08, 0, \"\", 1.0, 0\nboostTarget = scalar, U08, 1, \"\", 1.0, 0\n[ConstantsExtensions]\nreadOnly = enginemake\ncontrollerPriority = boosttarget\n";
+        let text = "\
+[MegaTune]
+signature = \"x\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+engineMake = scalar, U08, 0, \"\", 1.0, 0
+boostTarget = scalar, U08, 1, \"\", 1.0, 0
+
+[ConstantsExtensions]
+readOnly = enginemake
+controllerPriority = boosttarget
+";
 
         let definition = crate::parse_str(text, &SettingsContext::new()).expect("parses");
 

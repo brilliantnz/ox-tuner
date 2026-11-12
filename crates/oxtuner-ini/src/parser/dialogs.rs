@@ -470,7 +470,16 @@ mod tests {
     #[test]
     fn a_duplicate_setting_group_is_reported_and_the_later_one_wins() {
         let definition = parse(
-            "[MegaTune]\nsignature = \"x\"\n[SettingGroups]\nsettingGroup = mcu, \"First\"\nsettingOption = first, \"First\"\nsettingGroup = mcu, \"Second\"\nsettingOption = second, \"Second\"\n",
+            "\
+[MegaTune]
+signature = \"x\"
+
+[SettingGroups]
+settingGroup = mcu, \"First\"
+settingOption = first, \"First\"
+settingGroup = mcu, \"Second\"
+settingOption = second, \"Second\"
+",
         );
 
         let diagnostic = definition
@@ -478,7 +487,7 @@ mod tests {
             .iter()
             .find(|diagnostic| diagnostic.code == "duplicate-name")
             .expect("the second declaration is reported");
-        assert_eq!(diagnostic.line, Some(6));
+        assert_eq!(diagnostic.line, Some(7));
         assert_eq!(diagnostic.severity, Severity::Error);
 
         let group = definition.setting_groups.get("mcu").expect("group");

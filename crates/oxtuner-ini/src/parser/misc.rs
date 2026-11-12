@@ -462,7 +462,16 @@ mod tests {
     #[test]
     fn reference_table_commands_share_one_lowercase_key() {
         let definition = parse(
-            "[MegaTune]\nsignature = \"x\"\n[ReferenceTables]\nreferenceTable = clt, \"CLT\"\ntableWriteCommand = \"W\"\ntableBlockingFactor = 8\nsolutionsLabel = \"CLT\"\n",
+            "\
+[MegaTune]
+signature = \"x\"
+
+[ReferenceTables]
+referenceTable = clt, \"CLT\"
+tableWriteCommand = \"W\"
+tableBlockingFactor = 8
+solutionsLabel = \"CLT\"
+",
         );
 
         assert_eq!(
@@ -508,7 +517,16 @@ mod tests {
     #[test]
     fn a_duplicate_reference_table_is_reported_and_the_later_one_wins() {
         let definition = parse(
-            "[MegaTune]\nsignature = \"x\"\n[ReferenceTables]\nreferenceTable = clt, \"First\"\ntableIdentifier = 1, \"First\"\nreferenceTable = clt, \"Second\"\ntableIdentifier = 2, \"Second\"\n",
+            "\
+[MegaTune]
+signature = \"x\"
+
+[ReferenceTables]
+referenceTable = clt, \"First\"
+tableIdentifier = 1, \"First\"
+referenceTable = clt, \"Second\"
+tableIdentifier = 2, \"Second\"
+",
         );
 
         let diagnostic = definition
@@ -516,7 +534,7 @@ mod tests {
             .iter()
             .find(|diagnostic| diagnostic.code == "duplicate-name")
             .expect("the second declaration is reported");
-        assert_eq!(diagnostic.line, Some(6));
+        assert_eq!(diagnostic.line, Some(7));
 
         let table = definition.reference_tables.get("clt").expect("table");
         assert_eq!(table.title.as_deref(), Some("Second"));

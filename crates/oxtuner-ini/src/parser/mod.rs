@@ -719,7 +719,24 @@ mod tests {
 
     #[test]
     fn a_duplicate_table_or_curve_names_the_redeclaration_line() {
-        let text = "[MegaTune]\nsignature = \"x\"\n[TableEditor]\ntable = t, m, \"T\"\nzBins = z\ntable = t, m, \"T\"\nzBins = z\n[CurveEditor]\ncurve = c, \"C\"\nxBins = x\nyBins = y\ncurve = c, \"C\"\nxBins = x\nyBins = y\n";
+        let text = "\
+[MegaTune]
+signature = \"x\"
+
+[TableEditor]
+table = t, m, \"T\"
+zBins = z
+table = t, m, \"T\"
+zBins = z
+
+[CurveEditor]
+curve = c, \"C\"
+xBins = x
+yBins = y
+curve = c, \"C\"
+xBins = x
+yBins = y
+";
 
         let definition = parse_str(text, &SettingsContext::new()).expect("parses");
 
@@ -729,6 +746,6 @@ mod tests {
             .filter(|diagnostic| diagnostic.code == "duplicate-name")
             .map(|diagnostic| diagnostic.line)
             .collect();
-        assert_eq!(lines, vec![Some(6), Some(12)]);
+        assert_eq!(lines, vec![Some(7), Some(14)]);
     }
 }
