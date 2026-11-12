@@ -45,7 +45,9 @@ impl MsProtocol {
                 LinkMode::Legacy => {
                     // A raw action has no declared reply length, so whatever
                     // arrives is drained instead of parsed. Silence is normal:
-                    // several actions (a reset, for one) never answer.
+                    // several actions (a reset, for one) never answer. Only a
+                    // timeout with no bytes is silence; a partial reply is a
+                    // desynchronised link, not success.
                     io.write_all(&request)?;
 
                     let mut reply = Vec::new();
@@ -56,7 +58,7 @@ impl MsProtocol {
                         COMMAND_REPLY_QUIET,
                         COMMAND_REPLY_TIMEOUT,
                     ) {
-                        Ok(()) | Err(TransportError::Timeout { .. }) => {}
+                        Ok(()) | Err(TransportError::Timeout { got: 0, .. }) => {}
                         Err(error) => return Err(error.into()),
                     }
 

@@ -4,7 +4,7 @@
 //! `SimTransport`, which answers from the definition's own message set — so a
 //! failure is a real protocol failure, not a mock drifting from production.
 
-use oxtuner_ini::{Definition, SettingsContext};
+use oxtuner_ini::{CommandTemplate, Definition, SettingsContext};
 use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp, SimTransport};
 use oxtuner_transport::{Transport, TransportError};
@@ -38,6 +38,9 @@ interWriteDelay = 1
 tsWriteBlocks = on
 messageEnvelopeFormat = msEnvelope_1.0
 reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+
+[ControllerCommands]
+cmdTest = \"X\"
 
 [OutputChannels]
 ochGetCommand = \"r\\$tsCanId\\x30%2o%2c\"
@@ -543,4 +546,56 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
 
         assert!(error.to_string().contains(&size.to_string()), "{error}");
     }
+}
+
+#[test]
+fn a_controller_command_accepts_silence_on_the_legacy_link() {
+    let definition = speeduino();
+    let mut transport = sim(&definition);
+    let mut protocol = protocol(&definition, LinkMode::Legacy);
+    transport.open().expect("opens");
+
+    let report = protocol
+        .run_commands(&mut transport, &[CommandTemplate::parse("X")])
+        .expect("a legacy action without a reply is a success");
+
+    assert_eq!(report.commands, 1);
+    assert_eq!(report.replies, 0, "the simulator sent nothing back");
+}
+
+#[test]
+fn a_controller_command_accepts_an_empty_envelope_reply() {
+    let definition = speeduino();
+    let mut transport = sim(&definition);
+    transport.arm(SimOp::ControllerCommand, Fault::DropReply);
+    let mut protocol = protocol(&definition, LinkMode::Envelope);
+    transport.open().expect("opens");
+
+    let report = protocol
+        .run_commands(&mut transport, &[CommandTemplate::parse("X")])
+        .expect("silence with no bytes is a success");
+
+    assert_eq!(report.commands, 1);
+}
+
+#[test]
+fn a_partial_controller_command_reply_is_an_error() {
+    let definition = speeduino();
+    let mut transport = sim(&definition);
+    transport.arm(SimOp::ControllerCommand, Fault::Truncate { keep: 1 });
+    let mut protocol = protocol(&definition, LinkMode::Envelope);
+    transport.open().expect("opens");
+
+    let error = protocol
+        .run_commands(&mut transport, &[CommandTemplate::parse("X")])
+        .expect_err("a partial frame is a desynchronised link, not success");
+
+    assert!(
+        matches!(
+            error,
+            oxtuner_protocol::ProtocolError::Transport(TransportError::Timeout { got, .. })
+                if got > 0
+        ),
+        "{error}"
+    );
 }
