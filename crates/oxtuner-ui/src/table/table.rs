@@ -361,7 +361,10 @@ impl Table {
         };
         match self.model.paste_edits(&text) {
             Ok(edits) => self.request_edits(edits, cx),
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
@@ -374,7 +377,10 @@ impl Table {
                 }
                 cx.notify();
             }
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
@@ -406,7 +412,10 @@ impl Table {
                     self.request_axis_edits(axis, edits, cx);
                 }
             }
-            Err(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(?error, "table edit rejected");
+                cx.notify();
+            }
         }
     }
 
