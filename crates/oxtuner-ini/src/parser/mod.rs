@@ -302,6 +302,13 @@ impl SectionParser {
         ));
     }
 
+    /// Records an informational note about the section as a whole, for a fact
+    /// that belongs to no single line.
+    pub(crate) fn note_file(&mut self, code: &'static str, message: impl Into<String>) {
+        self.diagnostics
+            .push(Diagnostic::whole_file(Severity::Note, code, message));
+    }
+
     /// Records an error tied to a line.
     pub(crate) fn error(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
         self.diagnostics.push(Diagnostic::new(
@@ -690,5 +697,36 @@ mod tests {
         let constants = definition.coverage.section("Constants").expect("row");
         assert_eq!(constants.understood, constants.entries);
         assert_eq!(definition.coverage.percent(), 100.0);
+    }
+
+    #[test]
+    fn a_page_count_mismatch_has_no_line_because_it_belongs_to_the_file() {
+        let text =
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 2\npageSize = 288\npage = 1\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "page-size-count")
+            .expect("the mismatch is reported");
+        assert_eq!(diagnostic.line, None);
+        assert!(!diagnostic.to_string().contains("0: "));
+    }
+
+    #[test]
+    fn a_duplicate_table_or_curve_names_the_redeclaration_line() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[TableEditor]\ntable = t, m, \"T\"\nzBins = z\ntable = t, m, \"T\"\nzBins = z\n[CurveEditor]\ncurve = c, \"C\"\nxBins = x\nyBins = y\ncurve = c, \"C\"\nxBins = x\nyBins = y\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let lines: Vec<Option<u32>> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "duplicate-name")
+            .map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(lines, vec![Some(6), Some(12)]);
     }
 }
