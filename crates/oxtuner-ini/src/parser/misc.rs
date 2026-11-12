@@ -206,7 +206,7 @@ pub(crate) fn parse_reference_tables(
                 );
                 continue;
             };
-            definition.reference_tables.insert(
+            let replaced = definition.reference_tables.insert(
                 name,
                 ReferenceTable {
                     name: name.to_owned(),
@@ -217,6 +217,16 @@ pub(crate) fn parse_reference_tables(
                     ..ReferenceTable::default()
                 },
             );
+            if replaced.is_some() {
+                section.error(
+                    "duplicate-name",
+                    format!(
+                        "reference table `{name}` is declared more than once; the later \
+                         declaration replaces the earlier one"
+                    ),
+                    *line,
+                );
+            }
             current = Some(name.to_owned());
             section.understand(*line);
             continue;
@@ -493,5 +503,23 @@ mod tests {
             Some("Fuel")
         );
         assert_eq!(definition.datalog_entries[0].label, "RPM");
+    }
+
+    #[test]
+    fn a_duplicate_reference_table_is_reported_and_the_later_one_wins() {
+        let definition = parse(
+            "[MegaTune]\nsignature = \"x\"\n[ReferenceTables]\nreferenceTable = clt, \"First\"\ntableIdentifier = 1, \"First\"\nreferenceTable = clt, \"Second\"\ntableIdentifier = 2, \"Second\"\n",
+        );
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "duplicate-name")
+            .expect("the second declaration is reported");
+        assert_eq!(diagnostic.line, Some(6));
+
+        let table = definition.reference_tables.get("clt").expect("table");
+        assert_eq!(table.title.as_deref(), Some("Second"));
+        assert_eq!(table.identifiers, vec![(2, "Second".to_owned())]);
     }
 }
