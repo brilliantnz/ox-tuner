@@ -100,21 +100,25 @@ pub struct SessionLogReport {
 }
 
 impl SessionLogSnapshot {
-    /// Builds a snapshot, for callers that keep their own copy (the app's
-    /// output panel does, after a stop event).
-    pub fn new(
-        running: bool,
-        path: Option<PathBuf>,
-        frames: u64,
-        dropped: u64,
-        bytes: u64,
-    ) -> Self {
+    /// A log that just started, with no frames written yet.
+    pub fn running(path: Option<PathBuf>) -> Self {
         Self {
-            running,
+            running: true,
             path,
-            frames,
-            dropped,
-            bytes,
+            frames: 0,
+            dropped: 0,
+            bytes: 0,
+        }
+    }
+
+    /// A stopped log, described by what its writer reported.
+    pub fn finished(report: &SessionLogReport) -> Self {
+        Self {
+            running: false,
+            path: Some(report.path.clone()),
+            frames: report.frames,
+            dropped: report.dropped,
+            bytes: report.bytes,
         }
     }
 }
