@@ -212,9 +212,13 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
-    /// definition, a declared realtime size or offset does not fit the wire, or
-    /// the firmware's page switch needs a burn (which this build cannot do), or
-    /// [`ProtocolError::Encoding`] when a handshake command cannot be encoded.
+    /// definition or a declared realtime size or offset does not fit the wire.
+    ///
+    /// It also returns [`ProtocolError::Unsupported`] when the firmware's page
+    /// switch needs a burn: a session cannot honour that switch for any page,
+    /// so the whole definition is refused rather than only the affected page.
+    /// Returns [`ProtocolError::Encoding`] when a handshake command cannot be
+    /// encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
             return Err(ProtocolError::Unsupported(format!(
