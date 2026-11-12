@@ -71,6 +71,15 @@ pub enum FileValueError {
         /// Why.
         reason: String,
     },
+    /// A bit label cannot be written as it stands.
+    Label {
+        /// Variable name.
+        name: String,
+        /// The raw value whose label it is.
+        raw: f64,
+        /// Why the label cannot be written.
+        reason: String,
+    },
 }
 
 impl fmt::Display for FileValueError {
@@ -88,6 +97,10 @@ impl fmt::Display for FileValueError {
                 "`{name}`: {found} values in the tune, {expected} declared"
             ),
             Self::Text { name, reason } => write!(formatter, "`{name}`: {reason}"),
+            Self::Label { name, raw, reason } => write!(
+                formatter,
+                "`{name}`: the label for value {raw} cannot be written: {reason}"
+            ),
         }
     }
 }
@@ -652,6 +665,9 @@ fn unquote(value: &str) -> String {
 
 /// Formats a variable's stored values as the text a `.msq` carries.
 ///
+/// A `.msq` declares ISO-8859-1 and stores text as bytes, so a character with
+/// no byte in that set is refused rather than escaped.
+///
 /// # Errors
 ///
 /// Returns [`FileValueError`] when text is too long, quoted or outside
@@ -711,12 +727,10 @@ pub fn format_values(
             match label {
                 Some(label) => {
                     if let Some(character) = first_non_latin1(label) {
-                        return Err(FileValueError::Text {
+                        return Err(FileValueError::Label {
                             name: spec.name.clone(),
-                            reason: format!(
-                                "the label for value {raw} cannot be written: {}",
-                                not_latin1_reason(character)
-                            ),
+                            raw,
+                            reason: not_latin1_reason(character),
                         });
                     }
                     Ok(format!("\"{label}\""))
