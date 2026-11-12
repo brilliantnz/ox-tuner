@@ -924,9 +924,8 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
     let rows: Vec<AnyElement> = dialog
         .actions
         .iter()
-        .enumerate()
-        .filter(|(_, command)| command.gates.visible)
-        .map(|(_, command)| {
+        .filter(|command| command.gates.visible)
+        .map(|command| {
             let blocked =
                 command_block_reason(command, dialog.writable, can_reach_ecu, writes_enabled);
             let message = show_message(command);
