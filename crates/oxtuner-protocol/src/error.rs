@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use oxtuner_ini::CommandEncodeError;
 use oxtuner_transport::TransportError;
 
 /// Why a conversation produced no usable answer.
@@ -27,7 +28,7 @@ pub enum ProtocolError {
         operation: &'static str,
     },
     /// The definition's command template could not be encoded.
-    Encoding(String),
+    Encoding(CommandEncodeError),
 }
 
 impl ProtocolError {
@@ -62,7 +63,7 @@ impl fmt::Display for ProtocolError {
             Self::ReturnCode { code, operation } => {
                 write!(formatter, "the ECU refused {operation} (code 0x{code:02x})")
             }
-            Self::Encoding(message) => write!(formatter, "could not encode the command: {message}"),
+            Self::Encoding(error) => write!(formatter, "could not encode the command: {error}"),
         }
     }
 }
@@ -71,6 +72,7 @@ impl std::error::Error for ProtocolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport(error) => Some(error),
+            Self::Encoding(error) => Some(error),
             _ => None,
         }
     }

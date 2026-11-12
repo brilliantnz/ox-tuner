@@ -1027,7 +1027,7 @@ pub(super) fn refuse(
     report: &mut CoreReport,
     op: OpId,
     code: FailureCode,
-    message: &str,
+    message: impl std::fmt::Display,
 ) -> Outcome {
     tracing::warn!(%op, code = code.as_str(), %message, "command refused before the wire");
     report.failures += 1;
@@ -1037,7 +1037,7 @@ pub(super) fn refuse(
             op,
             failure: Failure {
                 code,
-                message: message.to_owned(),
+                message: message.to_string(),
             },
         },
     );

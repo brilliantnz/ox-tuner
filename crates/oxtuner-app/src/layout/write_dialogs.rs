@@ -581,7 +581,7 @@ pub(crate) fn show_import_consent(window: &mut Window, cx: &mut App) {
                             .on_click({
                                 let path = path.clone();
                                 move |_, window, cx| {
-                                    core::import_tune(&path, true, cx);
+                                    core::import_tune_with_consent(&path, cx);
                                     window.close_dialog(cx);
                                 }
                             }),

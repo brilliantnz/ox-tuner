@@ -57,6 +57,12 @@ pub fn strip_comment(line: &str) -> &str {
 /// Returns `None` when the line has no assignment, which is how the parser
 /// distinguishes entries from stray text.
 pub fn split_assignment(line: &str) -> Option<(&str, &str)> {
+    let index = assignment_index(line)?;
+    Some((line[..index].trim_ascii(), line[index + 1..].trim_ascii()))
+}
+
+/// The byte index of the first `=` outside quotes and braces.
+pub(crate) fn assignment_index(line: &str) -> Option<usize> {
     let mut in_quotes = false;
     let mut escaped = false;
     let mut depth = 0u32;
@@ -71,9 +77,7 @@ pub fn split_assignment(line: &str) -> Option<(&str, &str)> {
             b'"' => in_quotes = !in_quotes,
             b'{' if !in_quotes => depth += 1,
             b'}' if !in_quotes => depth = depth.saturating_sub(1),
-            b'=' if !in_quotes && depth == 0 => {
-                return Some((line[..index].trim_ascii(), line[index + 1..].trim_ascii()));
-            }
+            b'=' if !in_quotes && depth == 0 => return Some(index),
             _ => {}
         }
     }
@@ -203,6 +207,27 @@ pub struct CommandTemplate {
     /// The pieces, in wire order.
     pub segments: Vec<Segment>,
 }
+
+/// Why a command template could not be encoded.
+///
+/// The message names the segment that failed; callers that only display the
+/// failure can use [`Display`](fmt::Display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEncodeError(String);
+
+impl CommandEncodeError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for CommandEncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CommandEncodeError {}
 
 /// One piece of a command string.
 #[expect(
@@ -361,20 +386,25 @@ impl CommandTemplate {
     ///
     /// # Errors
     ///
-    /// Returns a message when a variable is unknown, a `%v` placeholder has no
-    /// payload, or the command contains text this build cannot encode.
+    /// Returns [`CommandEncodeError`] when a variable is unknown, a `%v`
+    /// placeholder has no payload, or the command contains text this build
+    /// cannot encode.
     pub fn encode(
         &self,
         arguments: &CommandArguments<'_>,
         variables: &dyn Fn(&str) -> Option<u8>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, CommandEncodeError> {
         let mut bytes = Vec::new();
         for segment in &self.segments {
             match segment {
                 Segment::Byte(byte) => bytes.push(*byte),
                 Segment::Variable(name) => match variables(name) {
                     Some(value) => bytes.push(value),
-                    None => return Err(format!("unknown command variable ${name}")),
+                    None => {
+                        return Err(CommandEncodeError::new(format!(
+                            "unknown command variable ${name}"
+                        )));
+                    }
                 },
                 Segment::Placeholder(Placeholder::PageId) => {
                     // The page identifier is the `[canId][page]` pair — read
@@ -382,26 +412,26 @@ impl CommandTemplate {
                     bytes.extend_from_slice(&arguments.page.to_be_bytes());
                 }
                 Segment::Placeholder(Placeholder::Offset) => {
-                    bytes.extend_from_slice(&word_bytes(
-                        arguments.offset,
-                        arguments.force_big_endian,
-                    ));
+                    bytes.extend_from_slice(&word_bytes(arguments.offset, arguments.wire_order));
                 }
                 Segment::Placeholder(Placeholder::Count) => {
-                    bytes.extend_from_slice(&word_bytes(
-                        arguments.count,
-                        arguments.force_big_endian,
-                    ));
+                    bytes.extend_from_slice(&word_bytes(arguments.count, arguments.wire_order));
                 }
                 Segment::Placeholder(Placeholder::Values) => {
                     bytes.extend_from_slice(arguments.values);
                 }
                 Segment::Placeholder(Placeholder::Value) => match arguments.values.first() {
                     Some(_) => bytes.extend_from_slice(arguments.values),
-                    None => return Err("the command needs at least one payload byte".to_owned()),
+                    None => {
+                        return Err(CommandEncodeError::new(
+                            "the command needs at least one payload byte",
+                        ));
+                    }
                 },
                 Segment::Unparsed(text) => {
-                    return Err(format!("the command contains unsupported text {text:?}"));
+                    return Err(CommandEncodeError::new(format!(
+                        "the command contains unsupported text {text:?}"
+                    )));
                 }
             }
         }
@@ -409,13 +439,26 @@ impl CommandTemplate {
     }
 }
 
+/// The wire order of the 16-bit command arguments.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the dialect defines exactly two byte orders"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireOrder {
+    /// Least significant byte first, the dialect default.
+    #[default]
+    LittleEndian,
+    /// Most significant byte first, for `forceBigEndianProtocol`.
+    BigEndian,
+}
+
 /// Values substituted into a command template at send time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandArguments<'a> {
     /// Page identifier, written as `[canId][page]` for `%2i`.
     pub page: u16,
-    /// Start offset for `%2o`. Little-endian on the wire unless
-    /// [`Self::force_big_endian`] is set.
+    /// Start offset for `%2o`.
     pub offset: u16,
     /// Byte count for `%2c`. Same wire order as [`Self::offset`].
     pub count: u16,
@@ -423,17 +466,14 @@ pub struct CommandArguments<'a> {
     pub values: &'a [u8],
     /// The definition's `forceBigEndianProtocol`: offsets and lengths go on
     /// the wire big-endian instead of the dialect's little-endian default.
-    /// Callers pass `protocol.force_big_endian_protocol`.
-    pub force_big_endian: bool,
+    pub wire_order: WireOrder,
 }
 
-/// One 16-bit command argument on the wire: little-endian unless the
-/// definition forces the big-endian protocol.
-fn word_bytes(value: u16, force_big_endian: bool) -> [u8; 2] {
-    if force_big_endian {
-        value.to_be_bytes()
-    } else {
-        value.to_le_bytes()
+/// One 16-bit command argument on the wire.
+fn word_bytes(value: u16, wire_order: WireOrder) -> [u8; 2] {
+    match wire_order {
+        WireOrder::LittleEndian => value.to_le_bytes(),
+        WireOrder::BigEndian => value.to_be_bytes(),
     }
 }
 
@@ -511,7 +551,7 @@ mod tests {
                     offset: 0x0004,
                     count: 0x0003,
                     values: &[],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )
@@ -530,7 +570,7 @@ mod tests {
                     page: 1,
                     offset: 4,
                     count: 3,
-                    force_big_endian: true,
+                    wire_order: WireOrder::BigEndian,
                     ..CommandArguments::default()
                 },
                 &|_| None,
@@ -561,7 +601,7 @@ mod tests {
             .encode(&CommandArguments::default(), &|_| None)
             .expect_err("must not invent a byte");
 
-        assert!(error.contains("$missing"));
+        assert!(error.to_string().contains("$missing"));
     }
 
     #[test]
@@ -575,7 +615,7 @@ mod tests {
                     offset: 2,
                     count: 3,
                     values: &[9, 8, 7],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )
@@ -597,7 +637,7 @@ mod tests {
                     offset: 0,
                     count: 2,
                     values: &[0xAB, 0xCD],
-                    force_big_endian: false,
+                    wire_order: WireOrder::LittleEndian,
                 },
                 &|_| None,
             )

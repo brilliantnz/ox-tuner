@@ -40,8 +40,15 @@ impl ChannelInfo {
 
     /// Marks the channel hidden, as the definition's `hide` flag does.
     #[must_use]
-    pub fn hidden(mut self, hidden: bool) -> Self {
-        self.hidden = hidden;
+    pub fn hidden(mut self) -> Self {
+        self.hidden = true;
+        self
+    }
+
+    /// Marks the channel visible.
+    #[must_use]
+    pub fn visible(mut self) -> Self {
+        self.hidden = false;
         self
     }
 }
@@ -204,6 +211,12 @@ impl Inner {
 ///
 /// Cloneable and cheap to hand out: the core and every chart share one
 /// allocation. Reads take a short read lock; no view holds it across paint.
+///
+/// # Panics
+///
+/// A method that reads or writes the ring panics when an earlier holder
+/// panicked while the lock was held. The samples are then unverified, so the
+/// process stops instead of drawing a history nobody can vouch for.
 #[derive(Debug, Clone)]
 pub struct ChartHistory {
     inner: Arc<RwLock<Inner>>,
@@ -359,13 +372,13 @@ impl ChartHistory {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
         self.inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("a previous panic poisoned the history lock; the ring is unverified")
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
         self.inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("a previous panic poisoned the history lock; the ring is unverified")
     }
 }
 

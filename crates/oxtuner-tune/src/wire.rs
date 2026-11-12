@@ -20,10 +20,9 @@
 //! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
 //! word is not an integer. Signed words are read and written as their
 //! two's-complement pattern. Text is Latin-1 on the wire, like the `.msq` layer,
-//! so a text constant with a character above U+00FF is refused on write: it is
-//! skipped rather than half-encoded. Decode skips a refused field.
-//! [`encode_page`] writes nothing for it, so the word keeps whatever the other
-//! constants on it wrote, and [`patch_page`] keeps the bytes the ECU sent.
+//! so a text constant with a character above U+00FF is refused on write with
+//! [`TuneError::TextNotLatin1`]; the page image is never half-encoded. Decode
+//! skips a field it refuses.
 
 use oxtuner_ini::{DataType, Endianness};
 
@@ -168,15 +167,15 @@ pub fn decode_page(
 ///
 /// Non-bits values are written first, then each `bits` constant merges into its
 /// word, so every other bit of that word keeps what another constant declared.
-/// A value whose address is unknown, a bit field the codec refuses, or a text
-/// constant with a character above U+00FF is skipped; a page image is never
-/// shifted to make one fit.
+/// A value whose address is unknown or a bit field the codec refuses is
+/// skipped; a page image is never shifted to make one fit.
 ///
 /// # Errors
 ///
 /// Returns [`TuneError::UnknownPage`] for a page the layout does not declare,
-/// and [`TuneError::PageTooLarge`] when the declared size is over 64 KiB
-/// (65 536 bytes).
+/// [`TuneError::PageTooLarge`] when the declared size is over 64 KiB (65 536
+/// bytes), and [`TuneError::TextNotLatin1`] when a text value contains a
+/// character the wire format cannot carry.
 pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Vec<u8>, TuneError> {
     let Some(page_layout) = layout.page(page) else {
         return Err(TuneError::UnknownPage { page });
@@ -216,9 +215,11 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let Some(source) = to_latin1_bytes(text) else {
-                        continue;
-                    };
+                    let source =
+                        to_latin1_bytes(text).map_err(|character| TuneError::TextNotLatin1 {
+                            name: variable.name.clone(),
+                            character,
+                        })?;
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -288,13 +289,14 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
 ///
 /// Names are matched case-insensitively, as the layout is. A name that is not on
 /// this page contributes nothing, and neither does a bit field the codec
-/// refuses: the base bytes stay as they are. The same applies to a text constant
-/// that cannot be written as Latin-1.
+/// refuses: the base bytes stay as they are.
 ///
 /// # Errors
 ///
-/// Returns [`TuneError::UnknownPage`] for an undeclared page and
-/// [`TuneError::ShortPage`] when the base image is shorter than the page.
+/// Returns [`TuneError::UnknownPage`] for an undeclared page,
+/// [`TuneError::ShortPage`] when the base image is shorter than the page, and
+/// [`TuneError::TextNotLatin1`] when a changed text value contains a character
+/// the wire format cannot carry.
 pub fn patch_page(
     layout: &TuneLayout,
     page: IniPage,
@@ -344,9 +346,11 @@ pub fn patch_page(
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let Some(source) = to_latin1_bytes(text) else {
-                        continue;
-                    };
+                    let source =
+                        to_latin1_bytes(text).map_err(|character| TuneError::TextNotLatin1 {
+                            name: variable.name.clone(),
+                            character,
+                        })?;
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -417,15 +421,15 @@ fn type_width(data_type: DataType) -> usize {
     usize::try_from(data_type.size()).unwrap_or(usize::MAX)
 }
 
-/// Latin-1 bytes for `text`, or `None` when a character does not fit.
+/// Latin-1 bytes for `text`, or the first character that does not fit.
 ///
 /// The wire encoding is Latin-1, the same as the `.msq` layer, so a text
 /// constant round-trips byte for byte instead of being lossily re-encoded. The
 /// `.msq` layer keeps its own codec; one shared home is the planned
 /// consolidation.
-fn to_latin1_bytes(text: &str) -> Option<Vec<u8>> {
+fn to_latin1_bytes(text: &str) -> Result<Vec<u8>, char> {
     text.chars()
-        .map(|character| u8::try_from(u32::from(character)).ok())
+        .map(|character| u8::try_from(u32::from(character)).map_err(|_| character))
         .collect()
 }
 
@@ -769,23 +773,29 @@ wide = bits, U16, 0, [40:47]
     }
 
     #[test]
-    fn text_that_cannot_be_latin1_is_skipped_on_write() {
+    fn text_that_cannot_be_latin1_is_refused_on_write() {
         let definition = definition();
         let layout = TuneLayout::build(&definition, &|_| None);
         let mut tune = Tune::new(Arc::new(layout.clone()));
         tune.set_text("name", "\u{2192}").expect("text is set");
 
-        let encoded = encode_page(&layout, IniPage::FIRST, &tune).expect("encodes");
+        let encoded = encode_page(&layout, IniPage::FIRST, &tune)
+            .expect_err("a text value the wire cannot carry must not be dropped");
         let base = [1u8; 10];
         let patched = patch_page(&layout, IniPage::FIRST, &base, &tune, &["name".to_owned()])
-            .expect("patches");
+            .expect_err("the delta write must not succeed without the value");
 
-        assert_eq!(
-            &encoded[4..8],
-            &[0, 0, 0, 0],
-            "nothing half-encoded is written"
-        );
-        assert_eq!(patched, base, "the base bytes stay as they were");
+        for error in [encoded, patched] {
+            assert!(
+                matches!(
+                    &error,
+                    TuneError::TextNotLatin1 { name, character }
+                        if name == "name" && *character == '\u{2192}'
+                ),
+                "{error}"
+            );
+            assert!(error.to_string().contains("name"), "{error}");
+        }
     }
 
     #[test]

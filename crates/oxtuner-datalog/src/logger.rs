@@ -131,11 +131,15 @@ impl LogStatus {
     }
 
     /// The current file, while one is open.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a writer panicked while holding the status lock.
     pub fn path(&self) -> Option<PathBuf> {
         self.inner
             .path
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("a previous panic poisoned the log status; the path is unverified")
             .clone()
     }
 
@@ -155,6 +159,10 @@ impl LogStatus {
     }
 
     /// A frozen copy for rendering.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an earlier holder panicked while the status lock was held.
     pub fn snapshot(&self) -> SessionLogSnapshot {
         SessionLogSnapshot {
             running: self.is_running(),
@@ -179,7 +187,8 @@ impl LogStatus {
             .inner
             .path
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path.to_owned());
+            .expect("a previous panic poisoned the log status; the path is unverified") =
+            Some(path.to_owned());
     }
 
     fn stopped(&self) {

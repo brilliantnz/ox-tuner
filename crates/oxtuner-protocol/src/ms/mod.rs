@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oxtuner_ini::{CommandArguments, CommandTemplate, Definition};
+use oxtuner_ini::{CommandArguments, CommandTemplate, Definition, WireOrder};
 use oxtuner_transport::{Transport, TransportError};
 
 mod commands;
@@ -156,6 +156,14 @@ const SIGNATURE_MAX: usize = 512;
 /// firmware that forgot to state a factor.
 const FALLBACK_BLOCKING_FACTOR: usize = 128;
 
+/// A page CRC reply with a variable-length text encoding is not readable by
+/// this build; neither link has a read shape for it.
+fn unsupported_text_crc(page: u8) -> ProtocolError {
+    ProtocolError::Unsupported(format!(
+        "page {page} reports its CRC as text, which this build cannot read"
+    ))
+}
+
 /// The MS-compatible protocol for one definition.
 pub struct MsProtocol {
     name: &'static str,
@@ -169,7 +177,7 @@ pub struct MsProtocol {
     block_read_timeout: Duration,
     page_activation_delay: Duration,
     port_open_delay: Duration,
-    force_big_endian: bool,
+    wire_order: WireOrder,
     realtime: Option<Realtime>,
     link: LinkMode,
     reply_code: ReplyCode,
@@ -204,8 +212,9 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
-    /// definition, or [`ProtocolError::Encoding`] when a handshake command
-    /// cannot be encoded.
+    /// definition or a declared realtime size or offset does not fit the wire,
+    /// or [`ProtocolError::Encoding`] when a handshake command cannot be
+    /// encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
             return Err(ProtocolError::Unsupported(format!(
@@ -223,7 +232,7 @@ impl MsProtocol {
 
         let pages = build_pages(definition, behavior, &variables);
         let handshake = build_handshake(definition, behavior, &variables)?;
-        let realtime = build_realtime(definition);
+        let realtime = build_realtime(definition)?;
 
         Ok(Self {
             name: behavior.name(),
@@ -263,7 +272,11 @@ impl MsProtocol {
                 .map_or(Duration::ZERO, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
-            force_big_endian: definition.comms.force_big_endian_protocol,
+            wire_order: if definition.comms.force_big_endian_protocol {
+                WireOrder::BigEndian
+            } else {
+                WireOrder::LittleEndian
+            },
             realtime,
             link: default_link(definition),
             reply_code: behavior.reply_code(definition),
@@ -384,30 +397,37 @@ impl MsProtocol {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError`] when the page switch or the transport fails,
-    /// or when the CRC reply is not the expected four bytes.
+    /// Returns [`ProtocolError`] when the page size does not fit the command's
+    /// count field, the firmware reports a text CRC, the page switch or the
+    /// transport fails, or when the CRC reply is not the expected four bytes.
     pub fn read_page_crc(
         &mut self,
         io: &mut dyn Transport,
         page: u8,
     ) -> Result<Option<u32>, ProtocolError> {
-        let Some((identifier, command, crc_reply, size)) = self
-            .pages
-            .iter()
-            .find(|entry| entry.spec.number == page)
-            .and_then(|entry| {
-                entry.crc.clone().map(|command| {
-                    (
-                        entry.identifier,
-                        command,
-                        entry.crc_reply,
-                        u16::try_from(entry.spec.size).unwrap_or(u16::MAX),
-                    )
-                })
-            })
-        else {
+        let Some(entry) = self.pages.iter().find(|entry| entry.spec.number == page) else {
             return Ok(None);
         };
+        let Some(command) = entry.crc.clone() else {
+            return Ok(None);
+        };
+        let size = u16::try_from(entry.spec.size).map_err(|_| {
+            ProtocolError::Unsupported(format!(
+                "page {page} is {} bytes, which does not fit the 16-bit count field of its CRC \
+                 command",
+                entry.spec.size
+            ))
+        })?;
+        let identifier = entry.identifier;
+        let crc_reply = entry.crc_reply.unwrap_or(CrcReply::RawBigEndian);
+
+        // Both links read the checksum as exactly four bytes, so a text reply
+        // would have its first four characters parsed as hex. Refuse instead of
+        // returning a wrong checksum that read-back would treat as verified.
+        if crc_reply == CrcReply::HexText {
+            return Err(unsupported_text_crc(page));
+        }
+
         self.activate(io, page)?;
         let request = self.encode(&command, u16::from_be_bytes(identifier), 0, size, &[])?;
 
@@ -430,18 +450,15 @@ impl MsProtocol {
                 bytes.len()
             )));
         }
-        let crc = match crc_reply.unwrap_or(CrcReply::RawBigEndian) {
+        let crc = match crc_reply {
             CrcReply::RawBigEndian => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             CrcReply::RawLittleEndian => {
                 u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
             }
+            // Refused before any read; the arm is defensive so a new link mode
+            // cannot silently fall through to a raw parse.
             CrcReply::HexText => {
-                let text = std::str::from_utf8(&bytes).map_err(|_| {
-                    ProtocolError::UnexpectedReply("the CRC is not ASCII".to_owned())
-                })?;
-                u32::from_str_radix(text.trim(), 16).map_err(|_| {
-                    ProtocolError::UnexpectedReply(format!("the CRC text {text:?} is not hex"))
-                })?
+                return Err(unsupported_text_crc(page));
             }
         };
         Ok(Some(crc))
@@ -528,7 +545,7 @@ impl MsProtocol {
                     offset,
                     count,
                     values,
-                    force_big_endian: self.force_big_endian,
+                    wire_order: self.wire_order,
                 },
                 &|name| self.variables.get(&name.to_ascii_lowercase()).copied(),
             )

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use oxtuner_ini::{CommandTemplate, Definition};
-use oxtuner_protocol::{CommandPattern, page_identifier};
+use oxtuner_protocol::{CommandPattern, WireOrder, page_identifier};
 
 use super::pattern_for;
 
@@ -22,9 +22,9 @@ pub(crate) struct PageEcu {
 pub(super) fn build_pages(
     definition: &Definition,
     variables: &HashMap<String, u8>,
-    force_big_endian: bool,
+    wire_order: WireOrder,
 ) -> Vec<PageEcu> {
-    let pattern = |command: &CommandTemplate| pattern_for(command, variables, force_big_endian);
+    let pattern = |command: &CommandTemplate| pattern_for(command, variables, wire_order);
 
     definition
         .pages

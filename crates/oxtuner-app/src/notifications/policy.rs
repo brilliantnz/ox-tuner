@@ -157,6 +157,7 @@ fn failure_title(code: FailureCode) -> String {
         FailureCode::BurnFailed => t!("app.notifications.failed_burn"),
         FailureCode::ImportRejected => t!("app.notifications.failed_import"),
         FailureCode::ImportNeedsConsent => t!("app.notifications.failed_import_consent"),
+        FailureCode::PickerFailed => t!("app.notifications.failed_picker"),
         FailureCode::SnapshotFailed => t!("app.notifications.failed_snapshot"),
         FailureCode::JournalFailed => t!("app.notifications.failed_journal"),
         FailureCode::LogFailed => t!("app.notifications.failed_log"),

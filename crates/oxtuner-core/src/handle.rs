@@ -145,11 +145,16 @@ pub(crate) struct Gate {
 
 impl Gate {
     /// Runs `accept` while the queue is still open, or reports `Stopped`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a previous panic poisoned the gate lock; the queue state is
+    /// then unverified.
     fn while_open<T>(&self, accept: impl FnOnce() -> Result<T, CoreError>) -> Result<T, CoreError> {
         let closed = self
             .closed
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("a previous panic poisoned the command gate; the queue state is unknown");
         if *closed {
             return Err(CoreError::Stopped);
         }
@@ -157,11 +162,16 @@ impl Gate {
     }
 
     /// Closes the door. Every later send is refused.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a previous panic poisoned the gate lock; the queue state is
+    /// then unverified.
     pub(crate) fn close(&self) {
         let mut closed = self
             .closed
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("a previous panic poisoned the command gate; the queue state is unknown");
         *closed = true;
     }
 }
@@ -532,20 +542,30 @@ impl CoreHandle {
 
     /// Imports a `.msq` into the working image.
     ///
-    /// A different-signature tune needs `consented: true`.
+    /// A tune whose signature differs from the open definition is refused;
+    /// [`Self::import_tune_with_consent`] is the approved path for that case.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
     /// command cannot be queued.
-    pub fn import_tune(
-        &self,
-        path: impl Into<PathBuf>,
-        consented: bool,
-    ) -> Result<OpId, CoreError> {
+    pub fn import_tune(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
         self.send_request(CommandRequest::ImportTune {
             path: path.into(),
-            consented,
+            consented: false,
+        })
+    }
+
+    /// Imports a `.msq` after the user approved a different signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn import_tune_with_consent(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::ImportTune {
+            path: path.into(),
+            consented: true,
         })
     }
 

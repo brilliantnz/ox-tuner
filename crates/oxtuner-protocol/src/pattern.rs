@@ -9,7 +9,7 @@
 //! "p%2i%2o%2c"  ──▶  ['p'] [page: u8, u8] [offset: u16] [count: u16]
 //! ```
 
-use oxtuner_ini::{CommandTemplate, Placeholder, Segment};
+use oxtuner_ini::{CommandTemplate, Placeholder, Segment, WireOrder};
 
 /// One recognised piece of a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +30,7 @@ enum Part {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandPattern {
     parts: Vec<Part>,
-    force_big_endian: bool,
+    wire_order: WireOrder,
 }
 
 /// What a matched command carried.
@@ -59,11 +59,7 @@ impl CommandPattern {
     /// (an [`Segment::Unparsed`]) or a `$variable` the resolver cannot give a
     /// value: guessing either would make the simulator answer a command the
     /// firmware would not.
-    pub fn new(
-        command: &CommandTemplate,
-        force_big_endian: bool,
-        variables: &dyn Fn(&str) -> Option<u8>,
-    ) -> Option<Self> {
+    pub fn new(command: &CommandTemplate, variables: &dyn Fn(&str) -> Option<u8>) -> Option<Self> {
         let mut parts = Vec::with_capacity(command.segments.len());
         for segment in &command.segments {
             match segment {
@@ -83,14 +79,14 @@ impl CommandPattern {
         }
         Some(Self {
             parts,
-            force_big_endian,
+            wire_order: WireOrder::default(),
         })
     }
 
     /// Fixes the wire order of the 16-bit arguments.
     #[must_use]
-    pub fn with_big_endian(mut self, big_endian: bool) -> Self {
-        self.force_big_endian = big_endian;
+    pub fn with_wire_order(mut self, order: WireOrder) -> Self {
+        self.wire_order = order;
         self
     }
 
@@ -167,10 +163,9 @@ impl CommandPattern {
 
     fn word(&self, bytes: &[u8]) -> u16 {
         let pair = [bytes[0], bytes[1]];
-        if self.force_big_endian {
-            u16::from_be_bytes(pair)
-        } else {
-            u16::from_le_bytes(pair)
+        match self.wire_order {
+            WireOrder::LittleEndian => u16::from_le_bytes(pair),
+            WireOrder::BigEndian => u16::from_be_bytes(pair),
         }
     }
 }
@@ -208,13 +203,13 @@ mod tests {
     use super::*;
 
     fn pattern(text: &str) -> CommandPattern {
-        CommandPattern::new(&CommandTemplate::parse(text), false, &|_| Some(0)).expect("a pattern")
+        CommandPattern::new(&CommandTemplate::parse(text), &|_| Some(0)).expect("a pattern")
     }
 
     #[test]
     fn a_page_read_yields_its_page_offset_and_count() {
         let command = CommandTemplate::parse(r#""p%2i%2o%2c""#);
-        let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
+        let pattern = CommandPattern::new(&command, &|_| Some(0)).expect("a pattern");
 
         let matched = pattern
             .capture(&[0x70, 0x00, 0x07, 0x20, 0x00, 0x10, 0x00])
@@ -242,5 +237,16 @@ mod tests {
                 .capture(&[0x70, 0, 1, 0])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_big_endian_builder_reads_the_word_in_wire_order() {
+        let matched = pattern(r#""p%2i%2o%2c""#)
+            .with_wire_order(WireOrder::BigEndian)
+            .capture(&[0x70, 0x00, 0x07, 0x20, 0x00, 0x10, 0x00])
+            .expect("matches");
+
+        assert_eq!(matched.offset, 0x2000);
+        assert_eq!(matched.count, 0x1000);
     }
 }

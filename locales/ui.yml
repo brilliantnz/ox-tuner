@@ -410,6 +410,8 @@ app:
       en: Tune could not be imported
     failed_import_consent:
       en: Import needs your approval
+    failed_picker:
+      en: Could not open the file dialog
     failed_snapshot:
       en: Snapshot could not be written
     failed_journal:

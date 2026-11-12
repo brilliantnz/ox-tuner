@@ -376,6 +376,8 @@ pub enum FailureCode {
     /// The imported tune has a different signature and the user has not
     /// approved the import.
     ImportNeedsConsent,
+    /// A native file or folder dialog could not return a choice.
+    PickerFailed,
     /// The snapshot before a risky operation could not be written.
     SnapshotFailed,
     /// The write journal could not be written, so the operation was refused.
@@ -415,6 +417,7 @@ impl FailureCode {
             Self::BurnFailed => "burn-failed",
             Self::ImportRejected => "import-rejected",
             Self::ImportNeedsConsent => "import-needs-consent",
+            Self::PickerFailed => "picker-failed",
             Self::SnapshotFailed => "snapshot-failed",
             Self::JournalFailed => "journal-failed",
             Self::LogFailed => "log-failed",

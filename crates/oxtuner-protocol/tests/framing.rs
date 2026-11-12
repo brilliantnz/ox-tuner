@@ -46,11 +46,11 @@ proptest! {
     #[test]
     fn a_command_matcher_never_panics_on_wire_bytes(data: Vec<u8>) {
         let command = CommandTemplate::parse("p%2i%2o%2c");
-        let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
+        let pattern = CommandPattern::new(&command, &|_| Some(0)).expect("a pattern");
         let _ = pattern.capture(&data);
 
         let command = CommandTemplate::parse("M%2i%2o%2c%v");
-        let pattern = CommandPattern::new(&command, false, &|_| Some(0)).expect("a pattern");
+        let pattern = CommandPattern::new(&command, &|_| Some(0)).expect("a pattern");
         let _ = pattern.capture(&data);
     }
 }

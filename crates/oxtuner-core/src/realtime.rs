@@ -75,10 +75,14 @@ pub struct LatestFrame {
 
 impl LatestFrame {
     /// The newest frame, or `None` before the first one arrives.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a writer panicked while holding the frame lock.
     pub fn get(&self) -> Option<Arc<RealtimeFrame>> {
         self.inner
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("a previous panic poisoned the frame lock; the frame is unverified")
             .clone()
     }
 
@@ -87,7 +91,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("a previous panic poisoned the frame lock; the frame is unverified");
         *slot = Some(Arc::new(frame));
     }
 
@@ -96,7 +100,7 @@ impl LatestFrame {
         let mut slot = self
             .inner
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("a previous panic poisoned the frame lock; the frame is unverified");
         *slot = None;
     }
 }
@@ -423,16 +427,7 @@ impl RealtimeDecoder {
         else {
             return None;
         };
-        let raw = read_raw(
-            block,
-            *offset,
-            if bits.is_some() { *storage } else { *data_type },
-            self.endianness,
-        )?;
-        match bits {
-            Some(range) => extract_bits(raw, *range),
-            None => Some(raw),
-        }
+        read_value(block, *offset, *data_type, *storage, *bits, self.endianness)
     }
 
     /// The measured source for a channel name, case-insensitively.
@@ -480,19 +475,9 @@ impl RealtimeDecoder {
             else {
                 continue;
             };
-            let Some(raw) = read_raw(
-                block,
-                *offset,
-                if bits.is_some() { *storage } else { *data_type },
-                self.endianness,
-            ) else {
-                continue;
-            };
-            let raw = match bits {
-                Some(range) => extract_bits(raw, *range),
-                None => Some(raw),
-            };
-            let Some(raw) = raw else {
+            let Some(raw) =
+                read_value(block, *offset, *data_type, *storage, *bits, self.endianness)
+            else {
                 continue;
             };
             let user = (raw + translate) * scale;
@@ -575,6 +560,69 @@ fn format_value(value: f64) -> String {
     }
 }
 
+/// Reads one channel, preserving the storage bits until a bit field is
+/// extracted.
+///
+/// A `bits` channel stores an unsigned bit pattern even when the declared
+/// storage is signed, and a 64-bit word cannot pass through `f64` without
+/// losing the low bits. The bit path therefore reads a `u64` and only converts
+/// the extracted field.
+fn read_value(
+    bytes: &[u8],
+    offset: usize,
+    data_type: DataType,
+    storage: DataType,
+    bits: Option<BitRange>,
+    endianness: Endianness,
+) -> Option<f64> {
+    match bits {
+        Some(range) => read_bits(bytes, offset, storage, endianness)
+            .and_then(|word| extract_bits(word, range))
+            .map(bit_value),
+        None => read_raw(bytes, offset, data_type, endianness),
+    }
+}
+
+/// Reads one storage word into a little-endian byte buffer.
+fn ordered_word(
+    bytes: &[u8],
+    offset: usize,
+    width: usize,
+    endianness: Endianness,
+) -> Option<[u8; 8]> {
+    let slice = bytes.get(offset..offset.checked_add(width)?)?;
+    let mut ordered = [0u8; 8];
+    match endianness {
+        Endianness::Little => ordered[..width].copy_from_slice(slice),
+        Endianness::Big => {
+            for index in 0..width {
+                ordered[index] = slice[width - 1 - index];
+            }
+        }
+    }
+    Some(ordered)
+}
+
+/// Reads one storage word as an unsigned bit pattern.
+fn read_bits(
+    bytes: &[u8],
+    offset: usize,
+    storage: DataType,
+    endianness: Endianness,
+) -> Option<u64> {
+    let width = usize::try_from(storage.size()).unwrap_or(usize::MAX);
+    let ordered = ordered_word(bytes, offset, width, endianness)?;
+    Some(match storage {
+        DataType::U08 | DataType::S08 | DataType::M08 => u64::from(ordered[0]),
+        DataType::U16 | DataType::S16 => u64::from(u16::from_le_bytes([ordered[0], ordered[1]])),
+        DataType::U32 | DataType::S32 => u64::from(u32::from_le_bytes([
+            ordered[0], ordered[1], ordered[2], ordered[3],
+        ])),
+        DataType::U64 | DataType::S64 => u64::from_le_bytes(ordered),
+        DataType::F32 | DataType::Ascii => return None,
+    })
+}
+
 /// Reads one numeric value from the block.
 #[expect(
     clippy::cast_precision_loss,
@@ -588,16 +636,7 @@ fn read_raw(
     endianness: Endianness,
 ) -> Option<f64> {
     let width = usize::try_from(data_type.size()).unwrap_or(usize::MAX);
-    let slice = bytes.get(offset..offset.checked_add(width)?)?;
-    let mut ordered = [0u8; 8];
-    match endianness {
-        Endianness::Little => ordered[..width].copy_from_slice(slice),
-        Endianness::Big => {
-            for index in 0..width {
-                ordered[index] = slice[width - 1 - index];
-            }
-        }
-    }
+    let ordered = ordered_word(bytes, offset, width, endianness)?;
     Some(match data_type {
         DataType::U08 | DataType::M08 => f64::from(ordered[0]),
         DataType::S08 => f64::from(ordered[0].cast_signed()),
@@ -618,22 +657,21 @@ fn read_raw(
     })
 }
 
+/// Converts an extracted bit field to the live model's value type.
 #[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
     clippy::cast_precision_loss,
     clippy::as_conversions,
-    reason = "the value is checked finite and non-negative; bit fields live in 64-bit words and return to f64 storage"
+    reason = "a bit field is at most 64 bits and every live value is stored as f64"
 )]
-fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
+fn bit_value(raw: u64) -> f64 {
+    raw as f64
+}
+
+fn extract_bits(word: u64, range: BitRange) -> Option<u64> {
     if range.high >= 64 || range.low > range.high {
         return None;
     }
 
-    if !raw.is_finite() || raw < 0.0 {
-        return None;
-    }
-    let word = raw as u64;
     let width = range
         .high
         .saturating_sub(range.low)
@@ -647,7 +685,7 @@ fn extract_bits(raw: f64, range: BitRange) -> Option<f64> {
     } else {
         (1u64 << width) - 1
     };
-    Some(((word >> range.low) & mask) as f64)
+    Some((word >> range.low) & mask)
 }
 
 #[cfg(test)]
@@ -739,6 +777,107 @@ halfRpm = { rpm / 2 }, \"rpm\"
         assert_eq!(frame.value("rpm").unwrap().value, 3500.0);
         assert_eq!(frame.value("tps").unwrap().value, 20.0);
         assert_eq!(frame.value("running").unwrap().value, 1.0);
+    }
+
+    fn bit_definition(storage: &str, range: &str, block_size: usize) -> Definition {
+        parse_str(
+            &format!(
+                "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = {block_size}
+flag = bits, {storage}, 0, [{range}]
+"
+            ),
+            &SettingsContext::new(),
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn a_signed_storage_word_still_yields_its_bits() {
+        for (storage, block_size, block, range) in [
+            ("S08", 1, [0x80, 0, 0, 0, 0, 0, 0, 0], "7:7"),
+            ("S16", 2, [0x00, 0x80, 0, 0, 0, 0, 0, 0], "15:15"),
+        ] {
+            let decoder = RealtimeDecoder::new(&bit_definition(storage, range, block_size));
+            let frame = decoder.decode(&block[..block_size], 1);
+
+            assert_eq!(frame.value("flag").unwrap().value, 1.0, "{storage}");
+        }
+    }
+
+    #[test]
+    fn a_big_endian_storage_word_is_read_in_wire_order() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = big
+nPages = 1
+pageSize = 2
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 2
+flag = bits, S16, 0, [15:15]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let decoder = RealtimeDecoder::new(&definition);
+
+        let frame = decoder.decode(&[0x80, 0x00], 1);
+
+        assert_eq!(frame.value("flag").unwrap().value, 1.0);
+    }
+
+    #[test]
+    fn a_u64_bit_field_reads_the_exact_word() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+low = bits, U64, 0, [0:0]
+high = bits, U64, 0, [63:63]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let decoder = RealtimeDecoder::new(&definition);
+
+        // 2^53 + 1 rounds to 2^53 in f64, which used to lose bit 0.
+        let precise = (1u64 << 53) + 1;
+        let frame = decoder.decode(&precise.to_le_bytes(), 1);
+        assert_eq!(frame.value("low").unwrap().value, 1.0);
+        assert_eq!(frame.value("high").unwrap().value, 0.0);
+
+        let high = 1u64 << 63;
+        let frame = decoder.decode(&high.to_le_bytes(), 2);
+        assert_eq!(frame.value("low").unwrap().value, 0.0);
+        assert_eq!(frame.value("high").unwrap().value, 1.0);
     }
 
     #[test]
@@ -912,7 +1051,7 @@ good = bits, U08, 0, [0:0]
     fn a_bit_range_past_the_word_is_skipped() {
         assert_eq!(
             extract_bits(
-                f64::from(0xFFu8),
+                0xFFu64,
                 BitRange {
                     low: 200,
                     high: 207
@@ -922,22 +1061,19 @@ good = bits, U08, 0, [0:0]
             "a range past the 64-bit word must not shift"
         );
         assert_eq!(
-            extract_bits(f64::from(0xFFu8), BitRange { low: 200, high: 10 }),
+            extract_bits(0xFFu64, BitRange { low: 200, high: 10 }),
             None,
             "a reversed range must not shift"
         );
         assert_eq!(
-            extract_bits(f64::from(u32::MAX), BitRange { low: 0, high: 63 }),
-            Some(f64::from(u32::MAX)),
+            extract_bits(u64::from(u32::MAX), BitRange { low: 0, high: 63 }),
+            Some(u64::from(u32::MAX)),
             "a full 64-bit range uses the whole-word mask"
         );
+        assert_eq!(extract_bits(0u64, BitRange { low: 0, high: 64 }), None);
         assert_eq!(
-            extract_bits(f64::from(0u8), BitRange { low: 0, high: 64 }),
-            None
-        );
-        assert_eq!(
-            extract_bits(f64::from(0x1234u16), BitRange { low: 8, high: 15 }),
-            Some(f64::from(0x12u8)),
+            extract_bits(0x1234u64, BitRange { low: 8, high: 15 }),
+            Some(0x12u64),
         );
     }
 

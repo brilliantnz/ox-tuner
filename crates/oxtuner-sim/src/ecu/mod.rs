@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use oxtuner_ini::{BitRange, ChannelKind, CommandTemplate, DataType, Definition, Endianness};
-use oxtuner_protocol::CommandPattern;
+use oxtuner_protocol::{CommandPattern, WireOrder};
 
 mod controller;
 mod pages;
@@ -118,61 +118,94 @@ pub(crate) struct SimEcu {
 pub(super) fn pattern_for(
     command: &CommandTemplate,
     variables: &HashMap<String, u8>,
-    force_big_endian: bool,
+    wire_order: WireOrder,
 ) -> Option<CommandPattern> {
-    CommandPattern::new(command, force_big_endian, &|name| {
+    CommandPattern::new(command, &|name| {
         variables.get(&name.to_ascii_lowercase()).copied()
     })
+    .map(|pattern| pattern.with_wire_order(wire_order))
+}
+
+/// Builds the realtime view, refusing a base offset the wire cannot carry.
+///
+/// A silent fallback would answer from a different region than the host reads,
+/// so a definition that does not fit the 16-bit field is rejected instead.
+fn realtime_ecu(
+    definition: &Definition,
+    variables: &HashMap<String, u8>,
+    wire_order: WireOrder,
+) -> Result<Option<RealtimeEcu>, SimError> {
+    let Some(command) = definition.comms.och_get_command.as_ref() else {
+        return Ok(None);
+    };
+    let Some(pattern) = pattern_for(command, variables, wire_order) else {
+        return Ok(None);
+    };
+    let Some(size) = definition.comms.och_block_size else {
+        return Ok(None);
+    };
+    let block_size = u16::try_from(size)
+        .ok()
+        .filter(|size| *size > 0)
+        .map(usize::from)
+        .ok_or_else(|| SimError {
+            message: format!(
+                "`{}` declares a {size}-byte realtime block, which is not a usable 16-bit size",
+                definition.signature
+            ),
+        })?;
+    let start_offset =
+        u16::try_from(definition.comms.output_channel_start_offset).map_err(|_| SimError {
+            message: format!(
+                "`{}` starts its realtime block at offset {}, which does not fit the 16-bit wire \
+                 field",
+                definition.signature, definition.comms.output_channel_start_offset
+            ),
+        })?;
+    let burn_pending = definition.channels.iter().find_map(|(name, channel)| {
+        if !name.eq_ignore_ascii_case("burnPending") {
+            return None;
+        }
+        let ChannelKind::Measured {
+            storage,
+            offset,
+            bits: Some(bits),
+            ..
+        } = &channel.kind
+        else {
+            return None;
+        };
+        let offset = usize::try_from(*offset).ok()?;
+        burn_pending_bit(definition.endianness, offset, *storage, *bits, block_size)
+    });
+
+    Ok(Some(RealtimeEcu {
+        pattern,
+        block_size,
+        start_offset,
+        burn_pending,
+    }))
 }
 
 impl SimEcu {
     /// Builds the message set, using `signature` as the reply text.
     pub(crate) fn new(definition: &Definition, signature: String) -> Result<Self, SimError> {
         let variables = variables(definition);
-        let force_big_endian = definition.comms.force_big_endian_protocol;
-        let pattern =
-            |command: &CommandTemplate| pattern_for(command, &variables, force_big_endian);
+        let wire_order = if definition.comms.force_big_endian_protocol {
+            WireOrder::BigEndian
+        } else {
+            WireOrder::LittleEndian
+        };
+        let pattern = |command: &CommandTemplate| pattern_for(command, &variables, wire_order);
 
         let query = definition
             .query_command
             .as_ref()
             .filter(|command| !command.is_empty())
             .and_then(pattern);
-        let realtime = definition
-            .comms
-            .och_get_command
-            .as_ref()
-            .and_then(|command| {
-                let pattern = pattern(command)?;
-                let block_size = definition
-                    .comms
-                    .och_block_size
-                    .and_then(|size| usize::try_from(size).ok())?;
-                Some(RealtimeEcu {
-                    pattern,
-                    block_size,
-                    start_offset: u16::try_from(definition.comms.output_channel_start_offset)
-                        .unwrap_or(0),
-                    burn_pending: definition.channels.iter().find_map(|(name, channel)| {
-                        if !name.eq_ignore_ascii_case("burnPending") {
-                            return None;
-                        }
-                        let ChannelKind::Measured {
-                            storage,
-                            offset,
-                            bits: Some(bits),
-                            ..
-                        } = &channel.kind
-                        else {
-                            return None;
-                        };
-                        let offset = usize::try_from(*offset).ok()?;
-                        burn_pending_bit(definition.endianness, offset, *storage, *bits, block_size)
-                    }),
-                })
-            });
+        let realtime = realtime_ecu(definition, &variables, wire_order)?;
 
-        let pages = pages::build_pages(definition, &variables, force_big_endian);
+        let pages = pages::build_pages(definition, &variables, wire_order);
 
         if query.is_none() && pages.iter().all(|page| page.read.is_none()) {
             return Err(SimError {
@@ -184,7 +217,7 @@ impl SimEcu {
             });
         }
 
-        let controller = controller::build_controller(definition, &variables, force_big_endian);
+        let controller = controller::build_controller(definition, &variables, wire_order);
 
         Ok(Self {
             signature: signature.into_bytes(),

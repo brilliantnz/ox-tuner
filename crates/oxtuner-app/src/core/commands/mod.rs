@@ -17,7 +17,7 @@ pub(crate) use session::{
     request_connect, save_trace, start_realtime, test_connection,
 };
 pub(crate) use transfer::{
-    choose_import, import_tune, list_snapshots, read_journal, restore_snapshot,
+    choose_import, import_tune_with_consent, list_snapshots, read_journal, restore_snapshot,
 };
 pub(crate) use tune::{
     acknowledge_write_failure, burn_to_flash, refresh_tune_status, resolve_conflicts,
@@ -72,7 +72,7 @@ pub(super) fn send<T>(
 /// The global is installed by [`start`] before the first window exists, so this
 /// normally has somewhere to put the message; the guard is for the boot order,
 /// where a failure can only be logged.
-pub(super) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
+pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
     if !cx.has_global::<CoreService>() {
         tracing::error!(code = code.as_str(), %message, "failure before the core was installed");
         return;

@@ -204,7 +204,7 @@ pub(super) fn adopt_ecu_image(
             report,
             op,
             FailureCode::AdoptRefused,
-            &error.to_string(),
+            error.to_string(),
         );
     }
     tracing::info!("the ECU image became the working tune");
@@ -244,8 +244,8 @@ pub(super) fn resolve_conflicts(
         ConflictResolution::UseEcu => {
             let snapshot = match snapshot::write(project, "conflict") {
                 Ok(path) => path,
-                Err(message) => {
-                    return refuse(events, report, op, FailureCode::SnapshotFailed, &message);
+                Err(error) => {
+                    return refuse(events, report, op, FailureCode::SnapshotFailed, error);
                 }
             };
             if let Err(error) = project.images_mut().import(ram) {
@@ -254,7 +254,7 @@ pub(super) fn resolve_conflicts(
                     report,
                     op,
                     FailureCode::WriteRefused,
-                    &error.to_string(),
+                    error.to_string(),
                 );
             }
             project.images_mut().clear_conflicts();
@@ -315,7 +315,9 @@ pub(super) fn revert_tune(
     };
     let snapshot = match snapshot::write(project, "revert") {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(events, report, op, FailureCode::SnapshotFailed, error);
+        }
     };
     project.images_mut().revert_to_baseline();
     tracing::info!(%op, cells = diff.cells, "tune reverted to the file baseline");
@@ -366,7 +368,7 @@ pub(super) fn revert_target(
     let variables = match target_variables(project, name) {
         Ok(variables) => variables,
         Err(message) => {
-            return refuse(events, report, op, FailureCode::WriteRefused, &message);
+            return refuse(events, report, op, FailureCode::WriteRefused, message);
         }
     };
 
@@ -374,7 +376,9 @@ pub(super) fn revert_target(
     // snapshotted first, exactly as a whole-tune revert does.
     let snapshot = match snapshot::write(project, "revert") {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(events, report, op, FailureCode::SnapshotFailed, error);
+        }
     };
 
     let reverted = project.images_mut().revert_variables(&variables);
@@ -501,7 +505,7 @@ pub(super) fn import_tune(
                 report,
                 op,
                 FailureCode::ImportRejected,
-                &format!("{} could not be read: {error}", path.display()),
+                format!("{} could not be read: {error}", path.display()),
             );
         }
     };
@@ -513,7 +517,7 @@ pub(super) fn import_tune(
                 report,
                 op,
                 FailureCode::ImportRejected,
-                &format!("{} is not a readable .msq: {error}", path.display()),
+                format!("{} is not a readable .msq: {error}", path.display()),
             );
         }
     };
@@ -532,7 +536,7 @@ pub(super) fn import_tune(
             report,
             op,
             FailureCode::ImportRejected,
-            &format!("the tune cannot be imported: {}", blocker.message),
+            format!("the tune cannot be imported: {}", blocker.message),
         );
     }
     if signature_mismatch && !consented {
@@ -558,7 +562,9 @@ pub(super) fn import_tune(
     let (cells, variables) = changed_against(project, &loaded.tune);
     let snapshot = match snapshot::write(project, operation) {
         Ok(path) => path,
-        Err(message) => return refuse(events, report, op, FailureCode::SnapshotFailed, &message),
+        Err(error) => {
+            return refuse(events, report, op, FailureCode::SnapshotFailed, error);
+        }
     };
     if let Err(error) = project.images_mut().import(loaded.tune) {
         return refuse(
@@ -566,7 +572,7 @@ pub(super) fn import_tune(
             report,
             op,
             FailureCode::ImportRejected,
-            &error.to_string(),
+            error.to_string(),
         );
     }
     tracing::info!(

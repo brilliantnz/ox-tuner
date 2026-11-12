@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use oxtuner_ini::{CommandArguments, SettingsContext, parse_str};
+use oxtuner_ini::{CommandArguments, Offset, SettingsContext, parse_str};
 
 fn fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -372,5 +372,43 @@ second = bits, U16, 2, [0:15], $addresses
     assert!(
         std::sync::Arc::ptr_eq(&first.options, &second.options),
         "entries sharing a `$define` must share the parsed option table"
+    );
+}
+
+#[test]
+fn a_block_commented_constant_does_not_shift_the_next_offset() {
+    let text = "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1.0, 0.0, 0.0, 255.0, 1
+/* dead = scalar, U08, 1, \"x\", 1.0, 0.0, 0.0, 255.0, 1
+   still dead */
+second = scalar, U08, \"x\", 1.0, 0.0, 0.0, 255.0, 1
+";
+
+    let definition = parse_str(text, &SettingsContext::new()).expect("the file parses");
+    let first = definition.constant("first").expect("first");
+    let second = definition.constant("second").expect("second");
+
+    assert_eq!(
+        definition.constants.len(),
+        2,
+        "the commented entry must not become a constant"
+    );
+    assert!(
+        definition.constant("dead").is_none(),
+        "the commented entry must not be addressable"
+    );
+    assert_eq!(first.address, Some(0));
+    assert_eq!(second.offset, Offset::Next);
+    assert_eq!(
+        second.address,
+        Some(1),
+        "the dead entry must not advance the inferred offset"
     );
 }
