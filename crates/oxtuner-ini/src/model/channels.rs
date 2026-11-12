@@ -108,9 +108,10 @@ pub struct CommsSettings {
     /// lost before the protocol crate models it.
     ///
     /// Keys are ASCII-lowercased, whichever section declared them, so
-    /// `tableWriteCommand` and `tablewritecommand` are the same entry. Only
-    /// synthetic keys built by the parser (`table.<id>.userpassword`,
-    /// `curve.<name>.<key>`, `referenceTable.<name>.<key>`) keep the spelling
-    /// of the names they embed.
+    /// `tableWriteCommand` and `tablewritecommand` are the same entry.
+    /// Synthetic keys built by the parser (`table.<id>.userpassword`,
+    /// `curve.<name>.<key>`, `referenceTable.<name>.<key>`, `menu.<key>`) are
+    /// namespaced instead: they keep the spelling of the names and keys they
+    /// embed, so look those up verbatim.
     pub raw: BTreeMap<String, String>,
 }
