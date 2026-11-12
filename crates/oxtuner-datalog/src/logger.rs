@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossfire::{TrySendError, spsc};
+use crossfire::{RecvTimeoutError, TrySendError, spsc};
 
 use crate::csv::{LogColumn, header, row};
 
@@ -332,9 +332,9 @@ fn writer_loop(
     let mut frames = 0u64;
     let mut bytes = 0u64;
 
-    while let Ok(message) = receiver.recv() {
-        match message {
-            Message::Frame { time, values } => {
+    loop {
+        match receiver.recv_timeout(FLUSH_INTERVAL) {
+            Ok(Message::Frame { time, values }) => {
                 let line = row(time, columns, &values);
                 writer.write_all(line.as_bytes())?;
                 frames = frames.saturating_add(1);
@@ -344,7 +344,11 @@ fn writer_loop(
                 status.inner.frames.store(frames, Ordering::Relaxed);
                 status.inner.bytes.store(bytes, Ordering::Relaxed);
             }
-            Message::Stop => break,
+            // The sender is gone or Stop arrived: finish and flush.
+            Ok(Message::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            // A quiet queue still gets its buffered rows written, so a crash
+            // cannot lose the last half second of a session.
+            Err(RecvTimeoutError::Timeout) => {}
         }
 
         if since_flush >= FLUSH_ROWS || last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -356,4 +360,39 @@ fn writer_loop(
 
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path() -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        std::env::temp_dir().join(format!(
+            "oxtuner-datalog-{}-{stamp}.csv",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn a_quiet_writer_flushes_its_rows_on_the_interval() {
+        let path = temp_path();
+        let columns = vec![LogColumn::new("rpm", "rpm")];
+        let logger = Logger::start(&path, columns, LogStatus::new()).expect("starts");
+        assert!(logger.try_log(0.0, &[1000.0]));
+
+        std::thread::sleep(FLUSH_INTERVAL + Duration::from_millis(250));
+
+        let text = std::fs::read_to_string(&path).expect("reads the log");
+        assert!(
+            text.contains("1000"),
+            "the row reached the file before stop: {text:?}"
+        );
+
+        let report = logger.stop().expect("stops");
+        assert_eq!(report.frames, 1);
+        let _ = std::fs::remove_file(&path);
+    }
 }
