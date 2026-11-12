@@ -338,19 +338,16 @@ impl MsProtocol {
         self.port_open_delay
     }
 
-    /// Sends one `[ControllerCommands]` action.
+    /// Reads a whole page.
     ///
-    /// Each command string is encoded in order and written as its own
-    /// conversation. On a legacy link the dialect declares no reply length, so
-    /// any reply is drained until quiet; on an envelope link the reply is read
-    /// as one frame. Silence is not a failure: several controller actions (a
-    /// reset, for one) never answer.
+    /// The read is chunked at the blocking factor and the chunks are
+    /// concatenated in order, so a page larger than one conversation still
+    /// reads completely.
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError`] when a command cannot be encoded or the link
-    /// fails. A timeout with no bytes is treated as a command that does not
-    /// reply.
+    /// Returns [`ProtocolError::Unsupported`] when the page is not declared or
+    /// has no read command, and any [`ProtocolError`] a chunked read returns.
     pub fn read_page_all(
         &mut self,
         io: &mut dyn Transport,
