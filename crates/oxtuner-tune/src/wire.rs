@@ -20,10 +20,9 @@
 //! word (`[40:47]` on a U16), when its word is wider than 32 bits, or when the
 //! word is not an integer. Signed words are read and written as their
 //! two's-complement pattern. Text is Latin-1 on the wire, like the `.msq` layer,
-//! so a text constant with a character above U+00FF is refused on write: it is
-//! skipped rather than half-encoded. Decode skips a refused field.
-//! [`encode_page`] writes nothing for it, so the word keeps whatever the other
-//! constants on it wrote, and [`patch_page`] keeps the bytes the ECU sent.
+//! so a text constant with a character above U+00FF is refused on write with
+//! [`TuneError::TextNotLatin1`]; the page image is never half-encoded. Decode
+//! skips a field it refuses.
 
 use oxtuner_ini::{DataType, Endianness};
 

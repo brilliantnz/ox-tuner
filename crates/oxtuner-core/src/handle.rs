@@ -145,6 +145,11 @@ pub(crate) struct Gate {
 
 impl Gate {
     /// Runs `accept` while the queue is still open, or reports `Stopped`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a previous panic poisoned the gate lock; the queue state is
+    /// then unverified.
     fn while_open<T>(&self, accept: impl FnOnce() -> Result<T, CoreError>) -> Result<T, CoreError> {
         let closed = self
             .closed
@@ -157,6 +162,11 @@ impl Gate {
     }
 
     /// Closes the door. Every later send is refused.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a previous panic poisoned the gate lock; the queue state is
+    /// then unverified.
     pub(crate) fn close(&self) {
         let mut closed = self
             .closed
