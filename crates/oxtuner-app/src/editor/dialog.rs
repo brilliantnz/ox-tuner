@@ -933,6 +933,9 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
             let command_name = command.command.clone();
             let command_label = command.label.clone();
 
+            // A dialog that declares the same command with the same label
+            // twice would share this id; that would be one row's worth of UI
+            // written twice, not two commands.
             let mut button = Button::new(format!(
                 "dialog-command-{}-{}-{}",
                 dialog.id, command.command, command.label
@@ -947,9 +950,11 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
                 None => {
                     button = button.on_click(move |_, _, cx| {
                         send_command(
-                            &dialog_id,
-                            &command_name,
-                            &command_label,
+                            CommandRef {
+                                dialog: &dialog_id,
+                                command: &command_name,
+                                label: &command_label,
+                            },
                             message.clone(),
                             cx,
                         );
@@ -991,8 +996,22 @@ fn command_card(dialog: &DialogView, cx: &mut Context<'_, DialogEditor>) -> Opti
     ))
 }
 
+/// The names one command button publishes under.
+#[derive(Clone, Copy)]
+struct CommandRef<'a> {
+    dialog: &'a str,
+    command: &'a str,
+    label: &'a str,
+}
+
 /// Sends a command button's action and shows its declared message.
-fn send_command(dialog: &str, command: &str, label: &str, message: Option<String>, cx: &mut App) {
+fn send_command(target: CommandRef<'_>, message: Option<String>, cx: &mut App) {
+    let CommandRef {
+        dialog,
+        command,
+        label,
+    } = target;
+
     if crate::core::run_controller_command(dialog, command, cx)
         && let Some(message) = message
     {
