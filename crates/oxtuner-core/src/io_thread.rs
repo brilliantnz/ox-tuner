@@ -197,6 +197,11 @@ pub(crate) struct IoReply {
 }
 
 /// The core's end of the I/O thread.
+///
+/// Dropping (or [`IoThread::shutdown`]) blocks until the request in flight
+/// reaches its own I/O deadline. Quitting deliberately waits instead of
+/// detaching: a detached thread would keep the serial port open while another
+/// process could claim it.
 pub(crate) struct IoThread {
     requests: crossfire::Tx<spsc::Array<IoRequest>>,
     stop: Arc<AtomicBool>,

@@ -36,7 +36,7 @@ use crate::contract::{
     SignatureVerdict, TableView, WriteReport,
 };
 use crate::gate::GateEvaluator;
-use crate::handle::{CoreHandle, EventStream, EventTx, Gate, SendFailure, StopFlag};
+use crate::handle::{CoreHandle, EventStream, EventTx, SendFailure, SendGate, StopFlag};
 use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
     self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
@@ -106,6 +106,11 @@ pub enum CoreError {
     /// The thread could not be created.
     Spawn(io::Error),
     /// A connection could not be built (no message set, a bad definition).
+    ///
+    /// The protocol cause is flattened to its display text because nothing
+    /// downstream matches on it. Retry or reporting code that needs the
+    /// concrete error would box the cause instead, a change left until a
+    /// caller actually needs it.
     Connect(String),
 }
 
@@ -258,6 +263,11 @@ impl std::fmt::Debug for CoreParts {
 /// wedged, and a wedged thread is abandoned — loudly, after [`SHUTDOWN_WAIT`] +
 /// [`JOIN_WAIT`] — instead of hanging the caller forever. Nothing is ever
 /// detached silently.
+///
+/// The trade-off is quit latency. Dropping waits for the command in flight to
+/// finish, so a slow ECU conversation can hold the caller for up to that
+/// conversation's own I/O deadline. The wait is deliberate: leaving the port
+/// open while the process tears down is worse than a short pause.
 pub struct CoreThread {
     join: Option<JoinHandle<CoreReport>>,
     commands: MTx<mpsc::Array<Envelope>>,
@@ -350,7 +360,7 @@ pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
     let event_tx = EventTx::new(event_tx, Arc::clone(&stop));
     let (frame_notify, frame_watch) = crate::realtime::frame_wake();
     let next_op = Arc::new(AtomicU64::new(OpId::FIRST));
-    let gate = Arc::new(Gate::default());
+    let gate = Arc::new(SendGate::default());
     let core_gate = Arc::clone(&gate);
     let latest = LatestFrame::default();
     let history = ChartHistory::new(config.history_capacity);
@@ -418,7 +428,7 @@ pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
 fn run(
     commands: Rx<mpsc::Array<Envelope>>,
     events: EventTx,
-    gate: Arc<Gate>,
+    gate: Arc<SendGate>,
     latest: LatestFrame,
     history: ChartHistory,
     log: LogStatus,

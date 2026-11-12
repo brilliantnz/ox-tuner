@@ -73,7 +73,11 @@ pub(super) fn run_controller_command(
             "open a project before sending a controller command",
         );
     };
-    let Some(controller) = project.definition().controller_commands.get_ignore_case(name) else {
+    let Some(controller) = project
+        .definition()
+        .controller_commands
+        .get_ignore_case(name)
+    else {
         return refuse(
             events,
             report,

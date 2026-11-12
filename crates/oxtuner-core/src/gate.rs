@@ -3,7 +3,7 @@
 //!
 //! The definition layer parses every `{ … }` field into an [`Expr`]; this module
 //! supplies the values those expressions read. A gate that cannot be resolved is
-//! reported as [`Gate::Unresolved`], and callers keep the gated item available:
+//! reported as [`GateOutcome::Unresolved`], and callers keep the gated item available:
 //! a gap in the evaluator must never lock a user out of a setting.
 
 use std::cell::RefCell;
@@ -19,7 +19,7 @@ use crate::realtime::RealtimeFrame;
 
 /// How one gate expression resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Gate {
+pub(crate) enum GateOutcome {
     /// The expression evaluated to a non-zero value.
     Open,
     /// The expression evaluated to zero.
@@ -28,7 +28,7 @@ pub(crate) enum Gate {
     Unresolved,
 }
 
-impl Gate {
+impl GateOutcome {
     /// Whether the gated item stays available. An unresolved gate stays open.
     fn passes(self) -> bool {
         !matches!(self, Self::Closed)
@@ -128,23 +128,23 @@ impl<'tune> GateEvaluator<'tune> {
     }
 
     /// Evaluates one gate expression, caching the parse.
-    pub(crate) fn gate(&mut self, expression: &str) -> Gate {
+    pub(crate) fn gate(&mut self, expression: &str) -> GateOutcome {
         let expression = expression.trim();
         if expression.is_empty() {
-            return Gate::Open;
+            return GateOutcome::Open;
         }
 
         let Some(parsed) = parse_gate(expression) else {
             self.unresolved.insert(expression.to_owned());
-            return Gate::Unresolved;
+            return GateOutcome::Unresolved;
         };
 
         match parsed.evaluate_with(self) {
-            Some(value) if is_true(value) => Gate::Open,
-            Some(_) => Gate::Closed,
+            Some(value) if is_true(value) => GateOutcome::Open,
+            Some(_) => GateOutcome::Closed,
             None => {
                 self.unresolved.insert(expression.to_owned());
-                Gate::Unresolved
+                GateOutcome::Unresolved
             }
         }
     }
@@ -277,8 +277,8 @@ pub(crate) fn resolve_gates(
     visibility: Option<&str>,
     enable: Option<&str>,
 ) -> GateState {
-    let visible = visibility.map_or(Gate::Open, |expression| evaluator.gate(expression));
-    let enabled = enable.map_or(Gate::Open, |expression| evaluator.gate(expression));
+    let visible = visibility.map_or(GateOutcome::Open, |expression| evaluator.gate(expression));
+    let enabled = enable.map_or(GateOutcome::Open, |expression| evaluator.gate(expression));
 
     GateState {
         visible: visible.passes(),
@@ -377,10 +377,10 @@ cycleB = { cycleA }
         let tune = tune();
         let mut gates = evaluator(&tune);
 
-        assert_eq!(gates.gate("flag"), Gate::Open);
-        assert_eq!(gates.gate("zero"), Gate::Closed);
-        assert_eq!(gates.gate("computed == 3"), Gate::Open);
-        assert_eq!(gates.gate("computed != 3"), Gate::Closed);
+        assert_eq!(gates.gate("flag"), GateOutcome::Open);
+        assert_eq!(gates.gate("zero"), GateOutcome::Closed);
+        assert_eq!(gates.gate("computed == 3"), GateOutcome::Open);
+        assert_eq!(gates.gate("computed != 3"), GateOutcome::Closed);
     }
 
     #[test]
@@ -389,7 +389,7 @@ cycleB = { cycleA }
         let mut gates = evaluator(&tune);
         let gate = gates.gate("missing > 0");
 
-        assert_eq!(gate, Gate::Unresolved);
+        assert_eq!(gate, GateOutcome::Unresolved);
         assert!(gate.passes(), "a gate we cannot read must not hide a row");
         assert_eq!(gates.unresolved().collect::<Vec<_>>(), vec!["missing > 0"]);
     }
@@ -399,7 +399,7 @@ cycleB = { cycleA }
         let tune = tune();
         let mut gates = evaluator(&tune);
 
-        assert_eq!(gates.gate("("), Gate::Unresolved);
+        assert_eq!(gates.gate("("), GateOutcome::Unresolved);
     }
 
     #[test]
@@ -407,7 +407,7 @@ cycleB = { cycleA }
         let tune = tune();
         let mut gates = evaluator(&tune);
 
-        assert_eq!(gates.gate("cycleA > 0"), Gate::Unresolved);
+        assert_eq!(gates.gate("cycleA > 0"), GateOutcome::Unresolved);
     }
 
     #[test]
@@ -415,12 +415,24 @@ cycleB = { cycleA }
         let tune = tune();
         let mut gates = evaluator(&tune);
 
-        assert_eq!(gates.gate("arrayValue(array.arr, 1) == 20"), Gate::Open);
-        assert_eq!(gates.gate("arrayValue(array.arr, 1.5) == 25"), Gate::Open);
-        assert_eq!(gates.gate("arrayValue(array.arr, -2) == 10"), Gate::Open);
-        assert_eq!(gates.gate("arrayValue(array.arr, 99) == 40"), Gate::Open);
-        assert_eq!(gates.gate("arr[1] == 20"), Gate::Open);
-        assert_eq!(gates.gate("arr[1.5] == 25"), Gate::Open);
+        assert_eq!(
+            gates.gate("arrayValue(array.arr, 1) == 20"),
+            GateOutcome::Open
+        );
+        assert_eq!(
+            gates.gate("arrayValue(array.arr, 1.5) == 25"),
+            GateOutcome::Open
+        );
+        assert_eq!(
+            gates.gate("arrayValue(array.arr, -2) == 10"),
+            GateOutcome::Open
+        );
+        assert_eq!(
+            gates.gate("arrayValue(array.arr, 99) == 40"),
+            GateOutcome::Open
+        );
+        assert_eq!(gates.gate("arr[1] == 20"), GateOutcome::Open);
+        assert_eq!(gates.gate("arr[1.5] == 25"), GateOutcome::Open);
     }
 
     #[test]
@@ -430,7 +442,7 @@ cycleB = { cycleA }
 
         assert_eq!(
             gates.gate("arrayValue(array.missing, 0) == 0"),
-            Gate::Unresolved
+            GateOutcome::Unresolved
         );
     }
 
@@ -451,8 +463,8 @@ cycleB = { cycleA }
         };
         let mut gates = GateEvaluator::new(&definition, &tune, Some(&frame));
 
-        assert_eq!(gates.gate("rpm > 500"), Gate::Open);
-        assert_eq!(gates.gate("live > 500"), Gate::Open);
+        assert_eq!(gates.gate("rpm > 500"), GateOutcome::Open);
+        assert_eq!(gates.gate("live > 500"), GateOutcome::Open);
     }
 
     #[test]
