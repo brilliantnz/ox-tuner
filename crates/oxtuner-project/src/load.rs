@@ -624,6 +624,16 @@ fn label_to_raw(
         .ok_or_else(|| format!("`{text}` is not one of the definition's labels"))
 }
 
+/// The first character that has no ISO-8859-1 byte.
+fn first_non_latin1(text: &str) -> Option<char> {
+    text.chars().find(|character| u32::from(*character) > 0xFF)
+}
+
+/// Why a character cannot be written into a `.msq` string.
+fn not_latin1_reason(character: char) -> String {
+    format!("`{character}` is not in ISO-8859-1, the encoding a .msq string uses")
+}
+
 /// Whether the value text is wrapped in double quotes.
 fn is_quoted(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -644,8 +654,9 @@ fn unquote(value: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`FileValueError`] when text is too long or quoted, a bit value has
-/// no label, or the shape and stored values disagree.
+/// Returns [`FileValueError`] when text is too long, quoted or outside
+/// ISO-8859-1, a bit label is outside ISO-8859-1 or has no label for its value,
+/// or the shape and stored values disagree.
 #[expect(
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
@@ -672,6 +683,12 @@ pub fn format_values(
                     reason: "a quote cannot be represented in a .msq string".to_owned(),
                 });
             }
+            if let Some(character) = first_non_latin1(text) {
+                return Err(FileValueError::Text {
+                    name: spec.name.clone(),
+                    reason: not_latin1_reason(character),
+                });
+            }
             Ok(format!("\"{text}\""))
         }
         (EntryShape::Bits { .. }, Values::Numbers(numbers)) => {
@@ -692,7 +709,18 @@ pub fn format_values(
                     .map(|option| option.label.as_str())
             });
             match label {
-                Some(label) => Ok(format!("\"{label}\"")),
+                Some(label) => {
+                    if let Some(character) = first_non_latin1(label) {
+                        return Err(FileValueError::Text {
+                            name: spec.name.clone(),
+                            reason: format!(
+                                "the label for value {raw} cannot be written: {}",
+                                not_latin1_reason(character)
+                            ),
+                        });
+                    }
+                    Ok(format!("\"{label}\""))
+                }
                 None => Err(FileValueError::NoLabel {
                     name: spec.name.clone(),
                     raw,
