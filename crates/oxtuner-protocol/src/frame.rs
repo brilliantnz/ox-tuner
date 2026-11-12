@@ -46,9 +46,10 @@ pub enum FrameError {
         /// What the slice carries.
         actual: usize,
     },
-    /// The payload is larger than the maximum frame payload.
+    /// The bytes asked for are larger than the limit that applies to them.
     TooLarge {
-        /// The length the caller or the length field asked for.
+        /// The payload length the caller asked for, or the whole frame length
+        /// the length field declares.
         declared: usize,
         /// The limit it exceeded.
         limit: usize,
