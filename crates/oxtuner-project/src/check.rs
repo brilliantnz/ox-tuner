@@ -229,7 +229,7 @@ fn check_header(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
 }
 
 fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
-    let mut from_tune: BTreeMap<IniPage, u32> = BTreeMap::new();
+    let mut from_tune: BTreeSet<IniPage> = BTreeSet::new();
 
     if let Some(root) = msq.document().root() {
         for page in root.find_children("page") {
@@ -266,7 +266,7 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             let size = page
                 .attr("size")
                 .and_then(|size| size.trim().parse::<u32>().ok());
-            if from_tune.insert(ini, size.unwrap_or(u32::MAX)).is_some() {
+            if !from_tune.insert(ini) {
                 report.block(
                     IssueKind::DuplicatePage,
                     format!("page {number} appears more than once"),
@@ -308,7 +308,7 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         let Some(ini) = IniPage::new(page.number) else {
             continue;
         };
-        if !from_tune.contains_key(&ini) {
+        if !from_tune.contains(&ini) {
             report.block(
                 IssueKind::MissingPage,
                 format!(

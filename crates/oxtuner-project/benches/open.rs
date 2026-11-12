@@ -13,7 +13,6 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use oxtuner_ini::{Definition, SettingsContext, parse_str};
 use oxtuner_project::{DefinitionSource, Msq, Project};
 
 const INI: &str = "\
@@ -224,19 +223,6 @@ fn bench_project_open_reference_warm(criterion: &mut Criterion) {
     });
 }
 
-/// The cache payload itself, without the filesystem.
-fn bench_definition_cache_codec(criterion: &mut Criterion) {
-    let definition = parse_str(&reference_ini(), &SettingsContext::new()).expect("parses");
-    let bytes = postcard::to_allocvec(&definition).expect("encodes");
-
-    criterion.bench_function("definition_cache_encode_reference_shape", |bencher| {
-        bencher.iter(|| postcard::to_allocvec(black_box(&definition)).expect("encodes"));
-    });
-    criterion.bench_function("definition_cache_decode_reference_shape", |bencher| {
-        bencher.iter(|| postcard::from_bytes::<Definition>(black_box(&bytes)).expect("decodes"));
-    });
-}
-
 /// Serialising the document, with no filesystem in the way.
 fn bench_msq_save(criterion: &mut Criterion) {
     let msq = Msq::parse(&msq_bytes()).expect("parses");
@@ -267,7 +253,6 @@ criterion_group!(
     bench_project_open,
     bench_project_open_reference,
     bench_project_open_reference_warm,
-    bench_definition_cache_codec,
     bench_project_save_noop
 );
 criterion_main!(benches);

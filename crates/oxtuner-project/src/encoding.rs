@@ -8,6 +8,12 @@
 //! come from something the user typed or pasted into the UI — has no Latin-1
 //! byte. It is reported ([`EncodeError`]) rather than replaced with `?`, because
 //! silently corrupting a name or a comment is worse than refusing the save.
+//!
+//! A hand-edited `.msq` saved as UTF-8 therefore displays as mojibake for any
+//! non-ASCII text. That is the deliberate trade-off: the format boundary is
+//! Latin-1, so the same bytes must decode the same way every time. A UTF-8 BOM
+//! is the one unambiguous signal a later version could sniff for if the
+//! exception ever matters.
 
 use std::fmt;
 

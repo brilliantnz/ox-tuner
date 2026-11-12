@@ -46,6 +46,7 @@ impl Provenance {
     }
 
     /// Writes the provenance file, creating `.ox-tuner/` when needed.
+    ///
     /// # Errors
     ///
     /// Returns the I/O error when the sidecar directory or file cannot be
@@ -65,6 +66,7 @@ impl Provenance {
     }
 
     /// Reads the provenance file, or `None` when the sidecar has never been written.
+    ///
     /// # Errors
     ///
     /// Returns the I/O error when the sidecar exists but cannot be read.
