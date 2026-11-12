@@ -111,7 +111,7 @@ impl LogConfig {
 
     /// Starts at the given verbosity, normally from the persisted setting.
     #[must_use]
-    pub fn with_verbose(mut self, verbosity: Verbosity) -> Self {
+    pub fn with_verbosity(mut self, verbosity: Verbosity) -> Self {
         self.verbosity = verbosity;
         self
     }
