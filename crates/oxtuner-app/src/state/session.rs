@@ -29,7 +29,12 @@ use super::store;
 use crate::core::CoreService;
 use crate::platform::paths::AppPaths;
 
-/// Bump when the on-disk shape changes in a way that needs migration.
+/// The on-disk shape this build writes.
+///
+/// The app is unreleased, so a shape change deletes the stale file and lets it
+/// be written again; schema versions and migrations arrive with the first
+/// release. The number exists so a file from a newer build is refused instead
+/// of half-read.
 pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 
 /// How long to wait after the last layout/window change before writing.
