@@ -1,7 +1,7 @@
-//! The `.ox-tuner/` sidecar: state that is ours, never `TunerStudio`'s.
+//! The `.oxtuner/` sidecar: state that is ours, never `TunerStudio`'s.
 //!
 //! ADR-0007 allows exactly one place inside a project for ox-tuner's own
-//! files: the `.ox-tuner/` directory. So far that is provenance — which INI a
+//! files: the `.oxtuner/` directory. So far that is provenance — which INI a
 //! tune was opened with (relative path, SHA-256 and firmware signature) — so a
 //! later session can tell "the definition changed" from "the tune changed".
 //!
@@ -18,7 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Directory name inside a project.
-pub const SIDECAR_DIR: &str = ".ox-tuner";
+pub const SIDECAR_DIR: &str = ".oxtuner";
 /// Provenance file inside the sidecar directory.
 pub const PROVENANCE_FILE: &str = "provenance";
 
@@ -45,7 +45,7 @@ impl Provenance {
         }
     }
 
-    /// Writes the provenance file, creating `.ox-tuner/` when needed.
+    /// Writes the provenance file, creating `.oxtuner/` when needed.
     ///
     /// # Errors
     ///

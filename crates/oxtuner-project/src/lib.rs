@@ -16,7 +16,7 @@
 //! # Guarantees
 //!
 //! - **In place.** Nothing is copied or restructured; inside the project,
-//!   writes are confined to `CurrentTune.msq` and the `.ox-tuner/` sidecar
+//!   writes are confined to `CurrentTune.msq` and the `.oxtuner/` sidecar
 //!   (ADR-0007). The optional definition cache is written only under the
 //!   caller-supplied cache directory (ADR-0026).
 //! - **Cached, never owned.** A caller may pass a cache directory

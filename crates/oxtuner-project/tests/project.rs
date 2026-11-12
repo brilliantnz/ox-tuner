@@ -314,8 +314,8 @@ fn a_write_stays_inside_the_project_and_its_sidecar() {
         written,
         [
             "project",
-            "project/.ox-tuner",
-            "project/.ox-tuner/provenance",
+            "project/.oxtuner",
+            "project/.oxtuner/provenance",
             "project/CurrentTune.msq",
             "project/projectCfg",
             "project/projectCfg/mainController.ini",
@@ -515,7 +515,7 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
     let outcome = project.save().expect("the edit saves");
     assert_eq!(outcome.variables, ["tempUnits"]);
     assert!(project.provenance().is_none());
-    assert!(!dir.path().join(".ox-tuner").exists());
+    assert!(!dir.path().join(".oxtuner").exists());
 }
 
 #[test]

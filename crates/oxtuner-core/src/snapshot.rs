@@ -3,7 +3,7 @@
 //! A snapshot is a complete `.msq` rendered from the **working** image, not a
 //! copy of the project file: unsaved edits are part of what the user is about to
 //! write, burn, revert or replace, so they must be recoverable. Files live in
-//! `<project>/.ox-tuner/snapshots/` and are pruned to a bounded count.
+//! `<project>/.oxtuner/snapshots/` and are pruned to a bounded count.
 
 use std::{
     fmt, fs, io,
@@ -286,7 +286,7 @@ mod tests {
 
         assert_eq!(
             directory(root),
-            Path::new("/projects/roadster/.ox-tuner/snapshots")
+            Path::new("/projects/roadster/.oxtuner/snapshots")
         );
     }
 
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn two_snapshots_in_one_millisecond_get_distinct_names() {
-        let directory = Path::new("/projects/roadster/.ox-tuner/snapshots");
+        let directory = Path::new("/projects/roadster/.oxtuner/snapshots");
         let stamp = 1_700_000_000_000;
 
         let first = snapshot_path(directory, "write", stamp, 0);
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_write_error_keeps_its_cause_and_names_the_path() {
-        let path = PathBuf::from("/projects/roadster/.ox-tuner/snapshots/snapshot-1.msq");
+        let path = PathBuf::from("/projects/roadster/.oxtuner/snapshots/snapshot-1.msq");
         let write = SnapshotError::Write {
             path: path.clone(),
             source: io::Error::other("disk full"),

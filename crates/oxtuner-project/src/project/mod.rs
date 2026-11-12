@@ -9,7 +9,7 @@
 //! restructured (ADR-0007), and the only writes inside the project are:
 //!
 //! - `CurrentTune.msq` — and only the constants whose values changed;
-//! - `.ox-tuner/provenance` — which INI was used, by hash and signature.
+//! - `.oxtuner/provenance` — which INI was used, by hash and signature.
 //!
 //! A caller may additionally pass a cache directory; the parsed definition is
 //! then memoized there, never inside the project (ADR-0026).

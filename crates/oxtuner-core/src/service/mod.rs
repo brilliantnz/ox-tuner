@@ -71,7 +71,7 @@ pub struct CoreConfig {
     /// enabled it in the settings and the app passed that choice in.
     pub writes_enabled: bool,
     /// Where a standalone definition's write journal and logs live. A project
-    /// always uses its own `.ox-tuner/` sidecar.
+    /// always uses its own `.oxtuner/` sidecar.
     pub journal_dir: Option<PathBuf>,
     /// Where parsed definitions are cached. `None` disables the cache, which is
     /// what tests and tools get unless they ask for it; the application passes

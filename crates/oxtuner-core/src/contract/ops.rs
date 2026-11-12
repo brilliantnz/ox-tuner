@@ -304,7 +304,7 @@ pub(crate) enum CommandRequest {
     /// imported. Snapshots carry the definition's signature, so no consent is
     /// needed for a first-party snapshot.
     RestoreSnapshot {
-        /// A `.msq` under `.ox-tuner/snapshots/`.
+        /// A `.msq` under `.oxtuner/snapshots/`.
         path: PathBuf,
     },
     /// List the project's snapshots, oldest first.
