@@ -36,6 +36,11 @@ const STOP_WAIT: Duration = Duration::from_secs(2);
 /// The poller holds a [`Logger`] and calls [`Logger::try_log`], which never
 /// blocks. Dropping it flushes and joins; [`Logger::stop`] also reports what the
 /// session wrote.
+///
+/// Dropping can stall the thread that does it. The stop message waits up to two
+/// seconds for queue room and the join waits for the final flush, so a teardown
+/// on a slow disk is not instant. Move the drop off the UI thread when that
+/// matters.
 pub struct Logger {
     sender: Option<crossfire::Tx<spsc::Array<Message>>>,
     join: Option<JoinHandle<io::Result<()>>>,
@@ -272,6 +277,7 @@ impl Logger {
                 false
             }
             Err(TrySendError::Disconnected(_)) => {
+                self.status.inner.dropped.fetch_add(1, Ordering::Relaxed);
                 self.status.stopped();
                 false
             }
