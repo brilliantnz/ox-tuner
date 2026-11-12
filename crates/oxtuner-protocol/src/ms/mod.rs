@@ -212,9 +212,9 @@ impl MsProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::Unsupported`] when no behavior claims the
-    /// definition or a declared realtime size or offset does not fit the wire,
-    /// or [`ProtocolError::Encoding`] when a handshake command cannot be
-    /// encoded.
+    /// definition, a declared realtime size or offset does not fit the wire, or
+    /// the firmware's page switch needs a burn (which this build cannot do), or
+    /// [`ProtocolError::Encoding`] when a handshake command cannot be encoded.
     pub fn new(definition: &Definition, behavior: &dyn EcuBehavior) -> Result<Self, ProtocolError> {
         if behavior.matches(definition) == Match::No {
             return Err(ProtocolError::Unsupported(format!(
@@ -231,6 +231,19 @@ impl MsProtocol {
         }
 
         let pages = build_pages(definition, behavior, &variables);
+        // Burning a page before it may be left is not something this build can
+        // do inside a read or write conversation, so say so before a port is
+        // opened instead of failing on the first page switch.
+        if let Some(page) = pages
+            .iter()
+            .find(|entry| entry.switch == PageSwitch::BurnBeforeSwitch)
+        {
+            return Err(ProtocolError::Unsupported(format!(
+                "this firmware must burn page {} before it is left; burn-before-switch paging is \
+                 not implemented",
+                page.spec.number
+            )));
+        }
         let handshake = build_handshake(definition, behavior, &variables)?;
         let realtime = build_realtime(definition)?;
 
@@ -480,8 +493,9 @@ impl MsProtocol {
     /// require.
     ///
     /// `ReadBeforeUse` sends a one-byte read of the target page: the legacy
-    /// protocol uses that read to select the page. `BurnBeforeSwitch` refuses
-    /// the switch here; only the core's burn path may perform it.
+    /// protocol uses that read to select the page. `BurnBeforeSwitch` is
+    /// refused here; [`MsProtocol::new`] already rejects such a definition, so
+    /// this arm is a guard against a behavior that starts reporting it later.
     fn activate(&mut self, io: &mut dyn Transport, page: u8) -> Result<(), ProtocolError> {
         if self.last_page == Some(page) {
             return Ok(());
@@ -519,7 +533,8 @@ impl MsProtocol {
             }
             PageSwitch::BurnBeforeSwitch => {
                 return Err(ProtocolError::Unsupported(format!(
-                    "this firmware must burn page {page} before switching away, and burning is                      not part of a read session"
+                    "page {page} must be burned before it is left, and a burn is not part of a read \
+                     session"
                 )));
             }
         }
