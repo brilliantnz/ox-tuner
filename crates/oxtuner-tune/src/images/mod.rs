@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
+use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
 
 mod conflict;
 mod state;
@@ -334,28 +334,40 @@ impl TuneImages {
             let Some(spec) = self.layout.variable(name) else {
                 continue;
             };
-            let count = spec
-                .shape
-                .dimensions()
-                .map_or(1, |(columns, rows)| columns.saturating_mul(rows))
-                .max(1);
 
-            for index in 0..count {
-                let (Ok(saved), Ok(current)) = (
-                    self.baseline.raw_at(name, index),
-                    self.working.raw_at(name, index),
-                ) else {
-                    continue;
-                };
-                if saved == current {
-                    continue;
+            if matches!(spec.shape, EntryShape::Text { .. }) {
+                let saved = self.baseline.text(name).ok().map(str::to_owned);
+                let current = self.working.text(name).ok().map(str::to_owned);
+                if let (Some(saved), Some(current)) = (saved, current)
+                    && saved != current
+                    && self.working.set_text(name, &saved).is_ok()
+                {
+                    reverted += 1;
                 }
+            } else {
+                let count = spec
+                    .shape
+                    .dimensions()
+                    .map_or(1, |(columns, rows)| columns.saturating_mul(rows))
+                    .max(1);
 
-                if self.working.set_raw_at(name, index, saved).is_err() {
-                    continue;
+                for index in 0..count {
+                    let (Ok(saved), Ok(current)) = (
+                        self.baseline.raw_at(name, index),
+                        self.working.raw_at(name, index),
+                    ) else {
+                        continue;
+                    };
+                    if saved == current {
+                        continue;
+                    }
+
+                    if self.working.set_raw_at(name, index, saved).is_err() {
+                        continue;
+                    }
+
+                    reverted += 1;
                 }
-
-                reverted += 1;
             }
 
             // A conflict mark asks the reader to review a cell. The values are
