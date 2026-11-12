@@ -84,6 +84,10 @@ pub enum Fault {
         at: usize,
     },
     /// The reply arrives late.
+    ///
+    /// The sleep runs on whatever thread is driving the transport, capped at
+    /// 500 ms. Keep suite delays well under the protocol's read timeout, or
+    /// the test measures a timeout instead of the late reply.
     Delay {
         /// How late.
         delay: Duration,
