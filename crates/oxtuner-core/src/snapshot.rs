@@ -100,10 +100,10 @@ pub(crate) fn directory(root: &Path) -> PathBuf {
 
 /// The final name of one snapshot.
 ///
-/// The sequence is zero-padded so files written in the same millisecond still
-/// sort in write order.
+/// The sequence is zero-padded to the full `u64` width so files written in the
+/// same millisecond still sort in write order.
 fn snapshot_path(directory: &Path, label: &str, stamp: u128, sequence: u64) -> PathBuf {
-    directory.join(format!("snapshot-{stamp}-{label}-{sequence:06}.msq"))
+    directory.join(format!("snapshot-{stamp}-{label}-{sequence:020}.msq"))
 }
 
 /// Writes the working image as a snapshot and prunes the oldest files.
@@ -116,6 +116,11 @@ fn snapshot_path(directory: &Path, label: &str, stamp: u128, sequence: u64) -> P
 /// Returns [`SnapshotError`] naming the directory, render, write or rename step
 /// that failed.
 pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotError> {
+    debug_assert!(
+        !label.contains(['/', '\\']) && !label.contains(".."),
+        "snapshot label must be a plain name: {label}"
+    );
+
     let directory = directory(project.root());
     fs::create_dir_all(&directory).map_err(|source| SnapshotError::Directory {
         path: directory.clone(),
@@ -155,6 +160,9 @@ pub(crate) fn write(project: &Project, label: &str) -> Result<PathBuf, SnapshotE
 }
 
 /// Snapshots in `root`, oldest first. Unreadable directories are empty.
+///
+/// A pre-sequence name sorts after a same-timestamp sequenced name because `-`
+/// sorts before `.`, but the timestamp still dominates in practice.
 pub(crate) fn list(root: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = fs::read_dir(directory(root))
         .into_iter()
@@ -170,6 +178,10 @@ pub(crate) fn list(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Drops the oldest snapshots over [`MAX_SNAPSHOTS`].
+///
+/// An interrupted write leaves a `*.tmp` file behind, which this and [`list`]
+/// ignore. It is not swept: a live writer's temporary looks the same.
 fn prune(directory: &Path) {
     let mut paths: Vec<PathBuf> = fs::read_dir(directory)
         .into_iter()
@@ -256,7 +268,7 @@ mod tests {
         let root = temp_dir();
         let snapshots = directory(&root);
         fs::create_dir_all(&snapshots).expect("directory");
-        let first = snapshot_path(&snapshots, "write", 1_700_000_000_000, 0);
+        let first = snapshot_path(&snapshots, "write", 1_700_000_000_000, 2);
         let second = snapshot_path(&snapshots, "write", 1_700_000_000_000, 10);
         fs::write(&first, b"x").expect("write");
         fs::write(&second, b"x").expect("write");
