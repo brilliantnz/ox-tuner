@@ -639,7 +639,7 @@ impl Session {
 }
 
 /// The text of a panic payload, which is `Box<dyn Any>` and not printable.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     if let Some(message) = payload.downcast_ref::<&'static str>() {
         return message;
     }
