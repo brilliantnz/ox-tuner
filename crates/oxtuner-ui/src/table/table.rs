@@ -34,10 +34,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::Button, button::ButtonVariants};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, ElementId, ElementInputHandler,
@@ -942,16 +941,7 @@ impl Render for Table {
             .bg(theme.secondary)
             .flex()
             .items_center()
-            .justify_center()
-            .child(
-                Button::new("re-bins")
-                    .icon(IconName::Move3d)
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .h_full()
-                    .rounded_none(),
-            );
+            .justify_center();
 
         let header_band = h_flex()
             .h(px(AXIS_HEIGHT))
