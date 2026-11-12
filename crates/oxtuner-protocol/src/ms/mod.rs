@@ -31,7 +31,7 @@ use realtime::{Realtime, build_realtime};
 
 use crate::behavior::{CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
 use crate::error::ProtocolError;
-use crate::frame::Frame;
+use crate::frame::{Frame, FrameError};
 
 /// How the bytes are framed on the wire.
 #[expect(
@@ -584,10 +584,7 @@ impl MsProtocol {
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
         if length > crate::frame::MAX_PAYLOAD {
-            return Err(ProtocolError::BadFrame(format!(
-                "the reply declares {length} payload bytes, the limit is {}",
-                crate::frame::MAX_PAYLOAD
-            )));
+            return Err(FrameError::TooLarge { declared: length }.into());
         }
         let mut rest = vec![0u8; length + 4];
         io.read_exact_timeout(&mut rest, self.block_read_timeout)?;

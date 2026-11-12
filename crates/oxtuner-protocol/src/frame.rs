@@ -85,7 +85,7 @@ impl std::error::Error for FrameError {}
 
 impl From<FrameError> for ProtocolError {
     fn from(error: FrameError) -> Self {
-        Self::BadFrame(error.to_string())
+        Self::BadFrame(error)
     }
 }
 
