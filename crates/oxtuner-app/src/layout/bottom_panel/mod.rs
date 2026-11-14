@@ -157,7 +157,7 @@ impl Render for BottomPanel {
 
         v_flex()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(cx.theme().tokens.tab)
             .text_color(cx.theme().foreground)
             .child(
                 TabBar::new("bottom-panel-tabs")
