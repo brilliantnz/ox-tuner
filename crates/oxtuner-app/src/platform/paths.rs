@@ -150,6 +150,22 @@ impl AppPaths {
         &self.projects_dir
     }
 
+    /// Creates the projects folder, once per launch.
+    ///
+    /// The folder is the default the new-project dialog starts in, so it
+    /// exists from the first launch instead of appearing only after the first
+    /// project is written. A failure is a warning, never a crash: the dialog
+    /// lets the user pick another folder anyway.
+    pub fn ensure_projects_dir(&self) {
+        if let Err(error) = std::fs::create_dir_all(&self.projects_dir) {
+            tracing::warn!(
+                %error,
+                path = %self.projects_dir.display(),
+                "the projects folder could not be created"
+            );
+        }
+    }
+
     /// The user-editable application settings.
     pub fn settings_file(&self) -> PathBuf {
         self.config_dir.join("settings.json")
@@ -238,6 +254,62 @@ impl gpui_kit::Global for AppPaths {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A fresh temporary root, so a test never touches the user's folders.
+    fn temp_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+
+        std::env::temp_dir().join(format!("oxtuner-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn the_projects_folder_is_created_on_the_first_launch() {
+        let root = temp_root("paths-test");
+        let paths = AppPaths {
+            config_dir: root.join("config"),
+            cache_dir: root.join("cache"),
+            logs_dir: root.join("logs"),
+            projects_dir: root.join("OxTunerProjects"),
+        };
+
+        paths.ensure_projects_dir();
+
+        assert!(
+            paths.projects_dir.is_dir(),
+            "the projects folder should exist"
+        );
+
+        // A second launch finds it already there and stays quiet about it.
+        paths.ensure_projects_dir();
+        assert!(paths.projects_dir.is_dir());
+    }
+
+    #[test]
+    fn a_missing_projects_folder_is_a_warning_not_a_crash() {
+        let paths = AppPaths {
+            config_dir: PathBuf::from("config"),
+            cache_dir: PathBuf::from("cache"),
+            logs_dir: PathBuf::from("logs"),
+            // A file where the folder should be makes every create fail.
+            projects_dir: {
+                let root = temp_root("paths-blocked-test");
+                std::fs::create_dir_all(&root).expect("create temp root");
+                std::fs::write(root.join("OxTunerProjects"), b"").expect("write the blocker");
+                root.join("OxTunerProjects")
+            },
+        };
+
+        paths.ensure_projects_dir();
+
+        assert!(
+            paths.projects_dir.is_file(),
+            "the blocker should still be there"
+        );
+    }
 
     fn dirs(config: &str, local: &str, cache: &str, home: &str) -> PlatformDirs {
         PlatformDirs {
