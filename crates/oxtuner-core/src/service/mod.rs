@@ -941,7 +941,7 @@ impl Live {
                 link_label: link.label(),
                 custom_link: !link.is_serial(),
                 definition_signature: definition.signature.clone(),
-                behavior: behavior.as_dyn().name().to_owned(),
+                behavior: behavior.as_dyn().id().to_owned(),
                 framing: match framing {
                     LinkMode::Legacy => "legacy",
                     LinkMode::Envelope => "envelope",

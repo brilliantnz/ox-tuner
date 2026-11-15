@@ -111,7 +111,7 @@ impl std::fmt::Debug for MsProtocol {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MsProtocol")
-            .field("name", &self.name)
+            .field("behavior_id", &self.behavior_id)
             .field("pages", &self.pages.len())
             .field("link", &self.link)
             .finish_non_exhaustive()
@@ -166,7 +166,7 @@ fn unsupported_text_crc(page: u8) -> ProtocolError {
 
 /// The MS-compatible protocol for one definition.
 pub struct MsProtocol {
-    name: &'static str,
+    behavior_id: &'static str,
     variables: HashMap<String, u8>,
     signature_command: Option<CommandTemplate>,
     handshake: Vec<Vec<u8>>,
@@ -252,7 +252,7 @@ impl MsProtocol {
         let realtime = build_realtime(definition)?;
 
         Ok(Self {
-            name: behavior.name(),
+            behavior_id: behavior.id(),
             variables,
             signature_command: definition
                 .query_command
@@ -304,9 +304,9 @@ impl MsProtocol {
         })
     }
 
-    /// The behavior's name, for logs and the connection summary.
-    pub fn name(&self) -> &'static str {
-        self.name
+    /// The behavior's stable id, for logs and the connection summary.
+    pub fn behavior_id(&self) -> &'static str {
+        self.behavior_id
     }
 
     /// Selects the framing. Legacy stays the default because it is the path

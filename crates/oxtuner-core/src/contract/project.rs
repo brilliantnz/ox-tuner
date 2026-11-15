@@ -211,7 +211,10 @@ pub struct ConnectionView {
     pub read_only_reason: Option<String>,
     /// Whether the global write switch is on. Off by default.
     pub writes_enabled: bool,
-    /// The `EcuBehavior` that claimed the definition.
+    /// The stable [`EcuBehavior::id`] that claimed the definition, never a
+    /// display label.
+    ///
+    /// [`EcuBehavior::id`]: oxtuner_protocol::EcuBehavior::id
     pub behavior: String,
     /// Framing in use: `legacy` or `envelope`.
     pub framing: &'static str,

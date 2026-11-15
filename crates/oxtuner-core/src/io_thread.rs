@@ -298,7 +298,7 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
     }
     recorder.note(format!(
         "behavior: {} · framing: {:?}",
-        protocol.name(),
+        protocol.behavior_id(),
         protocol.link_mode()
     ));
 
