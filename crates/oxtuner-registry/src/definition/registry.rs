@@ -212,11 +212,16 @@ impl Registry {
         family: Family,
         path: &std::path::Path,
     ) -> Result<Vec<VersionEntry>, RegistryError> {
-        let source = self
+        let Some(source) = self
             .sources
             .iter()
-            .find(|source| source.family() == family)
-            .expect("a listed family has a source");
+            .find(|source| source.family() == family && source.has_listing())
+        else {
+            return Err(RegistryError::new(
+                ErrorKind::Unsupported,
+                "this family publishes no version list",
+            ));
+        };
 
         let entries = source.fetch_listing(fetch)?;
         let bytes = serde_json::to_vec(&entries)

@@ -7,9 +7,9 @@
 
 use crate::error::{ErrorKind, RegistryError};
 
-/// The largest `versions.txt` listing this crate will read.
+/// The largest version listing this crate will read.
 ///
-/// A version list is a few dozen short lines; the cap only stops a stray or
+/// A listing is a few dozen short lines; the cap only stops a stray or
 /// hostile reply from being read whole.
 pub const MAX_VERSIONS_BYTES: usize = 64 * 1024;
 
@@ -17,9 +17,6 @@ pub const MAX_VERSIONS_BYTES: usize = 64 * 1024;
 ///
 /// A real definition is a few hundred kilobytes at most.
 pub const MAX_INI_BYTES: usize = 2 * 1024 * 1024;
-
-/// The largest release-notes document this crate will read.
-pub const MAX_NOTES_BYTES: usize = 256 * 1024;
 
 /// How long a cached listing counts as fresh.
 pub const VERSIONS_TTL_SECS: u64 = 24 * 60 * 60;
@@ -81,12 +78,21 @@ pub fn check_url(url: &str) -> Result<(), RegistryError> {
         .strip_prefix("https://")
         .ok_or_else(|| RegistryError::new(ErrorKind::InvalidUrl, "only https URLs are fetched"))?;
 
-    let host = rest.split('/').next().unwrap_or_default();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
 
-    if host.is_empty() {
+    if authority.is_empty() {
         return Err(RegistryError::new(
             ErrorKind::InvalidUrl,
             "the URL names no host",
+        ));
+    }
+
+    // A userinfo section hides the real host from a reader and a filter, and a
+    // space cannot appear in a valid URL at all.
+    if authority.contains('@') || url.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(RegistryError::new(
+            ErrorKind::InvalidUrl,
+            "the URL carries credentials or whitespace",
         ));
     }
 
@@ -111,6 +117,8 @@ mod tests {
             "https:///no-host",
             "ftp://example.com/x.ini",
             "not a url",
+            "https://user:pw@speeduino.com/fw/versions",
+            "https://speeduino.com/fw/a b.ini",
         ] {
             let error = check_url(url).expect_err("must be refused");
 

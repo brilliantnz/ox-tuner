@@ -112,18 +112,6 @@ impl CacheStore {
             .join(format!("{stem}-{suffix}.ini"))
     }
 
-    /// Where the release notes for `id` are cached.
-    pub fn notes_file(&self, id: &FirmwareId) -> PathBuf {
-        let stem = safe_segment(&id.version, 64);
-        let suffix = short_hash(id.raw.as_bytes());
-
-        self.root
-            .join("definition")
-            .join("notes")
-            .join(id.family.id())
-            .join(format!("{stem}-{suffix}.json"))
-    }
-
     /// Where the firmware image is cached.
     pub fn firmware_image(&self, image: &FirmwareImage) -> PathBuf {
         let stem = safe_segment(&image.version, 64);
@@ -202,6 +190,13 @@ impl CacheStore {
             return path.is_file();
         };
 
+        // A length mismatch is decidable without reading the file: the digest
+        // can only match when the sizes do.
+        match fs::metadata(path) {
+            Ok(found) if found.len() == meta.size => {}
+            _ => return false,
+        }
+
         digest_file(path).is_some_and(|found| found == expected)
     }
 
@@ -267,7 +262,8 @@ impl CacheStore {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Removes the oldest files in `dir` past `keep` entries.
+    /// Removes the oldest files in `dir` past `keep` entries, with their
+    /// provenance sidecars.
     ///
     /// Only files with the given extension are counted. Failures are best
     /// effort and ignored; a directory outside the root is left alone.
@@ -297,6 +293,9 @@ impl CacheStore {
         files.sort_by_key(|(modified, _)| *modified);
         let excess = files.len() - keep;
         for (_, path) in files.into_iter().take(excess) {
+            // The sidecar goes with its data: an orphan would never be read
+            // again and would keep the directory from ever shrinking.
+            let _ = fs::remove_file(self.meta_for(&path));
             let _ = fs::remove_file(path);
         }
     }
@@ -576,6 +575,42 @@ mod tests {
 
         assert!(CacheStore::verify(b"abc", &digest));
         assert!(!CacheStore::verify(b"abd", &digest));
+    }
+
+    #[test]
+    fn pruning_takes_the_sidecar_with_its_data() {
+        let root = temp_root("prune-sidecar");
+        let store = CacheStore::new(&root);
+        let dir = root.join("definition/ini/speeduino");
+
+        for index in 0..2 {
+            let path = dir.join(format!("{index}.ini"));
+            let bytes = b"x";
+            store.store(&path, bytes).expect("a store succeeds");
+            store.store_meta(
+                &path,
+                &Meta::downloaded("https://example.invalid/x.ini", bytes),
+            );
+        }
+
+        store.prune(&dir, "ini", 1);
+
+        let left: Vec<String> = fs::read_dir(&dir)
+            .expect("the dir reads")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let has = |suffix: &str| left.iter().any(|name| name.ends_with(suffix));
+
+        assert_eq!(left.len(), 2, "one data file and its sidecar: {left:?}");
+        assert!(has(".ini"), "{left:?}");
+        assert!(has(".meta.json"), "{left:?}");
+        assert!(
+            left.iter().any(|name| name.ends_with(".meta.json")),
+            "{left:?}"
+        );
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
     }
 
     #[test]

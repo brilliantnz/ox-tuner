@@ -51,6 +51,7 @@ impl ErrorKind {
         }
     }
 }
+
 impl RegistryError {
     /// The machine key for this failure.
     pub fn kind(&self) -> ErrorKind {
@@ -78,7 +79,8 @@ impl From<io::Error> for RegistryError {
     /// Any filesystem failure surfaces as a cache failure.
     ///
     /// The cache is a derived artifact, so callers treat this as a miss and
-    /// fall back to fetching or parsing again.
+    /// fall back to fetching or parsing again. The io error is flattened into
+    /// the message because this error type is `Clone` and cannot hold one.
     fn from(error: io::Error) -> Self {
         Self::new(ErrorKind::Cache, error.to_string())
     }

@@ -45,7 +45,7 @@ pub fn ini_url_for_signature(signature: &str) -> Option<String> {
     let (label, rest) = signature.trim().split_once([' ', '\t'])?;
     let rest = rest.trim();
 
-    if label.is_empty() || rest.is_empty() {
+    if !is_token(label) || rest.is_empty() {
         return None;
     }
 
@@ -54,7 +54,7 @@ pub fn ini_url_for_signature(signature: &str) -> Option<String> {
     url.push_str(&label.to_ascii_lowercase());
     url.push('/');
     for part in rest.split('.') {
-        if part.is_empty() {
+        if !is_token(part) {
             return None;
         }
         url.push_str(part);
@@ -174,36 +174,27 @@ fn join_url(base: &str, href: &str) -> String {
     )
 }
 
-/// Fetches one autoindex page and keeps its directory links.
-fn child_dirs(fetch: &dyn HttpGet, url: &str) -> Result<Vec<String>, RegistryError> {
+/// Fetches one autoindex page and returns its sorted, deduplicated names of
+/// directories (`dirs`) or `.ini` files (otherwise).
+///
+/// One helper keeps the page fetch and parse in one place, so a change to the
+/// page handling cannot drift between the two callers.
+fn page_names(fetch: &dyn HttpGet, url: &str, dirs: bool) -> Result<Vec<String>, RegistryError> {
     let bytes = fetch.fetch(url, MAX_LISTING_BYTES)?;
     let html = String::from_utf8_lossy(&bytes);
 
-    let mut dirs: Vec<String> = parse_autoindex_links(&html)
+    let mut names: Vec<String> = parse_autoindex_links(&html)
         .into_iter()
-        .filter(|link| link.is_dir)
-        .map(|link| link.href.trim_end_matches('/').to_owned())
+        .filter(|link| link.is_dir == dirs)
+        .map(|link| {
+            let name = link.href.trim_end_matches('/');
+            name.to_owned()
+        })
         .collect();
-    dirs.sort();
-    dirs.dedup();
+    names.sort();
+    names.dedup();
 
-    Ok(dirs)
-}
-
-/// Fetches one autoindex page and keeps its `.ini` file names.
-fn hash_files(fetch: &dyn HttpGet, url: &str) -> Result<Vec<String>, RegistryError> {
-    let bytes = fetch.fetch(url, MAX_LISTING_BYTES)?;
-    let html = String::from_utf8_lossy(&bytes);
-
-    let mut files: Vec<String> = parse_autoindex_links(&html)
-        .into_iter()
-        .filter(|link| !link.is_dir)
-        .map(|link| link.href)
-        .collect();
-    files.sort();
-    files.dedup();
-
-    Ok(files)
+    Ok(names)
 }
 
 /// The newest names first. Zero-padded dates sort newest-first this way.
@@ -226,7 +217,7 @@ fn is_dated(text: &str, width: usize) -> bool {
 /// newest day each with all its boards. The caps keep the walk to a few
 /// hundred small requests at most; the caller caches the result for a day.
 fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError> {
-    let mut branches = child_dirs(fetch, AUTOINDEX_ROOT)?;
+    let mut branches = page_names(fetch, AUTOINDEX_ROOT, true)?;
     branches.retain(|branch| branch != "master");
     branches.sort();
     branches.reverse();
@@ -256,7 +247,7 @@ fn crawl_branch(
 ) -> Result<(), RegistryError> {
     let base = join_url(AUTOINDEX_ROOT, branch);
     let years: Vec<String> = newest_first(
-        child_dirs(fetch, &base)?
+        page_names(fetch, &base, true)?
             .into_iter()
             .filter(|name| is_dated(name, 4))
             .collect(),
@@ -268,7 +259,7 @@ fn crawl_branch(
     };
 
     let months: Vec<String> = newest_first(
-        child_dirs(fetch, &join_url(&base, &year))?
+        page_names(fetch, &join_url(&base, &year), true)?
             .into_iter()
             .filter(|name| is_dated(name, 2))
             .collect(),
@@ -280,7 +271,7 @@ fn crawl_branch(
     };
 
     let days: Vec<String> = newest_first(
-        child_dirs(fetch, &join_url(&join_url(&base, &year), &month))?
+        page_names(fetch, &join_url(&join_url(&base, &year), &month), true)?
             .into_iter()
             .filter(|name| is_dated(name, 2))
             .collect(),
@@ -293,7 +284,7 @@ fn crawl_branch(
         }
 
         let day_url = join_url(&join_url(&base, &year), &format!("{month}/{day}"));
-        let mut boards = child_dirs(fetch, &day_url)?;
+        let mut boards = page_names(fetch, &day_url, true)?;
         boards.truncate(MAX_BOARDS_PER_DAY);
 
         for board in boards {
@@ -301,7 +292,7 @@ fn crawl_branch(
                 break;
             }
 
-            let mut hashes = hash_files(fetch, &join_url(&day_url, &board))?;
+            let mut hashes = page_names(fetch, &join_url(&day_url, &board), false)?;
             hashes.truncate(MAX_HASHES_PER_BOARD);
 
             for hash in hashes {
@@ -359,6 +350,7 @@ mod tests {
     fn broken_tails_build_no_url() {
         assert_eq!(ini_url_for_signature("rusEFI"), None);
         assert_eq!(ini_url_for_signature("rusEFI master..x"), None);
+        assert_eq!(ini_url_for_signature("rusEFI master/../../etc.1"), None);
         assert_eq!(ini_url_for_signature("  "), None);
     }
 

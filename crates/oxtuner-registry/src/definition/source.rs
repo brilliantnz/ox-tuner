@@ -66,9 +66,4 @@ pub trait FirmwareSource: Send + Sync {
 
         Ok(crate::definition::types::parse_versions(&text))
     }
-
-    /// The release-notes URL for an id, when the family publishes notes.
-    fn release_notes_url(&self, _id: &FirmwareId) -> Option<String> {
-        None
-    }
 }

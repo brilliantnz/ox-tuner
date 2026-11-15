@@ -112,13 +112,29 @@ pub fn parse_signature(signature: &str) -> Result<FirmwareId, RegistryError> {
     match family {
         Family::Rusefi => parse_rusefi_tail(&raw, tail),
         Family::Fome => parse_fome_tail(&raw, tail),
-        Family::Speeduino => Ok(FirmwareId {
-            family,
-            version: tail.to_owned(),
-            board: None,
-            hash: None,
-            raw,
-        }),
+        Family::Speeduino => {
+            // A path segment, not a sentence: the version addresses one file
+            // under `/fw/`, so anything outside the file-name vocabulary is a
+            // signature this crate cannot resolve.
+            let valid = tail.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_'
+            });
+
+            if !valid {
+                return Err(RegistryError::new(
+                    ErrorKind::InvalidSignature,
+                    "the Speeduino version is not a file-name token",
+                ));
+            }
+
+            Ok(FirmwareId {
+                family,
+                version: tail.to_owned(),
+                board: None,
+                hash: None,
+                raw,
+            })
+        }
         Family::Unknown => Err(RegistryError::new(
             ErrorKind::InvalidSignature,
             "the signature names no known firmware family",
@@ -272,6 +288,8 @@ mod tests {
             "rusEFI master.2024.2.2.board.1",
             "rusEFI master.2024.02.02.extra.board.1",
             "rusEFI master.2024.02.02.bo ard.1",
+            "speeduino 202501.7 extra",
+            "speeduino 2025/01",
             "something else entirely",
         ] {
             let error = parse_signature(signature).expect_err("must be refused");
