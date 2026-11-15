@@ -176,6 +176,32 @@ impl CacheStore {
         result.map_err(RegistryError::from)
     }
 
+    /// Whether the store holds a readable file at `path`.
+    pub fn exists(&self, path: &Path) -> bool {
+        check_inside(&self.root, path).is_ok() && path.is_file()
+    }
+
+    /// Whether the file at `path` is the one the provenance describes.
+    ///
+    /// A missing sidecar means the file was not put here by a download, so
+    /// there is nothing to check it against and it counts as valid. A
+    /// corrupt sidecar counts the same way: the bytes are what matters, and
+    /// availability wins over suspicion for a derived artifact.
+    pub fn verify_file(&self, path: &Path) -> bool {
+        let Some(meta) = self.load_meta(path) else {
+            return path.is_file();
+        };
+
+        let Some(expected) = meta.sha256.as_deref().and_then(parse_hex_digest) else {
+            return path.is_file();
+        };
+
+        match fs::read(path) {
+            Ok(bytes) => Self::verify(&bytes, &expected),
+            Err(_) => false,
+        }
+    }
+
     /// Reads the file at `path`, or nothing when it is missing or unreadable.
     ///
     /// Every rejection is a normal miss: the caller fetches again and may
@@ -293,6 +319,28 @@ fn check_inside(root: &Path, path: &Path) -> Result<(), RegistryError> {
             "the registry only reads and writes under its own root",
         ))
     }
+}
+
+/// Parses 64 lowercase hex characters into a digest.
+///
+/// Only the canonical form the store writes is accepted: uppercase hex
+/// counts as damage, not as a digest.
+fn parse_hex_digest(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+
+    let mut digest = [0u8; 32];
+    for (index, chunk) in text.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(chunk).ok()?;
+        digest[index] = u8::from_str_radix(pair, 16).ok()?;
+    }
+
+    Some(digest)
 }
 
 /// A sibling temporary name no other writer in this process can take.
@@ -489,6 +537,50 @@ mod tests {
 
         assert!(CacheStore::verify(b"abc", &digest));
         assert!(!CacheStore::verify(b"abd", &digest));
+    }
+
+    #[test]
+    fn a_stored_file_verifies_against_its_sidecar() {
+        let root = temp_root("verify-file");
+        let store = CacheStore::new(&root);
+        let path = store.definition_ini(&speeduino_id());
+        let bytes = b"[MegaTune]\n";
+
+        store.store(&path, bytes).expect("a store succeeds");
+        store.store_meta(
+            &path,
+            &Meta::downloaded("https://example.invalid/x.ini", bytes),
+        );
+
+        assert!(store.verify_file(&path));
+
+        fs::write(&path, b"[tampered]\n").expect("a tamper lands");
+        assert!(!store.verify_file(&path));
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
+    fn a_file_without_provenance_counts_as_valid() {
+        let root = temp_root("verify-nometa");
+        let store = CacheStore::new(&root);
+        let path = root.join("hand.ini");
+
+        fs::write(&path, b"x").expect("a hand-placed file lands");
+
+        assert!(store.verify_file(&path));
+        assert!(!store.verify_file(&root.join("missing.ini")));
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
+    fn odd_hex_is_not_a_digest() {
+        assert!(parse_hex_digest(&"0".repeat(64)).is_some());
+        assert_eq!(parse_hex_digest(&"0".repeat(64)), Some([0u8; 32]));
+        assert!(parse_hex_digest("abc").is_none());
+        assert!(parse_hex_digest(&"z".repeat(64)).is_none());
+        assert!(parse_hex_digest(&"AB".repeat(32)).is_none());
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub enum ErrorKind {
     InvalidUrl,
     /// The server has no such file.
     NotFound,
+    /// The family publishes no such thing.
+    Unsupported,
     /// The reply is larger than the cap for its kind.
     TooLarge,
     /// The bytes could not be fetched.
@@ -41,6 +43,7 @@ impl ErrorKind {
             Self::InvalidSignature => "invalid-signature",
             Self::InvalidUrl => "invalid-url",
             Self::NotFound => "not-found",
+            Self::Unsupported => "unsupported",
             Self::TooLarge => "too-large",
             Self::Network => "network",
             Self::Cache => "cache",

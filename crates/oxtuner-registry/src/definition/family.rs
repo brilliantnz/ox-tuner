@@ -32,6 +32,16 @@ impl Family {
             Self::Unknown => "unknown",
         }
     }
+
+    /// The display label. Family names are proper nouns, never translated.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Speeduino => "Speeduino",
+            Self::Fome => "FOME",
+            Self::Rusefi => "rusEFI",
+            Self::Unknown => "Unknown",
+        }
+    }
 }
 
 /// Which family `signature` names.
@@ -117,8 +127,11 @@ pub fn parse_signature(signature: &str) -> Result<FirmwareId, RegistryError> {
 }
 
 /// Splits a rusEFI tail shaped `branch.YYYY.MM.DD.board.hash`.
+///
+/// The shape is exactly six dot-separated parts: the upstream tooling allows
+/// letters, digits, `-` and `_` in the free-form parts and zero-padded digits
+/// in the date parts, so anything else cannot address a published file.
 fn parse_rusefi_tail(raw: &str, tail: &str) -> Result<FirmwareId, RegistryError> {
-    let parts: Vec<&str> = tail.split('.').collect();
     let invalid = || {
         RegistryError::new(
             ErrorKind::InvalidSignature,
@@ -126,29 +139,36 @@ fn parse_rusefi_tail(raw: &str, tail: &str) -> Result<FirmwareId, RegistryError>
         )
     };
 
-    if parts.len() < 6 {
+    let parts: Vec<&str> = tail.split('.').collect();
+    if parts.len() != 6 {
         return Err(invalid());
     }
 
-    let branch = parts[0];
-    let date = &parts[1..4];
-    let hash = parts[parts.len() - 1];
-    let board = parts[4..parts.len() - 1].join(".");
+    let [branch, year, month, day, board, hash] =
+        [parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]];
 
-    let dated = date.len() == 3
-        && date[0].len() == 4
-        && date
-            .iter()
-            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()));
+    let token = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    let dated = |part: &str, width: usize| {
+        part.len() == width && part.bytes().all(|byte| byte.is_ascii_digit())
+    };
 
-    if branch.is_empty() || board.is_empty() || hash.is_empty() || !dated {
+    if !token(branch) || !token(board) || !token(hash) {
+        return Err(invalid());
+    }
+
+    if !dated(year, 4) || !dated(month, 2) || !dated(day, 2) {
         return Err(invalid());
     }
 
     Ok(FirmwareId {
         family: Family::Rusefi,
         version: tail.to_owned(),
-        board: Some(board),
+        board: Some(board.to_owned()),
         hash: Some(hash.to_owned()),
         raw: raw.to_owned(),
     })
@@ -249,6 +269,9 @@ mod tests {
             "speeduino   ",
             "rusEFI master.2024.02",
             "rusEFI master.2024.02.02..1293678056",
+            "rusEFI master.2024.2.2.board.1",
+            "rusEFI master.2024.02.02.extra.board.1",
+            "rusEFI master.2024.02.02.bo ard.1",
             "something else entirely",
         ] {
             let error = parse_signature(signature).expect_err("must be refused");

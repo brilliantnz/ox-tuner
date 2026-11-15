@@ -15,4 +15,6 @@ pub use registry::Registry;
 pub use rusefi::RusefiSource;
 pub use source::FirmwareSource;
 pub use speeduino::SpeeduinoSource;
-pub use types::{VersionEntry, is_stable_version, parse_versions};
+pub use types::{
+    FetchedVersions, ResolvedDefinition, VersionEntry, is_stable_version, parse_versions,
+};

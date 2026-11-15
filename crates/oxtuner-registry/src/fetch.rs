@@ -21,24 +21,49 @@ pub const MAX_INI_BYTES: usize = 2 * 1024 * 1024;
 /// The largest release-notes document this crate will read.
 pub const MAX_NOTES_BYTES: usize = 256 * 1024;
 
+/// How long a cached listing counts as fresh.
+pub const VERSIONS_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// The largest autoindex page this crate will read.
+///
+/// Directory listings are a few kilobytes; the cap only stops a stray or
+/// hostile reply from being read whole.
+pub const MAX_LISTING_BYTES: usize = 256 * 1024;
+
 /// How many redirects one fetch may follow.
 pub const MAX_REDIRECTS: u8 = 3;
 
 /// Fetches URL bodies on the application's worker thread.
 ///
-/// The implementor owns timeouts, redirect handling and the response size cap:
-/// it must return [`ErrorKind::TooLarge`] instead of a body over `max_bytes`,
-/// and only ever request URLs that [`check_url`] accepts.
+/// Two verbs, two jobs. `fetch` lists, gets and checks: version listings,
+/// release notes, any small read. `download` moves file bytes with progress.
+/// Both obey the same policy and caps; only the reporting differs.
 pub trait HttpGet: Send + Sync {
-    /// Reads the whole body of `url`, or the reason it could not be read.
+    /// Reads the whole body of `url`.
     ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::InvalidUrl`] for a URL outside the fetch policy,
-    /// [`ErrorKind::NotFound`] for a missing file, [`ErrorKind::TooLarge`] for a
-    /// body over the cap, and [`ErrorKind::Network`] for anything else that goes
-    /// wrong on the wire.
-    fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, RegistryError>;
+    /// [`ErrorKind::NotFound`] for a missing file, [`ErrorKind::TooLarge`] for
+    /// a body over the cap, and [`ErrorKind::Network`] for anything else that
+    /// goes wrong on the wire.
+    fn fetch(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, RegistryError>;
+
+    /// Reads the whole body of `url`, reporting `(downloaded, total)` after
+    /// every chunk.
+    ///
+    /// `total` is the server's content length when it sent one. The callback
+    /// runs on the calling worker thread; the caller forwards it to the UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`HttpGet::fetch`].
+    fn download(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<Vec<u8>, RegistryError>;
 }
 
 /// Checks that `url` is one this crate will fetch.

@@ -1,12 +1,39 @@
 //! Version listings shared by the definition sources.
 
-/// One published version.
+use serde::{Deserialize, Serialize};
+
+use crate::definition::family::FirmwareId;
+
+/// One definition the registry can serve: the parsed id and its address.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDefinition {
+    /// The parsed signature.
+    pub id: FirmwareId,
+    /// Where the bytes live.
+    pub ini_url: String,
+}
+
+/// One published version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionEntry {
     /// The version text as the server lists it.
     pub version: String,
     /// Whether this is a stable release rather than a rolling channel.
     pub stable: bool,
+}
+
+/// A version listing and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedVersions {
+    /// Whether the entries came from the cache.
+    pub cached: bool,
+    /// Whether the cache was already stale when it was served.
+    ///
+    /// A stale listing is served only when the network failed: something to
+    /// browse beats nothing while offline, and the dialog says so.
+    pub stale: bool,
+    /// The parsed entries.
+    pub entries: Vec<VersionEntry>,
 }
 
 /// Whether `version` names a stable release.

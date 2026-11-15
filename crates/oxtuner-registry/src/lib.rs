@@ -36,7 +36,9 @@ pub mod firmware;
 pub use blocking::BlockingClient;
 
 pub use cache::{CacheStore, Meta};
-pub use definition::{Family, FirmwareId, FirmwareSource, Registry};
+pub use definition::{
+    Family, FetchedVersions, FirmwareId, FirmwareSource, Registry, ResolvedDefinition, VersionEntry,
+};
 pub use error::{ErrorKind, RegistryError};
 pub use fetch::HttpGet;
 pub use firmware::{Board, FirmwareImage, FirmwareImageSource, FlashPlan, FlashTool};
