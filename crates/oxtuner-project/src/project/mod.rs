@@ -209,6 +209,32 @@ impl fmt::Display for ProjectError {
     }
 }
 
+impl ProjectError {
+    /// A stable code for logs, diagnostics and a future notification policy.
+    ///
+    /// Never contains user data, so it is safe to group or filter on.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotAProject { .. } => "not-a-project",
+            Self::MissingDefinition { .. } => "missing-definition",
+            Self::AmbiguousDefinition { .. } => "ambiguous-definition",
+            Self::MissingTune { .. } => "missing-tune",
+            Self::InvalidName { .. } => "invalid-name",
+            Self::TargetNotEmpty { .. } => "target-not-empty",
+            Self::SignatureMismatch { .. } => "signature-mismatch",
+            Self::DefinitionNeedsIncludes { .. } => "definition-needs-includes",
+            Self::Io { .. } => "io",
+            Self::Msq(_) => "msq",
+            Self::Ini(_) => "ini",
+            Self::ReadOnly { .. } => "read-only",
+            Self::Unrepresentable { .. } => "unrepresentable",
+            Self::Tune(_) => "tune",
+            Self::Sidecar { .. } => "sidecar",
+        }
+    }
+}
+
 impl std::error::Error for ProjectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
