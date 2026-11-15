@@ -589,7 +589,8 @@ mod tests {
     #[test]
     fn a_label_list_separated_by_periods_keeps_its_option_indexes() {
         // The reference Speeduino definition writes the first three labels of
-        // `secondarySerialProtocol` as `"One". "Two". "Three"`.
+        // `secondarySerialProtocol` as
+        // `"Generic (Fixed List)". "Generic (ini File)". "CAN"`.
         let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
                     page = 1\n\
                     serial = bits, U08, 0, [3:6], \"Generic (Fixed List)\"\
@@ -633,6 +634,41 @@ mod tests {
         assert_eq!(literal(&variable.minimum), Some(-4.0));
         assert_eq!(literal(&variable.maximum), Some(4.0));
         assert_eq!(literal(&variable.digits), Some(1.0));
+    }
+
+    #[test]
+    fn a_storage_keyword_after_a_bit_list_is_a_flag_not_an_option() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
+                    page = 1\n\
+                    field = bits, U08, 0, [0:2], \"Off\", \"On\", noMsqSave\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let field = definition.constant("field").expect("the constant parses");
+        assert_eq!(field.options.len(), 2, "the keyword is not an option");
+        assert!(field.flags.no_msq_save);
+    }
+
+    #[test]
+    fn a_storage_keyword_on_a_pc_variable_is_a_flag() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    bits_value = bits, U08, [0:1], \"Off\", \"On\", noMsqSave\n\
+                    alias = string, ASCII, 8, noMsqSave\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let bits_value = definition
+            .pc_variables
+            .get("bits_value")
+            .expect("the bits variable parses");
+        assert_eq!(bits_value.options.len(), 2, "the keyword is not an option");
+        assert!(bits_value.flags.no_msq_save);
+
+        let alias = definition
+            .pc_variables
+            .get("alias")
+            .expect("the string variable parses");
+        assert!(alias.flags.no_msq_save);
     }
 
     #[test]
