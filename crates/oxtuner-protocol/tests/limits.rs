@@ -1,10 +1,10 @@
 //! Values that do not fit the wire are refused when the protocol is built or
 //! the command runs, never rounded into a different address.
 
-use oxtuner_ini::{CommandTemplate, Definition, SettingsContext};
+use oxtuner_ini::{Definition, SettingsContext};
 use oxtuner_protocol::{
     BehaviorKind, BurnPlan, Crc, Crc32Variant, CrcReply, EcuBehavior, LinkMode, Match, MsProtocol,
-    PageSwitch, ProtocolError, ReplyCode,
+    PageSwitch, ProtocolError,
 };
 use oxtuner_transport::{ReplayTransport, Trace};
 
@@ -18,16 +18,16 @@ fn protocol(definition: &Definition) -> MsProtocol {
 struct HexTextBehavior;
 
 impl EcuBehavior for HexTextBehavior {
-    fn name(&self) -> &'static str {
+    fn id(&self) -> &'static str {
         "hex-text"
+    }
+
+    fn name(&self) -> &'static str {
+        "Hex text"
     }
 
     fn matches(&self, _definition: &Definition) -> Match {
         Match::Exact
-    }
-
-    fn handshake(&self, _definition: &Definition) -> Vec<CommandTemplate> {
-        Vec::new()
     }
 
     fn crc(&self, _definition: &Definition, _page: u8) -> Option<Crc> {
@@ -37,18 +37,10 @@ impl EcuBehavior for HexTextBehavior {
         })
     }
 
-    fn switch_page(&self, _definition: &Definition, _page: u8) -> PageSwitch {
-        PageSwitch::None
-    }
-
     fn burn(&self, _definition: &Definition, _page: u8) -> BurnPlan {
         BurnPlan::NotBurnable {
             reason: "test firmware",
         }
-    }
-
-    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
-        ReplyCode::Leading
     }
 }
 
@@ -56,16 +48,16 @@ impl EcuBehavior for HexTextBehavior {
 struct BurnBeforeSwitchBehavior;
 
 impl EcuBehavior for BurnBeforeSwitchBehavior {
-    fn name(&self) -> &'static str {
+    fn id(&self) -> &'static str {
         "burn-before-switch"
+    }
+
+    fn name(&self) -> &'static str {
+        "Burn before switch"
     }
 
     fn matches(&self, _definition: &Definition) -> Match {
         Match::Exact
-    }
-
-    fn handshake(&self, _definition: &Definition) -> Vec<CommandTemplate> {
-        Vec::new()
     }
 
     fn crc(&self, _definition: &Definition, _page: u8) -> Option<Crc> {
@@ -78,10 +70,6 @@ impl EcuBehavior for BurnBeforeSwitchBehavior {
 
     fn burn(&self, _definition: &Definition, _page: u8) -> BurnPlan {
         BurnPlan::Immediate
-    }
-
-    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
-        ReplyCode::Leading
     }
 }
 
