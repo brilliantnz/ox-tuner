@@ -253,7 +253,21 @@ fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError>
             break;
         }
 
-        crawl_branch(fetch, &branch, &mut entries, &mut budget)?;
+        if let Err(error) = crawl_branch(fetch, &branch, &mut entries, &mut budget) {
+            // One dead branch must not cost the branches that answered, and
+            // the empty-walk gate below still refuses a listing with nothing
+            // in it.
+            if !matches!(error.kind(), ErrorKind::Network | ErrorKind::NotFound) {
+                return Err(error);
+            }
+
+            tracing::debug!(
+                op = "registry-listing",
+                branch,
+                code = error.kind().as_str(),
+                "branch skipped"
+            );
+        }
     }
 
     // A listed family always publishes something. An empty walk means the
@@ -526,6 +540,47 @@ mod tests {
         let entries = RusefiSource.fetch_listing(&stub).expect("a listing");
 
         assert_eq!(entries.len(), 1, "the readable board still lists");
+        assert!(entries[0].version.ends_with("uaefi.111"));
+    }
+
+    #[test]
+    fn a_dead_branch_does_not_discard_the_branches_that_answered() {
+        use std::collections::HashMap;
+
+        let mut pages = HashMap::new();
+        pages.insert(
+            AUTOINDEX_ROOT.to_owned(),
+            TreeStub::page(&["master/", "zzz/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master"),
+            TreeStub::page(&["2026/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026"),
+            TreeStub::page(&["11/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11"),
+            TreeStub::page(&["15/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15"),
+            TreeStub::page(&["uaefi/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15/uaefi"),
+            TreeStub::page(&["111.ini"]),
+        );
+        // `zzz` answers NotFound on its own page, so that branch is skipped.
+
+        let stub = TreeStub {
+            pages,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let entries = RusefiSource.fetch_listing(&stub).expect("a listing");
+
+        assert_eq!(entries.len(), 1);
         assert!(entries[0].version.ends_with("uaefi.111"));
     }
 

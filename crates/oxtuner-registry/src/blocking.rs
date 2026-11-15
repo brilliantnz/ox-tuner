@@ -176,6 +176,15 @@ impl BlockingClient {
             ));
         }
 
+        // The redirect policy stops rather than errors, so an out-of-policy
+        // redirect arrives as an ordinary 3xx response.
+        if response.status().is_redirection() {
+            return Err(RegistryError::new(
+                ErrorKind::InvalidUrl,
+                "a redirect left the fetch policy",
+            ));
+        }
+
         let status = response.status();
         if !status.is_success() {
             return Err(RegistryError::new(

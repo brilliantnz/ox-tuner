@@ -86,6 +86,16 @@ impl Registry {
             }
         }
 
+        // A known family no source serves yet (FOME today): the text names
+        // something real, so it is not an invalid signature. [`Registry::resolve`]
+        // answers the same way.
+        if family_of(signature) != Family::Unknown {
+            return Err(RegistryError::new(
+                ErrorKind::Unsupported,
+                "no source serves this family yet",
+            ));
+        }
+
         Err(RegistryError::new(
             ErrorKind::InvalidSignature,
             "no source serves this signature",
@@ -618,6 +628,18 @@ mod tests {
             resolved.ini_url,
             "https://rusefi.com/online/ini/rusefi/master/2024/02/02/alphax-4chan/1293678056.ini"
         );
+    }
+
+    #[test]
+    fn a_known_family_without_a_source_is_unsupported_everywhere() {
+        let registry = Registry::with_defaults();
+        let signature = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
+
+        let parsed = registry.parse_signature(signature).expect_err("no source");
+        let resolved = registry.resolve(signature).expect_err("no source");
+
+        assert_eq!(parsed.kind(), ErrorKind::Unsupported);
+        assert_eq!(resolved.kind(), parsed.kind());
     }
 
     #[test]
