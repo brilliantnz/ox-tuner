@@ -200,7 +200,6 @@ fn page_names(fetch: &dyn HttpGet, url: &str, dirs: bool) -> Result<Vec<String>,
     Ok(names)
 }
 
-/// The newest names first. Zero-padded dates sort newest-first this way.
 /// Takes one page out of the walk budget.
 ///
 /// The budget bounds remote-driven work: a page listing thousands of empty
@@ -235,13 +234,6 @@ fn is_dated(text: &str, width: usize) -> bool {
 /// hundred small requests at most; the caller caches the result for a day.
 fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError> {
     let mut budget = MAX_PAGES;
-
-    if !spend(&mut budget) {
-        return Err(RegistryError::new(
-            ErrorKind::Network,
-            "the listing walk hit its page budget",
-        ));
-    }
 
     let mut branches = page_names(fetch, AUTOINDEX_ROOT, true)?;
     branches.retain(|branch| branch != "master");
@@ -577,6 +569,55 @@ mod tests {
         assert!(spend(&mut budget));
         assert!(!spend(&mut budget), "the budget is spent, not negative");
         assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn an_exhausted_page_budget_returns_what_it_collected() {
+        use std::collections::HashMap;
+
+        let boards: Vec<String> = (0..MAX_PAGES + 20)
+            .map(|index| format!("b{index}/"))
+            .collect();
+        let board_refs: Vec<&str> = boards.iter().map(String::as_str).collect();
+
+        let mut pages = HashMap::new();
+        pages.insert(AUTOINDEX_ROOT.to_owned(), TreeStub::page(&["master/"]));
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master"),
+            TreeStub::page(&["2026/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026"),
+            TreeStub::page(&["11/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11"),
+            TreeStub::page(&["15/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15"),
+            TreeStub::page(&board_refs),
+        );
+        // Only the first board answers; the rest are absent and skipped.
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15/b0"),
+            TreeStub::page(&["111.ini"]),
+        );
+
+        let stub = TreeStub {
+            pages,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let entries = RusefiSource
+            .fetch_listing(&stub)
+            .expect("a partial listing");
+
+        assert_eq!(entries.len(), 1);
+        let calls = stub.calls.lock().expect("a test lock").len();
+        assert!(
+            calls <= MAX_PAGES + 5,
+            "the walk stops near its budget, got {calls} requests"
+        );
     }
 
     #[test]

@@ -360,6 +360,16 @@ impl Registry {
         let path = store.definition_ini(&resolved.id);
 
         let bytes = fetch.download(&resolved.ini_url, MAX_INI_BYTES, progress)?;
+
+        // A zero-byte reply is a failed read, not an empty definition: stored,
+        // it would verify against its own digest and be served forever.
+        if bytes.is_empty() {
+            return Err(RegistryError::new(
+                ErrorKind::Network,
+                "the definition reply was empty",
+            ));
+        }
+
         store.store(&path, &bytes)?;
         store.store_meta(
             &path,
@@ -427,9 +437,14 @@ impl Registry {
 }
 
 /// The cached entries regardless of age, or nothing when unreadable.
+///
+/// An empty listing is treated as a miss: a file written by an older build or
+/// by a failed read must never be served as a real answer.
 fn load_stale_listing(store: &CacheStore, path: &std::path::Path) -> Option<Vec<VersionEntry>> {
     let bytes = store.load(path)?;
-    serde_json::from_slice(&bytes).ok()
+    let entries: Vec<VersionEntry> = serde_json::from_slice(&bytes).ok()?;
+
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// The cached entries, or nothing when they are missing, stale or unreadable.
@@ -815,6 +830,41 @@ mod tests {
             !store.versions_file(Family::Speeduino).exists(),
             "a failed read must not be cached as fresh"
         );
+    }
+
+    #[test]
+    fn an_empty_definition_reply_is_a_failure_not_a_cached_file() {
+        let (_dir, store) = temp_store("download-empty");
+        let registry = Registry::with_defaults();
+        let id = registry
+            .parse_signature("speeduino 202501.7")
+            .expect("parses");
+
+        let failed = registry.ensure_definition(&EmptyBody, &store, &id, &mut |_, _| {});
+
+        assert!(
+            matches!(failed, Err(error) if error.kind() == ErrorKind::Network),
+            "an empty body must not look like an empty definition"
+        );
+        assert_eq!(registry.locate(&store, &id), None);
+    }
+
+    #[test]
+    fn a_cached_empty_listing_is_never_served() {
+        let (_dir, store) = temp_store("listing-empty-cache");
+        let registry = Registry::with_defaults();
+        let path = store.versions_file(Family::Speeduino);
+
+        store.store(&path, b"[]").expect("a store succeeds");
+        let mut meta = Meta::downloaded("https://speeduino.com/fw/versions", b"[]");
+        meta.fetched_at_unix = Some(1);
+        store.store_meta(&path, &meta);
+
+        let served = registry
+            .fetch_versions_with(&Failing, &store, Family::Speeduino, MaxAge::Any)
+            .expect_err("an empty cached listing is a miss, and the network is down");
+
+        assert_eq!(served.kind(), ErrorKind::Network);
     }
 
     #[test]
