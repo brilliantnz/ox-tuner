@@ -223,14 +223,21 @@ impl BehaviorKind {
             Self::Rusefi(RusefiBehavior),
             Self::MsCompatible(MsCompatibleBehavior),
         ];
-        candidates
-            .into_iter()
-            .find(|behavior| behavior.as_dyn().matches(definition) == Match::Exact)
-            .or_else(|| {
-                candidates
-                    .into_iter()
-                    .find(|behavior| behavior.as_dyn().matches(definition) == Match::Compatible)
-            })
+
+        // One pass: the first exact match wins outright, while the first
+        // compatible one is only remembered in case nothing is exact.
+        let mut compatible = None;
+        for candidate in candidates {
+            match candidate.as_dyn().matches(definition) {
+                Match::Exact => return Some(candidate),
+                Match::Compatible => {
+                    compatible.get_or_insert(candidate);
+                }
+                Match::No => {}
+            }
+        }
+
+        compatible
     }
 
     /// The behavior as the trait object the protocol consumes.
@@ -247,6 +254,14 @@ impl BehaviorKind {
 /// The definition's signature, trimmed and lowercased for a family check.
 fn normalized_signature(definition: &Definition) -> String {
     definition.signature.trim().to_ascii_lowercase()
+}
+
+/// Whether a normalized signature names FOME.
+///
+/// FOME reports itself inside a rusEFI signature (`rusEFI (FOME) <version>`),
+/// so the marker sits after the family prefix rather than at its start.
+fn is_fome(signature: &str) -> bool {
+    signature.contains("fome")
 }
 
 /// Speeduino (ADR-0009).
@@ -293,7 +308,7 @@ impl EcuBehavior for FomeBehavior {
     }
 
     fn matches(&self, definition: &Definition) -> Match {
-        if normalized_signature(definition).contains("fome") {
+        if is_fome(&normalized_signature(definition)) {
             Match::Exact
         } else {
             Match::No
@@ -329,7 +344,7 @@ impl EcuBehavior for RusefiBehavior {
 
         // A FOME build reports a `rusEFI (FOME)` signature, so it is claimed by
         // its own behavior instead of this one.
-        if signature.starts_with("rusefi") && !signature.contains("fome") {
+        if signature.starts_with("rusefi") && !is_fome(&signature) {
             Match::Exact
         } else {
             Match::No
@@ -373,12 +388,6 @@ impl EcuBehavior for MsCompatibleBehavior {
         } else {
             Match::No
         }
-    }
-
-    fn handshake(&self, _definition: &Definition) -> Vec<oxtuner_ini::CommandTemplate> {
-        // These firmwares answer as soon as the port is open; the port's DTR
-        // reset is covered by `delayAfterPortOpen`.
-        Vec::new()
     }
 }
 
@@ -503,18 +512,38 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
     }
 
     #[test]
-    fn every_family_has_a_stable_id_and_a_readable_name() {
-        let expected = [
-            (SpeeduinoBehavior.id(), SpeeduinoBehavior.name()),
-            (FomeBehavior.id(), FomeBehavior.name()),
-            (RusefiBehavior.id(), RusefiBehavior.name()),
-            (MsCompatibleBehavior.id(), MsCompatibleBehavior.name()),
+    fn every_family_has_a_distinct_lowercase_id_and_a_label() {
+        let families: [&dyn EcuBehavior; 4] = [
+            &SpeeduinoBehavior,
+            &FomeBehavior,
+            &RusefiBehavior,
+            &MsCompatibleBehavior,
         ];
 
-        for (id, name) in expected {
-            assert_eq!(id, id.to_ascii_lowercase(), "the id is a lowercase key");
-            assert!(!name.is_empty(), "the name is a display label");
+        let ids: Vec<&str> = families.iter().map(|behavior| behavior.id()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+
+        assert_eq!(unique.len(), ids.len(), "ids must not collide: {ids:?}");
+
+        for behavior in families {
+            let id = behavior.id();
+            assert!(
+                id.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "`{id}` is a machine key, so it stays lowercase"
+            );
+            assert!(!behavior.name().is_empty(), "`{id}` needs a label to show");
         }
+    }
+
+    #[test]
+    fn a_rusefi_board_signature_is_not_mistaken_for_fome() {
+        let rusefi = definition("rusEFI master.2026.10.21.f407-discovery.422007793");
+        let fome = definition("rusEFI (FOME) .2026.06.03.proteus_h7.3416487136");
+
+        assert!(!is_fome(&normalized_signature(&rusefi)));
+        assert!(is_fome(&normalized_signature(&fome)));
     }
 
     #[test]
