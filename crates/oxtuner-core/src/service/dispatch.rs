@@ -593,7 +593,12 @@ pub(super) fn handle(
             {
                 // The layout is a convenience next to the tune, so a write
                 // failure is logged and never fails the session.
-                tracing::warn!(%op, %error, "the project layout could not be persisted");
+                tracing::warn!(
+                    %op,
+                    error_kind = error.kind(),
+                    %error,
+                    "the project layout could not be persisted"
+                );
             }
             send(events, Event::ProjectUiSaved { op });
             Outcome::Continue
@@ -621,7 +626,12 @@ pub(super) fn handle(
                         );
                     }
                     Err(error) => {
-                        tracing::warn!(%op, %error, "tune save failed");
+                        tracing::warn!(
+                            %op,
+                            error_kind = error.kind(),
+                            %error,
+                            "tune save failed"
+                        );
                         report.failures += 1;
                         send(
                             events,
@@ -1097,7 +1107,13 @@ fn reject_project(
     report: &mut CoreReport,
     events: &EventTx,
 ) {
-    tracing::warn!(%op, path = %path.display(), %error, "project rejected");
+    tracing::warn!(
+        %op,
+        path = %path.display(),
+        error_kind = error.kind(),
+        %error,
+        "project rejected"
+    );
     report.failures += 1;
     send(
         events,
