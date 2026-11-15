@@ -78,9 +78,38 @@ fn a_project_written_by_tunerstudio_opens_as_tunable_data() {
     assert!(
         project
             .definition_path()
-            .ends_with("projectCfg/mainController.ini"),
-        "the definition is the one the project names"
+            .starts_with(root.join("projectCfg")),
+        "the definition is the one the project names: {}",
+        project.definition_path().display()
     );
+    assert!(project.definition_path().is_file());
+
+    // When the project names its definition in `project.properties`, that is
+    // the file that must have been loaded.
+    let properties = std::fs::read(root.join("projectCfg/project.properties"))
+        .ok()
+        .map(|bytes| oxtuner_encoding::decode_latin1(&bytes));
+    // Java properties lets a later duplicate key win, so the last one counts.
+    let named = properties.as_deref().and_then(|properties| {
+        properties
+            .lines()
+            .filter_map(|line| {
+                line.split_once('=')
+                    .filter(|(key, _)| key.trim().eq_ignore_ascii_case("ecuConfigFile"))
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+            .next_back()
+    });
+    if let Some(name) = named {
+        assert_eq!(
+            project
+                .definition_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(name.as_str()),
+            "the loaded definition is the one project.properties names"
+        );
+    }
     assert!(
         !project.is_read_only(),
         "the tune and the definition share a signature: {:?}",
