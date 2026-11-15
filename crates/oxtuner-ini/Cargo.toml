@@ -21,6 +21,7 @@ harness = false
 # definition, and `tracing` supplies the parse-phase spans. The dialect itself
 # is still hand-written and reads no parser dependency.
 [dependencies]
+oxtuner-encoding.workspace = true
 serde = { workspace = true, features = ["rc"] }
 tracing.workspace = true
 
