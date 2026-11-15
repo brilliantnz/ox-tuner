@@ -766,6 +766,27 @@ mod tests {
     }
 
     #[test]
+    fn a_young_cached_listing_under_any_is_still_marked_stale() {
+        let (_dir, store) = temp_store("fetch-any-young");
+        let registry = Registry::with_defaults();
+        let stub = Stub::default();
+
+        registry
+            .fetch_versions(&stub, &store, Family::Speeduino)
+            .expect("a fresh listing");
+
+        let served = registry
+            .fetch_versions_with(&stub, &store, Family::Speeduino, MaxAge::Any)
+            .expect("a cached listing");
+
+        assert!(served.cached);
+        assert!(
+            served.stale,
+            "Any answers without a read, so the answer is unproven even when young"
+        );
+    }
+
+    #[test]
     fn an_old_listing_accepted_by_policy_is_marked_stale() {
         let (_dir, store) = temp_store("fetch-any");
         let registry = Registry::with_defaults();

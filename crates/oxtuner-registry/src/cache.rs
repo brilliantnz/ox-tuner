@@ -37,8 +37,6 @@ pub struct Meta {
     pub size: u64,
     /// When the bytes were stored, as unix seconds.
     pub fetched_at_unix: Option<u64>,
-    /// The server's entity tag, when it sent one.
-    pub etag: Option<String>,
 }
 
 impl Meta {
@@ -55,7 +53,6 @@ impl Meta {
             sha256: Some(hex_digest(&sha256(bytes))),
             size,
             fetched_at_unix,
-            etag: None,
         }
     }
 }

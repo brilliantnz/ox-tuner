@@ -59,7 +59,11 @@ impl RegistryError {
     }
 
     /// Builds an error of one kind with a message.
-    pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    ///
+    /// Public because [`HttpGet`](crate::fetch::HttpGet) is implemented outside
+    /// this crate, and a downstream client must be able to report the same
+    /// kinds this crate maps.
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),

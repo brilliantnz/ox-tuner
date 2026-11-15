@@ -33,10 +33,12 @@ const MAX_HASHES_PER_BOARD: usize = 4;
 /// How many entries the walk collects before it stops.
 const MAX_ENTRIES: usize = 300;
 
-/// How many index pages one walk may read before it answers with what it has.
+/// How many index pages the walk may spend, not counting the root page it
+/// starts from, before it answers with what it has.
 ///
-/// The budget bounds the work on a page that lists far more directories than a
-/// real day does, so a hostile or broken index cannot keep the worker busy.
+/// The budget bounds remote-driven work on a page that lists far more
+/// directories than a real day does, so a hostile or broken index cannot keep
+/// the worker busy.
 const MAX_PAGES: usize = 400;
 
 /// The definition URL for `signature`, following the lookup rule.
@@ -614,9 +616,10 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         let calls = stub.calls.lock().expect("a test lock").len();
-        assert!(
-            calls <= MAX_PAGES + 5,
-            "the walk stops near its budget, got {calls} requests"
+        assert_eq!(
+            calls,
+            MAX_PAGES + 1,
+            "one free root page plus one request per budget unit"
         );
     }
 
