@@ -1,9 +1,9 @@
-//! How bytes enter the registry: they do not enter here.
+//! How bytes enter the registry: through a trait it does not implement here.
 //!
 //! This crate defines the [`HttpGet`] trait and the policy every fetch obeys.
-//! The application implements the trait on its own worker thread with whatever
-//! client it chose, so this crate never depends on a network stack, a TLS
-//! backend, or an async runtime.
+//! The application may implement the trait on its own worker thread with the
+//! client it chose, or use [`crate::blocking::BlockingClient`], which keeps
+//! `reqwest` inside that worker call. Nothing here may run on the UI thread.
 
 use crate::error::{ErrorKind, RegistryError};
 

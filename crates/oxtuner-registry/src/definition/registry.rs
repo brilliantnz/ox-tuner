@@ -22,10 +22,17 @@ use crate::{
 #[non_exhaustive]
 pub enum MaxAge {
     /// Serve any cached listing, however old.
+    ///
+    /// The answer is marked `stale`, because the caller asked for something
+    /// newer than what the cache could prove.
     Any,
     /// Serve only a listing younger than [`crate::fetch::VERSIONS_TTL_SECS`].
     Ttl,
     /// Ignore the cache and read the index.
+    ///
+    /// A refresh that fails still answers from the stale cache, with `stale`
+    /// set, so a visible Refresh action never empties the list on a bad
+    /// network.
     Zero,
 }
 
@@ -220,16 +227,16 @@ impl Registry {
 
         let path = store.versions_file(family);
 
-        let cached = match max_age {
-            MaxAge::Zero => None,
-            MaxAge::Any => load_stale_listing(store, &path),
-            MaxAge::Ttl => load_cached_listing(store, &path),
+        let (cached, accepted_old) = match max_age {
+            MaxAge::Zero => (None, false),
+            MaxAge::Any => (load_stale_listing(store, &path), true),
+            MaxAge::Ttl => (load_cached_listing(store, &path), false),
         };
 
         if let Some(entries) = cached {
             return Ok(FetchedVersions {
                 cached: true,
-                stale: false,
+                stale: accepted_old,
                 entries,
             });
         }
@@ -283,16 +290,21 @@ impl Registry {
         let entries = source.fetch_listing(fetch)?;
 
         // The listing is derived data. A read-only or full cache directory
-        // must not throw away an answer the network already produced.
+        // must not throw away an answer the network already produced, but a
+        // permanently unwritable cache must still leave a trace.
         match serde_json::to_vec(&entries) {
-            Ok(bytes) => {
-                if store.store(path, &bytes).is_ok() {
-                    store.store_meta(
-                        path,
-                        &crate::cache::Meta::downloaded(&source.index_hint(), &bytes),
-                    );
-                }
-            }
+            Ok(bytes) => match store.store(path, &bytes) {
+                Ok(()) => store.store_meta(
+                    path,
+                    &crate::cache::Meta::downloaded(&source.index_hint(), &bytes),
+                ),
+                Err(error) => tracing::debug!(
+                    op = "registry-cache-meta",
+                    %error,
+                    path = %path.display(),
+                    "the listing was not cached"
+                ),
+            },
             Err(error) => tracing::debug!(
                 op = "registry-cache-meta",
                 %error,
@@ -709,6 +721,56 @@ mod tests {
             .ensure_definition(&stub, &store, &id, &mut noop)
             .expect("a redownload");
         assert!(stub.calls.lock().expect("a test lock").len() > calls);
+    }
+
+    #[test]
+    fn an_old_listing_accepted_by_policy_is_marked_stale() {
+        let (_dir, store) = temp_store("fetch-any");
+        let registry = Registry::with_defaults();
+        let path = store.versions_file(Family::Speeduino);
+        let entries = vec![VersionEntry {
+            version: "202501.7".to_owned(),
+            stable: true,
+        }];
+        let bytes = serde_json::to_vec(&entries).expect("entries encode");
+
+        store.store(&path, &bytes).expect("a store succeeds");
+        let mut meta = Meta::downloaded("https://speeduino.com/fw/versions", &bytes);
+        meta.fetched_at_unix = Some(1);
+        store.store_meta(&path, &meta);
+
+        let served = registry
+            .fetch_versions_with(&Failing, &store, Family::Speeduino, MaxAge::Any)
+            .expect("an accepted old listing");
+
+        assert!(served.cached);
+        assert!(served.stale);
+        assert_eq!(served.entries, entries);
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_listing_visible() {
+        let (_dir, store) = temp_store("fetch-zero-fail");
+        let registry = Registry::with_defaults();
+        let path = store.versions_file(Family::Speeduino);
+        let entries = vec![VersionEntry {
+            version: "202501.7".to_owned(),
+            stable: true,
+        }];
+        let bytes = serde_json::to_vec(&entries).expect("entries encode");
+
+        store.store(&path, &bytes).expect("a store succeeds");
+        let mut meta = Meta::downloaded("https://speeduino.com/fw/versions", &bytes);
+        meta.fetched_at_unix = Some(1);
+        store.store_meta(&path, &meta);
+
+        let refreshed = registry
+            .fetch_versions_with(&Failing, &store, Family::Speeduino, MaxAge::Zero)
+            .expect("a refresh falls back to what it had");
+
+        assert!(refreshed.cached);
+        assert!(refreshed.stale);
+        assert_eq!(refreshed.entries, entries);
     }
 
     #[test]

@@ -82,10 +82,20 @@ impl CacheStore {
     /// [`CacheStore::meta_for`]); a path built from the caller's original,
     /// unresolved string is not necessarily inside the store.
     ///
+    /// A root that does not exist yet is kept as given, and a root carrying
+    /// `..` can never be used, because every derived path is refused as
+    /// outside the store. Resolve the root before calling this.
+    ///
     /// The directory is created on the first store, not here.
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_owned();
         let root = fs::canonicalize(&root).unwrap_or(root);
+
+        debug_assert!(
+            !root.components().any(|part| part == Component::ParentDir),
+            "a cache root must not carry `..`: {}",
+            root.display()
+        );
 
         Self { root }
     }
@@ -303,10 +313,10 @@ impl CacheStore {
         files.sort_by_key(|(modified, _)| *modified);
         let excess = files.len() - keep;
         for (_, path) in files.into_iter().take(excess) {
-            // The sidecar goes with its data: an orphan would never be read
-            // again and would keep the directory from ever shrinking.
-            let _ = fs::remove_file(self.meta_for(&path));
-            let _ = fs::remove_file(path);
+            if fs::remove_file(&path).is_ok() {
+                // Same order as `remove`: the bytes go first.
+                let _ = fs::remove_file(self.meta_for(&path));
+            }
         }
     }
 
@@ -323,13 +333,20 @@ impl CacheStore {
     pub fn remove(&self, path: &Path) -> Result<bool, RegistryError> {
         check_inside(&self.root, path)?;
 
-        let _ = fs::remove_file(self.meta_for(path));
+        let removed = match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(RegistryError::from(error)),
+        };
 
-        match fs::remove_file(path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(RegistryError::from(error)),
+        // Only after the bytes are gone: an orphan sidecar is dead weight,
+        // while a data file whose sidecar vanished would verify as trusted
+        // forever.
+        if removed {
+            let _ = fs::remove_file(self.meta_for(path));
         }
+
+        Ok(removed)
     }
 
     /// Whether `bytes` digest to `expected`.

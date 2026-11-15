@@ -31,10 +31,12 @@ pub struct VersionEntry {
 pub struct FetchedVersions {
     /// Whether the entries came from the cache.
     pub cached: bool,
-    /// Whether the cache was already stale when it was served.
+    /// Whether the answer is older than the caller asked for.
     ///
-    /// A stale listing is served only when the network failed: something to
-    /// browse beats nothing while offline, and the dialog says so.
+    /// Set when a listing was served from the cache even though its age was
+    /// past the policy ([`MaxAge::Any`]) or a refresh failed
+    /// ([`MaxAge::Zero`]). Something to browse beats nothing while offline,
+    /// and the dialog says so.
     pub stale: bool,
     /// The parsed entries.
     pub entries: Vec<VersionEntry>,

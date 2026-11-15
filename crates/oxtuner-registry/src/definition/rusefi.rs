@@ -27,9 +27,6 @@ const MAX_BRANCHES: usize = 4;
 /// How many newest days per branch the walk visits.
 const MAX_DAYS_PER_BRANCH: usize = 1;
 
-/// How many boards per day the walk visits.
-const MAX_BOARDS_PER_DAY: usize = 48;
-
 /// How many hashes per board the walk visits.
 const MAX_HASHES_PER_BOARD: usize = 4;
 
@@ -236,6 +233,16 @@ fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError>
         crawl_branch(fetch, &branch, &mut entries)?;
     }
 
+    // A listed family always publishes something. An empty walk means the
+    // index did not answer as expected, and caching an empty answer as fresh
+    // would replace a good listing for a whole TTL.
+    if entries.is_empty() {
+        return Err(RegistryError::new(
+            ErrorKind::Network,
+            "the listing walk found no entries",
+        ));
+    }
+
     Ok(entries)
 }
 
@@ -284,8 +291,7 @@ fn crawl_branch(
         }
 
         let day_url = join_url(&join_url(&base, &year), &format!("{month}/{day}"));
-        let mut boards = page_names(fetch, &day_url, true)?;
-        boards.truncate(MAX_BOARDS_PER_DAY);
+        let boards = page_names(fetch, &day_url, true)?;
 
         for board in boards {
             if entries.len() >= MAX_ENTRIES {
@@ -484,6 +490,40 @@ mod tests {
 
         assert_eq!(entries.len(), 1, "the readable board still lists");
         assert!(entries[0].version.ends_with("uaefi.111"));
+    }
+
+    #[test]
+    fn a_walk_where_every_board_fails_is_an_error_not_an_empty_listing() {
+        use std::collections::HashMap;
+
+        let mut pages = HashMap::new();
+        pages.insert(AUTOINDEX_ROOT.to_owned(), TreeStub::page(&["master/"]));
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master"),
+            TreeStub::page(&["2026/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026"),
+            TreeStub::page(&["11/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11"),
+            TreeStub::page(&["15/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15"),
+            TreeStub::page(&["broken/"]),
+        );
+
+        let stub = TreeStub {
+            pages,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let error = RusefiSource
+            .fetch_listing(&stub)
+            .expect_err("an empty walk is a failure");
+
+        assert_eq!(error.kind(), ErrorKind::Network);
     }
 
     #[test]
