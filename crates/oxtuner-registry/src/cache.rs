@@ -90,12 +90,14 @@ impl CacheStore {
     }
 
     /// Where the version listing for `family` is cached.
+    ///
+    /// The file holds JSON entries, so its name says so.
     pub fn versions_file(&self, family: Family) -> PathBuf {
         self.root
             .join("definition")
             .join("versions")
             .join(family.id())
-            .join("versions.txt")
+            .join("versions.json")
     }
 
     /// Where the definition for `id` is cached.
@@ -141,13 +143,14 @@ impl CacheStore {
 
     /// The provenance file kept next to a download.
     ///
-    /// `data.ini` maps to `data.meta.json`, whatever the data extension is.
+    /// `data.ini` maps to `data.meta.json` and `202501.7-ab12cd34.ini` to
+    /// `202501.7-ab12cd34.meta.json`: the whole stem is kept, dots included,
+    /// so two versions that share a leading number never share a sidecar.
     pub fn meta_for(&self, path: &Path) -> PathBuf {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
             .unwrap_or("download");
-        let stem = name.split('.').next().unwrap_or(name);
 
         path.with_file_name(format!("{stem}.meta.json"))
     }
@@ -187,6 +190,9 @@ impl CacheStore {
     /// there is nothing to check it against and it counts as valid. A
     /// corrupt sidecar counts the same way: the bytes are what matters, and
     /// availability wins over suspicion for a derived artifact.
+    ///
+    /// The digest is computed while streaming the file, so a large firmware
+    /// image is never held in memory just to be checked.
     pub fn verify_file(&self, path: &Path) -> bool {
         let Some(meta) = self.load_meta(path) else {
             return path.is_file();
@@ -196,10 +202,7 @@ impl CacheStore {
             return path.is_file();
         };
 
-        match fs::read(path) {
-            Ok(bytes) => Self::verify(&bytes, &expected),
-            Err(_) => false,
-        }
+        digest_file(path).is_some_and(|found| found == expected)
     }
 
     /// Reads the file at `path`, or nothing when it is missing or unreadable.
@@ -357,6 +360,29 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
+/// The SHA-256 digest of the file at `path`, read in bounded chunks.
+///
+/// Returns `None` when the file cannot be opened or read; the caller treats
+/// that as "not the file the sidecar describes".
+fn digest_file(path: &Path) -> Option<[u8; 32]> {
+    use std::io::Read as _;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..read]);
+    }
+
+    Some(hasher.finalize().into())
+}
+
 /// The digest as lowercase hexadecimal.
 fn hex_digest(digest: &[u8; 32]) -> String {
     use std::fmt::Write as _;
@@ -370,7 +396,15 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 
 /// The first four digest bytes as eight hex characters.
 fn short_hash(data: &[u8]) -> String {
-    hex_digest(&sha256(data))[..8].to_owned()
+    use std::fmt::Write as _;
+
+    let digest = sha256(data);
+    let mut text = String::with_capacity(8);
+    for byte in &digest[..4] {
+        let _ = write!(text, "{byte:02x}");
+    }
+
+    text
 }
 
 /// A filename stem drawn from free-form text.
@@ -441,17 +475,22 @@ mod tests {
 
         assert_eq!(
             store.versions_file(Family::Speeduino),
-            root.join("definition/versions/speeduino/versions.txt")
+            root.join("definition/versions/speeduino/versions.json")
         );
 
         let ini = store.definition_ini(&id);
         assert!(ini.starts_with(root.join("definition/ini/speeduino")));
         assert_eq!(ini.extension().and_then(|ext| ext.to_str()), Some("ini"));
 
-        let sidecar = store.meta_for(&ini);
+        // Two versions can share a leading number, so their sidecars must not.
+        // `202501.7-ab12cd34.ini` keeps its whole stem.
+        let ini = root.join("definition/ini/speeduino/202501.7-ab12cd34.ini");
         assert_eq!(
-            sidecar.extension().and_then(|ext| ext.to_str()),
-            Some("json")
+            store
+                .meta_for(&ini)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("202501.7-ab12cd34.meta.json")
         );
 
         fs::remove_dir_all(&root).expect("the test root is removed");
@@ -556,6 +595,52 @@ mod tests {
 
         fs::write(&path, b"[tampered]\n").expect("a tamper lands");
         assert!(!store.verify_file(&path));
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
+    fn two_versions_sharing_a_prefix_keep_their_own_provenance() {
+        let root = temp_root("sidecar-collision");
+        let store = CacheStore::new(&root);
+        let first = root.join("definition/ini/speeduino/202501.7-aaaa1111.ini");
+        let second = root.join("definition/ini/speeduino/202501.8-bbbb2222.ini");
+
+        store.store(&first, b"first").expect("a store succeeds");
+        store.store_meta(
+            &first,
+            &Meta::downloaded("https://example.invalid/1.ini", b"first"),
+        );
+        store.store(&second, b"second").expect("a store succeeds");
+        store.store_meta(
+            &second,
+            &Meta::downloaded("https://example.invalid/2.ini", b"second"),
+        );
+
+        // The bug this guards: both stems start with `202501`, so a sidecar
+        // named from the first dot would give one file the other's digest.
+        assert!(store.verify_file(&first));
+        assert!(store.verify_file(&second));
+        assert_ne!(store.meta_for(&first), store.meta_for(&second));
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
+    fn a_large_file_is_verified_without_holding_it_in_memory() {
+        let root = temp_root("verify-large");
+        let store = CacheStore::new(&root);
+        let path = root.join("definition/ini/speeduino/202501.7-cccc3333.ini");
+        let bytes = vec![b'x'; 3 * 1024 * 1024];
+
+        store.store(&path, &bytes).expect("a store succeeds");
+        store.store_meta(
+            &path,
+            &Meta::downloaded("https://example.invalid/big.ini", &bytes),
+        );
+
+        assert!(store.verify_file(&path));
+        assert_eq!(digest_file(&path), Some(sha256(&bytes)));
 
         fs::remove_dir_all(&root).expect("the test root is removed");
     }

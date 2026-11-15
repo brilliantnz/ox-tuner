@@ -60,7 +60,7 @@ impl HttpGet for BlockingClient {
 
         let result = self.fetch_once(url, max_bytes);
         let duration_ms = elapsed_ms(&started);
-        log_outcome(url, &result, duration_ms);
+        log_outcome(url, "fetch", &result, duration_ms);
 
         result
     }
@@ -75,7 +75,7 @@ impl HttpGet for BlockingClient {
 
         let result = self.download_chunks(url, max_bytes, progress);
         let duration_ms = elapsed_ms(&started);
-        log_outcome(url, &result, duration_ms);
+        log_outcome(url, "download", &result, duration_ms);
 
         result
     }
@@ -102,7 +102,7 @@ fn checked_start(url: &str, message: &str) -> Result<std::time::Instant, Registr
 
 /// The outcome of one fetch or download, on the record the Diagnostics tab
 /// filters and a future notification policy reads.
-fn log_outcome(url: &str, result: &Result<Vec<u8>, RegistryError>, duration_ms: u64) {
+fn log_outcome(url: &str, verb: &str, result: &Result<Vec<u8>, RegistryError>, duration_ms: u64) {
     match result {
         Ok(body) => {
             tracing::info!(
@@ -110,7 +110,8 @@ fn log_outcome(url: &str, result: &Result<Vec<u8>, RegistryError>, duration_ms: 
                 url,
                 bytes = body.len(),
                 duration_ms,
-                "finished a download"
+                "finished a {}",
+                verb
             );
         }
         Err(error) => {
@@ -120,7 +121,8 @@ fn log_outcome(url: &str, result: &Result<Vec<u8>, RegistryError>, duration_ms: 
                 code = error.kind().as_str(),
                 reason = error.to_string(),
                 duration_ms,
-                "a download failed"
+                "a {} failed",
+                verb
             );
         }
     }
@@ -193,6 +195,10 @@ impl BlockingClient {
         }
 
         let mut body = Vec::new();
+        if let Some(len) = total.and_then(|len| usize::try_from(len).ok()) {
+            body.reserve(len.min(max_bytes));
+        }
+
         let mut chunk = vec![0u8; 32 * 1024];
 
         loop {

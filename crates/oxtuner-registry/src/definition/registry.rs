@@ -9,7 +9,7 @@ use super::{
     rusefi::RusefiSource,
     source::FirmwareSource,
     speeduino::SpeeduinoSource,
-    types::{FetchedVersions, ResolvedDefinition, VersionEntry, parse_versions},
+    types::{FetchedVersions, ResolvedDefinition, VersionEntry},
 };
 use crate::{
     cache::CacheStore,
@@ -142,8 +142,7 @@ impl Registry {
     ///
     /// Runs on a worker thread: a stale or missing cache costs one index read.
     /// When the network fails but a stale listing exists, the stale listing
-    /// is served with `stale` set instead of failing. Use
-    /// [`Registry::read_versions`] for text already in hand.
+    /// is served with `stale` set instead of failing.
     ///
     /// # Errors
     ///
@@ -251,6 +250,17 @@ impl Registry {
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<PathBuf, RegistryError> {
         let resolved = self.resolve(&id.raw)?;
+
+        Self::download_resolved(fetch, store, &resolved, progress)
+    }
+
+    /// Downloads an already-resolved definition and stores it.
+    fn download_resolved(
+        fetch: &dyn HttpGet,
+        store: &CacheStore,
+        resolved: &ResolvedDefinition,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<PathBuf, RegistryError> {
         let path = store.definition_ini(&resolved.id);
 
         let bytes = fetch.download(&resolved.ini_url, MAX_INI_BYTES, progress)?;
@@ -300,15 +310,7 @@ impl Registry {
             return Ok(path);
         }
 
-        self.download_definition(fetch, store, &resolved.id, progress)
-    }
-
-    /// Reads a version listing into entries.
-    pub fn read_versions(&self, family: Family, text: &str) -> Option<Vec<VersionEntry>> {
-        self.sources
-            .iter()
-            .any(|source| source.family() == family && source.versions_url().is_some())
-            .then(|| parse_versions(text))
+        Self::download_resolved(fetch, store, &resolved, progress)
     }
 }
 
@@ -446,17 +448,17 @@ mod tests {
     }
 
     #[test]
-    fn only_speeduino_publishes_a_listing() {
+    fn every_shipped_family_publishes_a_listing() {
         let registry = Registry::with_defaults();
 
+        // Both shipped families list: Speeduino from its versions file,
+        // rusEFI by walking its autoindex tree.
+        assert_eq!(
+            registry.listing_families(),
+            vec![Family::Speeduino, Family::Rusefi]
+        );
         assert!(registry.versions_url(Family::Speeduino).is_some());
         assert_eq!(registry.versions_url(Family::Rusefi), None);
-
-        let entries = registry
-            .read_versions(Family::Speeduino, "202501.7\nmaster\n")
-            .expect("entries");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(registry.read_versions(Family::Rusefi, "x\n"), None);
     }
 
     #[test]
