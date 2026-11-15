@@ -94,6 +94,12 @@ impl Project {
         }
 
         self.images.commit_baseline();
+        tracing::debug!(
+            path = %self.tune_path.display(),
+            cells,
+            variables = written.len(),
+            "tune saved"
+        );
 
         Ok(SaveOutcome {
             path: self.tune_path.clone(),

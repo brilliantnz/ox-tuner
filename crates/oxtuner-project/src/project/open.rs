@@ -45,6 +45,14 @@ impl Project {
     ) -> Result<Self, ProjectError> {
         let root = root.as_ref();
         let _span = tracing::info_span!("project_open", root = %root.display()).entered();
+
+        let result = Self::open_folder(root, cache_dir);
+        log_open(&result);
+        result
+    }
+
+    /// The body of [`Self::open_with_cache`], split out so one place logs it.
+    fn open_folder(root: &Path, cache_dir: Option<&Path>) -> Result<Self, ProjectError> {
         let mut phase = Instant::now();
 
         if !root.join(CONFIG_DIR).is_dir() {
@@ -177,6 +185,19 @@ impl Project {
         let tune_path = tune_path.as_ref();
         let definition_path = definition_path.as_ref();
         let _span = tracing::info_span!("project_open", root = %tune_path.display()).entered();
+
+        let result = Self::open_tune_file(tune_path, definition_path, cache_dir);
+        log_open(&result);
+        result
+    }
+
+    /// The body of [`Self::open_standalone_with_cache`], split out so one place
+    /// logs it.
+    fn open_tune_file(
+        tune_path: &Path,
+        definition_path: &Path,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, ProjectError> {
         let mut phase = Instant::now();
 
         let definition_bytes = {
@@ -254,6 +275,21 @@ impl Project {
             state_writable: false,
             in_folder: false,
         })
+    }
+}
+
+/// Logs the outcome of an open once, with a stable kind for the failure.
+fn log_open(result: &Result<Project, ProjectError>) {
+    match result {
+        Ok(project) => tracing::debug!(
+            root = %project.root().display(),
+            signature = %project.definition().signature,
+            pages = project.definition().pages.len(),
+            constants = project.definition().constants.len(),
+            read_only = project.is_read_only(),
+            "project opened"
+        ),
+        Err(error) => tracing::warn!(error_kind = error.kind(), %error, "project open failed"),
     }
 }
 
