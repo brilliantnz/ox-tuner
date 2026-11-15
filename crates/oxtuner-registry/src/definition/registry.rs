@@ -60,6 +60,11 @@ impl Registry {
     ///
     /// A replacement takes the position of the source it replaced, so a custom
     /// feed for a shipped family is asked where that family was asked before.
+    ///
+    /// The entry point replaces a family, it does not introduce one: a source
+    /// answers with a [`FirmwareId`], and the only mint for one is the
+    /// signature parser, which knows the shipped families. A brand-new family
+    /// is a change inside this crate.
     pub fn add(&mut self, source: impl FirmwareSource + 'static) {
         let family = source.family();
         let boxed: Box<dyn FirmwareSource> = Box::new(source);
@@ -129,9 +134,9 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::InvalidSignature`] when no source serves the text,
-    /// and [`ErrorKind::Unsupported`] when the family publishes no definition
-    /// address.
+    /// Returns [`ErrorKind::InvalidSignature`] when the text names no modeled
+    /// family, and [`ErrorKind::Unsupported`] when the family parses but
+    /// publishes no definition address.
     pub fn resolve(&self, signature: &str) -> Result<ResolvedDefinition, RegistryError> {
         for source in &self.sources {
             if let Some(id) = source.parse(signature) {
