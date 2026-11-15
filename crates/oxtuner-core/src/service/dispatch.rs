@@ -1092,11 +1092,57 @@ fn adopt_project(
         cache_hit,
         "project opened"
     );
+    log_load_report(op, project.report());
     configure_history(history, project.definition());
     *session = Session::Project(Box::new(project));
     last_menu.clone_from(&summary.definition.menu);
     report.projects_opened += 1;
     send(events, Event::ProjectOpened { op, view: summary });
+}
+
+/// Logs every load finding, so the summary line is not the only trace.
+///
+/// The summary counts say how much was wrong. These lines say what, and each
+/// carries a stable issue code for the diagnostics panel and a future
+/// notification policy.
+fn log_load_report(op: OpId, report: &oxtuner_project::LoadReport) {
+    for blocker in &report.blockers {
+        tracing::warn!(
+            %op,
+            issue_kind = blocker.kind.code(),
+            message = %blocker.message,
+            "project load blocker"
+        );
+    }
+
+    for warning in &report.warnings {
+        tracing::warn!(
+            %op,
+            issue_kind = warning.kind.code(),
+            message = %warning.message,
+            "project load warning"
+        );
+    }
+
+    // The warnings above preview long lists. Log the full ones so a skipped
+    // value can be named from the log alone.
+    if !report.orphan_values.is_empty() {
+        tracing::warn!(
+            %op,
+            count = report.orphan_values.len(),
+            names = %report.orphan_values.join(", "),
+            "tune values have no definition entry and were kept untouched"
+        );
+    }
+
+    if !report.missing_values.is_empty() {
+        tracing::warn!(
+            %op,
+            count = report.missing_values.len(),
+            names = %report.missing_values.join(", "),
+            "definition values have no entry in the tune; their defaults are used"
+        );
+    }
 }
 
 /// Reports a project that could not be opened or created.
