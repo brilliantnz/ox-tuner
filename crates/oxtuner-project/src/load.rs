@@ -658,11 +658,6 @@ fn label_to_raw(
         .ok_or_else(|| format!("`{text}` is not one of the definition's labels"))
 }
 
-/// The first character that has no ISO-8859-1 byte.
-fn first_non_latin1(text: &str) -> Option<char> {
-    text.chars().find(|character| u32::from(*character) > 0xFF)
-}
-
 /// Why a character cannot be written into a `.msq` string.
 fn not_latin1_reason(character: char) -> String {
     format!("`{character}` is not in ISO-8859-1, the encoding a .msq string uses")
@@ -720,7 +715,7 @@ pub fn format_values(
                     reason: "a quote cannot be represented in a .msq string".to_owned(),
                 });
             }
-            if let Some(character) = first_non_latin1(text) {
+            if let Some(character) = oxtuner_encoding::first_non_latin1(text) {
                 return Err(FileValueError::Text {
                     name: spec.name.clone(),
                     reason: not_latin1_reason(character),
@@ -747,7 +742,7 @@ pub fn format_values(
             });
             match label {
                 Some(label) => {
-                    if let Some(character) = first_non_latin1(label) {
+                    if let Some(character) = oxtuner_encoding::first_non_latin1(label) {
                         return Err(FileValueError::Label {
                             name: spec.name.clone(),
                             raw,

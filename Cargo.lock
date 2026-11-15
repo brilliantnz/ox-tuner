@@ -5241,10 +5241,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxtuner-encoding"
+version = "0.0.0"
+
+[[package]]
 name = "oxtuner-ini"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "postcard",
  "proptest",
  "serde",
@@ -5269,6 +5274,7 @@ name = "oxtuner-project"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "oxtuner-ini",
  "oxtuner-tune",
  "postcard",
@@ -5328,6 +5334,7 @@ name = "oxtuner-tune"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "oxtuner-ini",
  "proptest",
 ]

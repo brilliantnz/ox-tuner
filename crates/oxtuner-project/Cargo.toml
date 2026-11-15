@@ -19,6 +19,7 @@ harness = false
 
 [dependencies]
 oxtuner-ini.workspace = true
+oxtuner-encoding.workspace = true
 oxtuner-tune.workspace = true
 postcard = { workspace = true, default-features = false, features = ["alloc"] }
 serde.workspace = true

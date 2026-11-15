@@ -24,10 +24,10 @@ use std::sync::Arc;
 use oxtuner_ini::{Definition, SettingsContext};
 use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, VariableSpec};
 
-use crate::encoding::{self, EncodeError};
 use crate::flags;
 use crate::load::{self, FileValueError};
 use crate::xml::{Document, Element, Node, XmlError};
+use oxtuner_encoding::Latin1Error as EncodeError;
 
 /// A `.msq` page address: the unnumbered PC page, or a numbered calibration page.
 #[expect(
@@ -325,7 +325,7 @@ impl Msq {
     /// Returns [`MsqError`] when the XML is malformed or the root is not
     /// `<msq>`.
     pub fn parse(bytes: &[u8]) -> Result<Self, MsqError> {
-        let source = encoding::decode(bytes);
+        let source = oxtuner_encoding::decode_latin1(bytes);
         let document = Document::parse(&source)?;
         let root = document.root().ok_or_else(|| MsqError::RootIsNotMsq {
             found: String::new(),
@@ -345,7 +345,7 @@ impl Msq {
     /// Returns [`MsqError::Encoding`] when the text has a character outside
     /// ISO-8859-1.
     pub fn save(&self) -> Result<Vec<u8>, MsqError> {
-        Ok(encoding::encode(&self.document.serialize())?)
+        Ok(oxtuner_encoding::encode_latin1(&self.document.serialize())?)
     }
 
     /// The parsed document, for callers that need raw access (tests, tools).

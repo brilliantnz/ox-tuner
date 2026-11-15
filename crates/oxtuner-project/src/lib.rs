@@ -56,7 +56,6 @@
 mod atomic;
 pub mod check;
 mod definition_cache;
-pub mod encoding;
 mod flags;
 pub mod hash;
 pub mod load;
@@ -67,9 +66,9 @@ pub mod xml;
 
 pub use check::{IssueKind, LoadIssue, LoadReport, check};
 pub use definition_cache::{CACHE_FORMAT_VERSION, DefinitionSource};
-pub use encoding::EncodeError;
 pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};
+pub use oxtuner_encoding::Latin1Error as EncodeError;
 pub use project::{
     CONFIG_DIR, CreateRequest, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome,
     TUNE_FILE,
