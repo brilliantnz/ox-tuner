@@ -68,6 +68,34 @@ pub enum IssueKind {
 }
 
 impl IssueKind {
+    /// A stable code for logs and a future notification policy.
+    ///
+    /// Never contains user data, so it is safe to group or filter on.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingVersionInfo => "missing-version-info",
+            Self::SignatureMismatch => "signature-mismatch",
+            Self::PageCountMismatch => "page-count-mismatch",
+            Self::InvalidPageNumber => "invalid-page-number",
+            Self::DuplicatePage => "duplicate-page",
+            Self::MissingPage => "missing-page",
+            Self::UnknownPage => "unknown-page",
+            Self::PageSizeMismatch => "page-size-mismatch",
+            Self::MissingPageSize => "missing-page-size",
+            Self::PcPageCount => "pc-page-count",
+            Self::ShapeMismatch => "shape-mismatch",
+            Self::OrphanValue => "orphan-value",
+            Self::MissingValue => "missing-value",
+            Self::NamelessEntry => "nameless-entry",
+            Self::Definition => "definition",
+            Self::ValueSkipped => "value-skipped",
+            Self::ValueOutOfRange => "value-out-of-range",
+            Self::ValueClamped => "value-clamped",
+            Self::PageDataMismatch => "page-data-mismatch",
+        }
+    }
+
     /// Whether the problem prevents saving.
     pub const fn is_blocker(self) -> bool {
         matches!(
@@ -111,6 +139,18 @@ pub struct LoadReport {
     pub loaded: usize,
     /// Values left at their definition default.
     pub skipped: usize,
+    /// Names of values the definition does not declare, in file order.
+    ///
+    /// These are the part of [`Self::skipped`] that carries no
+    /// [`IssueKind::ValueSkipped`] warning of its own: the check layer reports
+    /// them once, with a short preview. The full list is kept here so a log or
+    /// a diagnostics view can name every one instead of only counting them.
+    pub orphan_values: Vec<String>,
+    /// Names of definition entries the tune has no value for, sorted.
+    ///
+    /// The check layer warns about them once, with a short preview; this is the
+    /// full list, for the same reason as [`Self::orphan_values`].
+    pub missing_values: Vec<String>,
 }
 
 impl LoadReport {
@@ -407,6 +447,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         );
     }
     if !orphans.is_empty() {
+        report.orphan_values = orphans.iter().map(|name| (*name).to_owned()).collect();
         report.warn(
             IssueKind::OrphanValue,
             format!(
@@ -427,6 +468,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         .collect();
     missing.sort_unstable();
     if !missing.is_empty() {
+        report.missing_values = missing.iter().map(|name| (*name).to_owned()).collect();
         report.warn(
             IssueKind::MissingValue,
             format!(
@@ -674,6 +716,17 @@ pc = scalar, U08, 0, "", 1, 0, 0, 255, 0
             .find(|issue| issue.kind == IssueKind::OrphanValue)
             .expect("orphan warning");
         assert!(orphan.message.contains("gone"));
+    }
+
+    #[test]
+    fn issue_kinds_carry_stable_codes_for_logs() {
+        assert_eq!(
+            IssueKind::SignatureMismatch.code(),
+            "signature-mismatch",
+            "a blocker keeps its code when the message changes"
+        );
+        assert_eq!(IssueKind::OrphanValue.code(), "orphan-value");
+        assert_eq!(IssueKind::ValueSkipped.code(), "value-skipped");
     }
 
     #[test]
