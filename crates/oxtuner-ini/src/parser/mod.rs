@@ -563,6 +563,99 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_bit_option_keeps_the_equals_signs_in_its_label() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 288\n\
+                    page = 1\n\
+                    #define comparator_def = \"== (equal)\",  \"!= (different)\",  \
+                    \">= (greater/equal)\"\n\
+                    compare = bits, U08, 82, [0:2], $comparator_def\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let labels: Vec<&str> = definition
+            .constant("compare")
+            .expect("the constant parses")
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            ["== (equal)", "!= (different)", ">= (greater/equal)"],
+            "an `=` inside a quoted label is part of the label, not an index"
+        );
+    }
+
+    #[test]
+    fn a_label_list_separated_by_periods_keeps_its_option_indexes() {
+        // The reference Speeduino definition writes the first three labels of
+        // `secondarySerialProtocol` as `"One". "Two". "Three"`.
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
+                    page = 1\n\
+                    serial = bits, U08, 0, [3:6], \"Generic (Fixed List)\"\
+                    . \"Generic (ini File)\". \"CAN\", \"msDroid\"\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let options: Vec<(&str, u32)> = definition
+            .constant("serial")
+            .expect("the constant parses")
+            .options
+            .iter()
+            .map(|option| (option.label.as_str(), option.value))
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("Generic (Fixed List)", 0),
+                ("Generic (ini File)", 1),
+                ("CAN", 2),
+                ("msDroid", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scaled_pc_variable_keeps_its_numeric_attributes() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    wueAFR = array, S16, [10], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("wueAFR")
+            .expect("the variable parses");
+        let literal =
+            |number: &Option<crate::Number>| number.as_ref().and_then(crate::Number::literal);
+        assert_eq!(literal(&variable.scale), Some(0.1));
+        assert_eq!(literal(&variable.translate), Some(0.0));
+        assert_eq!(literal(&variable.minimum), Some(-4.0));
+        assert_eq!(literal(&variable.maximum), Some(4.0));
+        assert_eq!(literal(&variable.digits), Some(1.0));
+    }
+
+    #[test]
+    fn a_string_pc_variable_keeps_its_length() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\nAlias = string, ASCII, 20\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("Alias")
+            .expect("the variable parses");
+        assert_eq!(
+            variable.shape,
+            crate::Shape::Text {
+                length: crate::Dimension::Fixed(20),
+                columns: None,
+            },
+            "a string PC variable is text, not a scalar to parse as a number"
+        );
+    }
+
+    #[test]
     fn a_file_without_a_signature_is_rejected() {
         let error = parse_str("[Constants]\npage = 1\n", &SettingsContext::new())
             .expect_err("must be rejected");
