@@ -31,12 +31,13 @@ pub struct VersionEntry {
 pub struct FetchedVersions {
     /// Whether the entries came from the cache.
     pub cached: bool,
-    /// Whether the answer is older than the caller asked for.
+    /// Whether the listing came from the cache without a read of the index.
     ///
-    /// Set when a listing was served from the cache even though its age was
-    /// past the policy ([`MaxAge::Any`]) or a refresh failed
-    /// ([`MaxAge::Zero`]). Something to browse beats nothing while offline,
-    /// and the dialog says so.
+    /// Set when an old listing was accepted by policy
+    /// ([`MaxAge::Any`](crate::definition::MaxAge::Any)) or when a refresh
+    /// failed and the cached listing was kept
+    /// ([`MaxAge::Zero`](crate::definition::MaxAge::Zero)). Something to
+    /// browse beats nothing while offline, and the dialog says so.
     pub stale: bool,
     /// The parsed entries.
     pub entries: Vec<VersionEntry>,

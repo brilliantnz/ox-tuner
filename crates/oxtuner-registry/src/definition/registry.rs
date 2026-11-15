@@ -289,6 +289,16 @@ impl Registry {
 
         let entries = source.fetch_listing(fetch)?;
 
+        // A listed family always publishes something. An index that answers
+        // nothing is a failed read, not an empty family, and caching it as
+        // fresh would replace a good listing for a whole TTL.
+        if entries.is_empty() {
+            return Err(RegistryError::new(
+                ErrorKind::Network,
+                "the listing carried no entries",
+            ));
+        }
+
         // The listing is derived data. A read-only or full cache directory
         // must not throw away an answer the network already produced, but a
         // permanently unwritable cache must still leave a trace.
@@ -299,14 +309,14 @@ impl Registry {
                     &crate::cache::Meta::downloaded(&source.index_hint(), &bytes),
                 ),
                 Err(error) => tracing::debug!(
-                    op = "registry-cache-meta",
+                    op = "registry-cache-store",
                     %error,
                     path = %path.display(),
                     "the listing was not cached"
                 ),
             },
             Err(error) => tracing::debug!(
-                op = "registry-cache-meta",
+                op = "registry-cache-store",
                 %error,
                 path = %path.display(),
                 "the listing could not be encoded for the cache"
@@ -495,7 +505,6 @@ mod tests {
 
     /// A network that always fails.
     struct Failing;
-
     impl HttpGet for Failing {
         fn fetch(&self, _url: &str, _max_bytes: usize) -> Result<Vec<u8>, RegistryError> {
             Err(RegistryError::new(ErrorKind::Network, "offline"))
@@ -508,6 +517,24 @@ mod tests {
             _progress: &mut dyn FnMut(u64, Option<u64>),
         ) -> Result<Vec<u8>, RegistryError> {
             Err(RegistryError::new(ErrorKind::Network, "offline"))
+        }
+    }
+
+    /// A network that answers 200 with an empty body.
+    struct EmptyBody;
+
+    impl HttpGet for EmptyBody {
+        fn fetch(&self, _url: &str, _max_bytes: usize) -> Result<Vec<u8>, RegistryError> {
+            Ok(Vec::new())
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _max_bytes: usize,
+            _progress: &mut dyn FnMut(u64, Option<u64>),
+        ) -> Result<Vec<u8>, RegistryError> {
+            Ok(Vec::new())
         }
     }
 
@@ -771,6 +798,23 @@ mod tests {
         assert!(refreshed.cached);
         assert!(refreshed.stale);
         assert_eq!(refreshed.entries, entries);
+    }
+
+    #[test]
+    fn an_empty_index_is_a_failure_not_a_cached_empty_listing() {
+        let (_dir, store) = temp_store("fetch-empty");
+        let registry = Registry::with_defaults();
+
+        let failed = registry.fetch_versions(&EmptyBody, &store, Family::Speeduino);
+
+        assert!(
+            matches!(failed, Err(error) if error.kind() == ErrorKind::Network),
+            "an empty body must not look like a family with no versions"
+        );
+        assert!(
+            !store.versions_file(Family::Speeduino).exists(),
+            "a failed read must not be cached as fresh"
+        );
     }
 
     #[test]

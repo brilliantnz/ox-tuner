@@ -339,12 +339,10 @@ impl CacheStore {
             Err(error) => return Err(RegistryError::from(error)),
         };
 
-        // Only after the bytes are gone: an orphan sidecar is dead weight,
-        // while a data file whose sidecar vanished would verify as trusted
-        // forever.
-        if removed {
-            let _ = fs::remove_file(self.meta_for(path));
-        }
+        // The bytes are gone either way, so an orphan sidecar is only dead
+        // weight: drop it. A data file whose sidecar vanished by any other
+        // route would verify as trusted forever.
+        let _ = fs::remove_file(self.meta_for(path));
 
         Ok(removed)
     }

@@ -33,6 +33,12 @@ const MAX_HASHES_PER_BOARD: usize = 4;
 /// How many entries the walk collects before it stops.
 const MAX_ENTRIES: usize = 300;
 
+/// How many index pages one walk may read before it answers with what it has.
+///
+/// The budget bounds the work on a page that lists far more directories than a
+/// real day does, so a hostile or broken index cannot keep the worker busy.
+const MAX_PAGES: usize = 400;
+
 /// The definition URL for `signature`, following the lookup rule.
 ///
 /// `rusEFI master.2024.02.02.alphax-4chan.1293678056` becomes
@@ -195,6 +201,20 @@ fn page_names(fetch: &dyn HttpGet, url: &str, dirs: bool) -> Result<Vec<String>,
 }
 
 /// The newest names first. Zero-padded dates sort newest-first this way.
+/// Takes one page out of the walk budget.
+///
+/// The budget bounds remote-driven work: a page listing thousands of empty
+/// directories costs one request each, and the entry cap cannot see them.
+fn spend(budget: &mut usize) -> bool {
+    let Some(left) = budget.checked_sub(1) else {
+        return false;
+    };
+
+    *budget = left;
+    true
+}
+
+/// The newest names first. Zero-padded dates sort newest-first this way.
 fn newest_first(mut names: Vec<String>, take: usize) -> Vec<String> {
     names.sort();
     names.reverse();
@@ -214,6 +234,15 @@ fn is_dated(text: &str, width: usize) -> bool {
 /// newest day each with all its boards. The caps keep the walk to a few
 /// hundred small requests at most; the caller caches the result for a day.
 fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError> {
+    let mut budget = MAX_PAGES;
+
+    if !spend(&mut budget) {
+        return Err(RegistryError::new(
+            ErrorKind::Network,
+            "the listing walk hit its page budget",
+        ));
+    }
+
     let mut branches = page_names(fetch, AUTOINDEX_ROOT, true)?;
     branches.retain(|branch| branch != "master");
     branches.sort();
@@ -230,7 +259,7 @@ fn crawl_newest(fetch: &dyn HttpGet) -> Result<Vec<VersionEntry>, RegistryError>
             break;
         }
 
-        crawl_branch(fetch, &branch, &mut entries)?;
+        crawl_branch(fetch, &branch, &mut entries, &mut budget)?;
     }
 
     // A listed family always publishes something. An empty walk means the
@@ -251,8 +280,14 @@ fn crawl_branch(
     fetch: &dyn HttpGet,
     branch: &str,
     entries: &mut Vec<VersionEntry>,
+    budget: &mut usize,
 ) -> Result<(), RegistryError> {
     let base = join_url(AUTOINDEX_ROOT, branch);
+
+    if !spend(budget) {
+        return Ok(());
+    }
+
     let years: Vec<String> = newest_first(
         page_names(fetch, &base, true)?
             .into_iter()
@@ -264,6 +299,10 @@ fn crawl_branch(
     let Some(year) = years.into_iter().next() else {
         return Ok(());
     };
+
+    if !spend(budget) {
+        return Ok(());
+    }
 
     let months: Vec<String> = newest_first(
         page_names(fetch, &join_url(&base, &year), true)?
@@ -277,6 +316,10 @@ fn crawl_branch(
         return Ok(());
     };
 
+    if !spend(budget) {
+        return Ok(());
+    }
+
     let days: Vec<String> = newest_first(
         page_names(fetch, &join_url(&join_url(&base, &year), &month), true)?
             .into_iter()
@@ -286,7 +329,7 @@ fn crawl_branch(
     );
 
     for day in days {
-        if entries.len() >= MAX_ENTRIES {
+        if entries.len() >= MAX_ENTRIES || !spend(budget) {
             break;
         }
 
@@ -294,7 +337,7 @@ fn crawl_branch(
         let boards = page_names(fetch, &day_url, true)?;
 
         for board in boards {
-            if entries.len() >= MAX_ENTRIES {
+            if entries.len() >= MAX_ENTRIES || !spend(budget) {
                 break;
             }
 
@@ -524,6 +567,16 @@ mod tests {
             .expect_err("an empty walk is a failure");
 
         assert_eq!(error.kind(), ErrorKind::Network);
+    }
+
+    #[test]
+    fn the_page_budget_stops_a_walk_that_keeps_reading() {
+        let mut budget = 2;
+
+        assert!(spend(&mut budget));
+        assert!(spend(&mut budget));
+        assert!(!spend(&mut budget), "the budget is spent, not negative");
+        assert_eq!(budget, 0);
     }
 
     #[test]
