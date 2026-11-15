@@ -636,9 +636,14 @@ fn label_to_raw(
 ) -> Result<f64, String> {
     let written = entry.value.trim();
     // `TunerStudio` writes the chosen label back with the separator that
-    // followed it in the definition (`"Generic (Fixed List)".`), so one
-    // trailing period is not part of the label.
-    let written = written.strip_suffix('.').map_or(written, str::trim_end);
+    // followed it in the definition (`"Generic (Fixed List)".`), so a quoted
+    // label may carry one trailing period. A label that ends in a period of its
+    // own keeps it: there the quote is still the last character.
+    let written = written
+        .strip_suffix('.')
+        .filter(|stripped| stripped.ends_with('"'))
+        .unwrap_or(written);
+
     let text = unquote(written);
 
     if !is_quoted(written)
@@ -665,6 +670,23 @@ fn label_to_raw(
     options
         .iter()
         .find(|option| option.label.trim() == text.trim())
+        .or_else(|| {
+            // A writer that split the label list on commas only stored the
+            // whole first field, several labels joined by the separator
+            // (`Generic (Fixed List)". "Generic (ini File)". "CAN`). That
+            // field always starts at the first option, so selecting the option
+            // whose label it starts with is right; a later chunk would not be
+            // stored by any writer seen so far.
+            options.iter().find(|option| {
+                let label = option.label.trim();
+
+                !label.is_empty()
+                    && text
+                        .trim()
+                        .strip_prefix(label)
+                        .is_some_and(|rest| rest.starts_with("\"."))
+            })
+        })
         .map(|option| f64::from(option.value))
         .ok_or_else(|| format!("`{text}` is not one of the definition's labels"))
 }
@@ -759,6 +781,17 @@ pub fn format_values(
                         });
                     }
                     Ok(format!("\"{label}\""))
+                }
+                // A bits field with no option list is a count-up list: the
+                // value is its own label, and the file carries it quoted.
+                None if options.is_some_and(|options| options.is_empty()) => {
+                    if raw.fract() != 0.0 {
+                        return Err(FileValueError::NoLabel {
+                            name: spec.name.clone(),
+                            raw,
+                        });
+                    }
+                    Ok(format!("\"{raw:.0}\""))
                 }
                 None => Err(FileValueError::NoLabel {
                     name: spec.name.clone(),
@@ -1185,6 +1218,199 @@ viaIndex = array, U08, 8, [3], "", { alpha[1] }, 0, 0, 255, 0
         PARSED.get_or_init(|| {
             parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses")
         })
+    }
+
+    #[test]
+    fn a_string_value_is_the_element_text_not_a_quoted_token() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+note = string, ASCII, 8
+"#;
+        const PLAIN: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">Aux0</constant>
+    </page>
+</msq>"#;
+        const QUOTED: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">"Aux0"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+
+        for source in [PLAIN, QUOTED] {
+            let loaded = load(&Msq::parse(source.as_bytes()).unwrap(), &definition);
+            assert_eq!(loaded.tune.text("note").unwrap(), "Aux0", "the text loads");
+
+            let spec = loaded
+                .layout
+                .variables()
+                .iter()
+                .find(|spec| spec.name == "note")
+                .expect("the variable is in the layout");
+            let values = loaded.tune.value("note").expect("the value loaded");
+            let text = format_values(spec, &definition, values).expect("the value formats");
+            assert_eq!(
+                text, "Aux0",
+                "a string is the element text, not a quoted token"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_less_bit_field_saves_the_count_up_value() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+unused = bits, U08, 0, [0:2]
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="unused">"1"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let mut loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+        assert_eq!(loaded.tune.raw_at("unused", 0).unwrap(), 1.0);
+
+        loaded.tune.set_raw_at("unused", 0, 2.0).unwrap();
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "unused")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("unused").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+
+        assert_eq!(
+            text, "\"2\"",
+            "a count-up list writes the number the field holds"
+        );
+    }
+
+    #[test]
+    fn a_merged_label_field_selects_its_first_option() {
+        // A writer that split the definition's label list on commas only
+        // stores the whole first field, which is several labels joined by the
+        // period separator. It is still the first option.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+serial = bits, U08, 0, [0:3], "Generic (Fixed List)". "Generic (ini File)". "CAN", "msDroid"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="serial">"Generic (Fixed List)". "Generic (ini File)". "CAN"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| issue.kind != crate::check::IssueKind::ValueSkipped),
+            "{:?}",
+            loaded.report.warnings
+        );
+        assert_eq!(loaded.tune.raw_at("serial", 0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_label_that_ends_in_a_period_is_not_trimmed() {
+        // Only `"label".` carries the separator's period; a comma-separated
+        // label with a period of its own keeps it.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+place = bits, U08, 0, [0:2], "St.", "Ave"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="place">"St."</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| issue.kind != crate::check::IssueKind::ValueSkipped),
+            "{:?}",
+            loaded.report.warnings
+        );
+        assert_eq!(loaded.tune.raw_at("place", 0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_string_value_keeps_xml_syntax_out_of_the_text() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+note = string, ASCII, 16
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">A&amp;B&lt;C"D</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert_eq!(loaded.tune.text("note").unwrap(), "A&B<C\"D");
+
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "note")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("note").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+        assert_eq!(text, "A&B<C\"D", "the writer escapes XML, not the value");
     }
 
     #[test]
