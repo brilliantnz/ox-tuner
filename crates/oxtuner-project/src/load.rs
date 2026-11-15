@@ -635,6 +635,10 @@ fn label_to_raw(
     entry: &Entry,
 ) -> Result<f64, String> {
     let written = entry.value.trim();
+    // `TunerStudio` writes the chosen label back with the separator that
+    // followed it in the definition (`"Generic (Fixed List)".`), so one
+    // trailing period is not part of the label.
+    let written = written.strip_suffix('.').map_or(written, str::trim_end);
     let text = unquote(written);
 
     if !is_quoted(written)
@@ -650,6 +654,13 @@ fn label_to_raw(
             None => return Err("the definition has no bit options for this value".to_owned()),
         },
     };
+
+    // A bit field without labels is a raw value; the file quotes it (`"0"`).
+    if options.is_empty() {
+        return text.trim().parse::<f64>().map_err(|_| {
+            format!("`{text}` is not a number, and the definition labels none of its bits")
+        });
+    }
 
     options
         .iter()
@@ -686,9 +697,9 @@ fn unquote(value: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`FileValueError`] when text is too long, quoted or outside
-/// ISO-8859-1, a bit label is outside ISO-8859-1 or has no label for its value,
-/// or the shape and stored values disagree.
+/// Returns [`FileValueError`] when text is too long or outside ISO-8859-1, a
+/// bit label is outside ISO-8859-1 or has no label for its value, or the shape
+/// and stored values disagree.
 #[expect(
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
@@ -709,19 +720,17 @@ pub fn format_values(
                     ),
                 });
             }
-            if text.contains('"') {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: "a quote cannot be represented in a .msq string".to_owned(),
-                });
-            }
             if let Some(character) = oxtuner_encoding::first_non_latin1(text) {
                 return Err(FileValueError::Text {
                     name: spec.name.clone(),
                     reason: not_latin1_reason(character),
                 });
             }
-            Ok(format!("\"{text}\""))
+            // A string value is the element's text, not a quoted token:
+            // `TunerStudio` writes `<pcVariable name="alias">Aux0</pcVariable>`.
+            // Reading still accepts quotes, so a file written by a tool that
+            // quotes the value keeps working.
+            Ok(text.clone())
         }
         (EntryShape::Bits { .. }, Values::Numbers(numbers)) => {
             let raw = numbers.first().copied().unwrap_or(0.0);
@@ -1176,6 +1185,81 @@ viaIndex = array, U08, 8, [3], "", { alpha[1] }, 0, 0, 255, 0
         PARSED.get_or_init(|| {
             parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses")
         })
+    }
+
+    #[test]
+    fn a_scaled_pc_variable_keeps_its_fractional_values_through_a_save() {
+        // `[PcVariables]` carries the same scale, limits and digits as a
+        // constant. Dropping them rounds `-1.5` to `-2.0` on the next save.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[PcVariables]
+wueAFR = array, S16, [3], "AFR", 0.1, 0.0, -4.0, 4.0, 1
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <pcVariable cols="1" digits="1" name="wueAFR" rows="3" units="AFR">-1.5 -1.2 0.0</pcVariable>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "wueAFR")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("wueAFR").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        assert_eq!(tokens, ["-1.5", "-1.2", "0.0"]);
+    }
+
+    #[test]
+    fn a_bit_field_without_labels_and_one_with_period_separated_labels_load() {
+        // The shapes a project created by `TunerStudio` carries: a `bits`
+        // entry with no option list (the file quotes the raw value), and the
+        // `".` separator the reference Speeduino definition uses for
+        // `secondarySerialProtocol`, whose chosen label comes back as
+        // `"Generic (Fixed List)".`.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+unused = bits, U08, 0, [0:2]
+serial = bits, U08, 1, [3:6], "Generic (Fixed List)". "Generic (ini File)". "CAN"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="unused">"1"</constant>
+        <constant name="serial">"Generic (Fixed List)".</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        let skipped: Vec<&str> = loaded
+            .report
+            .warnings
+            .iter()
+            .filter(|issue| issue.kind == crate::check::IssueKind::ValueSkipped)
+            .map(|issue| issue.message.as_str())
+            .collect();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(loaded.tune.raw_at("unused", 0).unwrap(), 1.0);
+        assert_eq!(loaded.tune.raw_at("serial", 0).unwrap(), 0.0);
     }
 
     fn loaded() -> LoadedTune {

@@ -200,7 +200,7 @@ fn open_edit_save_reopen_round_trips_every_value_shape() {
     assert!(saved.contains("<futureThing mode=\"x\"><nested a=\"1\"/></futureThing>"));
     assert!(saved.contains("<bibliography author=\"TunerStudio\" tuneComment=\"fixture\"/>"));
     assert!(saved.contains("<constant name=\"aeMode\">\"Alpha-N\"</constant>"));
-    assert!(saved.contains("<constant name=\"note\">\"NEW\"</constant>"));
+    assert!(saved.contains("<constant name=\"note\">NEW</constant>"));
 
     let reopened = Project::open(dir.path()).expect("the saved project reopens");
     assert!(!reopened.is_read_only());
