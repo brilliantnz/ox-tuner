@@ -32,3 +32,15 @@ name = "preprocess"
 path = "fuzz_targets/preprocess.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "bit_options"
+path = "fuzz_targets/bit_options.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pc_variables"
+path = "fuzz_targets/pc_variables.rs"
+test = false
+doc = false

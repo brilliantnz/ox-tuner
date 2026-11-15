@@ -168,6 +168,53 @@ page = 1
     )
 }
 
+/// The option-list and PC-variable shapes the parser gained compatibility for:
+/// quoted labels containing `=`, a period-separated label list, and scaled PC
+/// arrays.
+fn options_fixture() -> String {
+    let mut text = String::from(
+        "\
+[MegaTune]
+signature = \"bench 1\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 512
+page = 1
+compare = bits, U08, 0, [0:7], ",
+    );
+
+    for index in 0..64 {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        let _ = write!(text, "\"== option {index}\"");
+    }
+
+    text.push_str("\nserial = bits, U08, 1, [0:3], \"One\". \"Two\". \"Three\". \"Four\"\n");
+    text.push_str("\n[PcVariables]\n");
+
+    for index in 0..200 {
+        let _ = writeln!(
+            text,
+            "bins_{index} = array, S16, [10], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1"
+        );
+    }
+
+    text
+}
+
+fn bench_parse_options(criterion: &mut Criterion) {
+    let text = options_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_bit_options_and_pc_variables", |bencher| {
+        bencher
+            .iter(|| black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses")));
+    });
+}
+
 fn bench_preprocess(criterion: &mut Criterion) {
     let text = fixture();
     let settings = SettingsContext::new();
@@ -298,6 +345,7 @@ criterion_group!(
     bench_parse_str,
     bench_parse_bytes,
     bench_parse_reference_shape,
+    bench_parse_options,
     bench_preprocess_defines,
     bench_expander_build,
     bench_expand_reference,

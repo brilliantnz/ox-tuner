@@ -1,12 +1,15 @@
 # Fuzzing `oxtuner-ini`
 
-Three targets cover the three entry points:
+Five targets: three entry points and two that keep the input on a single
+entry line, where the full pipeline would rarely generate a valid one.
 
-| Target        | Surface                                       |
-| ------------- | --------------------------------------------- |
-| `parse_ini`   | the full pipeline from UTF-8 text             |
-| `parse_bytes` | the lossy decoder plus the full pipeline      |
-| `preprocess`  | conditionals, `#define` expansion, `#include` |
+| Target         | Surface                                         |
+| -------------- | ----------------------------------------------- |
+| `parse_ini`    | the full pipeline from UTF-8 text               |
+| `parse_bytes`  | the lossy decoder plus the full pipeline        |
+| `preprocess`   | conditionals, `#define` expansion, `#include`   |
+| `bit_options`  | a `bits` option list: labels, `=`, `".`         |
+| `pc_variables` | one `[PcVariables]` entry: shape and attributes |
 
 Run them with `cargo +nightly fuzz run <target>`. Corpus and artifact folders
 are git-ignored; seed the corpus with the reference definitions when they are
