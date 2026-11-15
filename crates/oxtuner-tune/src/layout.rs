@@ -561,7 +561,8 @@ impl TuneLayout {
             minimum: attributes.minimum,
             maximum: attributes.maximum,
             digits: attributes.digits,
-            controller_owned: variable.class == ConstantClass::OddArray,
+            controller_owned: variable.flags.controller_priority
+                || variable.class == ConstantClass::OddArray,
             no_msq_save: variable.flags.no_msq_save,
             default_raw: 0.0,
         };
@@ -914,6 +915,43 @@ table = array, U08, 0, {shape}, \"x\", 1, 0
                 .iter()
                 .any(|issue| issue.kind == LayoutIssueKind::ShapeTooLarge)
         );
+    }
+
+    #[test]
+    fn a_pc_variable_keeps_its_declared_attributes() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[PcVariables]
+bins = array, S16, [3], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1
+view = oddArray, U08, [4], \"\", 1, 0, 0, 255, 0, noMsqSave
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        let bins = layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "bins")
+            .expect("the array is in the layout");
+        assert_eq!(bins.scale, Some(0.1));
+        assert_eq!(bins.translate, Some(0.0));
+        assert_eq!(bins.minimum, Some(-4.0));
+        assert_eq!(bins.maximum, Some(4.0));
+        assert_eq!(bins.digits, 1);
+
+        let view = layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "view")
+            .expect("the odd array is in the layout");
+        assert!(view.controller_owned, "an oddArray view is read-only");
+        assert!(view.no_msq_save, "the entry declares noMsqSave");
     }
 
     #[test]
