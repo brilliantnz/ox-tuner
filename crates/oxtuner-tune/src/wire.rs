@@ -216,11 +216,12 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let source =
-                        to_latin1_bytes(text).map_err(|character| TuneError::TextNotLatin1 {
+                    let source = oxtuner_encoding::encode_latin1(text).map_err(|error| {
+                        TuneError::TextNotLatin1 {
                             name: variable.name.clone(),
-                            character,
-                        })?;
+                            character: error.character,
+                        }
+                    })?;
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -347,11 +348,12 @@ pub fn patch_page(
                     let Ok(text) = tune.text(&variable.name) else {
                         continue;
                     };
-                    let source =
-                        to_latin1_bytes(text).map_err(|character| TuneError::TextNotLatin1 {
+                    let source = oxtuner_encoding::encode_latin1(text).map_err(|error| {
+                        TuneError::TextNotLatin1 {
                             name: variable.name.clone(),
-                            character,
-                        })?;
+                            character: error.character,
+                        }
+                    })?;
                     let end = start.saturating_add(len).min(bytes.len());
                     let take = source.len().min(end - start);
                     bytes[start..end].fill(0);
@@ -420,18 +422,6 @@ fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
 
 fn type_width(data_type: DataType) -> usize {
     usize::try_from(data_type.size()).unwrap_or(usize::MAX)
-}
-
-/// Latin-1 bytes for `text`, or the first character that does not fit.
-///
-/// The wire encoding is Latin-1, the same as the `.msq` layer, so a text
-/// constant round-trips byte for byte instead of being lossily re-encoded. The
-/// `.msq` layer keeps its own codec; one shared home is the planned
-/// consolidation.
-fn to_latin1_bytes(text: &str) -> Result<Vec<u8>, char> {
-    text.chars()
-        .map(|character| u8::try_from(u32::from(character)).map_err(|_| character))
-        .collect()
 }
 
 /// Replaces a bit range in an existing word, keeping every other bit.
