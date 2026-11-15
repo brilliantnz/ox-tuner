@@ -12,7 +12,7 @@ use crate::definition::{
     source::FirmwareSource,
     types::VersionEntry,
 };
-use crate::error::RegistryError;
+use crate::error::{ErrorKind, RegistryError};
 use crate::fetch::{HttpGet, MAX_LISTING_BYTES};
 
 /// The root every official definition hangs under.
@@ -78,15 +78,15 @@ impl FirmwareSource for RusefiSource {
     fn parse(&self, signature: &str) -> Option<FirmwareId> {
         let id = parse_signature(signature).ok()?;
 
-        (id.family == Family::Rusefi).then_some(id)
+        (id.family() == Family::Rusefi).then_some(id)
     }
 
     fn ini_url(&self, id: &FirmwareId) -> Option<String> {
-        if id.family != Family::Rusefi || family_of(&id.raw) != Family::Rusefi {
+        if id.family() != Family::Rusefi || family_of(id.raw()) != Family::Rusefi {
             return None;
         }
 
-        ini_url_for_signature(&id.raw)
+        ini_url_for_signature(id.raw())
     }
 
     fn index_hint(&self) -> String {
@@ -292,8 +292,22 @@ fn crawl_branch(
                 break;
             }
 
-            let mut hashes = page_names(fetch, &join_url(&day_url, &board), false)?;
-            hashes.truncate(MAX_HASHES_PER_BOARD);
+            let hashes = match page_names(fetch, &join_url(&day_url, &board), false) {
+                Ok(names) => newest_first(names, MAX_HASHES_PER_BOARD),
+                Err(error) if matches!(error.kind(), ErrorKind::Network | ErrorKind::NotFound) => {
+                    // One board that answers nothing must not cost the rest of
+                    // the listing: skip it and keep walking.
+                    tracing::debug!(
+                        op = "registry-listing",
+                        board,
+                        code = error.kind().as_str(),
+                        "board page skipped"
+                    );
+
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
 
             for hash in hashes {
                 let Some(hash) = hash
@@ -432,6 +446,44 @@ mod tests {
                 "the listing test never downloads",
             ))
         }
+    }
+
+    #[test]
+    fn one_unreadable_board_page_does_not_fail_the_listing() {
+        use std::collections::HashMap;
+
+        let mut pages = HashMap::new();
+        pages.insert(AUTOINDEX_ROOT.to_owned(), TreeStub::page(&["master/"]));
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master"),
+            TreeStub::page(&["2026/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026"),
+            TreeStub::page(&["11/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11"),
+            TreeStub::page(&["15/"]),
+        );
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15"),
+            TreeStub::page(&["broken/", "uaefi/"]),
+        );
+        // `broken` has no page in the stub, so it answers NotFound.
+        pages.insert(
+            join_url(AUTOINDEX_ROOT, "master/2026/11/15/uaefi"),
+            TreeStub::page(&["111.ini"]),
+        );
+
+        let stub = TreeStub {
+            pages,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let entries = RusefiSource.fetch_listing(&stub).expect("a listing");
+
+        assert_eq!(entries.len(), 1, "the readable board still lists");
+        assert!(entries[0].version.ends_with("uaefi.111"));
     }
 
     #[test]

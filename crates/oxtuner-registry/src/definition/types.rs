@@ -18,7 +18,11 @@ pub struct ResolvedDefinition {
 pub struct VersionEntry {
     /// The version text as the server lists it.
     pub version: String,
-    /// Whether this is a stable release rather than a rolling channel.
+    /// Whether this family treats the entry as a release rather than a channel.
+    ///
+    /// The rule is per family. Speeduino's `master` image and `EEPROM_clear`
+    /// are channels; rusEFI publishes its releases from the `master` branch,
+    /// so its builds count as releases.
     pub stable: bool,
 }
 

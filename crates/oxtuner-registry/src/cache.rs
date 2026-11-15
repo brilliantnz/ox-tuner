@@ -76,6 +76,12 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 impl CacheStore {
     /// Roots the store at `root`.
     ///
+    /// The root is resolved once here. Every path handed back to this store
+    /// must come from it ([`CacheStore::root`], [`CacheStore::versions_file`],
+    /// [`CacheStore::definition_ini`], [`CacheStore::firmware_image`],
+    /// [`CacheStore::meta_for`]); a path built from the caller's original,
+    /// unresolved string is not necessarily inside the store.
+    ///
     /// The directory is created on the first store, not here.
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_owned();
@@ -102,13 +108,13 @@ impl CacheStore {
 
     /// Where the definition for `id` is cached.
     pub fn definition_ini(&self, id: &FirmwareId) -> PathBuf {
-        let stem = safe_segment(&id.version, 64);
-        let suffix = short_hash(id.raw.as_bytes());
+        let stem = safe_segment(id.version(), 64);
+        let suffix = short_hash(id.raw().as_bytes());
 
         self.root
             .join("definition")
             .join("ini")
-            .join(id.family.id())
+            .join(id.family().id())
             .join(format!("{stem}-{suffix}.ini"))
     }
 
@@ -182,6 +188,10 @@ impl CacheStore {
     /// The digest is computed while streaming the file, so a large firmware
     /// image is never held in memory just to be checked.
     pub fn verify_file(&self, path: &Path) -> bool {
+        if check_inside(&self.root, path).is_err() {
+            return false;
+        }
+
         let Some(meta) = self.load_meta(path) else {
             return path.is_file();
         };
@@ -300,6 +310,28 @@ impl CacheStore {
         }
     }
 
+    /// Removes a data file and its provenance sidecar.
+    ///
+    /// Returns whether a file was removed. A missing file is `false`, not an
+    /// error: the caller wanted it gone and it is gone. A path outside the
+    /// root is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Cache`] when the path escapes the root or the file
+    /// exists but cannot be removed.
+    pub fn remove(&self, path: &Path) -> Result<bool, RegistryError> {
+        check_inside(&self.root, path)?;
+
+        let _ = fs::remove_file(self.meta_for(path));
+
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(RegistryError::from(error)),
+        }
+    }
+
     /// Whether `bytes` digest to `expected`.
     ///
     /// This answers "is this the file I asked for", not a security question.
@@ -412,27 +444,29 @@ fn short_hash(data: &[u8]) -> String {
 /// and the result is capped at `max` characters so one long version string
 /// cannot make an awkward path. An empty result becomes `unnamed`.
 fn safe_segment(text: &str, max: usize) -> String {
-    let mut stem = String::with_capacity(text.len());
+    let limit = max.max(1);
+    let mut stem = String::with_capacity(text.len().min(limit));
 
     for byte in text.bytes() {
+        if stem.len() >= limit {
+            break;
+        }
+
         let lower = byte.to_ascii_lowercase();
         if lower.is_ascii_alphanumeric() || lower == b'.' || lower == b'_' || lower == b'-' {
             stem.push(char::from(lower));
         } else {
             stem.push('-');
         }
-
-        if stem.len() >= max {
-            break;
-        }
     }
 
-    let trimmed = stem.trim_matches(['.', '-']).to_owned();
+    let trimmed = stem.trim_matches(['.', '-']);
 
     if trimmed.is_empty() {
-        "unnamed".to_owned()
+        // The fallback is a name too, so it obeys the same length budget.
+        "unnamed"[..limit.min("unnamed".len())].to_owned()
     } else {
-        trimmed
+        trimmed.to_owned()
     }
 }
 
@@ -457,13 +491,7 @@ mod tests {
     }
 
     fn speeduino_id() -> FirmwareId {
-        FirmwareId {
-            family: Family::Speeduino,
-            version: "202501.7".to_owned(),
-            board: None,
-            hash: None,
-            raw: "speeduino 202501.7".to_owned(),
-        }
+        crate::definition::family::parse_signature("speeduino 202501.7").expect("a known signature")
     }
 
     #[test]
@@ -681,6 +709,41 @@ mod tests {
     }
 
     #[test]
+    fn a_path_outside_the_root_never_verifies() {
+        let root = temp_root("verify-outside");
+        let store = CacheStore::new(&root);
+        let outside = root.join("..").join("outside.ini");
+
+        fs::write(&outside, b"x").expect("a file lands outside");
+
+        assert!(!store.verify_file(&outside));
+        assert!(store.remove(&outside).is_err());
+
+        let _ = fs::remove_file(&outside);
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
+    fn removing_drops_the_data_and_its_sidecar() {
+        let root = temp_root("remove");
+        let store = CacheStore::new(&root);
+        let path = store.definition_ini(&speeduino_id());
+
+        store.store(&path, b"x").expect("a store succeeds");
+        store.store_meta(
+            &path,
+            &Meta::downloaded("https://example.invalid/x.ini", b"x"),
+        );
+
+        assert!(store.remove(&path).expect("a removal"));
+        assert!(!path.exists());
+        assert!(!store.meta_for(&path).exists());
+        assert!(!store.remove(&path).expect("a second removal is quiet"));
+
+        fs::remove_dir_all(&root).expect("the test root is removed");
+    }
+
+    #[test]
     fn a_file_without_provenance_counts_as_valid() {
         let root = temp_root("verify-nometa");
         let store = CacheStore::new(&root);
@@ -709,5 +772,39 @@ mod tests {
         assert_eq!(safe_segment("AlphaX 4chan!", 64), "alphax-4chan");
         assert_eq!(safe_segment("...---...", 64), "unnamed");
         assert_eq!(safe_segment("v", 1), "v");
+    }
+
+    #[test]
+    fn a_stem_never_escapes_the_directory() {
+        use proptest::prelude::*;
+
+        proptest!(|(text in "\\PC{0,200}", max in 1usize..80)| {
+            let stem = safe_segment(&text, max);
+
+            prop_assert!(!stem.is_empty());
+            prop_assert!(!stem.contains(['/', '\\']));
+            prop_assert!(stem != "." && stem != "..");
+            prop_assert!(stem.len() <= max);
+        });
+    }
+
+    #[test]
+    fn confinement_refuses_anything_outside_the_root() {
+        let root = PathBuf::from("/cache/registry");
+
+        assert!(check_inside(&root, &root).is_ok());
+        assert!(check_inside(&root, &root.join("definition/x.ini")).is_ok());
+
+        for outside in [
+            PathBuf::from("/cache/registry-evil/x.ini"),
+            PathBuf::from("/cache/registry/../x.ini"),
+            PathBuf::from("/tmp/x.ini"),
+            PathBuf::new(),
+        ] {
+            assert!(
+                check_inside(&root, &outside).is_err(),
+                "should be refused: {outside:?}"
+            );
+        }
     }
 }

@@ -64,18 +64,45 @@ pub fn family_of(signature: &str) -> Family {
 }
 
 /// One exact firmware build, as its signature describes it.
+///
+/// The parts are private so the id cannot disagree with the signature it came
+/// from: `version` and `raw` must always describe the same build, and every
+/// cache key derives from both.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FirmwareId {
+    family: Family,
+    version: String,
+    board: Option<String>,
+    hash: Option<String>,
+    raw: String,
+}
+
+impl FirmwareId {
     /// The family the signature names.
-    pub family: Family,
+    pub fn family(&self) -> Family {
+        self.family
+    }
+
     /// The version part: `202501.7`, or the rusEFI dotted tail.
-    pub version: String,
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
     /// The rusEFI short board name, when the signature carries one.
-    pub board: Option<String>,
+    pub fn board(&self) -> Option<&str> {
+        self.board.as_deref()
+    }
+
     /// The rusEFI configuration hash, when the signature carries one.
-    pub hash: Option<String>,
+    pub fn hash(&self) -> Option<&str> {
+        self.hash.as_deref()
+    }
+
     /// The signature exactly as the ECU reported it.
-    pub raw: String,
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
 }
 
 /// Splits `signature` into its family and version parts.
@@ -261,9 +288,9 @@ mod tests {
     fn a_speeduino_signature_parses_to_its_version() {
         let id = parse_signature("speeduino 202501.7").expect("parses");
 
-        assert_eq!(id.family, Family::Speeduino);
-        assert_eq!(id.version, "202501.7");
-        assert_eq!(id.board, None);
+        assert_eq!(id.family(), Family::Speeduino);
+        assert_eq!(id.version(), "202501.7");
+        assert_eq!(id.board(), None);
     }
 
     #[test]
@@ -271,9 +298,9 @@ mod tests {
         let id =
             parse_signature("rusEFI master.2024.02.02.alphax-4chan.1293678056").expect("parses");
 
-        assert_eq!(id.family, Family::Rusefi);
-        assert_eq!(id.board.as_deref(), Some("alphax-4chan"));
-        assert_eq!(id.hash.as_deref(), Some("1293678056"));
+        assert_eq!(id.family(), Family::Rusefi);
+        assert_eq!(id.board(), Some("alphax-4chan"));
+        assert_eq!(id.hash(), Some("1293678056"));
     }
 
     #[test]
@@ -308,8 +335,8 @@ mod tests {
             let family = family_of(&text);
 
             if let Ok(id) = parse_signature(&text) {
-                assert_eq!(id.family, family);
-                assert_eq!(id.raw, text.trim());
+                assert_eq!(id.family(), family);
+                assert_eq!(id.raw(), text.trim());
             }
         });
     }

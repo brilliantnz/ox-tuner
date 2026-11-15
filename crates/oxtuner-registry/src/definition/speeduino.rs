@@ -12,9 +12,17 @@ use crate::definition::{
 /// The version listing: one version per line.
 pub const VERSIONS_URL: &str = "https://speeduino.com/fw/versions";
 
-/// The definition file for `version`.
-pub fn ini_url_for_version(version: &str) -> String {
-    format!("https://speeduino.com/fw/{version}.ini")
+/// The definition file for `version`, when it is a file-name token.
+///
+/// The version becomes a path segment, so anything outside the token
+/// vocabulary is refused rather than interpolated into a URL.
+pub fn ini_url_for_version(version: &str) -> Option<String> {
+    let token = !version.is_empty()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+
+    token.then(|| format!("https://speeduino.com/fw/{version}.ini"))
 }
 
 /// Serves the Speeduino definitions.
@@ -29,15 +37,15 @@ impl FirmwareSource for SpeeduinoSource {
     fn parse(&self, signature: &str) -> Option<FirmwareId> {
         let id = parse_signature(signature).ok()?;
 
-        (id.family == Family::Speeduino).then_some(id)
+        (id.family() == Family::Speeduino).then_some(id)
     }
 
     fn ini_url(&self, id: &FirmwareId) -> Option<String> {
-        if id.family != Family::Speeduino || family_of(&id.raw) != Family::Speeduino {
+        if id.family() != Family::Speeduino || family_of(id.raw()) != Family::Speeduino {
             return None;
         }
 
-        Some(ini_url_for_version(&id.version))
+        ini_url_for_version(id.version())
     }
 
     fn versions_url(&self) -> Option<String> {
@@ -75,10 +83,23 @@ mod tests {
 
     #[test]
     fn another_family_gets_no_url() {
+        use crate::definition::family::parse_signature;
+
         let source = SpeeduinoSource;
-        let mut id = source.parse("speeduino 202501.7").expect("parses");
-        id.family = Family::Rusefi;
+        let id =
+            parse_signature("rusEFI master.2024.02.02.alphax-4chan.1293678056").expect("parses");
 
         assert_eq!(source.ini_url(&id), None);
+    }
+
+    #[test]
+    fn a_version_outside_the_token_vocabulary_builds_no_url() {
+        assert_eq!(ini_url_for_version("../../etc/passwd"), None);
+        assert_eq!(ini_url_for_version("202501.7 extra"), None);
+        assert_eq!(ini_url_for_version(""), None);
+        assert_eq!(
+            ini_url_for_version("202501.7").as_deref(),
+            Some("https://speeduino.com/fw/202501.7.ini")
+        );
     }
 }

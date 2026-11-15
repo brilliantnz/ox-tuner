@@ -17,6 +17,18 @@ use crate::{
     fetch::{HttpGet, MAX_INI_BYTES, VERSIONS_TTL_SECS},
 };
 
+/// How old a cached listing may be before the network is asked again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MaxAge {
+    /// Serve any cached listing, however old.
+    Any,
+    /// Serve only a listing younger than [`crate::fetch::VERSIONS_TTL_SECS`].
+    Ttl,
+    /// Ignore the cache and read the index.
+    Zero,
+}
+
 /// The definition sources this build knows.
 pub struct Registry {
     sources: Vec<Box<dyn FirmwareSource>>,
@@ -37,9 +49,22 @@ impl Registry {
         }
     }
 
-    /// Adds one more source. Sources added first are asked first.
+    /// Adds or replaces the source for its family.
+    ///
+    /// A replacement takes the position of the source it replaced, so a custom
+    /// feed for a shipped family is asked where that family was asked before.
     pub fn add(&mut self, source: impl FirmwareSource + 'static) {
-        self.sources.push(Box::new(source));
+        let family = source.family();
+        let boxed: Box<dyn FirmwareSource> = Box::new(source);
+
+        match self
+            .sources
+            .iter()
+            .position(|existing| existing.family() == family)
+        {
+            Some(index) => self.sources[index] = boxed,
+            None => self.sources.push(boxed),
+        }
     }
 
     /// Splits `signature` with the first source that claims it.
@@ -66,7 +91,7 @@ impl Registry {
 
         self.sources
             .iter()
-            .find(|source| source.family() == id.family)?
+            .find(|source| source.family() == id.family())?
             .ini_url(&id)
     }
 
@@ -118,8 +143,14 @@ impl Registry {
     }
 
     /// The cached definition file for `id`, when the store already holds it.
+    ///
+    /// Presence only: [`Registry::ensure_definition`] is the call that also
+    /// proves the bytes still match their provenance. The path is derived from
+    /// the resolved signature, so it agrees with where `ensure_definition`
+    /// writes.
     pub fn locate(&self, store: &CacheStore, id: &FirmwareId) -> Option<PathBuf> {
-        let path = store.definition_ini(id);
+        let resolved = self.resolve(id.raw()).ok()?;
+        let path = store.definition_ini(&resolved.id);
 
         store.exists(&path).then_some(path)
     }
@@ -133,7 +164,6 @@ impl Registry {
             .map(|source| source.family())
             .collect();
         families.sort_by_key(|family| u8::from(*family != Family::Speeduino));
-        families.dedup();
 
         families
     }
@@ -155,6 +185,27 @@ impl Registry {
         store: &CacheStore,
         family: Family,
     ) -> Result<FetchedVersions, RegistryError> {
+        self.fetch_versions_with(fetch, store, family, MaxAge::Ttl)
+    }
+
+    /// Lists the family's versions under an explicit cache age policy.
+    ///
+    /// [`MaxAge::Zero`] is what a visible Refresh action asks for; the other
+    /// variants trade freshness for a network read. A failed read with a stale
+    /// listing present still answers with `stale` set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] when the family publishes no listing,
+    /// and the fetch failure when the network cannot answer and no stale
+    /// listing exists.
+    pub fn fetch_versions_with(
+        &self,
+        fetch: &dyn HttpGet,
+        store: &CacheStore,
+        family: Family,
+        max_age: MaxAge,
+    ) -> Result<FetchedVersions, RegistryError> {
         let listed = self
             .sources
             .iter()
@@ -169,7 +220,13 @@ impl Registry {
 
         let path = store.versions_file(family);
 
-        if let Some(entries) = load_cached_listing(store, &path) {
+        let cached = match max_age {
+            MaxAge::Zero => None,
+            MaxAge::Any => load_stale_listing(store, &path),
+            MaxAge::Ttl => load_cached_listing(store, &path),
+        };
+
+        if let Some(entries) = cached {
             return Ok(FetchedVersions {
                 cached: true,
                 stale: false,
@@ -224,13 +281,25 @@ impl Registry {
         };
 
         let entries = source.fetch_listing(fetch)?;
-        let bytes = serde_json::to_vec(&entries)
-            .map_err(|error| RegistryError::new(ErrorKind::Cache, error.to_string()))?;
-        store.store(path, &bytes)?;
-        store.store_meta(
-            path,
-            &crate::cache::Meta::downloaded(&source.index_hint(), &bytes),
-        );
+
+        // The listing is derived data. A read-only or full cache directory
+        // must not throw away an answer the network already produced.
+        match serde_json::to_vec(&entries) {
+            Ok(bytes) => {
+                if store.store(path, &bytes).is_ok() {
+                    store.store_meta(
+                        path,
+                        &crate::cache::Meta::downloaded(&source.index_hint(), &bytes),
+                    );
+                }
+            }
+            Err(error) => tracing::debug!(
+                op = "registry-cache-meta",
+                %error,
+                path = %path.display(),
+                "the listing could not be encoded for the cache"
+            ),
+        }
 
         Ok(entries)
     }
@@ -254,7 +323,7 @@ impl Registry {
         id: &FirmwareId,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<PathBuf, RegistryError> {
-        let resolved = self.resolve(&id.raw)?;
+        let resolved = self.resolve(id.raw())?;
 
         Self::download_resolved(fetch, store, &resolved, progress)
     }
@@ -282,6 +351,22 @@ impl Registry {
         Ok(path)
     }
 
+    /// Removes the cached definition and its provenance for `id`.
+    ///
+    /// The next [`Registry::ensure_definition`] downloads it again. This is
+    /// the escape hatch for a republished file under the same version, which
+    /// no digest comparison can detect.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolve failure, or the cache failure when the files cannot
+    /// be removed.
+    pub fn invalidate(&self, store: &CacheStore, id: &FirmwareId) -> Result<bool, RegistryError> {
+        let resolved = self.resolve(id.raw())?;
+
+        store.remove(&store.definition_ini(&resolved.id))
+    }
+
     /// Hands out the definition file for `id`, downloading it when needed.
     ///
     /// This is the call the new-project flow makes with the signature the
@@ -301,14 +386,14 @@ impl Registry {
         id: &FirmwareId,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<PathBuf, RegistryError> {
-        let resolved = self.resolve(&id.raw)?;
+        let resolved = self.resolve(id.raw())?;
         let path = store.definition_ini(&resolved.id);
 
         if store.verify_file(&path) {
             tracing::debug!(
                 op = "registry-fetch",
-                family = resolved.id.family.id(),
-                version = resolved.id.version.as_str(),
+                family = resolved.id.family().id(),
+                version = resolved.id.version(),
                 "a verified cache hit skipped the download"
             );
 
@@ -474,7 +559,7 @@ mod tests {
             .resolve("rusEFI master.2024.02.02.alphax-4chan.1293678056")
             .expect("a known signature");
 
-        assert_eq!(resolved.id.family, Family::Rusefi);
+        assert_eq!(resolved.id.family(), Family::Rusefi);
         assert_eq!(
             resolved.ini_url,
             "https://rusefi.com/online/ini/rusefi/master/2024/02/02/alphax-4chan/1293678056.ini"
@@ -546,6 +631,84 @@ mod tests {
         assert!(served.cached);
         assert!(served.stale);
         assert_eq!(served.entries, entries);
+    }
+
+    #[test]
+    fn a_zero_max_age_reads_the_index_again() {
+        let (_dir, store) = temp_store("fetch-zero");
+        let registry = Registry::with_defaults();
+        let stub = Stub::default();
+
+        registry
+            .fetch_versions(&stub, &store, Family::Speeduino)
+            .expect("a listing");
+        let calls = stub.calls.lock().expect("a test lock").len();
+
+        let refreshed = registry
+            .fetch_versions_with(&stub, &store, Family::Speeduino, MaxAge::Zero)
+            .expect("a refresh");
+
+        assert!(!refreshed.cached);
+        assert!(stub.calls.lock().expect("a test lock").len() > calls);
+    }
+
+    #[test]
+    fn an_added_source_replaces_the_shipped_one_in_place() {
+        use crate::definition::source::FirmwareSource;
+
+        struct Custom;
+
+        impl FirmwareSource for Custom {
+            fn family(&self) -> Family {
+                Family::Rusefi
+            }
+
+            fn parse(&self, _signature: &str) -> Option<FirmwareId> {
+                None
+            }
+
+            fn ini_url(&self, _id: &FirmwareId) -> Option<String> {
+                None
+            }
+
+            fn versions_url(&self) -> Option<String> {
+                Some("https://example.invalid/versions".to_owned())
+            }
+        }
+
+        let mut registry = Registry::with_defaults();
+        registry.add(Custom);
+
+        // Speeduino first, one rusEFI entry, no duplicate.
+        assert_eq!(
+            registry.listing_families(),
+            vec![Family::Speeduino, Family::Rusefi]
+        );
+    }
+
+    #[test]
+    fn invalidating_a_definition_forces_the_next_download() {
+        let (_dir, store) = temp_store("invalidate");
+        let registry = Registry::with_defaults();
+        let stub = Stub::default();
+        let id = registry
+            .parse_signature("speeduino 202501.7")
+            .expect("parses");
+        let mut noop = |_: u64, _: Option<u64>| {};
+
+        let path = registry
+            .ensure_definition(&stub, &store, &id, &mut noop)
+            .expect("a download");
+        assert!(store.verify_file(&path));
+
+        assert!(registry.invalidate(&store, &id).expect("an invalidate"));
+        assert!(!path.exists());
+
+        let calls = stub.calls.lock().expect("a test lock").len();
+        registry
+            .ensure_definition(&stub, &store, &id, &mut noop)
+            .expect("a redownload");
+        assert!(stub.calls.lock().expect("a test lock").len() > calls);
     }
 
     #[test]

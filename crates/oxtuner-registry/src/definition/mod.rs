@@ -11,7 +11,7 @@ pub mod speeduino;
 pub mod types;
 
 pub use family::{Family, FirmwareId, family_of, parse_signature};
-pub use registry::Registry;
+pub use registry::{MaxAge, Registry};
 pub use rusefi::RusefiSource;
 pub use source::FirmwareSource;
 pub use speeduino::SpeeduinoSource;
