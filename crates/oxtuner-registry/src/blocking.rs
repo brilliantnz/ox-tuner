@@ -157,8 +157,6 @@ impl BlockingClient {
         let mut response = self.client.get(url).send().map_err(|error| {
             if error.is_timeout() {
                 RegistryError::new(ErrorKind::Network, "the download timed out")
-            } else if error.is_redirect() {
-                RegistryError::new(ErrorKind::InvalidUrl, "a redirect left the fetch policy")
             } else if error
                 .status()
                 .is_some_and(|status| status == reqwest::StatusCode::NOT_FOUND)
@@ -176,9 +174,16 @@ impl BlockingClient {
             ));
         }
 
-        // The redirect policy stops rather than errors, so an out-of-policy
-        // redirect arrives as an ordinary 3xx response.
-        if response.status().is_redirection() {
+        // The redirect policy stops rather than errors, so a redirect it would
+        // have followed arrives as the stopped response.
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::MOVED_PERMANENTLY
+                | reqwest::StatusCode::FOUND
+                | reqwest::StatusCode::SEE_OTHER
+                | reqwest::StatusCode::TEMPORARY_REDIRECT
+                | reqwest::StatusCode::PERMANENT_REDIRECT
+        ) {
             return Err(RegistryError::new(
                 ErrorKind::InvalidUrl,
                 "a redirect left the fetch policy",

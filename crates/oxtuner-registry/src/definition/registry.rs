@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use super::{
     family::Family,
-    family::{FirmwareId, family_of},
+    family::FirmwareId,
     rusefi::RusefiSource,
     source::FirmwareSource,
     speeduino::SpeeduinoSource,
@@ -78,7 +78,9 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::InvalidSignature`] when no source serves the text.
+    /// Returns [`ErrorKind::Unsupported`] when the text names a modeled family
+    /// no source serves yet, and [`ErrorKind::InvalidSignature`] for anything
+    /// else.
     pub fn parse_signature(&self, signature: &str) -> Result<FirmwareId, RegistryError> {
         for source in &self.sources {
             if let Some(id) = source.parse(signature) {
@@ -86,10 +88,10 @@ impl Registry {
             }
         }
 
-        // A known family no source serves yet (FOME today): the text names
-        // something real, so it is not an invalid signature. [`Registry::resolve`]
-        // answers the same way.
-        if family_of(signature) != Family::Unknown {
+        // A family this crate models but no source serves yet (FOME today) is
+        // a real answer, not an invalid signature. [`Registry::resolve`]
+        // classifies it the same way.
+        if crate::definition::family::parse_signature(signature).is_ok() {
             return Err(RegistryError::new(
                 ErrorKind::Unsupported,
                 "no source serves this family yet",
@@ -144,9 +146,9 @@ impl Registry {
             }
         }
 
-        // A known family no source serves yet (FOME today): the text names
+        // A modeled family no source serves yet (FOME today): the text names
         // something real, the registry just cannot fetch it.
-        if family_of(signature) != Family::Unknown {
+        if crate::definition::family::parse_signature(signature).is_ok() {
             return Err(RegistryError::new(
                 ErrorKind::Unsupported,
                 "this family has no downloadable definition",
@@ -628,6 +630,21 @@ mod tests {
             resolved.ini_url,
             "https://rusefi.com/online/ini/rusefi/master/2024/02/02/alphax-4chan/1293678056.ini"
         );
+    }
+
+    #[test]
+    fn a_truncated_signature_stays_invalid() {
+        let registry = Registry::with_defaults();
+
+        for signature in ["rusEFI", "rusEFI (FOME)", "speeduino"] {
+            let parsed = registry.parse_signature(signature).expect_err("truncated");
+
+            assert_eq!(
+                parsed.kind(),
+                ErrorKind::InvalidSignature,
+                "for {signature:?}"
+            );
+        }
     }
 
     #[test]
