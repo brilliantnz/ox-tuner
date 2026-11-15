@@ -133,6 +133,24 @@ impl AppPaths {
         self.cache_dir.join("definitions")
     }
 
+    /// Raw downloads from the firmware registry: listings, definitions, images.
+    ///
+    /// A cache, not user data: deleting it costs downloads and parses, nothing
+    /// else. Parsed definitions keep living next to it in `definitions/`.
+    pub fn registry_dir(&self) -> PathBuf {
+        self.cache_dir.join("registry")
+    }
+
+    /// Cached definition listings and `.ini` downloads.
+    pub fn registry_definition_dir(&self) -> PathBuf {
+        self.registry_dir().join("definition")
+    }
+
+    /// Cached firmware listings and images. No flasher reads them yet.
+    pub fn registry_firmware_dir(&self) -> PathBuf {
+        self.registry_dir().join("firmware")
+    }
+
     /// The directory that holds the user-editable color themes. The bundled
     /// `OxTuner` light and dark themes are seeded here on first launch, next to
     /// `settings.json` and `state.json`, and reloaded live when edited.
@@ -278,6 +296,59 @@ mod tests {
         assert_eq!(
             paths.logs_dir,
             PathBuf::from("/home/me/.local/state/oxtuner/logs")
+        );
+    }
+
+    #[test]
+    fn the_registry_lives_beside_the_definition_cache() {
+        let macos = AppPaths::resolve(
+            Platform::Macos,
+            &dirs(
+                "/Users/me/Library/Application Support",
+                "/Users/me/Library/Application Support",
+                "/Users/me/Library/Caches",
+                "/Users/me",
+            ),
+        );
+        let windows = AppPaths::resolve(
+            Platform::Windows,
+            &dirs(
+                r"C:\Users\me\AppData\Roaming",
+                r"C:\Users\me\AppData\Local",
+                r"C:\Users\me\AppData\Local",
+                r"C:\Users\me",
+            ),
+        );
+        let linux = AppPaths::resolve(
+            Platform::Linux,
+            &dirs(
+                "/home/me/.config",
+                "/home/me/.local/share",
+                "/home/me/.cache",
+                "/home/me",
+            ),
+        );
+
+        for paths in [&macos, &windows, &linux] {
+            assert_eq!(paths.registry_dir(), paths.cache_dir.join("registry"));
+            assert_eq!(
+                paths.registry_definition_dir(),
+                paths.cache_dir.join("registry/definition")
+            );
+            assert_eq!(
+                paths.registry_firmware_dir(),
+                paths.cache_dir.join("registry/firmware")
+            );
+            assert_ne!(paths.registry_dir(), paths.definition_cache_dir());
+        }
+
+        assert_eq!(
+            macos.registry_definition_dir(),
+            PathBuf::from("/Users/me/Library/Caches/OxTuner/registry/definition")
+        );
+        assert_eq!(
+            linux.registry_firmware_dir(),
+            PathBuf::from("/home/me/.cache/oxtuner/registry/firmware")
         );
     }
 }

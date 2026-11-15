@@ -1,0 +1,27 @@
+[package]
+name = "oxtuner-registry"
+description = "Firmware and definition lookup for ox-tuner: signature resolution and OS cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# No benchmarks: nothing here runs per frame or per realtime frame.
+[lib]
+bench = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+reqwest = { workspace = true, features = ["blocking", "native-tls"] }
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
