@@ -525,6 +525,29 @@ impl TuneLayout {
             return;
         };
 
+        // A PC variable declares the same presentation attributes as a
+        // constant, so a scaled one keeps its user values instead of being
+        // rounded to whole numbers on save.
+        let attributes = Attributes::resolve(
+            variable.scale.as_ref(),
+            variable.translate.as_ref(),
+            variable.minimum.as_ref(),
+            variable.maximum.as_ref(),
+            variable.digits.as_ref(),
+            values,
+        );
+        if let Some(unresolved) = attributes.unresolved {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Warning,
+                LayoutIssueKind::UnresolvedAttribute,
+                Some(name),
+                format!(
+                    "presentation attribute `{unresolved}` is an expression this build could \
+                     not evaluate; values cannot be converted until it resolves"
+                ),
+            ));
+        }
+
         let spec = VariableSpec {
             name: name.to_owned(),
             owner: Owner::Pc,
@@ -533,13 +556,13 @@ impl TuneLayout {
             // PC variables live in the project file, not on a page.
             address: None,
             units: variable.units.literal().unwrap_or_default().to_owned(),
-            scale: Some(1.0),
-            translate: Some(0.0),
-            minimum: None,
-            maximum: None,
-            digits: 0,
-            controller_owned: false,
-            no_msq_save: false,
+            scale: attributes.scale,
+            translate: attributes.translate,
+            minimum: attributes.minimum,
+            maximum: attributes.maximum,
+            digits: attributes.digits,
+            controller_owned: variable.class == ConstantClass::OddArray,
+            no_msq_save: variable.flags.no_msq_save,
             default_raw: 0.0,
         };
         let default_raw = default_raw(definition, name, &spec, values);
