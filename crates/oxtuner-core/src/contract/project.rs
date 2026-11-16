@@ -160,6 +160,9 @@ pub struct ProjectView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One serial port the connect dialog can offer.
+///
+/// Every field takes part in the row comparison, so a different device on the
+/// same path reads as a change.
 pub struct PortView {
     /// Device path.
     pub name: String,

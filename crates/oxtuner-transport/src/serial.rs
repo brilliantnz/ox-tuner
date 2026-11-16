@@ -62,10 +62,16 @@ fn is_link_gone(error: &std::io::Error) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        // ERROR_OPERATION_ABORTED, ERROR_DEVICE_NOT_CONNECTED, ERROR_GEN_FAILURE.
-        // The standard library maps the first to `TimedOut` and the others to
+        // ERROR_OPERATION_ABORTED, ERROR_DEVICE_NOT_CONNECTED, ERROR_GEN_FAILURE
+        // and ERROR_BAD_COMMAND, which FTDI-class drivers return on unplug. The
+        // standard library maps the first to `TimedOut` and the rest to
         // uncategorised, so the raw code is the only reliable signal left.
-        const WINDOWS_GONE: [i32; 3] = [995, 1_167, 31];
+        //
+        // ERROR_GEN_FAILURE is broad enough to cover a recoverable failure too.
+        // That trade is taken deliberately: reading a transient fault as a
+        // closed link costs a reconnect, while the other way round costs a
+        // conversation that waits for a deadline that will never be answered.
+        const WINDOWS_GONE: [i32; 4] = [995, 1_167, 31, 22];
 
         if error
             .raw_os_error()
@@ -100,6 +106,7 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
+    #[doc(hidden)]
     /// Builds a port from parts already in hand.
     ///
     /// For callers that test against a port they describe rather than one the
@@ -144,6 +151,7 @@ pub struct UsbIdentity {
 }
 
 impl UsbIdentity {
+    #[doc(hidden)]
     /// An identity for a vendor and product the caller already knows.
     ///
     /// Every optional field starts absent. Callers that test against a device
@@ -341,9 +349,12 @@ impl Transport for SerialTransport {
 
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
         let port = self.port_mut()?;
-        port.write_all(bytes)
-            .and_then(|()| port.flush())
-            .map_err(|error| TransportError::Write(error.to_string()))
+
+        match port.write_all(bytes).and_then(|()| port.flush()) {
+            Ok(()) => Ok(()),
+            Err(error) if is_link_gone(&error) => Err(TransportError::Closed),
+            Err(error) => Err(TransportError::Write(error.to_string())),
+        }
     }
 
     fn read_exact_timeout(
@@ -456,7 +467,10 @@ impl Transport for SerialTransport {
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         self.set_timeout(READ_POLL)?;
         let port = self.port_mut()?;
-        match port.read(buf) {
+
+        // The same fold as every other read: a pulled cable must not be reported
+        // as a port with nothing to say.
+        match read_once(port, buf) {
             Ok(read) => Ok(read),
             Err(error)
                 if matches!(
@@ -466,6 +480,7 @@ impl Transport for SerialTransport {
             {
                 Ok(0)
             }
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => Err(TransportError::Closed),
             Err(error) => Err(TransportError::Read(error.to_string())),
         }
     }

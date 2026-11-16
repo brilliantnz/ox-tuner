@@ -78,7 +78,12 @@ impl PortsWatch {
         read: impl FnOnce() -> Result<Vec<PortInfo>, TransportError>,
     ) -> Result<Option<Vec<PortView>>, TransportError> {
         let ports = read()?;
-        let next: Vec<PortView> = ports.iter().map(view).collect();
+        let mut next: Vec<PortView> = ports.iter().map(view).collect();
+        // Enumeration order is not contractual, so sorting keeps a machine that
+        // returns the same set in a different order from publishing a change it
+        // did not have.
+        next.sort_by(|left, right| left.name.cmp(&right.name));
+
         let publish = should_publish(self.primed, &self.list, &next);
 
         self.list = next;
