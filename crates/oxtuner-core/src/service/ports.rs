@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use oxtuner_transport::PortInfo;
+use oxtuner_transport::{PortInfo, TransportError};
 
 use crate::contract::PortView;
 
@@ -64,22 +64,33 @@ impl PortsWatch {
         self.primed
     }
 
-    /// Re-reads the ports.
+    /// Re-reads the ports, reporting an enumeration failure to the caller.
     ///
     /// Returns the new list when it differs from the last one, and `None` for the
     /// first sample: the ports present at start-up are a baseline, not arrivals.
-    pub(crate) fn sample(&mut self) -> Option<Vec<PortView>> {
-        let Ok(ports) = crate::io_thread::list_ports() else {
-            return None;
-        };
-
+    pub(crate) fn refresh(&mut self) -> Result<Option<Vec<PortView>>, TransportError> {
+        let ports = crate::io_thread::list_ports()?;
         let next: Vec<PortView> = ports.iter().map(view).collect();
         let publish = should_publish(self.primed, &self.list, &next);
 
         self.list = next;
         self.primed = true;
 
-        publish.then(|| self.list.clone())
+        Ok(publish.then(|| self.list.clone()))
+    }
+
+    /// The same, for the command loop, which has nobody to report to.
+    ///
+    /// A failed read leaves the last list in place rather than blanking it: a
+    /// transient enumeration failure is not a machine with no ports.
+    pub(crate) fn sample(&mut self) -> Option<Vec<PortView>> {
+        match self.refresh() {
+            Ok(published) => published,
+            Err(error) => {
+                tracing::debug!(%error, "serial ports could not be listed");
+                None
+            }
+        }
     }
 }
 

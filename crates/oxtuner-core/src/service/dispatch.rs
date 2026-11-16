@@ -45,8 +45,22 @@ pub(super) fn handle(
             // Answer from the snapshot so a dialog cannot see a list that
             // disagrees with the last change the core published. The first
             // command still has to wait for the first sample.
-            if !ports.is_primed() {
-                ports.sample();
+            if !ports.is_primed()
+                && let Err(error) = ports.refresh()
+            {
+                tracing::warn!(%op, %error, "serial ports could not be listed");
+                report.failures += 1;
+                send(
+                    events,
+                    Event::Failed {
+                        op,
+                        failure: Failure {
+                            code: FailureCode::ConnectFailed,
+                            message: error.to_string(),
+                        },
+                    },
+                );
+                return Outcome::Continue;
             }
 
             let summary = ports.snapshot().to_vec();

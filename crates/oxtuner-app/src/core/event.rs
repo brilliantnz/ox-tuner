@@ -81,17 +81,14 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // The port list is stored for the dialog, which stays open while it scans:
     // closing and reopening would lose the user's selection and scroll. The core
     // publishes the same snapshot on a change, so both paths land here.
-    if let Event::PortsListed { ports, .. } = event {
-        let service = cx.global_mut::<CoreService>();
-        service.status.ports = ports;
-        service.status.scanning = false;
-        cx.refresh_windows();
-        return;
-    }
+    let ports = match &event {
+        Event::PortsListed { ports, .. } | Event::PortsChanged { ports } => Some(ports),
+        _ => None,
+    };
 
-    if let Event::PortsChanged { ports } = event {
+    if let Some(ports) = ports {
         let service = cx.global_mut::<CoreService>();
-        service.status.ports = ports;
+        service.status.ports.clone_from(ports);
         service.status.scanning = false;
         cx.refresh_windows();
         return;
