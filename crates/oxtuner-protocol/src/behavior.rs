@@ -249,40 +249,40 @@ pub enum BehaviorKind {
     MsCompatible(MsCompatibleBehavior),
 }
 
+/// Every behavior this build ships, in the order they are tried.
+///
+/// FOME is tried before rusEFI because its signature starts with `rusEFI` as
+/// well, and Speeduino comes first so a board that keeps a `speeduino`
+/// signature stays Speeduino. The fallback comes last and claims nothing
+/// exactly. One list, so adding a family cannot reach one selection path and
+/// miss the other.
+const FAMILIES: [BehaviorKind; 4] = [
+    BehaviorKind::Speeduino(SpeeduinoBehavior),
+    BehaviorKind::Fome(FomeBehavior),
+    BehaviorKind::Rusefi(RusefiBehavior),
+    BehaviorKind::MsCompatible(MsCompatibleBehavior),
+];
+
 impl BehaviorKind {
     /// Picks a family from a signature alone, with no definition in hand.
     ///
     /// This is identity only: the generic fallback is never returned because
     /// it claims no signature. A probe uses it before any definition exists.
     pub fn for_signature(signature: &str) -> Option<Self> {
-        let candidates = [
-            Self::Speeduino(SpeeduinoBehavior),
-            Self::Fome(FomeBehavior),
-            Self::Rusefi(RusefiBehavior),
-        ];
-
-        candidates
+        FAMILIES
             .into_iter()
             .find(|candidate| candidate.as_dyn().matches_signature(signature) == Match::Exact)
     }
 
     /// Selects the first behavior that claims `definition`.
     ///
-    /// `Exact` matches win over `Compatible` ones. FOME is tried before rusEFI
-    /// because its signature starts with `rusEFI` as well, and Speeduino comes
-    /// first so a board that keeps a `speeduino` signature stays Speeduino.
+    /// `Exact` matches win over `Compatible` ones; see [`FAMILIES`] for the
+    /// order.
     pub fn select(definition: &Definition) -> Option<Self> {
-        let candidates = [
-            Self::Speeduino(SpeeduinoBehavior),
-            Self::Fome(FomeBehavior),
-            Self::Rusefi(RusefiBehavior),
-            Self::MsCompatible(MsCompatibleBehavior),
-        ];
-
         // One pass: the first exact match wins outright, while the first
         // compatible one is only remembered in case nothing is exact.
         let mut compatible = None;
-        for candidate in candidates {
+        for candidate in FAMILIES {
             match candidate.as_dyn().matches(definition) {
                 Match::Exact => return Some(candidate),
                 Match::Compatible => {

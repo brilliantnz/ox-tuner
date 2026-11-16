@@ -29,9 +29,9 @@ const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
 ///
-/// The wait covers the port settling, the open, and two read deadlines: a
-/// framed reply reads a header and then its payload, each bounded by the probe
-/// timeout.
+/// The wait covers the port settling, the open and one reply deadline. The extra
+/// probe timeout is headroom: the deadline is shared by the header and the
+/// payload, so a read cannot spend two of them.
 const PROBE_WAIT: Duration = PROBE_PORT_SETTLE
     .saturating_add(PROBE_OPEN_BUDGET)
     .saturating_add(PROBE_TIMEOUT.saturating_mul(2));

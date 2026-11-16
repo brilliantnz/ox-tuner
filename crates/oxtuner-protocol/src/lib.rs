@@ -75,9 +75,7 @@ pub use behavior::{
 pub use crc32::crc32;
 pub use error::ProtocolError;
 pub use frame::{Frame, FrameDecoder, FrameError};
-pub use ms::{
-    LinkMode, MsProtocol, PROBE_PORT_SETTLE, PageSpec, Protocol, RawCommandReport, RealtimeSpec,
-};
+pub use ms::{LinkMode, MsProtocol, PageSpec, Protocol, RawCommandReport, RealtimeSpec};
 pub use oxtuner_ini::WireOrder;
 pub use pattern::{CommandPattern, PatternMatch, page_identifier};
-pub use probe::{COMMON_BAUDS, PROBES, ProbeSpec, RUSEFI, SPEEDUINO};
+pub use probe::{COMMON_BAUDS, PROBE_PORT_SETTLE, PROBES, ProbeSpec, RUSEFI, SPEEDUINO};

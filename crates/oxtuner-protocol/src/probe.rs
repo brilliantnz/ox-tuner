@@ -14,7 +14,16 @@
 //! The registry resolves the real signature to the family's own `.ini`
 //! afterwards, so a probe is only ever the first question.
 
+use std::time::Duration;
+
 use crate::{BehaviorKind, LinkMode, RusefiBehavior, SpeeduinoBehavior};
+
+/// How long a probe lets the port settle before it asks.
+///
+/// Opening a serial port resets an Arduino into its bootloader, which ignores
+/// the query for about a second. A probe has no INI to state
+/// `delayAfterPortOpen`, so the settle is protocol knowledge.
+pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
 
 /// The baud rates a scan tries, in order.
 ///
@@ -245,33 +254,52 @@ mod tests {
     fn a_probe_waits_for_the_port_to_settle() {
         let protocol = MsProtocol::for_probe(&SPEEDUINO);
 
-        assert!(
-            protocol.port_open_delay() >= Duration::from_millis(500),
-            "opening an Arduino resets it, so the probe must let it settle: {:?}",
-            protocol.port_open_delay()
+        assert_eq!(
+            protocol.port_open_delay(),
+            PROBE_PORT_SETTLE,
+            "opening an Arduino resets it, so the probe spends the settle"
         );
     }
 
     #[test]
     fn a_framed_probe_reads_through_the_reply_code() {
-        let spec = SPEEDUINO.with_link(LinkMode::Envelope);
-        let mut payload = vec![0u8];
-        payload.extend_from_slice(b"speeduino 202501");
-        let framed = Frame::encode(&payload).expect("the reply frames");
-        let mut io = Answer {
+        // A leading non-printable byte is a refusal code for a family that
+        // leads with one, and plain data for a family that sends the data
+        // alone. Same bytes, two families, two answers.
+        let payload = [1u8, b'x'];
+
+        let mut leading = Answer {
             sent: Vec::new(),
-            reply: framed,
+            reply: Frame::encode(&payload).expect("the reply frames"),
             timeout: None,
         };
-        let mut protocol = MsProtocol::for_probe(&spec);
+        let mut speeduino = MsProtocol::for_probe(&SPEEDUINO.with_link(LinkMode::Envelope));
         let short = Duration::from_millis(350);
 
-        let signature = protocol
-            .signature_with_timeout(&mut io, short)
-            .expect("the probe reads");
+        let refused = speeduino.signature_with_timeout(&mut leading, short);
 
-        assert_eq!(signature, "speeduino 202501", "the code is not text");
-        assert_eq!(io.timeout, Some(short), "the caller's timeout is used");
+        assert!(
+            matches!(
+                refused,
+                Err(crate::ProtocolError::ReturnCode { code: 1, .. })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(leading.timeout, Some(short), "the caller's timeout is used");
+
+        let mut absent = Answer {
+            sent: Vec::new(),
+            reply: Frame::encode(&payload).expect("the reply frames"),
+            timeout: None,
+        };
+        let mut rusefi = MsProtocol::for_probe(&RUSEFI.with_link(LinkMode::Envelope));
+
+        let read = rusefi.signature_with_timeout(&mut absent, short);
+
+        assert!(
+            matches!(read, Err(crate::ProtocolError::UnexpectedReply(_))),
+            "a data-only family reads the byte as data and finds no signature: {read:?}"
+        );
     }
 
     #[test]

@@ -198,9 +198,8 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        // The new-project scan reads the probe event when it lands; until then
-        // the core log carries the result and the status keeps no state nothing
-        // shows.
+        // Nothing renders a probe result yet: the new-project scan is the next
+        // slice, and until it lands the core log carries the answer.
         Event::FirmwareProbed { .. }
         | Event::ProjectUiSaved { .. }
         | Event::PortsListed { .. }

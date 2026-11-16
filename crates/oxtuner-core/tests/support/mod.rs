@@ -10,8 +10,6 @@
     reason = "not every integration test binary uses every helper"
 )]
 
-use std::time::Duration;
-
 use oxtuner_core::{CustomLink, Definition, PortChoice, ProbeSpec, Transport};
 use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
 
@@ -53,7 +51,7 @@ pub(crate) fn silent() -> PortChoice {
     PortChoice::custom(Silent)
 }
 
-/// A port that accepts writes and answers nothing.
+/// A port that opens and answers nothing, like one with no ECU attached.
 struct Silent;
 
 impl CustomLink for Silent {
@@ -62,61 +60,12 @@ impl CustomLink for Silent {
     }
 
     fn open(&self, _definition: &Definition) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SilentTransport))
+        Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
-    fn open_for_probe(&self, _probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SilentTransport))
+    fn open_for_probe(&self, probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::silent(*probe)))
     }
-}
-
-/// A transport whose input never arrives.
-struct SilentTransport;
-
-impl Transport for SilentTransport {
-    fn open(&mut self) -> Result<(), oxtuner_transport::TransportError> {
-        Ok(())
-    }
-
-    fn write_all(&mut self, _bytes: &[u8]) -> Result<(), oxtuner_transport::TransportError> {
-        Ok(())
-    }
-
-    fn read_exact_timeout(
-        &mut self,
-        buf: &mut [u8],
-        _timeout: Duration,
-    ) -> Result<(), oxtuner_transport::TransportError> {
-        Err(oxtuner_transport::TransportError::Timeout {
-            got: 0,
-            expected: buf.len(),
-        })
-    }
-
-    fn read_until(
-        &mut self,
-        _sink: &mut Vec<u8>,
-        _max: usize,
-        _terminator: u8,
-        _quiet: Duration,
-        _timeout: Duration,
-    ) -> Result<(), oxtuner_transport::TransportError> {
-        Err(oxtuner_transport::TransportError::Timeout {
-            got: 0,
-            expected: 1,
-        })
-    }
-
-    fn read_available(
-        &mut self,
-        _buf: &mut [u8],
-    ) -> Result<usize, oxtuner_transport::TransportError> {
-        Ok(0)
-    }
-
-    fn flush_input(&mut self) {}
-
-    fn close(&mut self) {}
 }
 
 /// A simulator connection with a specific configuration.

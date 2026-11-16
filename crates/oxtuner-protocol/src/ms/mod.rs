@@ -29,7 +29,7 @@ pub use realtime::RealtimeSpec;
 use pages::{PageCommands, build_pages};
 use realtime::{Realtime, build_realtime};
 
-use crate::behavior::{CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
+use crate::behavior::{CrcReply, EcuBehavior, Match, MsCompatibleBehavior, PageSwitch, ReplyCode};
 use crate::error::ProtocolError;
 use crate::frame::{Frame, FrameError};
 use crate::probe::ProbeSpec;
@@ -157,13 +157,6 @@ const SIGNATURE_MAX: usize = 512;
 /// firmware that forgot to state a factor.
 const FALLBACK_BLOCKING_FACTOR: usize = 128;
 
-/// How long a probe lets the port settle before it asks.
-///
-/// Opening a serial port resets an Arduino into its bootloader, which ignores
-/// the query for about a second. A probe has no INI to state
-/// `delayAfterPortOpen`, so the settle is protocol knowledge.
-pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
-
 /// A page CRC reply with a variable-length text encoding is not readable by
 /// this build; neither link has a read shape for it.
 fn unsupported_text_crc(page: u8) -> ProtocolError {
@@ -219,7 +212,7 @@ impl Default for Parts {
     /// The protocol defaults, so neither construction path states them twice.
     fn default() -> Self {
         Self {
-            behavior_id: "ms-compatible",
+            behavior_id: MsCompatibleBehavior.id(),
             variables: HashMap::new(),
             signature_request: None,
             handshake: Vec::new(),
@@ -249,7 +242,7 @@ impl Parts {
             signature_request: Some(spec.query.to_vec()),
             link: spec.link,
             reply_code: spec.behavior.as_dyn().default_reply_code(),
-            port_open_delay: PROBE_PORT_SETTLE,
+            port_open_delay: crate::probe::PROBE_PORT_SETTLE,
             ..Self::default()
         }
     }
@@ -357,7 +350,6 @@ impl MsProtocol {
 
         // The query is encoded once here instead of on every signature read, so
         // a probe and a session reach the wire through the same field.
-        let variables = variables;
         let order = wire_order(definition);
         let signature_request = match definition.query_command.as_ref() {
             Some(command) if !command.is_empty() => {
@@ -731,10 +723,14 @@ impl MsProtocol {
 
     /// Reads one complete framed reply.
     pub(super) fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
-        Self::framed_reply_with(io, self.block_read_timeout)
+        let timeout = self.block_read_timeout;
+        Self::read_frame(io, timeout, timeout)
     }
 
     /// Reads one complete framed reply within `timeout`.
+    ///
+    /// The header and the payload share one deadline, so a probe's short
+    /// timeout bounds the whole reply.
     fn framed_reply_with(
         io: &mut dyn Transport,
         timeout: Duration,
@@ -756,9 +752,39 @@ impl MsProtocol {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         io.read_exact_timeout(&mut rest, remaining)?;
 
-        let mut bytes = Vec::with_capacity(length + 6);
+        Self::assemble(header, &rest)
+    }
+
+    /// Reads one complete framed reply, giving each read its own timeout.
+    fn read_frame(
+        io: &mut dyn Transport,
+        header_timeout: Duration,
+        rest_timeout: Duration,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let mut header = [0u8; 2];
+        io.read_exact_timeout(&mut header, header_timeout)?;
+        let length = Frame::length(header);
+        // Reject a corrupt length before allocating or waiting for bytes that
+        // cannot belong to a valid reply.
+        if length > crate::frame::MAX_PAYLOAD {
+            return Err(FrameError::TooLarge {
+                declared: length,
+                limit: crate::frame::MAX_PAYLOAD,
+            }
+            .into());
+        }
+        let mut rest = vec![0u8; length + 4];
+        io.read_exact_timeout(&mut rest, rest_timeout)?;
+
+        Self::assemble(header, &rest)
+    }
+
+    /// Parses a header and payload that were already read into a payload.
+    fn assemble(header: [u8; 2], rest: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        let mut bytes = Vec::with_capacity(header.len() + rest.len());
         bytes.extend_from_slice(&header);
-        bytes.extend_from_slice(&rest);
+        bytes.extend_from_slice(rest);
+
         let reply = Frame::parse(&bytes)?;
         Ok(reply.payload)
     }
