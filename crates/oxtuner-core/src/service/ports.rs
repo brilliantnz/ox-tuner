@@ -74,13 +74,12 @@ impl PortsWatch {
         };
 
         let next: Vec<PortView> = ports.iter().map(view).collect();
-        let changed = next != self.list;
-        let was_primed = self.primed;
+        let publish = should_publish(self.primed, &self.list, &next);
 
         self.list = next;
         self.primed = true;
 
-        (changed && was_primed).then(|| self.list.clone())
+        publish.then(|| self.list.clone())
     }
 }
 
@@ -117,5 +116,61 @@ fn board_name(vid: u16, pid: u16) -> Option<&'static str> {
         (0x10C4, 0xEA60) => Some("CP2102 serial"),
         (0x0483, 0x3752) => Some("ST-Link (not an ECU)"),
         _ => None,
+    }
+}
+
+/// Whether a sample is news.
+///
+/// The first sample is a baseline: the ports present when the core starts are
+/// not arrivals, and reporting them would greet the user with one notification
+/// per built-in port.
+fn should_publish(primed: bool, previous: &[PortView], next: &[PortView]) -> bool {
+    primed && previous != next
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn port(name: &str) -> PortView {
+        PortView {
+            name: name.to_owned(),
+            label: name.to_owned(),
+            vid: Some(0x2341),
+            pid: Some(0x0042),
+            serial: Some("A".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_first_sample_publishes_nothing() {
+        assert!(!should_publish(false, &[], &[port("/dev/cu.first")]));
+    }
+
+    #[test]
+    fn an_unchanged_list_publishes_nothing() {
+        let list = [port("/dev/cu.first")];
+        assert!(!should_publish(true, &list, &list));
+    }
+
+    #[test]
+    fn a_new_port_publishes() {
+        let before = [port("/dev/cu.first")];
+        let after = [port("/dev/cu.first"), port("/dev/cu.second")];
+        assert!(should_publish(true, &before, &after));
+    }
+
+    #[test]
+    fn a_removed_port_publishes() {
+        let before = [port("/dev/cu.first"), port("/dev/cu.second")];
+        let after = [port("/dev/cu.first")];
+        assert!(should_publish(true, &before, &after));
+    }
+
+    #[test]
+    fn a_board_name_is_only_given_for_known_pairs() {
+        assert_eq!(board_name(0x2341, 0x0042), Some("Arduino Mega 2560"));
+        assert_eq!(board_name(0x0483, 0x3752), Some("ST-Link (not an ECU)"));
+        assert_eq!(board_name(0x0000, 0x0000), None);
     }
 }
