@@ -208,13 +208,13 @@ struct Parts {
     reply_code: ReplyCode,
 }
 
-impl Parts {
-    /// What a probe starts from: a query, a link and a reply shape.
-    fn probe(spec: &ProbeSpec) -> Self {
+impl Default for Parts {
+    /// The protocol defaults, so neither construction path states them twice.
+    fn default() -> Self {
         Self {
-            behavior_id: spec.behavior_id(),
+            behavior_id: "ms-compatible",
             variables: HashMap::new(),
-            signature_request: Some(spec.query.to_vec()),
+            signature_request: None,
             handshake: Vec::new(),
             pages: Vec::new(),
             blocking_factor: FALLBACK_BLOCKING_FACTOR,
@@ -225,8 +225,21 @@ impl Parts {
             port_open_delay: Duration::ZERO,
             wire_order: WireOrder::LittleEndian,
             realtime: None,
+            link: LinkMode::Legacy,
+            reply_code: ReplyCode::Leading,
+        }
+    }
+}
+
+impl Parts {
+    /// What a probe starts from: a query, a link and a reply shape.
+    fn probe(spec: &ProbeSpec) -> Self {
+        Self {
+            behavior_id: spec.behavior_id(),
+            signature_request: Some(spec.query.to_vec()),
             link: spec.link,
-            reply_code: spec.reply_code,
+            reply_code: spec.behavior.as_dyn().default_reply_code(),
+            ..Self::default()
         }
     }
 }
@@ -435,6 +448,11 @@ impl MsProtocol {
     /// The framing in use.
     pub fn link_mode(&self) -> LinkMode {
         self.link
+    }
+
+    /// How a framed reply is shaped.
+    pub fn reply_code(&self) -> ReplyCode {
+        self.reply_code
     }
 
     /// The pages the definition declares, in definition order.
@@ -684,19 +702,36 @@ impl MsProtocol {
 
     /// Sends one framed request and returns the validated reply payload.
     fn converse(
-        &mut self,
+        &self,
         io: &mut dyn Transport,
         request: &[u8],
     ) -> Result<Vec<u8>, ProtocolError> {
+        Self::converse_with(io, request, self.block_read_timeout)
+    }
+
+    /// Sends one framed request and reads its reply within `timeout`.
+    fn converse_with(
+        io: &mut dyn Transport,
+        request: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ProtocolError> {
         let framed = Frame::encode(request)?;
         io.write_all(&framed)?;
-        self.framed_reply(io)
+        Self::framed_reply_with(io, timeout)
     }
 
     /// Reads one complete framed reply.
     pub(super) fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
+        Self::framed_reply_with(io, self.block_read_timeout)
+    }
+
+    /// Reads one complete framed reply within `timeout`.
+    fn framed_reply_with(
+        io: &mut dyn Transport,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ProtocolError> {
         let mut header = [0u8; 2];
-        io.read_exact_timeout(&mut header, self.block_read_timeout)?;
+        io.read_exact_timeout(&mut header, timeout)?;
         let length = Frame::length(header);
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
@@ -708,7 +743,7 @@ impl MsProtocol {
             .into());
         }
         let mut rest = vec![0u8; length + 4];
-        io.read_exact_timeout(&mut rest, self.block_read_timeout)?;
+        io.read_exact_timeout(&mut rest, timeout)?;
 
         let mut bytes = Vec::with_capacity(length + 6);
         bytes.extend_from_slice(&header);
@@ -776,21 +811,13 @@ impl MsProtocol {
     /// Reads the signature with a caller-chosen reply timeout.
     ///
     /// A port probe uses a short one so a silent port costs little; a session
-    /// keeps the protocol's own timeout.
+    /// keeps the protocol's own timeout through [`Protocol::signature`].
     ///
     /// # Errors
     ///
     /// Returns [`ProtocolError`] when the request has no signature command, the
     /// transport fails, or the reply carries no signature.
-    pub fn probe_signature(
-        &mut self,
-        io: &mut dyn Transport,
-        timeout: Duration,
-    ) -> Result<String, ProtocolError> {
-        self.signature_with_timeout(io, timeout)
-    }
-
-    fn signature_with_timeout(
+    pub fn signature_with_timeout(
         &mut self,
         io: &mut dyn Transport,
         timeout: Duration,
@@ -819,7 +846,7 @@ impl MsProtocol {
                 }
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request)?;
+                let payload = Self::converse_with(io, &request, timeout)?;
                 // Padding before the text (NULs and line breaks) is not a
                 // refusal: some firmware sends a line ending before the
                 // signature. What follows the padding either starts the

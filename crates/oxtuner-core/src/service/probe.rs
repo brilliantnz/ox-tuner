@@ -21,11 +21,14 @@ use super::{
 /// tries several ports and must not spend that on each one.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 
-/// How long the core waits for the I/O thread to answer.
+/// How long a port may take to open before a probe counts it as slow.
 ///
-/// Slightly longer than the read timeout so the thread can send the reply it
-/// already has before the command is declared a miss.
-const PROBE_WAIT: Duration = Duration::from_millis(500);
+/// The port opens lazily inside the I/O thread when the request arrives, so the
+/// caller's wait has to cover the open as well as the reply.
+const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
+
+/// How long the core waits for the I/O thread to answer.
+const PROBE_WAIT: Duration = PROBE_TIMEOUT.saturating_add(PROBE_OPEN_BUDGET);
 
 /// Sends one probe and reports the signature, or that the port stayed silent.
 pub(super) fn probe_firmware(
@@ -58,20 +61,25 @@ pub(super) fn probe_firmware(
     };
 
     // A fresh thread per attempt, so one request id is enough.
-    let _ = thread.submit(
+    let reply = match thread.submit(
         1,
-        IoOp::ProbeSignature {
-            timeout: PROBE_TIMEOUT,
+        IoOp::Signature {
+            timeout: Some(PROBE_TIMEOUT),
         },
-    );
-    let reply = replies.recv_timeout(PROBE_WAIT);
+    ) {
+        Ok(()) => replies.recv_timeout(PROBE_WAIT),
+        Err(error) => return reject(op, probe, &error.to_string(), events),
+    };
     thread.shutdown();
 
+    // A port that could not be opened is not a silent ECU, so its own message
+    // is what the user needs to see.
     let signature = match reply {
         Ok(reply) => match reply.outcome {
             IoOutcome::Signature { signature } if !signature.trim().is_empty() => {
                 signature.trim().to_owned()
             }
+            IoOutcome::Failed(failure) => return reject(op, probe, &failure.message, events),
             _ => return reject(op, probe, "the ECU did not answer", events),
         },
         Err(_) => return reject(op, probe, "the ECU did not answer", events),

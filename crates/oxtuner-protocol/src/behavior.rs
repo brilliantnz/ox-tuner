@@ -160,26 +160,28 @@ pub trait EcuBehavior: Send + Sync {
     /// text rather than the whole definition, because identifying a firmware is
     /// what a probe needs before any definition exists. A behavior that has no
     /// family identity of its own answers [`Match::No`] here and claims work
-    /// through [`supports`](Self::supports) instead.
+    /// through [`supports_compatible`](Self::supports_compatible) instead.
     fn matches_signature(&self, signature: &str) -> Match;
 
-    /// Whether this behavior can work with what the definition declares.
+    /// Whether this behavior claims a definition its signature did not name,
+    /// because the declared message set is enough.
     ///
-    /// Capability, not identity: the generic fallback inspects the definition,
-    /// while a family claims only its own signatures and answers `false` here.
-    /// The two questions are separate so a definition can be claimed compatibly
-    /// without pretending to be a known firmware.
-    fn supports(&self, _definition: &Definition) -> bool {
+    /// Only the generic fallback answers `true`; a family claims work through
+    /// [`matches_signature`](Self::matches_signature) alone. The two questions
+    /// stay separate so a definition can be claimed compatibly without
+    /// pretending to be a known firmware.
+    fn supports_compatible(&self, _definition: &Definition) -> bool {
         false
     }
 
     /// Whether this behavior handles the definition.
     ///
-    /// Combines the two questions above: identity first, then capability. It
-    /// stays on the trait so a definition-driven caller keeps one entry point.
+    /// Combines the two questions above: identity first, then the compatible
+    /// fallback. It stays on the trait so a definition-driven caller keeps one
+    /// entry point.
     fn matches(&self, definition: &Definition) -> Match {
         match self.matches_signature(&definition.signature) {
-            Match::No if self.supports(definition) => Match::Compatible,
+            Match::No if self.supports_compatible(definition) => Match::Compatible,
             claimed => claimed,
         }
     }
@@ -210,6 +212,16 @@ pub trait EcuBehavior: Send + Sync {
 
     /// How a framed reply is shaped (see [`ReplyCode`]).
     fn reply_code(&self, _definition: &Definition) -> ReplyCode {
+        self.default_reply_code()
+    }
+
+    /// The reply shape when no definition is in hand.
+    ///
+    /// The shape is a family fact, so a probe needs it before a definition
+    /// exists. [`reply_code`](Self::reply_code) delegates here; an
+    /// implementation that ever needs the definition overrides that method
+    /// instead.
+    fn default_reply_code(&self) -> ReplyCode {
         ReplyCode::Leading
     }
 }
@@ -295,7 +307,7 @@ impl BehaviorKind {
 }
 
 /// The signature, trimmed and lowercased for a family check.
-fn normalized(signature: &str) -> String {
+fn normalized_signature(signature: &str) -> String {
     signature.trim().to_ascii_lowercase()
 }
 
@@ -325,7 +337,7 @@ impl EcuBehavior for SpeeduinoBehavior {
     }
 
     fn matches_signature(&self, signature: &str) -> Match {
-        if normalized(signature).starts_with("speeduino") {
+        if normalized_signature(signature).starts_with("speeduino") {
             Match::Exact
         } else {
             Match::No
@@ -351,14 +363,14 @@ impl EcuBehavior for FomeBehavior {
     }
 
     fn matches_signature(&self, signature: &str) -> Match {
-        if is_fome(&normalized(signature)) {
+        if is_fome(&normalized_signature(signature)) {
             Match::Exact
         } else {
             Match::No
         }
     }
 
-    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
+    fn default_reply_code(&self) -> ReplyCode {
         // Same reply shape as rusEFI: data alone, and an empty payload
         // acknowledges a write.
         ReplyCode::Absent
@@ -383,7 +395,7 @@ impl EcuBehavior for RusefiBehavior {
     }
 
     fn matches_signature(&self, signature: &str) -> Match {
-        let signature = normalized(signature);
+        let signature = normalized_signature(signature);
 
         // A FOME build reports a `rusEFI (FOME)` signature, so it is claimed by
         // its own behavior instead of this one.
@@ -394,7 +406,7 @@ impl EcuBehavior for RusefiBehavior {
         }
     }
 
-    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
+    fn default_reply_code(&self) -> ReplyCode {
         // `sendResponse(TS_CRC, data, count)`: the payload is the data itself,
         // and an empty payload acknowledges a write.
         ReplyCode::Absent
@@ -423,7 +435,7 @@ impl EcuBehavior for MsCompatibleBehavior {
         Match::No
     }
 
-    fn supports(&self, definition: &Definition) -> bool {
+    fn supports_compatible(&self, definition: &Definition) -> bool {
         let has_pages = definition
             .pages
             .iter()
@@ -589,14 +601,14 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
             MsCompatibleBehavior.matches_signature("something else"),
             Match::No
         );
-        assert!(MsCompatibleBehavior.supports(&definition));
+        assert!(MsCompatibleBehavior.supports_compatible(&definition));
 
         // A family answers identity and claims nothing by capability.
         assert_eq!(
             SpeeduinoBehavior.matches_signature("speeduino 202501"),
             Match::Exact
         );
-        assert!(!SpeeduinoBehavior.supports(&definition));
+        assert!(!SpeeduinoBehavior.supports_compatible(&definition));
         assert_eq!(SpeeduinoBehavior.matches(&definition), Match::No);
 
         // Combining both recovers the old verdict.
@@ -611,7 +623,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         )
         .expect("parses");
 
-        assert!(!MsCompatibleBehavior.supports(&definition));
+        assert!(!MsCompatibleBehavior.supports_compatible(&definition));
         assert_eq!(MsCompatibleBehavior.matches(&definition), Match::No);
     }
 
@@ -646,8 +658,8 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         let rusefi = definition("rusEFI master.2026.10.21.f407-discovery.422007793");
         let fome = definition("rusEFI (FOME) .2026.06.03.proteus_h7.3416487136");
 
-        assert!(!is_fome(&normalized(&rusefi.signature)));
-        assert!(is_fome(&normalized(&fome.signature)));
+        assert!(!is_fome(&normalized_signature(&rusefi.signature)));
+        assert!(is_fome(&normalized_signature(&fome.signature)));
     }
 
     #[test]

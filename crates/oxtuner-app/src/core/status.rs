@@ -364,10 +364,7 @@ impl CoreStatus {
                 }
                 self.menu_revision = self.menu_revision.wrapping_add(1);
             }
-            Update::Probed(hit) => {
-                self.last_probe = Some(hit);
-                self.failure = None;
-            }
+            Update::Probed(hit) => self.last_probe = Some(hit),
             Update::Tested(summary) => {
                 let port = summary.port.clone();
                 self.test = Some(TestResult {

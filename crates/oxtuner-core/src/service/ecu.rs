@@ -248,7 +248,9 @@ pub(super) fn connect(
                 standalone,
             );
             connection.connection.probe = probe;
-            if let Err(error) = connection.request(op, PendingKind::Connect, IoOp::Signature) {
+            if let Err(error) =
+                connection.request(op, PendingKind::Connect, IoOp::Signature { timeout: None })
+            {
                 tracing::warn!(%op, %error, "the signature query could not be queued");
                 report.failures += 1;
                 send(

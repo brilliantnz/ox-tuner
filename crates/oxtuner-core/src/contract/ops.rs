@@ -860,6 +860,9 @@ pub enum FirmwareProbe {
 }
 
 impl FirmwareProbe {
+    /// Every probe a scan tries, in the order it tries them.
+    pub const ALL: [Self; 2] = [Self::Speeduino, Self::Rusefi];
+
     /// The protocol probe this names.
     #[must_use]
     pub fn spec(self) -> oxtuner_protocol::ProbeSpec {
@@ -872,7 +875,7 @@ impl FirmwareProbe {
     /// A stable lowercase key for logs and the detection result.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        self.spec().name
+        self.spec().behavior_id()
     }
 }
 

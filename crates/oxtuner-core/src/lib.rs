@@ -127,8 +127,7 @@ pub use oxtuner_tune::{CellState, TuneStatus};
 
 /// Re-exported so a caller can pick the connection's framing without taking a
 /// dependency on `oxtuner-protocol`.
-pub use oxtuner_protocol::LinkMode;
-pub use oxtuner_protocol::ProbeSpec;
+pub use oxtuner_protocol::{LinkMode, ProbeSpec};
 
 /// Re-exported so a [`CustomLink`] implementation can name the transport it
 /// returns.

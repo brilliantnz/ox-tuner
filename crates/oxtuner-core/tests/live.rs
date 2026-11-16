@@ -186,6 +186,41 @@ fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
 }
 
 #[test]
+fn a_probe_is_refused_while_a_session_is_live() {
+    let harness = Harness::start();
+    harness.load();
+    harness.wait_loaded();
+    harness.connect(SimConfig::default());
+    let _ = harness.wait_connected();
+
+    harness
+        .handle
+        .probe_firmware(support::simulator(), oxtuner_core::FirmwareProbe::Rusefi)
+        .expect("queued");
+
+    let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(failure.code, FailureCode::ConnectFailed);
+    assert!(failure.message.contains("disconnect the ECU"));
+
+    harness.thread.join();
+}
+
+#[test]
+fn every_probe_name_matches_the_protocol_registry() {
+    for probe in oxtuner_core::FirmwareProbe::ALL {
+        assert_eq!(
+            probe.spec().behavior_id(),
+            probe.as_str(),
+            "{probe:?} and its spec must name the same family"
+        );
+    }
+}
+
+#[test]
 fn connecting_without_a_definition_is_refused() {
     let harness = Harness::start();
 

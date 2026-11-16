@@ -1,10 +1,11 @@
 //! What a probe needs to ask an unknown ECU for its signature.
 //!
 //! Autodetecting an ECU needs three protocol facts before any definition
-//! exists: which query byte the family answers, how the reply is framed, and
-//! how the reply is shaped. All three are protocol knowledge, so they live here
-//! as constants rather than as a definition of our own. A probe carries no
-//! calibration data and never becomes project data.
+//! exists: which query byte the family answers and how the reply is framed.
+//! Both are protocol knowledge, so they live here as constants rather than as a
+//! definition of our own. The reply shape comes from the family's behavior,
+//! which already owns that fact. A probe carries no calibration data and never
+//! becomes project data.
 //!
 //! The order matters. A MegaSquirt-compatible board answers `Q`; a rusEFI board
 //! answers `S`. Trying both on a port answers which family is attached without
@@ -13,7 +14,7 @@
 //! The registry resolves the real signature to the family's own `.ini`
 //! afterwards, so a probe is only ever the first question.
 
-use crate::{BehaviorKind, LinkMode, ReplyCode, SpeeduinoBehavior};
+use crate::{BehaviorKind, LinkMode, RusefiBehavior, SpeeduinoBehavior};
 
 /// The baud rates a scan tries, in order.
 ///
@@ -27,14 +28,11 @@ pub const COMMON_BAUDS: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
 /// how that answer is framed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProbeSpec {
-    /// Stable key used in logs and the detection result.
-    pub name: &'static str,
-    /// The family the probe asks for.
+    /// The family the probe asks for, and the key logs and the detection
+    /// result use.
     pub behavior: BehaviorKind,
     /// The exact query bytes.
     pub query: &'static [u8],
-    /// How the family shapes a framed reply.
-    pub reply_code: ReplyCode,
     /// The framing the probe sends with.
     pub link: LinkMode,
 }
@@ -53,19 +51,15 @@ impl ProbeSpec {
 /// hardware, and a firmware that also speaks `msEnvelope_1.0` still answers the
 /// plain query.
 pub const SPEEDUINO: ProbeSpec = ProbeSpec {
-    name: "speeduino",
     behavior: BehaviorKind::Speeduino(SpeeduinoBehavior),
     query: b"Q",
-    reply_code: ReplyCode::Leading,
     link: LinkMode::Legacy,
 };
 
 /// rusEFI and FOME answer `S`, and reply with the data alone.
 pub const RUSEFI: ProbeSpec = ProbeSpec {
-    name: "rusefi",
-    behavior: BehaviorKind::Rusefi(crate::RusefiBehavior),
+    behavior: BehaviorKind::Rusefi(RusefiBehavior),
     query: b"S",
-    reply_code: ReplyCode::Absent,
     link: LinkMode::Legacy,
 };
 
@@ -79,12 +73,14 @@ mod tests {
     use oxtuner_transport::{Transport, TransportError};
 
     use super::*;
-    use crate::{MsProtocol, Protocol};
+    use crate::{MsProtocol, Protocol, ReplyCode};
 
-    /// A transport that answers the first write with one canned reply.
+    /// A transport that answers the first write with one canned reply and
+    /// records the timeout it was given.
     struct Answer {
         sent: Vec<u8>,
         reply: Vec<u8>,
+        timeout: Option<Duration>,
     }
 
     impl Transport for Answer {
@@ -100,8 +96,9 @@ mod tests {
         fn read_exact_timeout(
             &mut self,
             buf: &mut [u8],
-            _timeout: Duration,
+            timeout: Duration,
         ) -> Result<(), TransportError> {
+            self.timeout = Some(timeout);
             if buf.len() > self.reply.len() {
                 return Err(TransportError::Timeout {
                     got: self.reply.len(),
@@ -119,8 +116,9 @@ mod tests {
             max: usize,
             terminator: u8,
             _quiet: Duration,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> Result<(), TransportError> {
+            self.timeout = Some(timeout);
             let end = self
                 .reply
                 .iter()
@@ -148,20 +146,33 @@ mod tests {
         Answer {
             sent: Vec::new(),
             reply,
+            timeout: None,
         }
     }
 
     #[test]
     fn every_probe_names_a_family_and_a_query() {
         for probe in PROBES {
-            assert!(!probe.name.is_empty(), "a probe needs a key for logs");
-            assert!(!probe.query.is_empty(), "{} needs a query byte", probe.name);
-            assert_eq!(
-                probe.behavior_id(),
-                probe.name,
-                "the key and the behavior should name the same family"
-            );
+            let key = probe.behavior_id();
+
+            assert!(!key.is_empty(), "a probe needs a key for logs");
+            assert!(!probe.query.is_empty(), "{key} needs a query byte");
         }
+    }
+
+    #[test]
+    fn the_probes_query_different_commands() {
+        assert_eq!(SPEEDUINO.query, b"Q");
+        assert_eq!(RUSEFI.query, b"S");
+        assert_ne!(SPEEDUINO.query, RUSEFI.query);
+    }
+
+    #[test]
+    fn the_probes_ask_for_the_family_they_name() {
+        assert!(matches!(SPEEDUINO.behavior, BehaviorKind::Speeduino(_)));
+        assert!(matches!(RUSEFI.behavior, BehaviorKind::Rusefi(_)));
+        assert_eq!(SPEEDUINO.behavior_id(), "speeduino");
+        assert_eq!(RUSEFI.behavior_id(), "rusefi");
     }
 
     #[test]
@@ -189,30 +200,43 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_carries_its_family_reply_shape() {
+        let speeduino = MsProtocol::for_probe(&SPEEDUINO);
+        let rusefi = MsProtocol::for_probe(&RUSEFI);
+
+        assert_eq!(
+            SPEEDUINO.behavior.as_dyn().default_reply_code(),
+            ReplyCode::Leading
+        );
+        assert_eq!(
+            RUSEFI.behavior.as_dyn().default_reply_code(),
+            ReplyCode::Absent
+        );
+        // The spec does not restate the shape; the protocol takes it from the
+        // family, so the two cannot disagree.
+        assert_eq!(speeduino.reply_code(), ReplyCode::Leading);
+        assert_eq!(rusefi.reply_code(), ReplyCode::Absent);
+    }
+
+    #[test]
+    fn the_caller_timeout_reaches_the_transport() {
+        let mut io = answer(b"speeduino 202501");
+        let mut protocol = MsProtocol::for_probe(&SPEEDUINO);
+        let short = Duration::from_millis(350);
+
+        protocol
+            .signature_with_timeout(&mut io, short)
+            .expect("the probe reads");
+
+        assert_eq!(io.timeout, Some(short), "the short timeout is used");
+    }
+
+    #[test]
     fn a_probe_has_no_pages_and_no_realtime_block() {
         let protocol = MsProtocol::for_probe(&SPEEDUINO);
 
         assert_eq!(protocol.pages().len(), 0);
         assert!(protocol.realtime().is_none());
-    }
-
-    #[test]
-    fn the_probes_query_different_commands() {
-        assert_eq!(SPEEDUINO.query, b"Q");
-        assert_eq!(RUSEFI.query, b"S");
-        assert_ne!(SPEEDUINO.query, RUSEFI.query);
-    }
-
-    #[test]
-    fn the_probes_ask_for_the_family_they_name() {
-        assert!(matches!(SPEEDUINO.behavior, BehaviorKind::Speeduino(_)));
-        assert!(matches!(RUSEFI.behavior, BehaviorKind::Rusefi(_)));
-    }
-
-    #[test]
-    fn the_probes_carry_their_own_reply_shape() {
-        assert_eq!(SPEEDUINO.reply_code, ReplyCode::Leading);
-        assert_eq!(RUSEFI.reply_code, ReplyCode::Absent);
     }
 
     #[test]

@@ -117,13 +117,12 @@ impl IoPlan {
 #[derive(Debug)]
 pub(crate) enum IoOp {
     /// Read the firmware signature.
-    Signature,
-    /// Read the firmware signature with a short reply timeout.
-    ///
-    /// Used by a port probe, where a silent port must cost little.
-    ProbeSignature {
-        /// How long to wait for the answer.
-        timeout: Duration,
+    Signature {
+        /// How long to wait for the answer; `None` uses the protocol's own.
+        ///
+        /// A port probe passes a short one, where a silent port must cost
+        /// little.
+        timeout: Option<Duration>,
     },
     /// Read a list of whole pages, in order.
     ReadPages { pages: Vec<u8> },
@@ -363,7 +362,7 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
                 .map_err(|error| CoreError::Connect(error.to_string()))?
         }
         ProtocolSource::Probe(spec) => {
-            recorder.note(format!("probe: {}", spec.name));
+            recorder.note(format!("probe: {}", spec.behavior_id()));
 
             MsProtocol::for_probe(spec)
         }
@@ -542,14 +541,17 @@ fn execute(
             transport.close();
             (IoOutcome::Closed, true)
         }
-        IoOp::Signature => match protocol.signature(transport) {
-            Ok(signature) => (IoOutcome::Signature { signature }, false),
-            Err(error) => (failure(&error), false),
-        },
-        IoOp::ProbeSignature { timeout } => match protocol.probe_signature(transport, timeout) {
-            Ok(signature) => (IoOutcome::Signature { signature }, false),
-            Err(error) => (failure(&error), false),
-        },
+        IoOp::Signature { timeout } => {
+            let read = match timeout {
+                Some(timeout) => protocol.signature_with_timeout(transport, timeout),
+                None => protocol.signature(transport),
+            };
+
+            match read {
+                Ok(signature) => (IoOutcome::Signature { signature }, false),
+                Err(error) => (failure(&error), false),
+            }
+        }
         IoOp::ReadPages { pages } => {
             let mut read = Vec::with_capacity(pages.len());
             for page in pages {
@@ -784,7 +786,9 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
             PortChoice::custom(TestSim(SimConfig::default())),
         );
         let (thread, replies) = IoThread::start(&plan).expect("starts");
-        thread.submit(1, IoOp::Signature).expect("queued");
+        thread
+            .submit(1, IoOp::Signature { timeout: None })
+            .expect("queued");
 
         let reply = replies
             .recv_timeout(Duration::from_secs(2))
