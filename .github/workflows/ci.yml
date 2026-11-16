@@ -155,13 +155,17 @@ jobs:
 
       # GPUI's Linux backend links system libraries; a bare runner fails at
       # build-script time (`yeslogic-fontconfig-sys` needs `fontconfig.pc`).
-      # macOS and Windows ship theirs.
+      # macOS and Windows ship theirs. `libudev-dev` and `pkg-config` are for
+      # serialport, whose Linux enumeration uses libudev; without its headers the
+      # build script cannot find the library.
       - name: Install Linux system packages
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             libfontconfig-dev \
+            libudev-dev \
+            pkg-config \
             libfreetype-dev \
             libwayland-dev \
             libxkbcommon-dev \
