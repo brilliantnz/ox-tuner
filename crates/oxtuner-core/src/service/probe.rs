@@ -21,17 +21,16 @@ use super::{
 /// tries several ports and must not spend that on each one.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 
-/// How long a port may take to open before a probe counts it as slow.
+/// The share of the wait reserved for the port open.
 ///
-/// The port opens lazily inside the I/O thread when the request arrives, so the
-/// caller's wait has to cover the open as well as the reply.
+/// Nothing bounds the open itself, so a port that takes longer than this is
+/// reported as silent.
 const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
 ///
-/// The wait covers the port settling, the open and one reply deadline. The extra
-/// probe timeout is headroom: the deadline is shared by the header and the
-/// payload, so a read cannot spend two of them.
+/// Covers the settle, the open and one shared reply deadline, with a second
+/// deadline of slack for the thread start.
 const PROBE_WAIT: Duration = PROBE_PORT_SETTLE
     .saturating_add(PROBE_OPEN_BUDGET)
     .saturating_add(PROBE_TIMEOUT.saturating_mul(2));
@@ -89,7 +88,17 @@ pub(super) fn probe_firmware(
             IoOutcome::Failed(failure) => return reject(op, probe, &failure.message, events),
             _ => return reject(op, probe, "the ECU did not answer", events),
         },
-        Err(_) => return reject(op, probe, "the ECU did not answer", events),
+        Err(crossfire::RecvTimeoutError::Timeout) => {
+            return reject(op, probe, "the ECU did not answer", events);
+        }
+        Err(crossfire::RecvTimeoutError::Disconnected) => {
+            return reject(
+                op,
+                probe,
+                "the probe thread stopped before answering",
+                events,
+            );
+        }
     };
 
     tracing::info!(

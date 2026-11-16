@@ -721,10 +721,12 @@ impl MsProtocol {
         Self::framed_reply_with(io, timeout)
     }
 
-    /// Reads one complete framed reply.
+    /// Reads one complete framed reply, giving each read its own timeout.
+    ///
+    /// Only a raw controller action uses this; a page, burn, CRC or realtime
+    /// conversation runs through `converse` and shares one deadline instead.
     pub(super) fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
-        let timeout = self.block_read_timeout;
-        Self::read_frame(io, timeout, timeout)
+        Self::read_frame(io, self.block_read_timeout)
     }
 
     /// Reads one complete framed reply within `timeout`.
@@ -756,13 +758,9 @@ impl MsProtocol {
     }
 
     /// Reads one complete framed reply, giving each read its own timeout.
-    fn read_frame(
-        io: &mut dyn Transport,
-        header_timeout: Duration,
-        rest_timeout: Duration,
-    ) -> Result<Vec<u8>, ProtocolError> {
+    fn read_frame(io: &mut dyn Transport, timeout: Duration) -> Result<Vec<u8>, ProtocolError> {
         let mut header = [0u8; 2];
-        io.read_exact_timeout(&mut header, header_timeout)?;
+        io.read_exact_timeout(&mut header, timeout)?;
         let length = Frame::length(header);
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
@@ -774,7 +772,7 @@ impl MsProtocol {
             .into());
         }
         let mut rest = vec![0u8; length + 4];
-        io.read_exact_timeout(&mut rest, rest_timeout)?;
+        io.read_exact_timeout(&mut rest, timeout)?;
 
         Self::assemble(header, &rest)
     }
@@ -859,7 +857,7 @@ impl MsProtocol {
         io: &mut dyn Transport,
         timeout: Duration,
     ) -> Result<String, ProtocolError> {
-        let request = self.signature_request.clone().ok_or_else(|| {
+        let request = self.signature_request.as_deref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no queryCommand, so the signature cannot be read".to_owned(),
             )
@@ -868,7 +866,7 @@ impl MsProtocol {
 
         let reply = match self.link {
             LinkMode::Legacy => {
-                io.write_all(&request)?;
+                io.write_all(request)?;
                 let mut reply = Vec::new();
                 let outcome = io.read_until(&mut reply, SIGNATURE_MAX, 0, SIGNATURE_QUIET, timeout);
                 match outcome {
@@ -883,7 +881,7 @@ impl MsProtocol {
                 }
             }
             LinkMode::Envelope => {
-                let payload = Self::converse_with(io, &request, timeout)?;
+                let payload = Self::converse_with(io, request, timeout)?;
                 // Padding before the text (NULs and line breaks) is not a
                 // refusal: some firmware sends a line ending before the
                 // signature. What follows the padding either starts the
