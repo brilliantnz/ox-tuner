@@ -163,9 +163,15 @@ pub struct ProjectView {
 pub struct PortView {
     /// Device path.
     pub name: String,
-    /// The label to show (the path itself: `serial2` reports no product
-    /// description).
+    /// The label to show: a known board name, else the product string, else the
+    /// path.
     pub label: String,
+    /// Vendor id, when the platform reports one.
+    pub vid: Option<u16>,
+    /// Product id, when the platform reports one.
+    pub pid: Option<u16>,
+    /// Serial number, when the device provides one.
+    pub serial: Option<String>,
 }
 
 /// How the ECU's signature compared with the definition's.

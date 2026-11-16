@@ -79,8 +79,17 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     crate::notifications::publish_event(&event, link_was_lost.as_deref(), cx);
 
     // The port list is stored for the dialog, which stays open while it scans:
-    // closing and reopening would lose the user's selection and scroll.
+    // closing and reopening would lose the user's selection and scroll. The core
+    // publishes the same snapshot on a change, so both paths land here.
     if let Event::PortsListed { ports, .. } = event {
+        let service = cx.global_mut::<CoreService>();
+        service.status.ports = ports;
+        service.status.scanning = false;
+        cx.refresh_windows();
+        return;
+    }
+
+    if let Event::PortsChanged { ports } = event {
         let service = cx.global_mut::<CoreService>();
         service.status.ports = ports;
         service.status.scanning = false;
@@ -184,9 +193,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        Event::PortsListed { .. } | Event::Rejected { .. } | Event::Stopped => {
-            (Update::Nothing, None)
-        }
+        Event::PortsListed { .. }
+        | Event::PortsChanged { .. }
+        | Event::Rejected { .. }
+        | Event::Stopped => (Update::Nothing, None),
     };
 
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))

@@ -637,10 +637,16 @@ mod tests {
             PortView {
                 name: "/dev/cu.first".to_owned(),
                 label: "first".to_owned(),
+                vid: Some(0x2341),
+                pid: Some(0x0042),
+                serial: Some("A".to_owned()),
             },
             PortView {
                 name: "/dev/cu.second".to_owned(),
                 label: "second".to_owned(),
+                vid: Some(0x1A86),
+                pid: Some(0x7523),
+                serial: None,
             },
         ]
     }

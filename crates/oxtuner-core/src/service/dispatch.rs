@@ -5,6 +5,7 @@
 
 use super::ecu::*;
 use super::log::*;
+use super::ports::PortsWatch;
 use super::transfer::*;
 use super::tune::*;
 use super::*;
@@ -31,6 +32,7 @@ pub(super) fn handle(
     report: &mut CoreReport,
     last_menu: &mut Vec<MenuNode>,
     menu_dirty: &mut bool,
+    ports: &mut PortsWatch,
 ) -> Outcome {
     let Envelope { op, command } = envelope;
 
@@ -40,33 +42,16 @@ pub(super) fn handle(
             Outcome::Stop
         }
         CommandRequest::ListPorts => {
-            match io_thread::list_ports() {
-                Ok(ports) => {
-                    let summary: Vec<PortView> = ports
-                        .into_iter()
-                        .map(|port| PortView {
-                            label: port.label().to_owned(),
-                            name: port.path().to_owned(),
-                        })
-                        .collect();
-                    tracing::debug!(%op, ports = summary.len(), "serial ports listed");
-                    send(events, Event::PortsListed { op, ports: summary });
-                }
-                Err(error) => {
-                    tracing::warn!(%op, %error, "serial ports could not be listed");
-                    report.failures += 1;
-                    send(
-                        events,
-                        Event::Failed {
-                            op,
-                            failure: Failure {
-                                code: FailureCode::ConnectFailed,
-                                message: error.to_string(),
-                            },
-                        },
-                    );
-                }
+            // Answer from the snapshot so a dialog cannot see a list that
+            // disagrees with the last change the core published. The first
+            // command still has to wait for the first sample.
+            if !ports.is_primed() {
+                ports.sample();
             }
+
+            let summary = ports.snapshot().to_vec();
+            tracing::debug!(%op, ports = summary.len(), "serial ports listed");
+            send(events, Event::PortsListed { op, ports: summary });
             Outcome::Continue
         }
         CommandRequest::Connect { port, framing } => {

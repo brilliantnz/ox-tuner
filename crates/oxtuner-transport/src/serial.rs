@@ -1,20 +1,21 @@
-//! The real serial port (`serial2`).
+//! The real serial port (`serialport`).
 //!
 //! Blocking I/O with per-call timeouts, used by the I/O thread only (ADR-0008).
-//! The port is configured raw 8N1 with no flow control — what every Speeduino,
-//! rusEFI and MegaSquirt-family ECU expects — at the baud rate the connection
-//! chose.
+//! The port is configured raw 8N1 with no flow control, which is what every
+//! Speeduino, rusEFI and MegaSquirt-family ECU expects, at the baud rate the
+//! connection chose.
 //!
-//! `serial2` was chosen over `serialport-rs` for the core path: it has no
-//! `libudev` requirement on Linux (one less system package in CI and for users),
-//! a simpler blocking API, and an explicit per-call read timeout. The trade-off
-//! is that [`ports`] returns device paths without product descriptions, so the
-//! connect dialog shows the path itself.
+//! The same crate is the only enumerator. Each port arrives already joined to its
+//! USB device, so nothing here matches a device to a path. Opening, per-call
+//! timeouts and the closed-link signal were measured against a real ECU at
+//! 115200 8N1 before the previous transport was removed.
+//!
+//! `libudev` is enabled for Linux only, through the crate's own target-scoped
+//! dependency; a musl build falls back to sysfs and still reports the same
+//! identity.
 
 use std::io::{ErrorKind, Read};
 use std::time::{Duration, Instant};
-
-use serial2::SerialPort;
 
 use crate::Transport;
 use crate::error::TransportError;
@@ -25,14 +26,13 @@ use crate::error::TransportError;
 /// enough to avoid spinning.
 const READ_POLL: Duration = Duration::from_millis(20);
 
-/// An upper bound on a single write.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Reads once, turning `Ok(0)` into end of file.
+/// Reads once, turning end of file and a broken link into `UnexpectedEof`.
 ///
 /// `std::io::Read` defines a zero-length read on a non-empty buffer as EOF.
-/// A pulled cable reports exactly that, so the conversation ends instead of
-/// spinning on `Ok(0)` until the deadline and then reporting a timeout.
+/// `serialport` reports a pulled cable as `BrokenPipe` on macOS and as one of the
+/// neighbouring kinds elsewhere, so all of them are folded into the same signal.
+/// The conversation then ends instead of spinning until the deadline and
+/// reporting a timeout, or worse, reading a quiet ECU as still connected.
 fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     if buf.is_empty() {
         return Ok(0);
@@ -40,36 +40,132 @@ fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 
     match read.read(buf) {
         Ok(0) => Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::NotConnected
+            ) =>
+        {
+            Err(std::io::Error::from(ErrorKind::UnexpectedEof))
+        }
         other => other,
     }
 }
 
 /// One port the connect dialog can offer.
 ///
-/// `serial2` lists device paths; on macOS the callout `/dev/cu.*` entry is the
-/// one to open, and picking the blocking `/dev/tty.*` twin makes the I/O thread
-/// look hung (P5 finding 2), so [`ports`] filters the duplicates.
+/// The path is what gets opened and what the dialog keys its selection on. The
+/// identity beside it comes from the platform, already joined to the port by
+/// `serialport`, so nothing here matches a USB device to a path by guessing.
+///
+/// On macOS the callout `/dev/cu.*` entry is the one to open, and picking the
+/// blocking `/dev/tty.*` twin makes the I/O thread look hung, so [`ports`]
+/// filters the duplicates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortInfo {
     /// Device path (`/dev/cu.usbmodem21201`, `COM3`).
-    ///
-    /// Private so a later metadata field (manufacturer, serial number) can be
-    /// added without a second accessor or a breaking change. Use [`Self::label`].
     name: String,
+    /// The device behind the port, when the platform reports one.
+    usb: Option<UsbIdentity>,
 }
 
 impl PortInfo {
     /// The label to show for this port.
+    ///
+    /// The product string when the device has one, otherwise the path. Board
+    /// names are the caller's business, because the product string is missing on
+    /// many boards and cannot be trusted when present.
     pub fn label(&self) -> &str {
+        self.usb
+            .as_ref()
+            .and_then(UsbIdentity::product)
+            .unwrap_or(&self.name)
+    }
+
+    /// The device path, which is the port's stable identity within a session.
+    pub fn path(&self) -> &str {
         &self.name
     }
 
-    /// The device path, which is the port's stable identity.
+    /// The device behind the port, when the platform reports one.
+    pub fn usb(&self) -> Option<&UsbIdentity> {
+        self.usb.as_ref()
+    }
+}
+
+/// What the platform reports about the device behind a port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbIdentity {
+    vid: u16,
+    pid: u16,
+    serial: Option<String>,
+    manufacturer: Option<String>,
+    product: Option<String>,
+    location: Option<UsbLocation>,
+    interface: Option<u8>,
+}
+
+impl UsbIdentity {
+    /// Vendor id.
+    pub fn vid(&self) -> u16 {
+        self.vid
+    }
+
+    /// Product id.
+    pub fn pid(&self) -> u16 {
+        self.pid
+    }
+
+    /// Serial number, when the device provides one.
     ///
-    /// Equal to [`Self::label`] until a backend can report a product
-    /// description; the two are separate accessors so they may diverge then.
-    pub fn path(&self) -> &str {
-        &self.name
+    /// Many clones do not, and the value is only unique when the vendor made it
+    /// so, which is why it is never the only part of an identity.
+    pub fn serial(&self) -> Option<&str> {
+        self.serial.as_deref()
+    }
+
+    /// Manufacturer string, when the platform reports one.
+    pub fn manufacturer(&self) -> Option<&str> {
+        self.manufacturer.as_deref()
+    }
+
+    /// Product string, when the device provides one.
+    ///
+    /// Often absent, and never part of an identity.
+    pub fn product(&self) -> Option<&str> {
+        self.product.as_deref()
+    }
+
+    /// Where the device sits in the USB tree, when the platform reports it.
+    pub fn location(&self) -> Option<&UsbLocation> {
+        self.location.as_ref()
+    }
+
+    /// The interface this port belongs to, when the platform reports it.
+    ///
+    /// The number means different interfaces on different platforms, so it only
+    /// compares within one platform.
+    pub fn interface(&self) -> Option<u8> {
+        self.interface
+    }
+}
+
+/// A device's position in the USB tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbLocation {
+    bus_id: String,
+    port_chain: Vec<u8>,
+}
+
+impl UsbLocation {
+    /// The bus the device is attached to.
+    pub fn bus_id(&self) -> &str {
+        &self.bus_id
+    }
+
+    /// The ports traversed on that bus, from the root hub outward.
+    pub fn port_chain(&self) -> &[u8] {
+        &self.port_chain
     }
 }
 
@@ -108,7 +204,7 @@ impl SerialSettings {
 /// A serial byte transport.
 pub struct SerialTransport {
     settings: SerialSettings,
-    port: Option<SerialPort>,
+    port: Option<Box<dyn serialport::SerialPort>>,
 }
 
 impl std::fmt::Debug for SerialTransport {
@@ -135,17 +231,13 @@ impl SerialTransport {
         &self.settings
     }
 
-    fn port(&self) -> Result<&SerialPort, TransportError> {
-        self.port.as_ref().ok_or(TransportError::NotOpen)
-    }
-
-    fn port_mut(&mut self) -> Result<&mut SerialPort, TransportError> {
+    fn port_mut(&mut self) -> Result<&mut Box<dyn serialport::SerialPort>, TransportError> {
         self.port.as_mut().ok_or(TransportError::NotOpen)
     }
 
     fn set_timeout(&mut self, timeout: Duration) -> Result<(), TransportError> {
         self.port_mut()?
-            .set_read_timeout(timeout)
+            .set_timeout(timeout)
             .map_err(|error| TransportError::Read(error.to_string()))
     }
 }
@@ -155,15 +247,21 @@ impl Transport for SerialTransport {
         if self.port.is_some() {
             return Ok(());
         }
-        // A `u32` asks `serial2` for raw 8N1 with no parity and no flow control.
-        let mut port =
-            SerialPort::open(&self.settings.port, self.settings.baud).map_err(|error| {
+        // Raw 8N1 with no parity and no flow control, which is what every
+        // Speeduino, rusEFI and MegaSquirt-family ECU expects.
+        let mut port = serialport::new(&self.settings.port, self.settings.baud)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .timeout(READ_POLL)
+            .open()
+            .map_err(|error| {
                 // Busy and permission problems are the two normal failures, and
                 // their text is what tells the user which one happened.
                 TransportError::Open(format!("{}: {error}", self.settings.port))
             })?;
-        port.set_read_timeout(READ_POLL)
-            .and_then(|()| port.set_write_timeout(WRITE_TIMEOUT))
+        port.set_timeout(READ_POLL)
             .map_err(|error| TransportError::Open(error.to_string()))?;
         tracing::info!(
             port = %self.settings.port,
@@ -175,7 +273,7 @@ impl Transport for SerialTransport {
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        let port = self.port()?;
+        let port = self.port_mut()?;
         port.write_all(bytes)
             .and_then(|()| port.flush())
             .map_err(|error| TransportError::Write(error.to_string()))
@@ -203,7 +301,7 @@ impl Transport for SerialTransport {
                 });
             }
             self.set_timeout(deadline - now)?;
-            let port = self.port()?;
+            let port = self.port_mut()?;
             match read_once(port, &mut buf[filled..]) {
                 Ok(read) => filled += read,
                 Err(error) if error.kind() == ErrorKind::TimedOut => {
@@ -259,7 +357,7 @@ impl Transport for SerialTransport {
             // conversation.
             let remaining = max - (sink.len() - before);
             let take = remaining.min(buffer.len());
-            let port = self.port()?;
+            let port = self.port_mut()?;
             match read_once(port, &mut buffer[..take]) {
                 Ok(read) => {
                     sink.extend_from_slice(&buffer[..read]);
@@ -290,7 +388,7 @@ impl Transport for SerialTransport {
 
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         self.set_timeout(READ_POLL)?;
-        let port = self.port()?;
+        let port = self.port_mut()?;
         match port.read(buf) {
             Ok(read) => Ok(read),
             Err(error)
@@ -306,15 +404,17 @@ impl Transport for SerialTransport {
     }
 
     fn flush_input(&mut self) {
-        if let Some(port) = self.port.as_ref() {
-            let _ = port.discard_input_buffer();
+        if let Some(port) = self.port.as_mut() {
+            let _ = port.clear(serialport::ClearBuffer::Input);
         }
     }
 
     fn close(&mut self) {
-        if let Some(port) = self.port.as_ref() {
-            let _ = port.discard_buffers();
+        if let Some(port) = self.port.as_mut() {
+            let _ = port.clear(serialport::ClearBuffer::All);
         }
+        // Dropping the handle closes the descriptor; the crate has no explicit
+        // close, and a reconnected transport opens a fresh one.
         self.port = None;
     }
 }
@@ -328,12 +428,17 @@ impl Transport for SerialTransport {
 ///
 /// Returns [`TransportError::Open`] when the device list cannot be enumerated.
 pub fn ports() -> Result<Vec<PortInfo>, TransportError> {
-    let available = SerialPort::available_ports()
+    let available = serialport::available_ports()
         .map_err(|error| TransportError::Open(format!("could not enumerate ports: {error}")))?;
+
     let mut ports: Vec<PortInfo> = available
         .into_iter()
-        .map(|path| PortInfo {
-            name: path.display().to_string(),
+        .map(|port| PortInfo {
+            name: port.port_name,
+            usb: match port.port_type {
+                serialport::SerialPortType::UsbPort(info) => Some(usb_identity(&info)),
+                _ => None,
+            },
         })
         .collect();
 
@@ -354,6 +459,22 @@ pub fn ports() -> Result<Vec<PortInfo>, TransportError> {
     Ok(ports)
 }
 
+/// Copies the platform's device information into the type this crate exposes.
+fn usb_identity(info: &serialport::UsbPortInfo) -> UsbIdentity {
+    UsbIdentity {
+        vid: info.vid,
+        pid: info.pid,
+        serial: info.serial_number.clone(),
+        manufacturer: info.manufacturer.clone(),
+        product: info.product.clone(),
+        location: info.location.as_ref().map(|location| UsbLocation {
+            bus_id: location.bus_id().to_owned(),
+            port_chain: location.port_chain().to_vec(),
+        }),
+        interface: info.interface,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,9 +483,31 @@ mod tests {
     fn a_port_is_named_by_its_path() {
         let port = PortInfo {
             name: "/dev/cu.usbmodem21201".to_owned(),
+            usb: None,
         };
 
         assert_eq!(port.label(), "/dev/cu.usbmodem21201");
+        assert_eq!(port.path(), "/dev/cu.usbmodem21201");
+    }
+
+    #[test]
+    fn a_port_with_a_product_is_labelled_by_it() {
+        let port = PortInfo {
+            name: "/dev/cu.usbserial-A50285BI".to_owned(),
+            usb: Some(UsbIdentity {
+                vid: 0x0403,
+                pid: 0x6001,
+                serial: Some("A50285BI".to_owned()),
+                manufacturer: None,
+                product: Some("FT232R USB UART".to_owned()),
+                location: None,
+                interface: Some(0),
+            }),
+        };
+
+        assert_eq!(port.label(), "FT232R USB UART");
+        assert_eq!(port.path(), "/dev/cu.usbserial-A50285BI");
+        assert_eq!(port.usb().map(UsbIdentity::vid), Some(0x0403));
     }
 
     #[test]

@@ -55,7 +55,7 @@ mod trace;
 pub use error::TransportError;
 pub use recording::RecordingTransport;
 pub use replay::ReplayTransport;
-pub use serial::{PortInfo, SerialSettings, SerialTransport, ports};
+pub use serial::{PortInfo, SerialSettings, SerialTransport, UsbIdentity, UsbLocation, ports};
 pub use trace::{Direction, Trace, TraceError, TraceFrame};
 
 /// A byte transport.
