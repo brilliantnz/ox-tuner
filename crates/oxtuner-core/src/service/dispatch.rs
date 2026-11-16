@@ -79,7 +79,7 @@ pub(super) fn handle(
             connect(op, session, live, events, report, &port, framing, true)
         }
         CommandRequest::ProbeFirmware { port, probe } => {
-            probe_firmware(op, &port, probe, live.is_some(), events)
+            probe_firmware(op, &port, probe, live.is_some(), events, report)
         }
         CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {

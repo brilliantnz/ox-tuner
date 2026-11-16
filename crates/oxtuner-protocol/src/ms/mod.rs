@@ -456,7 +456,8 @@ impl MsProtocol {
     }
 
     /// How a framed reply is shaped.
-    pub fn reply_code(&self) -> ReplyCode {
+    #[cfg(test)]
+    pub(crate) fn reply_code(&self) -> ReplyCode {
         self.reply_code
     }
 

@@ -11,8 +11,8 @@ use crate::contract::FirmwareProbe;
 use oxtuner_protocol::{PROBE_PORT_SETTLE, ProbeSpec};
 
 use super::{
-    Event, EventTx, Failure, FailureCode, IoOp, IoOutcome, IoPlan, IoThread, OpId, Outcome,
-    PortChoice, send,
+    CoreReport, Event, EventTx, Failure, FailureCode, IoOp, IoOutcome, IoPlan, IoThread, OpId,
+    Outcome, PortChoice, send,
 };
 
 /// How long the probe waits for a reply before the port is declared silent.
@@ -24,7 +24,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 /// The share of the wait reserved for the port open.
 ///
 /// Nothing bounds the open itself, so a port that takes longer than this is
-/// reported as silent.
+/// reported as silent. The I/O thread is still joined afterwards, so an open
+/// that hangs delays the answer without changing it.
 const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
@@ -42,8 +43,10 @@ pub(super) fn probe_firmware(
     probe: FirmwareProbe,
     live_open: bool,
     events: &EventTx,
+    report: &mut CoreReport,
 ) -> Outcome {
     if live_open {
+        report.failures += 1;
         send(
             events,
             Event::Failed {
@@ -63,7 +66,7 @@ pub(super) fn probe_firmware(
 
     let (thread, replies) = match IoThread::start(&plan) {
         Ok(pair) => pair,
-        Err(error) => return reject(op, probe, &error.to_string(), events),
+        Err(error) => return reject(op, probe, &error.to_string(), events, report),
     };
 
     // A fresh thread per attempt, so one request id is enough.
@@ -74,7 +77,7 @@ pub(super) fn probe_firmware(
         },
     ) {
         Ok(()) => replies.recv_timeout(PROBE_WAIT),
-        Err(error) => return reject(op, probe, &error.to_string(), events),
+        Err(error) => return reject(op, probe, &error.to_string(), events, report),
     };
     thread.shutdown();
 
@@ -85,11 +88,13 @@ pub(super) fn probe_firmware(
             IoOutcome::Signature { signature } if !signature.trim().is_empty() => {
                 signature.trim().to_owned()
             }
-            IoOutcome::Failed(failure) => return reject(op, probe, &failure.message, events),
-            _ => return reject(op, probe, "the ECU did not answer", events),
+            IoOutcome::Failed(failure) => {
+                return reject(op, probe, &failure.message, events, report);
+            }
+            _ => return reject(op, probe, "the ECU did not answer", events, report),
         },
         Err(crossfire::RecvTimeoutError::Timeout) => {
-            return reject(op, probe, "the ECU did not answer", events);
+            return reject(op, probe, "the ECU did not answer", events, report);
         }
         Err(crossfire::RecvTimeoutError::Disconnected) => {
             return reject(
@@ -97,6 +102,7 @@ pub(super) fn probe_firmware(
                 probe,
                 "the probe thread stopped before answering",
                 events,
+                report,
             );
         }
     };
@@ -126,7 +132,14 @@ pub(super) fn probe_firmware(
 }
 
 /// Reports a probe that produced no signature.
-fn reject(op: OpId, probe: FirmwareProbe, reason: &str, events: &EventTx) -> Outcome {
+fn reject(
+    op: OpId,
+    probe: FirmwareProbe,
+    reason: &str,
+    events: &EventTx,
+    report: &mut CoreReport,
+) -> Outcome {
+    report.failures += 1;
     tracing::debug!(%op, ?probe, reason, "firmware probe found nothing");
     send(
         events,

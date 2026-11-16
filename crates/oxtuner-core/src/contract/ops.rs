@@ -875,7 +875,10 @@ impl FirmwareProbe {
     /// A stable lowercase key for logs and the detection result.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        self.spec().behavior_id()
+        match self {
+            Self::Speeduino => oxtuner_protocol::SPEEDUINO.behavior_id(),
+            Self::Rusefi => oxtuner_protocol::RUSEFI.behavior_id(),
+        }
     }
 }
 
