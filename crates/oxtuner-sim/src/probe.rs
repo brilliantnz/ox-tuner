@@ -27,6 +27,15 @@ impl SimProbe {
         Self::with_signature(spec, default_signature(&spec))
     }
 
+    /// Answers nothing, like a port with no ECU attached.
+    ///
+    /// A scan needs the miss path as well as the hit, so a test can drive one
+    /// port that stays silent and one that answers.
+    #[must_use]
+    pub fn silent(spec: ProbeSpec) -> Self {
+        Self::with_signature(spec, "")
+    }
+
     /// Answers `spec`'s query with `signature`, for a test that needs an exact
     /// text.
     #[must_use]
@@ -48,6 +57,9 @@ impl SimProbe {
     /// The reply bytes for one correctly addressed query.
     fn reply(&self) -> Result<Vec<u8>, TransportError> {
         let text = self.signature.as_bytes();
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
 
         match self.spec.link {
             LinkMode::Legacy => {
@@ -188,7 +200,7 @@ impl Transport for SimProbe {
 
 #[cfg(test)]
 mod tests {
-    use oxtuner_protocol::probe::{RUSEFI, SPEEDUINO};
+    use oxtuner_protocol::{RUSEFI, SPEEDUINO};
 
     use super::*;
 
@@ -230,10 +242,7 @@ mod tests {
 
     #[test]
     fn the_rusefi_probe_answers_with_the_data_alone_when_framed() {
-        let spec = ProbeSpec {
-            link: LinkMode::Envelope,
-            ..RUSEFI
-        };
+        let spec = RUSEFI.with_link(LinkMode::Envelope);
         let mut probe = probe(spec);
 
         let request = Frame::encode(b"S").expect("the query frames");
@@ -255,10 +264,7 @@ mod tests {
 
     #[test]
     fn the_speeduino_probe_leads_a_framed_reply_with_a_return_code() {
-        let spec = ProbeSpec {
-            link: LinkMode::Envelope,
-            ..SPEEDUINO
-        };
+        let spec = SPEEDUINO.with_link(LinkMode::Envelope);
         let mut probe = probe(spec);
 
         let request = Frame::encode(b"Q").expect("the query frames");
@@ -272,6 +278,17 @@ mod tests {
 
         let frame = Frame::parse(reply).expect("the answer is one frame");
         assert_eq!(frame.payload.first(), Some(&0), "the success code leads");
+    }
+
+    #[test]
+    fn a_silent_probe_answers_nothing() {
+        let mut probe = SimProbe::silent(SPEEDUINO);
+        probe.open().expect("the probe opens");
+
+        probe.write_all(b"Q").expect("the query is written");
+
+        let mut buf = [0u8; 16];
+        assert_eq!(probe.read_available(&mut buf).expect("no answer"), 0);
     }
 
     #[test]

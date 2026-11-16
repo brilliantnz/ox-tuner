@@ -867,8 +867,8 @@ impl FirmwareProbe {
     #[must_use]
     pub fn spec(self) -> oxtuner_protocol::ProbeSpec {
         match self {
-            Self::Speeduino => oxtuner_protocol::probe::SPEEDUINO,
-            Self::Rusefi => oxtuner_protocol::probe::RUSEFI,
+            Self::Speeduino => oxtuner_protocol::SPEEDUINO,
+            Self::Rusefi => oxtuner_protocol::RUSEFI,
         }
     }
 

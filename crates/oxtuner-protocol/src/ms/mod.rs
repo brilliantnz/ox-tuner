@@ -157,6 +157,13 @@ const SIGNATURE_MAX: usize = 512;
 /// firmware that forgot to state a factor.
 const FALLBACK_BLOCKING_FACTOR: usize = 128;
 
+/// How long a probe lets the port settle before it asks.
+///
+/// Opening a serial port resets an Arduino into its bootloader, which ignores
+/// the query for about a second. A probe has no INI to state
+/// `delayAfterPortOpen`, so the settle is protocol knowledge.
+pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
+
 /// A page CRC reply with a variable-length text encoding is not readable by
 /// this build; neither link has a read shape for it.
 fn unsupported_text_crc(page: u8) -> ProtocolError {
@@ -233,12 +240,16 @@ impl Default for Parts {
 
 impl Parts {
     /// What a probe starts from: a query, a link and a reply shape.
+    ///
+    /// A probe has no INI to state `delayAfterPortOpen`, but opening an Arduino
+    /// resets it into the bootloader, so the settle is protocol knowledge here.
     fn probe(spec: &ProbeSpec) -> Self {
         Self {
             behavior_id: spec.behavior_id(),
             signature_request: Some(spec.query.to_vec()),
             link: spec.link,
             reply_code: spec.behavior.as_dyn().default_reply_code(),
+            port_open_delay: PROBE_PORT_SETTLE,
             ..Self::default()
         }
     }
@@ -355,6 +366,8 @@ impl MsProtocol {
             _ => None,
         };
 
+        let defaults = Parts::default();
+
         Ok(Self::from_parts(Parts {
             behavior_id: behavior.id(),
             variables,
@@ -366,7 +379,7 @@ impl MsProtocol {
                 .blocking_factor
                 .and_then(|factor| usize::try_from(factor).ok())
                 .filter(|factor| *factor > 0)
-                .unwrap_or(FALLBACK_BLOCKING_FACTOR)
+                .unwrap_or(defaults.blocking_factor)
                 // A chunk must fit the 16-bit count field, so an oversized
                 // definition is clamped instead of failing every read.
                 .min(usize::from(u16::MAX)),
@@ -378,19 +391,19 @@ impl MsProtocol {
             block_read_timeout: definition
                 .comms
                 .block_read_timeout_ms
-                .map_or(Duration::from_secs(2), |milliseconds| {
+                .map_or(defaults.block_read_timeout, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             page_activation_delay: definition
                 .comms
                 .page_activation_delay_ms
-                .map_or(Duration::ZERO, |milliseconds| {
+                .map_or(defaults.page_activation_delay, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             port_open_delay: definition
                 .comms
                 .delay_after_port_open_ms
-                .map_or(Duration::ZERO, |milliseconds| {
+                .map_or(defaults.port_open_delay, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             wire_order: order,
@@ -701,11 +714,7 @@ impl MsProtocol {
     }
 
     /// Sends one framed request and returns the validated reply payload.
-    fn converse(
-        &self,
-        io: &mut dyn Transport,
-        request: &[u8],
-    ) -> Result<Vec<u8>, ProtocolError> {
+    fn converse(&self, io: &mut dyn Transport, request: &[u8]) -> Result<Vec<u8>, ProtocolError> {
         Self::converse_with(io, request, self.block_read_timeout)
     }
 
@@ -730,6 +739,7 @@ impl MsProtocol {
         io: &mut dyn Transport,
         timeout: Duration,
     ) -> Result<Vec<u8>, ProtocolError> {
+        let deadline = std::time::Instant::now() + timeout;
         let mut header = [0u8; 2];
         io.read_exact_timeout(&mut header, timeout)?;
         let length = Frame::length(header);
@@ -743,7 +753,8 @@ impl MsProtocol {
             .into());
         }
         let mut rest = vec![0u8; length + 4];
-        io.read_exact_timeout(&mut rest, timeout)?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        io.read_exact_timeout(&mut rest, remaining)?;
 
         let mut bytes = Vec::with_capacity(length + 6);
         bytes.extend_from_slice(&header);

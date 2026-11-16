@@ -210,14 +210,12 @@ fn a_probe_is_refused_while_a_session_is_live() {
 }
 
 #[test]
-fn every_probe_name_matches_the_protocol_registry() {
-    for probe in oxtuner_core::FirmwareProbe::ALL {
-        assert_eq!(
-            probe.spec().behavior_id(),
-            probe.as_str(),
-            "{probe:?} and its spec must name the same family"
-        );
-    }
+fn the_core_probe_list_matches_the_protocol_registry() {
+    assert_eq!(
+        oxtuner_core::FirmwareProbe::ALL.map(oxtuner_core::FirmwareProbe::spec),
+        oxtuner_protocol::PROBES,
+        "the core's probe list and the protocol registry must match, in order"
+    );
 }
 
 #[test]

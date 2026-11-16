@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use crate::contract::FirmwareProbe;
-use oxtuner_protocol::ProbeSpec;
+use oxtuner_protocol::{PROBE_PORT_SETTLE, ProbeSpec};
 
 use super::{
     Event, EventTx, Failure, FailureCode, IoOp, IoOutcome, IoPlan, IoThread, OpId, Outcome,
@@ -28,7 +28,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
-const PROBE_WAIT: Duration = PROBE_TIMEOUT.saturating_add(PROBE_OPEN_BUDGET);
+///
+/// The wait covers the port settling, the open, and two read deadlines: a
+/// framed reply reads a header and then its payload, each bounded by the probe
+/// timeout.
+const PROBE_WAIT: Duration = PROBE_PORT_SETTLE
+    .saturating_add(PROBE_OPEN_BUDGET)
+    .saturating_add(PROBE_TIMEOUT.saturating_mul(2));
 
 /// Sends one probe and reports the signature, or that the port stayed silent.
 pub(super) fn probe_firmware(
@@ -45,7 +51,7 @@ pub(super) fn probe_firmware(
                 op,
                 failure: Failure {
                     code: FailureCode::ConnectFailed,
-                    message: "disconnect the ECU before probing another port".to_owned(),
+                    message: "disconnect the ECU before probing".to_owned(),
                 },
             },
         );
@@ -56,8 +62,9 @@ pub(super) fn probe_firmware(
     let link = port.clone();
     let plan = IoPlan::probe(spec, link.clone());
 
-    let Ok((thread, replies)) = IoThread::start(&plan) else {
-        return reject(op, probe, "the port could not be opened", events);
+    let (thread, replies) = match IoThread::start(&plan) {
+        Ok(pair) => pair,
+        Err(error) => return reject(op, probe, &error.to_string(), events),
     };
 
     // A fresh thread per attempt, so one request id is enough.

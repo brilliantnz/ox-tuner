@@ -27,6 +27,7 @@ pub const COMMON_BAUDS: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
 /// One signature probe: a family, the byte that asks for its signature, and
 /// how that answer is framed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProbeSpec {
     /// The family the probe asks for, and the key logs and the detection
     /// result use.
@@ -42,6 +43,15 @@ impl ProbeSpec {
     #[must_use]
     pub fn behavior_id(self) -> &'static str {
         self.behavior.as_dyn().id()
+    }
+
+    /// The same probe over another framing.
+    ///
+    /// A scan may try a family over both links, so the shape stays the same and
+    /// only the framing changes.
+    #[must_use]
+    pub fn with_link(self, link: LinkMode) -> Self {
+        Self { link, ..self }
     }
 }
 
@@ -73,7 +83,7 @@ mod tests {
     use oxtuner_transport::{Transport, TransportError};
 
     use super::*;
-    use crate::{MsProtocol, Protocol, ReplyCode};
+    use crate::{Frame, MsProtocol, Protocol, ReplyCode};
 
     /// A transport that answers the first write with one canned reply and
     /// records the timeout it was given.
@@ -98,7 +108,7 @@ mod tests {
             buf: &mut [u8],
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            self.timeout = Some(timeout);
+            self.timeout = Some(self.timeout.map_or(timeout, |seen| seen.max(timeout)));
             if buf.len() > self.reply.len() {
                 return Err(TransportError::Timeout {
                     got: self.reply.len(),
@@ -118,7 +128,7 @@ mod tests {
             _quiet: Duration,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            self.timeout = Some(timeout);
+            self.timeout = Some(self.timeout.map_or(timeout, |seen| seen.max(timeout)));
             let end = self
                 .reply
                 .iter()
@@ -229,6 +239,55 @@ mod tests {
             .expect("the probe reads");
 
         assert_eq!(io.timeout, Some(short), "the short timeout is used");
+    }
+
+    #[test]
+    fn a_probe_waits_for_the_port_to_settle() {
+        let protocol = MsProtocol::for_probe(&SPEEDUINO);
+
+        assert!(
+            protocol.port_open_delay() >= Duration::from_millis(500),
+            "opening an Arduino resets it, so the probe must let it settle: {:?}",
+            protocol.port_open_delay()
+        );
+    }
+
+    #[test]
+    fn a_framed_probe_reads_through_the_reply_code() {
+        let spec = SPEEDUINO.with_link(LinkMode::Envelope);
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(b"speeduino 202501");
+        let framed = Frame::encode(&payload).expect("the reply frames");
+        let mut io = Answer {
+            sent: Vec::new(),
+            reply: framed,
+            timeout: None,
+        };
+        let mut protocol = MsProtocol::for_probe(&spec);
+        let short = Duration::from_millis(350);
+
+        let signature = protocol
+            .signature_with_timeout(&mut io, short)
+            .expect("the probe reads");
+
+        assert_eq!(signature, "speeduino 202501", "the code is not text");
+        assert_eq!(io.timeout, Some(short), "the caller's timeout is used");
+    }
+
+    #[test]
+    fn a_framed_probe_of_a_data_only_family_keeps_the_text_whole() {
+        let spec = RUSEFI.with_link(LinkMode::Envelope);
+        let framed = Frame::encode(b"rusEFI master").expect("the reply frames");
+        let mut io = Answer {
+            sent: Vec::new(),
+            reply: framed,
+            timeout: None,
+        };
+        let mut protocol = MsProtocol::for_probe(&spec);
+
+        let signature = protocol.signature(&mut io).expect("the probe reads");
+
+        assert_eq!(signature, "rusEFI master");
     }
 
     #[test]
