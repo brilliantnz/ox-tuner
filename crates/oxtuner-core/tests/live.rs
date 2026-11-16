@@ -182,7 +182,8 @@ fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
 
     assert_eq!(failure.code, FailureCode::FirmwareNotDetected);
 
-    harness.thread.join();
+    let report = harness.thread.join();
+    assert_eq!(report.failures, 1, "a probe miss is a failed command");
 }
 
 #[test]
@@ -206,7 +207,8 @@ fn a_probe_is_refused_while_a_session_is_live() {
     assert_eq!(failure.code, FailureCode::ConnectFailed);
     assert!(failure.message.contains("disconnect the ECU"));
 
-    harness.thread.join();
+    let report = harness.thread.join();
+    assert_eq!(report.failures, 1, "a refused probe is a failed command");
 }
 
 #[test]

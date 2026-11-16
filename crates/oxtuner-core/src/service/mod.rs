@@ -150,7 +150,7 @@ pub struct CoreReport {
     pub projects_opened: u64,
     /// Tune files saved successfully.
     pub tune_saves: u64,
-    /// Commands that failed (a rejected definition, project or save).
+    /// Commands that failed, so the shutdown report shows how much went wrong.
     pub failures: u64,
     /// Connections opened.
     pub connects: u64,
