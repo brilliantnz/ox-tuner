@@ -23,10 +23,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 
 /// The share of the wait reserved for the port open.
 ///
-/// Nothing bounds the open itself. A port that spends more than this leaves the
-/// rest of the wait as slack, so a slow reply then reads as a silent port. The
-/// I/O thread is still joined afterwards, so an open that hangs delays the
-/// answer without changing it.
+/// Nothing bounds the open itself. An open that overruns this comes out of the
+/// slack the rest of the wait holds, so a reply that uses its own timeout reads
+/// as a silent port. The I/O thread is still joined afterwards, so an open that
+/// hangs delays the answer without changing it.
 const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
