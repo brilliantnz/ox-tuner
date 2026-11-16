@@ -100,6 +100,15 @@ pub enum Event {
         /// The available ports.
         ports: Vec<PortView>,
     },
+    /// The set of serial ports changed while the core was idle.
+    ///
+    /// Sent only when the list actually differs from the last one published, so a
+    /// steady machine produces no traffic. The same snapshot answers
+    /// [`super::Command::ListPorts`].
+    PortsChanged {
+        /// The ports as they are now.
+        ports: Vec<PortView>,
+    },
     /// A [`super::Command::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
@@ -294,6 +303,7 @@ impl Event {
             | Self::Failed { op, .. }
             | Self::Rejected { op, .. } => Some(*op),
             Self::MenuChanged { .. }
+            | Self::PortsChanged { .. }
             | Self::ConnectionLost { .. }
             | Self::Reconnected { .. }
             | Self::Stopped => None,

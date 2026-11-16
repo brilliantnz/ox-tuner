@@ -88,11 +88,16 @@ impl DialogModel {
         match self.mode {
             Mode::Simulator => Some(crate::link::simulator()),
             Mode::Serial => {
-                let port = self
-                    .selected_port
-                    .as_deref()
-                    .filter(|name| ports.iter().any(|port| port.name == *name))
-                    .or_else(|| ports.first().map(|port| port.name.as_str()))?;
+                // A remembered or chosen port that is gone leaves no selection
+                // rather than falling back to whichever port is first: a cable
+                // moving must never point Connect at another board.
+                let port = match self.selected_port.as_deref() {
+                    Some(name) => ports
+                        .iter()
+                        .find(|port| port.name == name)
+                        .map(|port| port.name.as_str()),
+                    None => ports.first().map(|port| port.name.as_str()),
+                }?;
                 Some(PortChoice::serial(port.to_owned(), baud))
             }
         }
@@ -637,10 +642,16 @@ mod tests {
             PortView {
                 name: "/dev/cu.first".to_owned(),
                 label: "first".to_owned(),
+                vid: Some(0x2341),
+                pid: Some(0x0042),
+                serial: Some("A".to_owned()),
             },
             PortView {
                 name: "/dev/cu.second".to_owned(),
                 label: "second".to_owned(),
+                vid: Some(0x1A86),
+                pid: Some(0x7523),
+                serial: None,
             },
         ]
     }
@@ -665,15 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn a_remembered_port_that_is_gone_falls_back_to_the_first_scan_result() {
-        let choice = serial_model(Some("/dev/cu.missing"))
-            .port_choice(&ports(), 57_600)
-            .expect("a port");
+    fn a_remembered_port_that_is_gone_leaves_no_selection() {
+        // Falling back to the first scanned port would point Connect at a board
+        // the user never chose, which is what a moved cable would trigger.
+        let choice = serial_model(Some("/dev/cu.missing")).port_choice(&ports(), 57_600);
 
-        assert!(matches!(
-            choice,
-            PortChoice::Serial { ref port, .. } if port == "/dev/cu.first"
-        ));
+        assert!(choice.is_none());
     }
 
     #[test]

@@ -55,7 +55,7 @@ mod trace;
 pub use error::TransportError;
 pub use recording::RecordingTransport;
 pub use replay::ReplayTransport;
-pub use serial::{PortInfo, SerialSettings, SerialTransport, ports};
+pub use serial::{PortInfo, SerialSettings, SerialTransport, UsbIdentity, UsbLocation, ports};
 pub use trace::{Direction, Trace, TraceError, TraceFrame};
 
 /// A byte transport.
@@ -78,8 +78,9 @@ pub trait Transport: Send {
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError::NotOpen`] before the link is open and
-    /// [`TransportError::Write`] when the device rejects the bytes.
+    /// Returns [`TransportError::NotOpen`] before the link is open,
+    /// [`TransportError::Write`] when the device rejects the bytes, and
+    /// [`TransportError::Closed`] when the link has gone away.
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError>;
 
     /// Fills `buf` completely, or fails.
@@ -123,8 +124,9 @@ pub trait Transport: Send {
     ///
     /// # Errors
     ///
-    /// Returns [`TransportError::NotOpen`] before the link is open and
-    /// [`TransportError::Read`] when the device cannot be read.
+    /// Returns [`TransportError::NotOpen`] before the link is open,
+    /// [`TransportError::Read`] when the device cannot be read, and
+    /// [`TransportError::Closed`] when the link has gone away.
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
 
     /// Discards anything pending in the input buffer.

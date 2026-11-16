@@ -32,14 +32,14 @@ use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page}
 use crate::contract::{
     AxisEdit, BurnReport, CellEdit, CommandRequest, ConflictResolution, ConnectionView,
     ControllerActionReport, DefinitionView, DialogView, Envelope, Event, Failure, FailureCode,
-    ImportReport, JournalEntry, OpId, PortView, ProjectView, ReadReport, RevertReport, SaveReport,
+    ImportReport, JournalEntry, OpId, ProjectView, ReadReport, RevertReport, SaveReport,
     SignatureVerdict, TableView, WriteReport,
 };
 use crate::gate::GateEvaluator;
 use crate::handle::{CoreHandle, EventStream, EventTx, SendFailure, SendGate, StopFlag};
 use crate::history::{ChannelInfo, ChartHistory};
 use crate::io_thread::{
-    self, IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
+    IoFailureKind, IoOp, IoOutcome, IoPlan, IoReply, IoThread, PageRead, PageWrite, RequestId,
 };
 use crate::journal::{self, Journal};
 use crate::link::PortChoice;
@@ -414,8 +414,9 @@ pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
 
 /// The command loop.
 ///
-/// Blocks on the queue: with no poller yet there is nothing to do while idle,
-/// and a timed wait would only wake the thread for nothing.
+/// Waits at most one poll interval while idle, because the port list is sampled
+/// here rather than on a thread of its own. With a live connection the nearer of
+/// its timers and the poll sets the wake.
 #[expect(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
@@ -444,20 +445,21 @@ fn run(
     // The last menu tree the core published, for change suppression.
     let mut last_menu: Vec<MenuNode> = Vec::new();
     let mut menu_dirty = false;
+    // Port presence is sampled on this loop, not on a thread of its own.
+    let mut ports = ports::PortsWatch::new();
 
     // Every handle is gone (`Err`) also ends the loop, which is what makes a
     // dropped UI a shutdown rather than a leak.
     loop {
-        let envelope = match next_wait(live.as_ref()) {
-            Some(timeout) => match commands.recv_timeout(timeout) {
-                Ok(envelope) => Some(envelope),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => break,
-            },
-            None => match commands.recv() {
-                Ok(envelope) => Some(envelope),
-                Err(_) => break,
-            },
+        let wait = match next_wait(live.as_ref()) {
+            Some(wait) => wait.min(ports.remaining()),
+            None => ports.remaining(),
+        };
+
+        let envelope = match commands.recv_timeout(wait) {
+            Ok(envelope) => Some(envelope),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => break,
         };
 
         if let Some(envelope) = envelope {
@@ -476,6 +478,7 @@ fn run(
                 &mut report,
                 &mut last_menu,
                 &mut menu_dirty,
+                &mut ports,
             );
             let took = op_started.elapsed();
 
@@ -516,6 +519,17 @@ fn run(
             .map(|connection| connection.connection.revision)
             != connection_revision;
         let first_frame = !had_frame && latest.get().is_some();
+
+        // Sampled here rather than on its own thread: a change is published only
+        // when the list actually differs, and the first sample is a baseline.
+        if ports.due() {
+            if let Some(updated) = ports.sample() {
+                tracing::debug!(ports = updated.len(), "serial ports changed");
+                send(&events, Event::PortsChanged { ports: updated });
+            }
+
+            ports.polled();
+        }
 
         if menu_dirty || connection_changed || first_frame {
             refresh_menu(&events, &session, &latest, &mut last_menu);
@@ -1164,6 +1178,7 @@ impl Live {
 mod dispatch;
 mod ecu;
 mod log;
+mod ports;
 mod transfer;
 mod tune;
 

@@ -160,12 +160,24 @@ pub struct ProjectView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One serial port the connect dialog can offer.
+///
+/// Every field takes part in the row comparison, so a different device on the
+/// same path reads as a change.
 pub struct PortView {
     /// Device path.
     pub name: String,
-    /// The label to show (the path itself: `serial2` reports no product
-    /// description).
+    /// The label to show: a known board name, else the product string, else the
+    /// path.
     pub label: String,
+    /// Vendor id, when the platform reports one.
+    ///
+    /// Kept so a different device arriving on the same path counts as a change
+    /// rather than as the same port.
+    pub vid: Option<u16>,
+    /// Product id, when the platform reports one.
+    pub pid: Option<u16>,
+    /// Serial number, when the device provides one.
+    pub serial: Option<String>,
 }
 
 /// How the ECU's signature compared with the definition's.

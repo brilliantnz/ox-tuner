@@ -79,11 +79,25 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     crate::notifications::publish_event(&event, link_was_lost.as_deref(), cx);
 
     // The port list is stored for the dialog, which stays open while it scans:
-    // closing and reopening would lose the user's selection and scroll.
-    if let Event::PortsListed { ports, .. } = event {
+    // closing and reopening would lose the user's selection and scroll. The core
+    // publishes the same snapshot on a change, so both paths land here.
+    // A change carries a fresh list, but only the answer to the scan ends the
+    // scan: a change that arrives mid-scan must not hide the dialog's state for
+    // the rest of the round trip.
+    let ports = match &event {
+        Event::PortsListed { ports, .. } => Some((ports, true)),
+        Event::PortsChanged { ports } => Some((ports, false)),
+        _ => None,
+    };
+
+    if let Some((ports, answered)) = ports {
         let service = cx.global_mut::<CoreService>();
-        service.status.ports = ports;
-        service.status.scanning = false;
+        service.status.ports.clone_from(ports);
+
+        if answered {
+            service.status.scanning = false;
+        }
+
         cx.refresh_windows();
         return;
     }
@@ -184,9 +198,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        Event::PortsListed { .. } | Event::Rejected { .. } | Event::Stopped => {
-            (Update::Nothing, None)
-        }
+        Event::PortsListed { .. }
+        | Event::PortsChanged { .. }
+        | Event::Rejected { .. }
+        | Event::Stopped => (Update::Nothing, None),
     };
 
     let auto_connect = matches!(&update, Update::Loaded(_) | Update::Opened(_))
