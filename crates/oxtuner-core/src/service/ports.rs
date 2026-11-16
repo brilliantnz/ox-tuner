@@ -279,6 +279,36 @@ mod tests {
         assert_eq!(published.len(), 2);
     }
 
+    fn named(name: &str, vid: u16, pid: u16) -> PortInfo {
+        PortInfo::from_parts(
+            name.to_owned(),
+            Some(oxtuner_transport::UsbIdentity::described(vid, pid)),
+        )
+    }
+
+    #[test]
+    fn the_same_ports_in_another_order_publish_nothing() {
+        let mut watch = PortsWatch::new();
+        let first = || {
+            Ok(vec![
+                named("/dev/cu.first", 0x2341, 0x0042),
+                named("/dev/cu.second", 0x1A86, 0x7523),
+            ])
+        };
+        let reversed = || {
+            Ok(vec![
+                named("/dev/cu.second", 0x1A86, 0x7523),
+                named("/dev/cu.first", 0x2341, 0x0042),
+            ])
+        };
+
+        assert!(watch.refresh_with(first).expect("reads").is_none());
+        assert!(
+            watch.refresh_with(reversed).expect("reads").is_none(),
+            "a reordering is not a change"
+        );
+    }
+
     #[test]
     fn a_board_name_is_only_given_for_known_pairs() {
         assert_eq!(board_name(0x2341, 0x0042), Some("Arduino Mega 2560"));

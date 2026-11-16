@@ -106,11 +106,11 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
-    #[doc(hidden)]
     /// Builds a port from parts already in hand.
     ///
     /// For callers that test against a port they describe rather than one the
     /// platform reported.
+    #[doc(hidden)]
     pub fn from_parts(name: String, usb: Option<UsbIdentity>) -> Self {
         Self { name, usb }
     }
@@ -151,12 +151,12 @@ pub struct UsbIdentity {
 }
 
 impl UsbIdentity {
-    #[doc(hidden)]
     /// An identity for a vendor and product the caller already knows.
     ///
     /// Every optional field starts absent. Callers that test against a device
     /// they describe add only the fields they care about, so the call site reads
     /// as what it means.
+    #[doc(hidden)]
     pub fn described(vid: u16, pid: u16) -> Self {
         Self {
             vid,
