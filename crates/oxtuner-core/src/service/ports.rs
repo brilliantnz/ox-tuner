@@ -16,7 +16,7 @@ use crate::contract::PortView;
 /// One enumeration costs about a millisecond on a machine with a handful of
 /// ports, so this is well under a percent of one core. It is the whole cost of
 /// noticing a plug: detection is bounded by this interval.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The last list the core published, and when to look again.
 #[derive(Debug)]
@@ -187,18 +187,13 @@ mod tests {
     }
 
     fn described(vid: u16, pid: u16, product: Option<&str>) -> PortInfo {
-        PortInfo::from_parts(
-            "/dev/cu.test".to_owned(),
-            Some(oxtuner_transport::UsbIdentity::from_parts(
-                vid,
-                pid,
-                Some("S".to_owned()),
-                None,
-                product.map(str::to_owned),
-                None,
-                Some(1),
-            )),
-        )
+        let mut identity = oxtuner_transport::UsbIdentity::described(vid, pid).with_serial("S");
+
+        if let Some(product) = product {
+            identity = identity.with_product(product);
+        }
+
+        PortInfo::from_parts("/dev/cu.test".to_owned(), Some(identity))
     }
 
     #[test]
@@ -243,6 +238,21 @@ mod tests {
             !watch.is_primed(),
             "a failed read leaves the first sample pending"
         );
+    }
+
+    #[test]
+    fn a_failed_read_after_a_good_one_keeps_the_list_and_stays_primed() {
+        let mut watch = PortsWatch::new();
+        let one = || Ok(vec![described(0x2341, 0x0042, None)]);
+
+        watch.refresh_with(one).expect("first read");
+        assert_eq!(watch.snapshot().len(), 1);
+
+        let failed = watch.refresh_with(|| Err(TransportError::Open("nope".to_owned())));
+
+        assert!(matches!(failed, Err(TransportError::Open(_))));
+        assert_eq!(watch.snapshot().len(), 1, "the last list stays");
+        assert!(watch.is_primed(), "a failure does not unprime the watch");
     }
 
     #[test]

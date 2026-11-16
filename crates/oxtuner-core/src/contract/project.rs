@@ -167,6 +167,9 @@ pub struct PortView {
     /// path.
     pub label: String,
     /// Vendor id, when the platform reports one.
+    ///
+    /// Kept so a different device arriving on the same path counts as a change
+    /// rather than as the same port.
     pub vid: Option<u16>,
     /// Product id, when the platform reports one.
     pub pid: Option<u16>,

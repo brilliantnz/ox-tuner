@@ -7,8 +7,9 @@
 //!
 //! The same crate is the only enumerator. Each port arrives already joined to its
 //! USB device, so nothing here matches a device to a path. Opening, per-call
-//! timeouts and the closed-link signal were measured against a real ECU at
-//! 115200 8N1 before the previous transport was removed.
+//! timeouts and the pulled-cable signal were measured on macOS against a real ECU
+//! at 115200 8N1. The Windows and Linux error mappings come from the crate's own
+//! source; only the macOS behaviour has been observed on hardware.
 //!
 //! `libudev` is enabled for Linux only, through the crate's own target-scoped
 //! dependency; a musl build falls back to sysfs and still reports the same
@@ -61,13 +62,23 @@ fn is_link_gone(error: &std::io::Error) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        const ERROR_OPERATION_ABORTED: i32 = 995;
+        // ERROR_OPERATION_ABORTED, ERROR_DEVICE_NOT_CONNECTED, ERROR_GEN_FAILURE.
+        // The standard library maps the first to `TimedOut` and the others to
+        // uncategorised, so the raw code is the only reliable signal left.
+        const WINDOWS_GONE: [i32; 3] = [995, 1_167, 31];
 
-        if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED) {
+        if error
+            .raw_os_error()
+            .is_some_and(|code| WINDOWS_GONE.contains(&code))
+        {
             return true;
         }
     }
 
+    // Linux reports a hangup as `BrokenPipe`, which is folded above. A `POLLERR`
+    // there becomes an uncategorised error with no raw code, so it is reported as
+    // a read failure rather than a closed link; the conversation still ends and
+    // the reconnect follows, only the wording differs.
     false
 }
 
@@ -133,28 +144,35 @@ pub struct UsbIdentity {
 }
 
 impl UsbIdentity {
-    /// Builds an identity from parts already in hand.
+    /// An identity for a vendor and product the caller already knows.
     ///
-    /// For callers that test against a port they describe rather than one the
-    /// platform reported.
-    pub fn from_parts(
-        vid: u16,
-        pid: u16,
-        serial: Option<String>,
-        manufacturer: Option<String>,
-        product: Option<String>,
-        location: Option<UsbLocation>,
-        interface: Option<u8>,
-    ) -> Self {
+    /// Every optional field starts absent. Callers that test against a device
+    /// they describe add only the fields they care about, so the call site reads
+    /// as what it means.
+    pub fn described(vid: u16, pid: u16) -> Self {
         Self {
             vid,
             pid,
-            serial,
-            manufacturer,
-            product,
-            location,
-            interface,
+            serial: None,
+            manufacturer: None,
+            product: None,
+            location: None,
+            interface: None,
         }
+    }
+
+    /// The same identity with a serial number.
+    #[must_use]
+    pub fn with_serial(mut self, serial: impl Into<String>) -> Self {
+        self.serial = Some(serial.into());
+        self
+    }
+
+    /// The same identity with a product string.
+    #[must_use]
+    pub fn with_product(mut self, product: impl Into<String>) -> Self {
+        self.product = Some(product.into());
+        self
     }
 
     /// Vendor id.
