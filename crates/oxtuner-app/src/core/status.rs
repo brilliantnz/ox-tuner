@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::SharedString;
 use oxtuner_core::{
-    BurnReport, ConnectionView, DefinitionView, DialogView, Failure, FailureCode, ImportReport,
-    JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport, RevertReport,
-    SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus, WriteReport,
+    BurnReport, ConnectionView, DefinitionView, DialogView, Failure, FailureCode, FirmwareProbe,
+    ImportReport, JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport,
+    RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus,
+    WriteReport,
 };
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
@@ -73,6 +74,8 @@ pub(crate) struct CoreStatus {
     pub(crate) testing: Option<String>,
     /// The last signature test.
     pub(crate) test: Option<TestResult>,
+    /// The last firmware probe that found a signature.
+    pub(crate) last_probe: Option<ProbeHit>,
     /// The connection request that is still being answered.
     pub(crate) pending_connect: Option<PortChoice>,
     /// Whether the global write switch is on.
@@ -139,6 +142,19 @@ pub(crate) struct TestResult {
     pub(crate) port: String,
     /// The summary, or the failure message.
     pub(crate) outcome: Result<ConnectionView, String>,
+}
+
+/// A signature a firmware probe read, for the new-project scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeHit {
+    /// The port the answer came from.
+    pub(crate) port: String,
+    /// The baud rate that answered, when the port was a serial device.
+    pub(crate) baud: Option<u32>,
+    /// The family probe that answered.
+    pub(crate) probe: FirmwareProbe,
+    /// The signature text the ECU sent.
+    pub(crate) signature: String,
 }
 
 /// A saved session trace, for the output panel.
@@ -225,6 +241,7 @@ impl CoreStatus {
 pub(super) enum Update {
     Loaded(DefinitionView),
     Tested(ConnectionView),
+    Probed(ProbeHit),
     /// A project opened; boxed because its summary is much larger than the
     /// other updates.
     Opened(Box<ProjectView>),
@@ -346,6 +363,10 @@ impl CoreStatus {
                     definition.menu = menu;
                 }
                 self.menu_revision = self.menu_revision.wrapping_add(1);
+            }
+            Update::Probed(hit) => {
+                self.last_probe = Some(hit);
+                self.failure = None;
             }
             Update::Tested(summary) => {
                 let port = summary.port.clone();

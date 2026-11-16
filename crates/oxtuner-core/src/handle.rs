@@ -459,6 +459,22 @@ impl CoreHandle {
         self.send_request(CommandRequest::TestConnection { port, framing })
     }
 
+    /// Asks one port for a firmware signature, with no definition loaded.
+    ///
+    /// The reply is [`crate::Event::FirmwareProbed`] or [`crate::Event::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn probe_firmware(
+        &self,
+        port: crate::PortChoice,
+        probe: crate::FirmwareProbe,
+    ) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::ProbeFirmware { port, probe })
+    }
+
     /// Closes the connection.
     ///
     /// # Errors

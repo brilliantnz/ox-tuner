@@ -14,6 +14,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use oxtuner_ini::Definition;
+use oxtuner_protocol::ProbeSpec;
 use oxtuner_transport::Transport;
 
 /// A link the core cannot open by itself.
@@ -35,6 +36,21 @@ pub trait CustomLink: Send + Sync + 'static {
     ///
     /// Returns the user-facing reason the link could not be opened.
     fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String>;
+
+    /// Opens the transport for a signature probe, which has no definition.
+    ///
+    /// A link that can only answer with a definition says so, and the probe
+    /// reports the reason instead of pretending to have opened a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing reason the probe cannot run on this link.
+    fn open_for_probe(&self, _probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
+        Err(format!(
+            "{} cannot answer a signature probe without a definition",
+            self.label()
+        ))
+    }
 }
 
 /// Where a connection's bytes go.

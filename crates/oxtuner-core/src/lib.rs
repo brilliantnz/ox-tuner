@@ -95,12 +95,12 @@ pub use contract::{
     DefinitionView, DialogAction, DialogEmbed, DialogField, DialogFieldKind, DialogFieldTone,
     DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
     DialogUnmodeledRow, DialogView, DialogWidget, DialogWidgetKind, EcuCommand, Event, Failure,
-    FailureCode, FrontPageGauge, GateState, GaugeTemplate, ImportReport, IndicatorSpec,
-    JournalCommand, JournalEntry, KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ,
-    MIN_POLL_HZ, OpId, PortView, ProjectCommand, ProjectConnection, ProjectView, ReadReport,
-    ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
-    RejectReason, RevertReport, SafetyCommand, SaveReport, SignatureVerdict, TableView,
-    TuneCommand, WriteReport,
+    FailureCode, FirmwareProbe, FrontPageGauge, GateState, GaugeTemplate, ImportReport,
+    IndicatorSpec, JournalCommand, JournalEntry, KeyActionInfo, LifecycleCommand, LogCommand,
+    MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortView, ProjectCommand, ProjectConnection, ProjectView,
+    ReadReport, ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution,
+    ReferenceTableView, RejectReason, RevertReport, SafetyCommand, SaveReport, SignatureVerdict,
+    TableView, TuneCommand, WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
@@ -128,6 +128,7 @@ pub use oxtuner_tune::{CellState, TuneStatus};
 /// Re-exported so a caller can pick the connection's framing without taking a
 /// dependency on `oxtuner-protocol`.
 pub use oxtuner_protocol::LinkMode;
+pub use oxtuner_protocol::ProbeSpec;
 
 /// Re-exported so a [`CustomLink`] implementation can name the transport it
 /// returns.

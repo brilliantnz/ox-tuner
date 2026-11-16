@@ -6,6 +6,7 @@
 use super::ecu::*;
 use super::log::*;
 use super::ports::PortsWatch;
+use super::probe::probe_firmware;
 use super::transfer::*;
 use super::tune::*;
 use super::*;
@@ -76,6 +77,9 @@ pub(super) fn handle(
         }
         CommandRequest::TestConnection { port, framing } => {
             connect(op, session, live, events, report, &port, framing, true)
+        }
+        CommandRequest::ProbeFirmware { port, probe } => {
+            probe_firmware(op, &port, probe, live.is_some(), events)
         }
         CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {

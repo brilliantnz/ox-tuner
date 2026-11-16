@@ -1198,6 +1198,7 @@ mod dispatch;
 mod ecu;
 mod log;
 mod ports;
+mod probe;
 mod transfer;
 mod tune;
 

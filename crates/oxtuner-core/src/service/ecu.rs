@@ -229,12 +229,12 @@ pub(super) fn connect(
 
     let link = port.clone();
     let effective_framing = framing.unwrap_or_else(|| default_framing(definition));
-    let plan = IoPlan {
-        definition: Box::new(definition.clone()),
+    let plan = IoPlan::definition(
+        Box::new(definition.clone()),
         behavior,
-        link_mode: framing,
-        link: link.clone(),
-    };
+        framing,
+        link.clone(),
+    );
 
     match IoThread::start(&plan) {
         Ok((thread, replies)) => {

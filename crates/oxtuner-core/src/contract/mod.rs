@@ -36,8 +36,8 @@ pub use frontpage::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 pub use gates::GateState;
 pub use ops::{
     AxisEdit, AxisKind, CellEdit, ConflictResolution, CoreCommand, DefinitionCommand, EcuCommand,
-    JournalCommand, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId, ProjectCommand,
-    RejectReason, SafetyCommand, TuneCommand,
+    FirmwareProbe, JournalCommand, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId,
+    ProjectCommand, RejectReason, SafetyCommand, TuneCommand,
 };
 pub(crate) use ops::{CommandRequest, Envelope};
 pub use project::{

@@ -4,8 +4,8 @@
 //! is handed over through [`oxtuner_core::CustomLink`], so the session layer
 //! never depends on a demo transport (ADR-0022).
 
-use oxtuner_core::{CustomLink, Definition, PortChoice, Transport};
-use oxtuner_sim::{SimConfig, SimTransport};
+use oxtuner_core::{CustomLink, Definition, PortChoice, ProbeSpec, Transport};
+use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
 
 /// The simulator, as the core sees it.
 pub(crate) struct SimulatorLink {
@@ -21,6 +21,10 @@ impl CustomLink for SimulatorLink {
         SimTransport::new(definition, self.config.clone())
             .map(|sim| -> Box<dyn Transport> { Box::new(sim) })
             .map_err(|error| error.to_string())
+    }
+
+    fn open_for_probe(&self, probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::new(*probe)))
     }
 }
 

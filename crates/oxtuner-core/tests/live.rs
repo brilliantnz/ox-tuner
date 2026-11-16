@@ -133,6 +133,59 @@ fn connecting_to_the_simulator_reports_the_signature() {
 }
 
 #[test]
+fn a_probe_reads_a_signature_without_a_loaded_definition() {
+    let harness = Harness::start();
+
+    // No definition is loaded: the probe carries the query and reply shape.
+    harness
+        .handle
+        .probe_firmware(support::simulator(), oxtuner_core::FirmwareProbe::Speeduino)
+        .expect("queued");
+
+    let Event::FirmwareProbed {
+        probe,
+        signature,
+        baud,
+        ..
+    } = harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(probe, oxtuner_core::FirmwareProbe::Speeduino);
+    assert!(signature.starts_with("speeduino"), "{signature}");
+    assert_eq!(baud, None, "a custom link has no baud rate");
+
+    // A probe is not a session: a real connect still works afterwards.
+    harness.load();
+    harness.wait_loaded();
+    harness.connect(SimConfig::default());
+    let summary = harness.wait_connected();
+    assert_eq!(summary.signature, "speeduino 202501");
+
+    harness.thread.join();
+}
+
+#[test]
+fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
+    let harness = Harness::start();
+
+    harness
+        .handle
+        .probe_firmware(support::silent(), oxtuner_core::FirmwareProbe::Speeduino)
+        .expect("queued");
+
+    let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(failure.code, FailureCode::FirmwareNotDetected);
+
+    harness.thread.join();
+}
+
+#[test]
 fn connecting_without_a_definition_is_refused() {
     let harness = Harness::start();
 

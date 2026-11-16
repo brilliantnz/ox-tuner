@@ -8,9 +8,9 @@ use oxtuner_tune::TuneStatus;
 use crate::menu::MenuNode;
 
 use super::{
-    BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, ImportReport,
-    JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason, RevertReport, SaveReport,
-    TableView, WriteReport,
+    BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, FirmwareProbe,
+    ImportReport, JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason,
+    RevertReport, SaveReport, TableView, WriteReport,
 };
 
 /// A reply from the core.
@@ -124,6 +124,24 @@ pub enum Event {
         op: OpId,
         /// What the test found.
         view: ConnectionView,
+    },
+    /// A [`super::Command::ProbeFirmware`] read a signature without a
+    /// definition.
+    ///
+    /// There is no verdict here because there is nothing to compare against:
+    /// the signature is the first question, and the registry answers the next
+    /// one.
+    FirmwareProbed {
+        /// The command this answers.
+        op: OpId,
+        /// The port the answer came from.
+        port: String,
+        /// The baud rate that answered, when the port was a serial device.
+        baud: Option<u32>,
+        /// The family probe that answered.
+        probe: FirmwareProbe,
+        /// The signature text the ECU sent.
+        signature: String,
     },
     /// The ECU answered and the session is up.
     Connected {
@@ -290,6 +308,7 @@ impl Event {
             | Self::ConflictsResolved { op }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
+            | Self::FirmwareProbed { op, .. }
             | Self::Connected { op, .. }
             | Self::Disconnected { op }
             | Self::PagesRead { op, .. }
@@ -364,6 +383,8 @@ pub enum FailureCode {
     ConnectFailed,
     /// The signature test could not run (no definition, port busy, no answer).
     TestFailed,
+    /// A firmware probe reached no signature on the port it tried.
+    FirmwareNotDetected,
     /// There is no connection to act on.
     NotConnected,
     /// A page read failed. The ECU image is left untouched.
@@ -423,6 +444,7 @@ impl FailureCode {
             Self::ControllerActionFailed => "controller-command-failed",
             Self::ConnectFailed => "connect-failed",
             Self::TestFailed => "test-failed",
+            Self::FirmwareNotDetected => "firmware-not-detected",
             Self::NotConnected => "not-connected",
             Self::ReadFailed => "read-failed",
             Self::AdoptRefused => "adopt-refused",

@@ -157,6 +157,21 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         ),
         Event::MenuChanged { menu } => (Update::Menu(menu), None),
         Event::ConnectionTested { view, .. } => (Update::Tested(view), None),
+        Event::FirmwareProbed {
+            port,
+            baud,
+            probe,
+            signature,
+            ..
+        } => (
+            Update::Probed(super::status::ProbeHit {
+                port,
+                baud,
+                probe,
+                signature,
+            }),
+            None,
+        ),
         Event::Connected { view, .. } => (Update::Connected(view), None),
         Event::Reconnected { view } => (Update::Reconnected(view), None),
         Event::ConnectionLost { reason } => (Update::LinkLost(reason), None),
@@ -198,8 +213,8 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        Event::ProjectUiSaved { .. } => (Update::Nothing, None),
-        Event::PortsListed { .. }
+        Event::ProjectUiSaved { .. }
+        | Event::PortsListed { .. }
         | Event::PortsChanged { .. }
         | Event::Rejected { .. }
         | Event::Stopped => (Update::Nothing, None),
