@@ -69,7 +69,15 @@ impl PortsWatch {
     /// Returns the new list when it differs from the last one, and `None` for the
     /// first sample: the ports present at start-up are a baseline, not arrivals.
     pub(crate) fn refresh(&mut self) -> Result<Option<Vec<PortView>>, TransportError> {
-        let ports = crate::io_thread::list_ports()?;
+        self.refresh_with(crate::io_thread::list_ports)
+    }
+
+    /// The same, reading through a seam so the contract can be tested.
+    fn refresh_with(
+        &mut self,
+        read: impl FnOnce() -> Result<Vec<PortInfo>, TransportError>,
+    ) -> Result<Option<Vec<PortView>>, TransportError> {
+        let ports = read()?;
         let next: Vec<PortView> = ports.iter().map(view).collect();
         let publish = should_publish(self.primed, &self.list, &next);
 
@@ -176,6 +184,84 @@ mod tests {
         let before = [port("/dev/cu.first"), port("/dev/cu.second")];
         let after = [port("/dev/cu.first")];
         assert!(should_publish(true, &before, &after));
+    }
+
+    fn described(vid: u16, pid: u16, product: Option<&str>) -> PortInfo {
+        PortInfo::from_parts(
+            "/dev/cu.test".to_owned(),
+            Some(oxtuner_transport::UsbIdentity::from_parts(
+                vid,
+                pid,
+                Some("S".to_owned()),
+                None,
+                product.map(str::to_owned),
+                None,
+                Some(1),
+            )),
+        )
+    }
+
+    #[test]
+    fn a_known_board_wins_over_its_product_string() {
+        let row = view(&described(0x2341, 0x0042, Some("Generic CDC")));
+
+        assert_eq!(row.label, "Arduino Mega 2560");
+        assert_eq!(row.vid, Some(0x2341));
+        assert_eq!(row.serial.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn an_unknown_board_falls_back_to_its_product_string() {
+        let row = view(&described(0x0A0B, 0x0C0D, Some("Some UART")));
+
+        assert_eq!(row.label, "Some UART");
+    }
+
+    #[test]
+    fn a_port_without_identity_falls_back_to_its_path() {
+        let row = view(&PortInfo::from_parts("/dev/cu.test".to_owned(), None));
+
+        assert_eq!(row.label, "/dev/cu.test");
+        assert_eq!(row.vid, None);
+        assert_eq!(row.serial, None);
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_last_list_and_the_first_sample_pending() {
+        let mut watch = PortsWatch::new();
+
+        let error = watch
+            .refresh_with(|| Err(TransportError::Open("nope".to_owned())))
+            .expect_err("a failed read is reported");
+
+        assert!(matches!(error, TransportError::Open(_)));
+        assert!(
+            watch.snapshot().is_empty(),
+            "a failed read keeps the last list"
+        );
+        assert!(
+            !watch.is_primed(),
+            "a failed read leaves the first sample pending"
+        );
+    }
+
+    #[test]
+    fn the_second_sample_publishes_a_change_and_the_first_does_not() {
+        let mut watch = PortsWatch::new();
+        let one = || Ok(vec![described(0x2341, 0x0042, None)]);
+
+        assert!(watch.refresh_with(one).expect("reads").is_none());
+        assert_eq!(watch.snapshot().len(), 1);
+
+        let two = || {
+            Ok(vec![
+                described(0x2341, 0x0042, None),
+                described(0x1A86, 0x7523, None),
+            ])
+        };
+
+        let published = watch.refresh_with(two).expect("reads").expect("a change");
+        assert_eq!(published.len(), 2);
     }
 
     #[test]

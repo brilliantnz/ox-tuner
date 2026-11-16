@@ -28,11 +28,10 @@ const READ_POLL: Duration = Duration::from_millis(20);
 
 /// Reads once, turning end of file and a broken link into `UnexpectedEof`.
 ///
-/// `std::io::Read` defines a zero-length read on a non-empty buffer as EOF.
-/// `serialport` reports a pulled cable as `BrokenPipe` on macOS and as one of the
-/// neighbouring kinds elsewhere, so all of them are folded into the same signal.
-/// The conversation then ends instead of spinning until the deadline and
-/// reporting a timeout, or worse, reading a quiet ECU as still connected.
+/// `std::io::Read` defines a zero-length read on a non-empty buffer as EOF, and a
+/// backend reports a pulled cable in its own way. All of those are folded into
+/// one signal here, so the conversation ends instead of spinning until the
+/// deadline and calling it a timeout.
 fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     if buf.is_empty() {
         return Ok(0);
@@ -40,16 +39,36 @@ fn read_once(mut read: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 
     match read.read(buf) {
         Ok(0) => Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::NotConnected
-            ) =>
-        {
-            Err(std::io::Error::from(ErrorKind::UnexpectedEof))
-        }
+        Err(error) if is_link_gone(&error) => Err(std::io::Error::from(ErrorKind::UnexpectedEof)),
         other => other,
     }
+}
+
+/// Whether an error means the device left rather than the reply being late.
+///
+/// POSIX reports a hangup as `BrokenPipe`. Windows aborts the pending read with
+/// `ERROR_OPERATION_ABORTED`, which the standard library presents as `TimedOut`,
+/// so the raw code is the only way to tell it apart from a genuine timeout. This
+/// process never cancels its own reads, so that code on this handle is the device
+/// going away.
+fn is_link_gone(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::NotConnected
+    ) {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const ERROR_OPERATION_ABORTED: i32 = 995;
+
+        if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// One port the connect dialog can offer.
@@ -70,6 +89,14 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
+    /// Builds a port from parts already in hand.
+    ///
+    /// For callers that test against a port they describe rather than one the
+    /// platform reported.
+    pub fn from_parts(name: String, usb: Option<UsbIdentity>) -> Self {
+        Self { name, usb }
+    }
+
     /// The label to show for this port.
     ///
     /// The product string when the device has one, otherwise the path. Board
@@ -106,6 +133,30 @@ pub struct UsbIdentity {
 }
 
 impl UsbIdentity {
+    /// Builds an identity from parts already in hand.
+    ///
+    /// For callers that test against a port they describe rather than one the
+    /// platform reported.
+    pub fn from_parts(
+        vid: u16,
+        pid: u16,
+        serial: Option<String>,
+        manufacturer: Option<String>,
+        product: Option<String>,
+        location: Option<UsbLocation>,
+        interface: Option<u8>,
+    ) -> Self {
+        Self {
+            vid,
+            pid,
+            serial,
+            manufacturer,
+            product,
+            location,
+            interface,
+        }
+    }
+
     /// Vendor id.
     pub fn vid(&self) -> u16 {
         self.vid
@@ -249,7 +300,7 @@ impl Transport for SerialTransport {
         }
         // Raw 8N1 with no parity and no flow control, which is what every
         // Speeduino, rusEFI and MegaSquirt-family ECU expects.
-        let mut port = serialport::new(&self.settings.port, self.settings.baud)
+        let port = serialport::new(&self.settings.port, self.settings.baud)
             .data_bits(serialport::DataBits::Eight)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
@@ -261,8 +312,6 @@ impl Transport for SerialTransport {
                 // their text is what tells the user which one happened.
                 TransportError::Open(format!("{}: {error}", self.settings.port))
             })?;
-        port.set_timeout(READ_POLL)
-            .map_err(|error| TransportError::Open(error.to_string()))?;
         tracing::info!(
             port = %self.settings.port,
             baud = self.settings.baud,

@@ -414,8 +414,9 @@ pub fn start(config: &CoreConfig) -> Result<CoreParts, CoreError> {
 
 /// The command loop.
 ///
-/// Blocks on the queue: with no poller yet there is nothing to do while idle,
-/// and a timed wait would only wake the thread for nothing.
+/// Waits at most one poll interval while idle, because the port list is sampled
+/// here rather than on a thread of its own. With a live connection the nearer of
+/// its timers and the poll sets the wake.
 #[expect(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
