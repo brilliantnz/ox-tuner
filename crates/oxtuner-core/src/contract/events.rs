@@ -7,6 +7,7 @@ use oxtuner_tune::TuneStatus;
 
 use crate::menu::MenuNode;
 
+use super::project::DefinitionPreview;
 use super::{
     BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, FirmwareProbe,
     ImportReport, JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason,
@@ -26,6 +27,15 @@ pub enum Event {
         op: OpId,
         /// What the definition contains.
         view: DefinitionView,
+    },
+    /// A definition was inspected for the new-project wizard.
+    DefinitionInspected {
+        /// The command this answers.
+        op: OpId,
+        /// The definition that was read.
+        path: PathBuf,
+        /// The signature and setting groups the wizard renders.
+        preview: DefinitionPreview,
     },
     /// A project is open and owned by the core: definition, tune images and the
     /// load gate's findings.
@@ -297,6 +307,8 @@ impl Event {
     pub fn op(&self) -> Option<OpId> {
         match self {
             Self::DefinitionLoaded { op, .. }
+            | Self::DefinitionInspected { op, .. }
+            | Self::FirmwareProbed { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
             | Self::ProjectUiSaved { op }
@@ -308,7 +320,6 @@ impl Event {
             | Self::ConflictsResolved { op }
             | Self::PortsListed { op, .. }
             | Self::ConnectionTested { op, .. }
-            | Self::FirmwareProbed { op, .. }
             | Self::Connected { op, .. }
             | Self::Disconnected { op }
             | Self::PagesRead { op, .. }

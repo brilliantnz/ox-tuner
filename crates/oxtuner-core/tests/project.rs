@@ -79,6 +79,33 @@ page = 1
 reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 "#;
 
+/// Writes the create fixture's definition beside the sandbox and returns it.
+fn definition_path(directory: &Path) -> PathBuf {
+    let path = directory.join("create-definition.ini");
+    fs::write(&path, CREATE_DEFINITION).expect("the definition is writable");
+    path
+}
+
+/// A definition with one setting group, for the wizard's inspect command.
+const INSPECT_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = pressure_units, "Pressure Display"
+settingOption = DEFAULT, "PSI"
+settingOption = pressure_bar, "BAR"
+
+[Constants]
+nPages = 1
+pageSize = 128
+page = 1
+
+#if CELSIUS
+celsius_only = scalar, U08, 8, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
 /// The same tune, written for another firmware.
 fn other_firmware_tune() -> String {
     TUNE.replace("signature=\"speeduino 202501\"", "signature=\"other 1\"")
@@ -351,8 +378,11 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
         .create_project(CreateRequest {
             parent: dir.path().to_path_buf(),
             name: "Roadster".to_owned(),
-            ini_bytes: CREATE_DEFINITION.as_bytes().to_vec(),
+            ini_path: definition_path(dir.path()),
             expected_signature: Some("speeduino 202501".to_owned()),
+            settings: Vec::new(),
+            port: None,
+            baud: 0,
         })
         .expect("the command is queued");
     let event = core.next();
@@ -376,6 +406,65 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
 }
 
 #[test]
+fn inspect_definition_answers_with_the_setting_groups() {
+    let dir = TempDir::new("inspect");
+    let path = dir.path().join("groups.ini");
+    fs::write(&path, INSPECT_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .inspect_definition(&path)
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    match event {
+        Event::DefinitionInspected {
+            path: answered,
+            preview,
+            ..
+        } => {
+            assert_eq!(answered, path);
+            assert_eq!(preview.signature, "speeduino 202501");
+            assert_eq!(preview.groups.len(), 1);
+            assert_eq!(preview.groups[0].label, "Pressure Display");
+            assert_eq!(preview.groups[0].default.as_deref(), Some("DEFAULT"));
+            assert!(preview.tested_flags.iter().any(|flag| flag == "celsius"));
+        }
+        other => panic!("expected an inspected definition, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_created_project_remembers_the_wizard_connection() {
+    let dir = TempDir::new("create-connection");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Roadster".to_owned(),
+            ini_path: definition_path(dir.path()),
+            expected_signature: None,
+            settings: Vec::new(),
+            port: Some("/dev/cu.test".to_owned()),
+            baud: 57_600,
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let summary = opened(&event);
+    assert_eq!(
+        summary.connection.last_port.as_deref(),
+        Some("/dev/cu.test")
+    );
+    assert_eq!(summary.connection.baud_override, Some(57_600));
+}
+
+#[test]
 fn a_refused_create_reports_the_reason_and_writes_nothing() {
     let dir = TempDir::new("create-refused");
     let core = Harness::start();
@@ -385,8 +474,11 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
         .create_project(CreateRequest {
             parent: dir.path().to_path_buf(),
             name: "Mismatch".to_owned(),
-            ini_bytes: CREATE_DEFINITION.as_bytes().to_vec(),
+            ini_path: definition_path(dir.path()),
             expected_signature: Some("other firmware".to_owned()),
+            settings: Vec::new(),
+            port: None,
+            baud: 0,
         })
         .expect("the command is queued");
     let event = core.next();

@@ -8,8 +8,8 @@
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
-    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, LatestFrame, OpId,
-    SignatureVerdict,
+    BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, FirmwareProbe,
+    LatestFrame, OpId, SignatureVerdict,
 };
 use oxtuner_ini::{SettingsContext, parse_str};
 use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
@@ -550,6 +550,28 @@ fn a_test_connection_reads_the_signature_and_releases_the_port() {
     harness.connect(SimConfig::default());
     let connected = harness.wait_connected();
     assert_eq!(connected.verdict, SignatureVerdict::Match);
+
+    harness.thread.join();
+}
+
+#[test]
+fn a_probe_reads_a_signature_without_a_loaded_definition() {
+    let harness = Harness::start();
+
+    // No definition is loaded: the probe supplies a tiny one for its family.
+    harness
+        .handle
+        .probe_firmware(support::simulator(), FirmwareProbe::Speeduino)
+        .expect("queued");
+    let Event::FirmwareProbed {
+        signature, probe, ..
+    } = harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(signature, "speeduino");
+    assert_eq!(probe, FirmwareProbe::Speeduino);
 
     harness.thread.join();
 }

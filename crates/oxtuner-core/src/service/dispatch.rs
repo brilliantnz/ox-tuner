@@ -3,6 +3,8 @@
     reason = "the service modules are one implementation split across files"
 )]
 
+use crate::contract::DefinitionPreview;
+
 use super::ecu::*;
 use super::log::*;
 use super::ports::PortsWatch;
@@ -529,6 +531,50 @@ pub(super) fn handle(
                     );
                 }
             }
+            Outcome::Continue
+        }
+        CommandRequest::InspectDefinition { path } => {
+            // Reading and parsing a user's definition is project I/O, so it
+            // stays on the core thread. Nothing is installed: the wizard only
+            // needs the signature and the setting groups until Create.
+            let _span = tracing::debug_span!(
+                "core_inspect_definition",
+                %op,
+                path = %path.display()
+            )
+            .entered();
+
+            match oxtuner_project::inspect_definition(&path) {
+                Ok(preview) => send(
+                    events,
+                    Event::DefinitionInspected {
+                        op,
+                        path,
+                        preview: DefinitionPreview::of(&preview),
+                    },
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        %op,
+                        path = %path.display(),
+                        error_kind = error.kind(),
+                        %error,
+                        "definition rejected"
+                    );
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::DefinitionRejected,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                }
+            }
+
             Outcome::Continue
         }
         CommandRequest::OpenProject { path } => {

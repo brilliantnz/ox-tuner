@@ -6,6 +6,69 @@ use crate::menu::MenuNode;
 
 use super::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 
+/// A definition the new-project wizard inspected, before anything was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionPreview {
+    /// Firmware signature, trimmed.
+    pub signature: String,
+    /// Flags the definition asks about in an `#if`, sorted.
+    pub tested_flags: Vec<String>,
+    /// The setting groups the definition declares, in declaration order.
+    pub groups: Vec<SettingGroupView>,
+}
+
+/// One `[SettingGroups]` entry as the wizard shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingGroupView {
+    /// Group id the `.msq` snapshot records.
+    pub name: String,
+    /// Display name.
+    pub label: String,
+    /// Options in declaration order. Empty for a boolean group.
+    pub options: Vec<SettingOptionView>,
+    /// The option selected when the user makes no choice. `None` for a
+    /// boolean group, whose default is [`Self::default_active`].
+    pub default: Option<String>,
+    /// Whether a boolean group's flag is active by default.
+    pub default_active: bool,
+}
+
+/// One option of a [`SettingGroupView`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingOptionView {
+    /// Flag name the definition's `#if` tests, and what creation stores.
+    pub name: String,
+    /// Display name.
+    pub label: String,
+}
+
+impl DefinitionPreview {
+    pub(crate) fn of(preview: &oxtuner_project::DefinitionPreview) -> Self {
+        Self {
+            signature: preview.signature.clone(),
+            tested_flags: preview.tested_flags.clone(),
+            groups: preview
+                .groups
+                .iter()
+                .map(|group| SettingGroupView {
+                    name: group.name.clone(),
+                    label: group.label.clone(),
+                    options: group
+                        .options
+                        .iter()
+                        .map(|option| SettingOptionView {
+                            name: option.name.clone(),
+                            label: option.label.clone(),
+                        })
+                        .collect(),
+                    default: group.default.clone(),
+                    default_active: group.default_active,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One hidden-dialog hotkey from `[KeyActions]`, as the UI lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyActionInfo {
@@ -249,6 +312,36 @@ pub struct ConnectionView {
     pub realtime_block: Option<u16>,
 }
 
+/// The outcome of a signature test against one port.
+///
+/// A test proves a port, a baud and a framing without opening a session, so it
+/// is also what a new project checks a definition against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionTest {
+    /// The port the test ran against.
+    pub port: String,
+    /// The summary, or the failure message.
+    pub outcome: Result<ConnectionView, String>,
+}
+
+impl ConnectionTest {
+    /// The signature a create should verify, when this test ran on `port`.
+    ///
+    /// A test against another port says nothing about the ECU a project will
+    /// talk to, so its signature is ignored rather than carried over.
+    #[must_use]
+    pub fn signature_for(&self, port: Option<&str>) -> Option<String> {
+        if port != Some(self.port.as_str()) {
+            return None;
+        }
+
+        match &self.outcome {
+            Ok(view) => Some(view.signature.trim().to_owned()),
+            Err(_) => None,
+        }
+    }
+}
+
 /// One cell the ECU and the working image disagree about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictReport {
@@ -279,4 +372,51 @@ pub struct ReadReport {
     pub signature_verified: bool,
     /// Cells that differ from the working image after a re-read.
     pub conflicts: Vec<ConflictReport>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tested(port: &str, signature: &str) -> ConnectionTest {
+        ConnectionTest {
+            port: port.to_owned(),
+            outcome: Ok(ConnectionView {
+                port: port.to_owned(),
+                custom: false,
+                signature: signature.to_owned(),
+                definition_signature: signature.to_owned(),
+                verdict: SignatureVerdict::Match,
+                read_only: false,
+                read_only_reason: None,
+                writes_enabled: false,
+                behavior: "test".to_owned(),
+                framing: "legacy",
+                pages: 1,
+                realtime_block: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_signature_counts_only_when_the_check_ran_on_this_port() {
+        let result = tested("/dev/ttyACM0", "speeduino 202501");
+
+        assert_eq!(
+            result.signature_for(Some("/dev/ttyACM0")).as_deref(),
+            Some("speeduino 202501")
+        );
+        assert_eq!(result.signature_for(Some("/dev/ttyACM1")), None);
+        assert_eq!(result.signature_for(None), None);
+    }
+
+    #[test]
+    fn a_failed_check_contributes_no_signature() {
+        let failed = ConnectionTest {
+            port: "/dev/ttyACM0".to_owned(),
+            outcome: Err("no answer".to_owned()),
+        };
+
+        assert_eq!(failed.signature_for(Some("/dev/ttyACM0")), None);
+    }
 }

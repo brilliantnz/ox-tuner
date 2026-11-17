@@ -278,6 +278,20 @@ impl CoreHandle {
         self.send_request(CommandRequest::CreateProject { request })
     }
 
+    /// Reads a definition for the new-project wizard without owning it.
+    ///
+    /// Nothing is installed and no session changes. The reply is
+    /// [`crate::Event::DefinitionInspected`] with the signature and setting
+    /// groups, or [`crate::Event::Failed`] with
+    /// [`crate::FailureCode::DefinitionRejected`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError`] when the command queue is closed.
+    pub fn inspect_definition(&self, path: impl Into<PathBuf>) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::InspectDefinition { path: path.into() })
+    }
+
     /// Stores the open project's panel layout in its state file.
     ///
     /// The reply is [`crate::Event::ProjectUiSaved`]. A project that is not

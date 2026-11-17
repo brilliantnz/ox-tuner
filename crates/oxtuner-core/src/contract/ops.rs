@@ -98,6 +98,11 @@ pub(crate) enum CommandRequest {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
+    /// Read a definition for the new-project wizard, without owning it.
+    InspectDefinition {
+        /// The definition file.
+        path: PathBuf,
+    },
     /// Open a `TunerStudio` project folder in place.
     ///
     /// The core reads the definition and the tune, owns both, and answers with
@@ -236,6 +241,7 @@ pub(crate) enum CommandRequest {
     /// The reply is [`super::Event::ConnectionTested`] with the same
     /// [`super::ConnectionView`] a real connection would report, or a failure with
     /// [`super::FailureCode::TestFailed`]. A live connection must be closed first.
+    ///
     TestConnection {
         /// Where the bytes go.
         port: PortChoice,
@@ -442,6 +448,16 @@ pub enum DefinitionCommand {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
+    /// Read a definition without taking ownership of it.
+    ///
+    /// The new-project wizard needs the signature and the setting groups of a
+    /// file the user picked, and creates nothing until the review step. The
+    /// reply is [`super::Event::DefinitionInspected`], or
+    /// [`super::Event::Failed`] with [`super::FailureCode::DefinitionRejected`].
+    Inspect {
+        /// The definition file.
+        path: PathBuf,
+    },
     /// Drop the loaded definition and tune.
     Unload,
 }
@@ -464,10 +480,16 @@ pub enum ProjectCommand {
         parent: PathBuf,
         /// Display name, also used as the folder name.
         name: String,
-        /// The user-supplied definition bytes copied into `projectCfg/`.
-        ini_bytes: Vec<u8>,
+        /// The user-supplied definition file copied into `projectCfg/`.
+        ini_path: PathBuf,
         /// Signature the ECU reported, when the project came from a detection.
         expected_signature: Option<String>,
+        /// `#if` flags chosen from the definition's setting groups.
+        settings: Vec<String>,
+        /// Serial port the project starts on, when the wizard picked one.
+        port: Option<String>,
+        /// Baud rate paired with `port`; zero keeps the definition's rate.
+        baud: u32,
     },
     /// Write changed values back to the tune file.
     Save,
@@ -691,6 +713,7 @@ impl CoreCommand {
         match self {
             Self::Lifecycle(LifecycleCommand::Shutdown) => "shutdown",
             Self::Definition(DefinitionCommand::Load { .. }) => "load-definition",
+            Self::Definition(DefinitionCommand::Inspect { .. }) => "inspect-definition",
             Self::Definition(DefinitionCommand::Unload) => "unload-definition",
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
             Self::Project(ProjectCommand::Create { .. }) => "create-project",
@@ -731,6 +754,10 @@ impl CoreCommand {
 }
 
 impl From<CoreCommand> for CommandRequest {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive match over every command reads as a single conversion"
+    )]
     fn from(command: CoreCommand) -> Self {
         match command {
             CoreCommand::Lifecycle(LifecycleCommand::Shutdown) => Self::Shutdown,
@@ -743,19 +770,28 @@ impl From<CoreCommand> for CommandRequest {
                 bytes,
                 settings,
             },
+            CoreCommand::Definition(DefinitionCommand::Inspect { path }) => {
+                Self::InspectDefinition { path }
+            }
             CoreCommand::Definition(DefinitionCommand::Unload) => Self::UnloadDefinition,
             CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
             CoreCommand::Project(ProjectCommand::Create {
                 parent,
                 name,
-                ini_bytes,
+                ini_path,
                 expected_signature,
+                settings,
+                port,
+                baud,
             }) => Self::CreateProject {
                 request: oxtuner_project::CreateRequest {
                     parent,
                     name,
-                    ini_bytes,
+                    ini_path,
                     expected_signature,
+                    settings,
+                    port,
+                    baud,
                 },
             },
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
