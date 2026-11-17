@@ -5202,7 +5202,7 @@ dependencies = [
  "gpui-kit",
  "oxtuner-core",
  "oxtuner-log",
- "oxtuner-project",
+ "oxtuner-registry",
  "oxtuner-sim",
  "oxtuner-ui",
  "rust-i18n",
