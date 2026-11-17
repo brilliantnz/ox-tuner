@@ -22,7 +22,7 @@ use std::{
 };
 
 use crossfire::{AsyncRx, MTx, Rx, SendTimeoutError, TrySendError, Tx, mpsc, spsc};
-use oxtuner_project::{CreateRequest, UiState};
+use oxtuner_project::{CreateRequest, ProjectLayout};
 
 use crate::contract::{CellEdit, CommandRequest, CoreCommand, Envelope, Event, OpId};
 use crate::service::CoreError;
@@ -294,15 +294,15 @@ impl CoreHandle {
 
     /// Stores the open project's panel layout in its state file.
     ///
-    /// The reply is [`crate::Event::ProjectUiSaved`]. A project that is not
-    /// open answers the same way and stores nothing.
+    /// The reply is [`crate::Event::ProjectLayoutSaved`]. A project that is
+    /// not open answers the same way and stores nothing.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
     /// command cannot be queued.
-    pub fn set_project_ui(&self, ui: UiState) -> Result<OpId, CoreError> {
-        self.send_request(CommandRequest::SetProjectUi { ui })
+    pub fn set_project_layout(&self, layout: ProjectLayout) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::SetProjectLayout { layout })
     }
 
     /// Writes the open project's changed values back to its tune file.

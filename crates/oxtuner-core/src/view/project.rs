@@ -196,7 +196,7 @@ impl ProjectView {
                 last_port: project.state().connection.last_port.clone(),
                 baud_override: project.state().connection.baud_override,
             },
-            ui: project.state().ui.clone(),
+            layout: project.state().layout.clone(),
         }
     }
 }

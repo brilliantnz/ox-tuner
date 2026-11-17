@@ -220,7 +220,7 @@ pub struct ProjectView {
     /// Non-fatal findings, ready for the output panel.
     pub warnings: Vec<String>,
     /// The panel layout this project was last read with.
-    pub ui: oxtuner_project::UiState,
+    pub layout: oxtuner_project::ProjectLayout,
     /// The connection this project last used, when state has it.
     pub connection: ProjectConnection,
 }

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
 use oxtuner_project::{
-    CreateRequest, IssueKind, Project, ProjectError, ProjectState, TUNE_FILE, UiState,
+    CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState, TUNE_FILE,
 };
 
 const MAIN_DEFINITION: &str = r#"
@@ -888,7 +888,7 @@ fn a_hand_edited_state_file_is_applied_on_open() {
         r#"{
             "schema_version": 1,
             "connection": { "last_port": "/dev/ttyACM9", "baud_override": 57600 },
-            "ui": {
+            "layout": {
                 "primary_sidebar_width": 321.0,
                 "secondary_sidebar_width": 222.0,
                 "bottom_panel_height": 199.0,
@@ -907,10 +907,10 @@ fn a_hand_edited_state_file_is_applied_on_open() {
         Some("/dev/ttyACM9")
     );
     assert_eq!(project.state().connection.baud_override, Some(57_600));
-    assert_eq!(project.state().ui.primary_sidebar_width, 321.0);
-    assert!(!project.state().ui.primary_sidebar_visible);
-    assert!(!project.state().ui.bottom_panel_visible);
-    assert!(project.state().ui.table_low_at_top);
+    assert_eq!(project.state().layout.primary_sidebar_width, 321.0);
+    assert!(!project.state().layout.primary_sidebar_visible);
+    assert!(!project.state().layout.bottom_panel_visible);
+    assert!(project.state().layout.table_low_at_top);
 }
 
 #[test]
@@ -1511,12 +1511,12 @@ page = 1
 }
 
 #[test]
-fn the_ui_section_is_per_project_and_survives_a_reopen() {
+fn the_layout_section_is_per_project_and_survives_a_reopen() {
     let dir = project_dir("ui-state");
     let mut project = Project::open(dir.path()).expect("the project opens");
-    assert!(project.state().ui.primary_sidebar_visible);
+    assert!(project.state().layout.primary_sidebar_visible);
 
-    let ui = UiState {
+    let layout = ProjectLayout {
         primary_sidebar_width: 300.0,
         secondary_sidebar_width: 200.0,
         bottom_panel_height: 260.0,
@@ -1525,11 +1525,20 @@ fn the_ui_section_is_per_project_and_survives_a_reopen() {
         bottom_panel_visible: false,
         table_low_at_top: true,
     };
-    project.set_ui(ui.clone()).expect("the layout persists");
+    project
+        .set_layout(layout.clone())
+        .expect("the layout persists");
     drop(project);
 
     let reopened = Project::open(dir.path()).expect("the project reopens");
-    assert_eq!(reopened.state().ui, ui);
+    assert_eq!(reopened.state().layout, layout);
+
+    let raw = std::fs::read_to_string(dir.path().join(".oxtuner/project.json"))
+        .expect("the state file is readable");
+    assert!(
+        raw.contains("\"layout\""),
+        "new writes use the layout key, not the old ui one"
+    );
 }
 
 /// Creating a project from the real Speeduino definition runs only on the

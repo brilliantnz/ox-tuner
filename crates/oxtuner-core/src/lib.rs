@@ -136,10 +136,9 @@ pub use oxtuner_protocol::{LinkMode, ProbeSpec};
 pub use oxtuner_transport::Transport;
 
 /// Re-exported so callers can build [`ProjectCommand::Create`] and name the
-/// project's UI state and layout without adding a dependency on
+/// project's panel layout without adding a dependency on
 /// `oxtuner-project` themselves.
 pub use oxtuner_project::{
-    CreateRequest, DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PRIMARY_SIDEBAR_WIDTH,
-    DEFAULT_SECONDARY_SIDEBAR_WIDTH, SIDECAR_DIR, UiState, accepts_definition, ensure_target_free,
+    CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition, ensure_target_free,
     split_destination, validate_project_name,
 };

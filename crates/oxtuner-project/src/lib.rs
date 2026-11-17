@@ -78,8 +78,7 @@ pub use project::{
     TUNE_FILE, accepts_definition, ensure_target_free, split_destination, validate_project_name,
 };
 pub use sidecar::{
-    ConnectionState, DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PRIMARY_SIDEBAR_WIDTH,
-    DEFAULT_SECONDARY_SIDEBAR_WIDTH, DefinitionRef, ProjectState, SIDECAR_DIR, STATE_FILE,
-    STATE_SCHEMA_VERSION, UiState,
+    ConnectionState, DefinitionRef, ProjectLayout, ProjectState, SIDECAR_DIR, STATE_FILE,
+    STATE_SCHEMA_VERSION,
 };
 pub use xml::{Attr, Document, Element, Node, XmlError, XmlErrorKind};

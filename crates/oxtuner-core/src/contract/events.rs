@@ -54,7 +54,7 @@ pub enum Event {
     },
     /// The project's panel layout was stored, or there was no project to
     /// store it for.
-    ProjectUiSaved {
+    ProjectLayoutSaved {
         /// The command this answers.
         op: OpId,
     },
@@ -318,7 +318,7 @@ impl Event {
             | Self::FirmwareProbed { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
-            | Self::ProjectUiSaved { op }
+            | Self::ProjectLayoutSaved { op }
             | Self::TableRead { op, .. }
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }

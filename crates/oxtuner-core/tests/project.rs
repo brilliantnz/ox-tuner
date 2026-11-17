@@ -536,11 +536,11 @@ fn the_project_layout_is_stored_in_its_own_state_file() {
     let _ = core.open(dir.path());
     let summary = opened(&core.next()).clone();
     assert!(
-        summary.ui.primary_sidebar_visible,
+        summary.layout.primary_sidebar_visible,
         "a fresh project starts open"
     );
 
-    let ui = oxtuner_project::UiState {
+    let layout = oxtuner_project::ProjectLayout {
         primary_sidebar_width: 300.0,
         secondary_sidebar_width: 260.0,
         bottom_panel_height: 240.0,
@@ -550,11 +550,11 @@ fn the_project_layout_is_stored_in_its_own_state_file() {
         table_low_at_top: true,
     };
     core.handle
-        .set_project_ui(ui.clone())
+        .set_project_layout(layout.clone())
         .expect("the layout command is queued");
     let ack = core.next();
     assert!(
-        matches!(ack, Event::ProjectUiSaved { .. }),
+        matches!(ack, Event::ProjectLayoutSaved { .. }),
         "the layout command answers: {ack:?}"
     );
 
@@ -567,7 +567,7 @@ fn the_project_layout_is_stored_in_its_own_state_file() {
     let state = oxtuner_project::ProjectState::read(dir.path())
         .expect("the state is readable")
         .expect("the state was written");
-    assert_eq!(state.ui, ui);
+    assert_eq!(state.layout, layout);
 }
 
 #[test]
@@ -576,11 +576,11 @@ fn a_layout_command_with_no_project_open_is_ignored() {
     let core = Harness::start();
 
     core.handle
-        .set_project_ui(oxtuner_project::UiState::default())
+        .set_project_layout(oxtuner_project::ProjectLayout::default())
         .expect("the command is queued");
     let ack = core.next();
     assert!(
-        matches!(ack, Event::ProjectUiSaved { .. }),
+        matches!(ack, Event::ProjectLayoutSaved { .. }),
         "a command with no project still answers: {ack:?}"
     );
     assert!(!dir.path().join(".oxtuner").exists());

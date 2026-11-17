@@ -3,7 +3,7 @@
 use std::{fmt, path::PathBuf};
 
 use oxtuner_ini::SettingsContext;
-use oxtuner_project::UiState;
+use oxtuner_project::ProjectLayout;
 use oxtuner_protocol::LinkMode;
 
 use crate::link::PortChoice;
@@ -136,10 +136,10 @@ pub(crate) enum CommandRequest {
     ///
     /// Best effort: the layout is a convenience next to the tune, so a write
     /// failure is logged. The reply is always
-    /// [`super::Event::ProjectUiSaved`], whether or not a project is open.
-    SetProjectUi {
+    /// [`super::Event::ProjectLayoutSaved`], whether or not a project is open.
+    SetProjectLayout {
         /// The layout to store.
-        ui: UiState,
+        layout: ProjectLayout,
     },
     /// Read one table from the open project, shaped for the grid.
     ///
@@ -494,9 +494,9 @@ pub enum ProjectCommand {
     /// Write changed values back to the tune file.
     Save,
     /// Replace the project's panel layout in its state file.
-    SetUi {
+    SetLayout {
         /// The layout to store.
-        ui: UiState,
+        layout: ProjectLayout,
     },
     /// List the project snapshots, oldest first.
     ListSnapshots,
@@ -718,7 +718,7 @@ impl CoreCommand {
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
             Self::Project(ProjectCommand::Create { .. }) => "create-project",
             Self::Project(ProjectCommand::Save) => "save-tune",
-            Self::Project(ProjectCommand::SetUi { .. }) => "set-project-ui",
+            Self::Project(ProjectCommand::SetLayout { .. }) => "set-project-layout",
             Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
             Self::Tune(TuneCommand::ReadTable { .. }) => "read-table",
             Self::Tune(TuneCommand::ReadDialog { .. }) => "read-dialog",
@@ -795,7 +795,9 @@ impl From<CoreCommand> for CommandRequest {
                 },
             },
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
-            CoreCommand::Project(ProjectCommand::SetUi { ui }) => Self::SetProjectUi { ui },
+            CoreCommand::Project(ProjectCommand::SetLayout { layout }) => {
+                Self::SetProjectLayout { layout }
+            }
             CoreCommand::Project(ProjectCommand::ListSnapshots) => Self::ListSnapshots,
             CoreCommand::Tune(TuneCommand::ReadTable { name }) => Self::ReadTable { name },
             CoreCommand::Tune(TuneCommand::ReadDialog { name }) => Self::ReadDialog { name },

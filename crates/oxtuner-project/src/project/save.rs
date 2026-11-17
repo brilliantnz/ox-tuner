@@ -3,7 +3,7 @@ use oxtuner_tune::TuneDiff;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
-use crate::sidecar::{ProjectState, UiState};
+use crate::sidecar::{ProjectLayout, ProjectState};
 
 use super::{Project, ProjectError, SaveOutcome};
 
@@ -183,8 +183,8 @@ impl Project {
     ///
     /// Returns [`ProjectError::Sidecar`] when the state file cannot be
     /// written. A standalone tune keeps the layout in memory only.
-    pub fn set_ui(&mut self, ui: UiState) -> Result<(), ProjectError> {
-        self.state.ui = ui;
+    pub fn set_layout(&mut self, layout: ProjectLayout) -> Result<(), ProjectError> {
+        self.state.layout = layout;
         self.persist_state()
     }
 

@@ -29,13 +29,6 @@ pub const STATE_FILE: &str = "project.json";
 /// half-read.
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
-/// Width of the navigation sidebar, in pixels, for a fresh project.
-pub const DEFAULT_PRIMARY_SIDEBAR_WIDTH: f32 = 240.;
-/// Width of the inspector sidebar, in pixels, for a fresh project.
-pub const DEFAULT_SECONDARY_SIDEBAR_WIDTH: f32 = 280.;
-/// Height of the bottom panel, in pixels, for a fresh project.
-pub const DEFAULT_BOTTOM_PANEL_HEIGHT: f32 = 180.;
-
 /// Per-project state: definition reference, last-used connection and panel
 /// layout.
 ///
@@ -51,7 +44,7 @@ pub struct ProjectState {
     /// The connection this project last used.
     pub connection: ConnectionState,
     /// The project's panel layout.
-    pub ui: UiState,
+    pub layout: ProjectLayout,
 }
 
 impl Default for ProjectState {
@@ -60,7 +53,7 @@ impl Default for ProjectState {
             schema_version: STATE_SCHEMA_VERSION,
             definition: DefinitionRef::default(),
             connection: ConnectionState::default(),
-            ui: UiState::default(),
+            layout: ProjectLayout::default(),
         }
     }
 }
@@ -88,13 +81,17 @@ pub struct ConnectionState {
 }
 
 /// The project's panel layout.
+///
+/// Passive data: panel sizes and visibility the app echoes while the project is
+/// open. The core only ferries it between the state file and the app and never
+/// interprets it.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each panel visibility is an independent layout fact"
 )]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct UiState {
+pub struct ProjectLayout {
     /// Navigation sidebar width, in pixels.
     pub primary_sidebar_width: f32,
     /// Inspector sidebar width, in pixels.
@@ -111,12 +108,21 @@ pub struct UiState {
     pub table_low_at_top: bool,
 }
 
-impl Default for UiState {
+impl ProjectLayout {
+    /// Width of the navigation sidebar, in pixels, for a fresh project.
+    pub const DEFAULT_PRIMARY_SIDEBAR_WIDTH: f32 = 240.;
+    /// Width of the inspector sidebar, in pixels, for a fresh project.
+    pub const DEFAULT_SECONDARY_SIDEBAR_WIDTH: f32 = 280.;
+    /// Height of the bottom panel, in pixels, for a fresh project.
+    pub const DEFAULT_BOTTOM_PANEL_HEIGHT: f32 = 180.;
+}
+
+impl Default for ProjectLayout {
     fn default() -> Self {
         Self {
-            primary_sidebar_width: DEFAULT_PRIMARY_SIDEBAR_WIDTH,
-            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
-            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
+            primary_sidebar_width: Self::DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+            secondary_sidebar_width: Self::DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+            bottom_panel_height: Self::DEFAULT_BOTTOM_PANEL_HEIGHT,
             primary_sidebar_visible: true,
             secondary_sidebar_visible: true,
             bottom_panel_visible: true,
@@ -238,7 +244,7 @@ mod tests {
         );
         state.connection.last_port = Some("/dev/ttyACM0".to_owned());
         state.connection.baud_override = Some(115_200);
-        state.ui.primary_sidebar_visible = false;
+        state.layout.primary_sidebar_visible = false;
         state
     }
 

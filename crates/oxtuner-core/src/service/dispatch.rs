@@ -637,9 +637,9 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
-        CommandRequest::SetProjectUi { ui } => {
+        CommandRequest::SetProjectLayout { layout } => {
             if let Session::Project(project) = session
-                && let Err(error) = project.set_ui(ui)
+                && let Err(error) = project.set_layout(layout)
             {
                 // The layout is a convenience next to the tune, so a write
                 // failure is logged and never fails the session.
@@ -650,7 +650,7 @@ pub(super) fn handle(
                     "the project layout could not be persisted"
                 );
             }
-            send(events, Event::ProjectUiSaved { op });
+            send(events, Event::ProjectLayoutSaved { op });
             Outcome::Continue
         }
         CommandRequest::SaveTune => {
