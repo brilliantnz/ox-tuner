@@ -17,6 +17,8 @@ use oxtuner_core::{
 };
 use oxtuner_project::{CreateRequest, TUNE_FILE};
 
+mod support;
+
 /// How long a test waits for an event before failing.
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -184,7 +186,9 @@ impl Harness {
     }
 
     fn next(&self) -> Event {
-        self.events.recv_timeout(WAIT).expect("an event arrives")
+        // The core pushes its port snapshot on its own, so a command's answer
+        // is read past those publications.
+        support::recv_non_port(&self.events, WAIT).expect("an event arrives")
     }
 }
 

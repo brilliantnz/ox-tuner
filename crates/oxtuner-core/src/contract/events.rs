@@ -109,7 +109,12 @@ pub enum Event {
         /// The evaluated navigation tree.
         menu: Vec<MenuNode>,
     },
-    /// The serial ports the connect dialog can offer.
+    /// The serial ports the core last sampled, on explicit request.
+    ///
+    /// The core also pushes this snapshot on its own whenever it changes (see
+    /// [`Self::PortsChanged`]), so this command is the on-demand resync: the
+    /// Refresh button, or a check right before a scan that must not miss a
+    /// freshly plugged device.
     PortsListed {
         /// The command this answers.
         op: OpId,
@@ -118,8 +123,10 @@ pub enum Event {
     },
     /// The set of serial ports changed while the core was idle.
     ///
-    /// Sent only when the list actually differs from the last one published, so a
-    /// steady machine produces no traffic. The same snapshot answers
+    /// Sent whenever the sampled list differs from the last one published,
+    /// including the first sample when it found ports: a view that opens later
+    /// renders the last published list and never has to ask for the initial
+    /// one. A steady machine produces no traffic. The same snapshot answers
     /// [`super::Command::ListPorts`].
     PortsChanged {
         /// The ports as they are now.

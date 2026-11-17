@@ -10,7 +10,11 @@
     reason = "not every integration test binary uses every helper"
 )]
 
-use oxtuner_core::{CustomLink, Definition, PortChoice, ProbeSpec, Transport};
+use std::time::{Duration, Instant};
+
+use oxtuner_core::{
+    BlockingEventStream, CustomLink, Definition, Event, PortChoice, ProbeSpec, Transport,
+};
 use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
 
 /// The simulator as a link implementation.
@@ -71,4 +75,26 @@ impl CustomLink for Silent {
 /// A simulator connection with a specific configuration.
 pub(crate) fn simulator_with(config: SimConfig) -> PortChoice {
     PortChoice::custom(Simulator::new(config))
+}
+
+/// Receives the next event that is not a port-list publication.
+///
+/// The core pushes its port snapshot on its own, including the first sample,
+/// so a harness waiting for a command's answer steps over those instead of
+/// tripping on them. Tests that assert on the port list itself wait for the
+/// publication explicitly and do not use this.
+pub(crate) fn recv_non_port(events: &BlockingEventStream, wait: Duration) -> Option<Event> {
+    let deadline = Instant::now() + wait;
+
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let event = events.recv_timeout(left)?;
+
+        if !matches!(
+            event,
+            Event::PortsChanged { .. } | Event::PortsListed { .. }
+        ) {
+            return Some(event);
+        }
+    }
 }

@@ -520,8 +520,10 @@ fn run(
             != connection_revision;
         let first_frame = !had_frame && latest.get().is_some();
 
-        // Sampled here rather than on its own thread: a change is published only
-        // when the list actually differs, and the first sample is a baseline.
+        // Sampled here rather than on its own thread: the list is published only
+        // when it differs from the last one published, including the first
+        // sample when it found ports, so a view that opens later renders the
+        // last published list without asking first.
         if ports.due() {
             if let Some(updated) = ports.sample() {
                 tracing::debug!(ports = updated.len(), "serial ports changed");

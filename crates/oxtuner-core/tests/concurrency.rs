@@ -160,10 +160,9 @@ fn a_stalled_ui_keeps_acquiring_frames() {
 
     // And the core still answers a command after all those frames.
     let op = ui.handle.stop_realtime().expect("queued");
-    let answer = ui
-        .events
-        .recv_timeout(WAIT)
-        .expect("the core answered after polling");
+    // The core pushes its port snapshot on its own, so the answer is read
+    // past those publications.
+    let answer = support::recv_non_port(&ui.events, WAIT).expect("the core answered after polling");
     assert_eq!(
         answer.op(),
         Some(op),
@@ -332,6 +331,14 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
     let mut delivered = 0u64;
     let mut answered = std::collections::HashSet::new();
     while let Some(event) = events.recv_timeout(Duration::from_millis(200)) {
+        // The port baseline is the core's own publication, not a command's
+        // answer, so it stays out of the accounting below.
+        if matches!(
+            event,
+            Event::PortsChanged { .. } | Event::PortsListed { .. }
+        ) {
+            continue;
+        }
         delivered += 1;
         match event {
             Event::Stopped => break,
@@ -345,11 +352,13 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
 
     // Every accepted command produced exactly one event (its answer or a
     // `Rejected`), plus the single final `Stopped`; each of those either
-    // reached the UI or was counted as dropped.
+    // reached the UI or was counted as dropped. The port baseline is at most
+    // one publication, so a machine with ports may account for one extra
+    // dropped event when the baseline lost the single queue slot.
     let expected = u64::try_from(accepted.len()).unwrap_or(u64::MAX) + 1;
-    assert_eq!(
-        delivered + report.dropped_events,
-        expected,
+    let accounted = delivered + report.dropped_events;
+    assert!(
+        accounted == expected || accounted == expected + 1,
         "delivered {delivered} + dropped {} should account for {expected} events ({report:?})",
         report.dropped_events
     );

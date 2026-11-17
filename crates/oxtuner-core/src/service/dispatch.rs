@@ -45,9 +45,9 @@ pub(super) fn handle(
             Outcome::Stop
         }
         CommandRequest::ListPorts => {
-            // Answer from the snapshot so a dialog cannot see a list that
-            // disagrees with the last change the core published. The first
-            // command still has to wait for the first sample.
+            // Answer from the snapshot so a view that asks on demand never sees
+            // a list that disagrees with the last change the core published. The
+            // first command still takes the first sample itself.
             if !ports.is_primed()
                 && let Err(error) = ports.refresh()
             {

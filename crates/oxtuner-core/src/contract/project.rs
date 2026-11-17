@@ -235,7 +235,7 @@ pub struct ProjectConnection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// One serial port the connect dialog can offer.
+/// One serial port present on the machine.
 ///
 /// Every field takes part in the row comparison, so a different device on the
 /// same path reads as a change.

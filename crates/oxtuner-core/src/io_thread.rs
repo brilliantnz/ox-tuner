@@ -320,7 +320,7 @@ impl Drop for IoThread {
     }
 }
 
-/// Lists serial ports for the connect dialog.
+/// Snapshots the serial ports present on the machine.
 pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
     ports()
 }
