@@ -20,6 +20,7 @@ reqwest = { workspace = true, features = ["blocking", "native-tls"] }
 tracing.workspace = true
 
 [dev-dependencies]
+oxtuner-protocol.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 

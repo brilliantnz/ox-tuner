@@ -26,7 +26,7 @@ impl EcuBehavior for HexTextBehavior {
         "Hex text"
     }
 
-    fn matches(&self, _definition: &Definition) -> Match {
+    fn matches_signature(&self, _signature: &str) -> Match {
         Match::Exact
     }
 
@@ -56,7 +56,7 @@ impl EcuBehavior for BurnBeforeSwitchBehavior {
         "Burn before switch"
     }
 
-    fn matches(&self, _definition: &Definition) -> Match {
+    fn matches_signature(&self, _signature: &str) -> Match {
         Match::Exact
     }
 

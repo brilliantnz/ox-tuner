@@ -198,8 +198,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        Event::ProjectUiSaved { .. } => (Update::Nothing, None),
-        Event::PortsListed { .. }
+        // No view reads a probe result yet, so the core log carries the answer.
+        Event::FirmwareProbed { .. }
+        | Event::ProjectUiSaved { .. }
+        | Event::PortsListed { .. }
         | Event::PortsChanged { .. }
         | Event::Rejected { .. }
         | Event::Stopped => (Update::Nothing, None),

@@ -216,7 +216,7 @@ impl SimTransport {
         }
 
         let reply_code = BehaviorKind::select(definition).map_or(ReplyCode::Leading, |behavior| {
-            behavior.as_dyn().reply_code(definition)
+            behavior.as_dyn().reply_code()
         });
 
         Ok(Self {

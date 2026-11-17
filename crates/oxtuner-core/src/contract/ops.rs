@@ -242,6 +242,19 @@ pub(crate) enum CommandRequest {
         /// Framing override, as for [`Self::Connect`].
         framing: Option<LinkMode>,
     },
+    /// Ask one port for a firmware signature with a built-in probe.
+    ///
+    /// Unlike [`Self::TestConnection`], this needs no loaded definition: the
+    /// probe carries the query byte and the reply shape for its family. The
+    /// reply is [`super::Event::FirmwareProbed`], or
+    /// [`super::Event::Failed`] with [`super::FailureCode::FirmwareNotDetected`]
+    /// when the port stays silent.
+    ProbeFirmware {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Which family probe to send.
+        probe: FirmwareProbe,
+    },
     /// Close the connection and release the port.
     Disconnect,
     /// Read every declared page into the tune images.
@@ -575,6 +588,13 @@ pub enum EcuCommand {
         /// Framing override.
         framing: Option<LinkMode>,
     },
+    /// Ask one port for a firmware signature with a built-in probe.
+    ProbeFirmware {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Which family probe to send.
+        probe: FirmwareProbe,
+    },
     /// Close the connection.
     Disconnect,
     /// Read every declared page.
@@ -691,6 +711,7 @@ impl CoreCommand {
             Self::Tune(TuneCommand::ResolveConflicts { .. }) => "resolve-conflicts",
             Self::Ecu(EcuCommand::Connect { .. }) => "connect",
             Self::Ecu(EcuCommand::TestConnection { .. }) => "test-connection",
+            Self::Ecu(EcuCommand::ProbeFirmware { .. }) => "probe-firmware",
             Self::Ecu(EcuCommand::Disconnect) => "disconnect",
             Self::Ecu(EcuCommand::ReadAll) => "read-all",
             Self::Ecu(EcuCommand::StartRealtime { .. }) => "start-realtime",
@@ -778,6 +799,9 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Ecu(EcuCommand::TestConnection { port, framing }) => {
                 Self::TestConnection { port, framing }
             }
+            CoreCommand::Ecu(EcuCommand::ProbeFirmware { port, probe }) => {
+                Self::ProbeFirmware { port, probe }
+            }
             CoreCommand::Ecu(EcuCommand::Disconnect) => Self::Disconnect,
             CoreCommand::Ecu(EcuCommand::ReadAll) => Self::ReadAll,
             CoreCommand::Ecu(EcuCommand::StartRealtime { interval_ms }) => {
@@ -818,6 +842,42 @@ impl RejectReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ShuttingDown => "shutting-down",
+        }
+    }
+}
+
+/// A signature probe family, for [`EcuCommand::ProbeFirmware`].
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the shipped probe families are a closed set"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareProbe {
+    /// MegaSquirt-compatible boards, including Speeduino, answer `Q`.
+    Speeduino,
+    /// rusEFI and FOME answer `S`.
+    Rusefi,
+}
+
+impl FirmwareProbe {
+    /// Every probe a scan tries, in the order it tries them.
+    pub const ALL: [Self; 2] = [Self::Speeduino, Self::Rusefi];
+
+    /// The protocol probe this names.
+    #[must_use]
+    pub fn spec(self) -> oxtuner_protocol::ProbeSpec {
+        match self {
+            Self::Speeduino => oxtuner_protocol::SPEEDUINO,
+            Self::Rusefi => oxtuner_protocol::RUSEFI,
+        }
+    }
+
+    /// A stable lowercase key for logs and the detection result.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Speeduino => oxtuner_protocol::SPEEDUINO.behavior_id(),
+            Self::Rusefi => oxtuner_protocol::RUSEFI.behavior_id(),
         }
     }
 }
