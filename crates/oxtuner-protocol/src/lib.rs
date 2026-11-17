@@ -78,4 +78,7 @@ pub use frame::{Frame, FrameDecoder, FrameError};
 pub use ms::{LinkMode, MsProtocol, PageSpec, Protocol, RawCommandReport, RealtimeSpec};
 pub use oxtuner_ini::WireOrder;
 pub use pattern::{CommandPattern, PatternMatch, page_identifier};
-pub use probe::{COMMON_BAUDS, PROBE_PORT_SETTLE, PROBES, ProbeSpec, RUSEFI, SPEEDUINO};
+pub use probe::{
+    COMMON_BAUDS, DEFAULT_BAUD, PICKABLE_BAUDS, PROBE_PORT_SETTLE, PROBES, ProbeSpec, RUSEFI,
+    SPEEDUINO,
+};

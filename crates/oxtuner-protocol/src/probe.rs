@@ -39,6 +39,22 @@ pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
 /// rate.
 pub const COMMON_BAUDS: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
 
+/// The baud rate used when no other rate is known.
+///
+/// This is the first rate the scan tries, so a fresh picker defaults to the
+/// rate most likely to answer instead of hardcoding 115200 at every call site.
+pub const DEFAULT_BAUD: u32 = COMMON_BAUDS[0];
+
+/// The baud rates a user can pick from, slowest first.
+///
+/// Unlike [`COMMON_BAUDS`], which is ordered for probing, this list is for
+/// display: it covers the rates USB serial adapters and aftermarket ECUs
+/// actually speak, so a device on an uncommon rate stays selectable.
+pub const PICKABLE_BAUDS: [u32; 13] = [
+    9_600, 14_400, 19_200, 38_400, 57_600, 115_200, 230_400, 250_000, 460_800, 500_000, 576_000,
+    921_600, 1_000_000,
+];
+
 /// One signature probe: a family, the byte that asks for its signature, how
 /// that answer is framed, and how long the port may settle before it is asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +377,18 @@ mod tests {
         assert!(
             COMMON_BAUDS.windows(2).all(|pair| pair[0] > pair[1]),
             "the list is tried in order: {COMMON_BAUDS:?}"
+        );
+    }
+
+    #[test]
+    fn the_pickable_bauds_stay_sorted_and_keep_the_default() {
+        assert!(
+            PICKABLE_BAUDS.contains(&DEFAULT_BAUD),
+            "the default must stay selectable: {PICKABLE_BAUDS:?}"
+        );
+        assert!(
+            PICKABLE_BAUDS.windows(2).all(|pair| pair[0] < pair[1]),
+            "the picker lists rates slowest-first: {PICKABLE_BAUDS:?}"
         );
     }
 }
