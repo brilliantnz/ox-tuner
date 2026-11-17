@@ -97,8 +97,8 @@ pub enum ProjectError {
         /// Why the name was rejected.
         reason: &'static str,
     },
-    /// The target folder exists and already holds files.
-    TargetNotEmpty {
+    /// The target path is already taken, by a folder or by a file.
+    TargetExists {
         /// The path that was inspected.
         path: PathBuf,
     },
@@ -108,6 +108,11 @@ pub enum ProjectError {
         expected: String,
         /// The signature the definition declares.
         found: String,
+    },
+    /// The chosen definition is not a `.ini` file.
+    DefinitionNotIni {
+        /// The path that was picked.
+        path: PathBuf,
     },
     /// The definition pulls in `#include` files that creation cannot copy.
     DefinitionNeedsIncludes {
@@ -180,15 +185,18 @@ impl fmt::Display for ProjectError {
             Self::InvalidName { name, reason } => {
                 write!(formatter, "invalid project name `{name}`: {reason}")
             }
-            Self::TargetNotEmpty { path } => write!(
+            Self::TargetExists { path } => write!(
                 formatter,
-                "the target folder {} already holds files",
+                "{} already exists, choose another name or folder",
                 path.display()
             ),
             Self::SignatureMismatch { expected, found } => write!(
                 formatter,
                 "the ECU reports `{expected}`, the definition declares `{found}`"
             ),
+            Self::DefinitionNotIni { path } => {
+                write!(formatter, "{} is not a .ini definition", path.display())
+            }
             Self::DefinitionNeedsIncludes { names } => write!(
                 formatter,
                 "the definition includes {}; copy the whole definition folder instead",
@@ -221,8 +229,9 @@ impl ProjectError {
             Self::AmbiguousDefinition { .. } => "ambiguous-definition",
             Self::MissingTune { .. } => "missing-tune",
             Self::InvalidName { .. } => "invalid-name",
-            Self::TargetNotEmpty { .. } => "target-not-empty",
+            Self::TargetExists { .. } => "target-exists",
             Self::SignatureMismatch { .. } => "signature-mismatch",
+            Self::DefinitionNotIni { .. } => "definition-not-ini",
             Self::DefinitionNeedsIncludes { .. } => "definition-needs-includes",
             Self::Io { .. } => "io",
             Self::Msq(_) => "msq",
@@ -248,8 +257,9 @@ impl std::error::Error for ProjectError {
             | Self::AmbiguousDefinition { .. }
             | Self::MissingTune { .. }
             | Self::InvalidName { .. }
-            | Self::TargetNotEmpty { .. }
+            | Self::TargetExists { .. }
             | Self::SignatureMismatch { .. }
+            | Self::DefinitionNotIni { .. }
             | Self::DefinitionNeedsIncludes { .. }
             | Self::ReadOnly { .. } => None,
         }
@@ -307,7 +317,9 @@ mod detect;
 mod open;
 mod save;
 
-pub use create::CreateRequest;
+pub use create::{
+    CreateRequest, accepts_definition, ensure_target_free, split_destination, validate_project_name,
+};
 pub(crate) use open::read_include;
 
 /// The definition path as stored in the sidecar: relative to the project root.

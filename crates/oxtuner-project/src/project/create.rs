@@ -38,13 +38,31 @@ pub struct CreateRequest {
     pub parent: PathBuf,
     /// Display name, also used as the folder name.
     pub name: String,
-    /// The user-supplied definition bytes copied to `projectCfg/`.
-    pub ini_bytes: Vec<u8>,
+    /// The user-supplied definition file, copied into `projectCfg/`.
+    ///
+    /// Creation reads it itself: reading a file is project I/O, and the core
+    /// thread — not the UI — owns that. A path that is not a `.ini` file, or
+    /// cannot be read, is refused before anything is written.
+    pub ini_path: PathBuf,
     /// Signature the ECU reported, when the project was detected from one.
     ///
     /// `None` means the user picked the INI by hand; the definition is used
     /// as-is without a signature check.
     pub expected_signature: Option<String>,
+    /// `#if` flags chosen from the definition's setting groups.
+    ///
+    /// Each entry is an option name the user picked (for example
+    /// `pressure_bar`). The definition is parsed with them active, so the tune
+    /// snapshot records the same choices the user sees in the dialog. An empty
+    /// list keeps the definition's own defaults.
+    pub settings: Vec<String>,
+    /// Serial port the project starts on, when the wizard picked one.
+    pub port: Option<String>,
+    /// Baud rate paired with [`Self::port`].
+    ///
+    /// Zero keeps the definition's own rate, which is what a project created
+    /// without a connection choice needs.
+    pub baud: u32,
 }
 
 impl CreateRequest {
@@ -55,6 +73,54 @@ impl CreateRequest {
     pub fn root(&self) -> PathBuf {
         self.parent.join(self.name.trim())
     }
+}
+
+/// The folder and the project name inside a typed destination path.
+///
+/// This is the inverse of [`CreateRequest::root`], and lives beside it so the
+/// two cannot disagree. Both separators count on every platform, so a Windows
+/// style path works while typing on macOS or Linux too. A trailing separator
+/// means the user named a folder only, and the project name then stays whatever
+/// it was. A single component is a name inside the folder the caller already
+/// has.
+pub fn split_destination(typed: &Path) -> (Option<PathBuf>, Option<String>) {
+    let text = typed.as_os_str().to_string_lossy();
+
+    // A trailing separator means the user named a folder, not a project.
+    let folder = text.trim_end_matches(['/', '\\']);
+    if folder.len() != text.len() {
+        let folder = (!folder.is_empty()).then(|| PathBuf::from(folder.to_string()));
+
+        return (folder, None);
+    }
+
+    let Some(cut) = text.rfind(['/', '\\']) else {
+        return (None, Some(text.to_string()));
+    };
+
+    let mut folder = text[..cut].to_string();
+
+    // A root keeps its separator: "/name" lives in "/", "C:\name" lives in "C:\".
+    if folder.is_empty() || folder.ends_with(':') {
+        let separator = text[cut..].chars().next().unwrap_or('/');
+        folder.push(separator);
+    }
+
+    let file_name = text[cut + 1..].to_string();
+    let file_name = (!file_name.is_empty()).then_some(file_name);
+
+    (Some(PathBuf::from(folder)), file_name)
+}
+
+/// Whether `path` names a definition file.
+///
+/// The native file picker cannot filter by extension, so this is the one rule
+/// for what may become a project definition. Creation applies it before reading
+/// anything; the UI applies the same function so a wrong pick explains itself
+/// immediately instead of at Create.
+pub fn accepts_definition(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
 }
 
 impl Project {
@@ -76,22 +142,56 @@ impl Project {
     /// definition cannot be parsed, a reported signature mismatches, or a
     /// file cannot be written. A failure removes what creation wrote.
     pub fn create(request: &CreateRequest) -> Result<Self, ProjectError> {
-        let name = validate_name(&request.name)?;
         let root = request.root();
-        ensure_target_empty(&root)?;
+        let _span = tracing::info_span!(
+            "project_create",
+            root = %root.display(),
+            name = request.name.trim()
+        )
+        .entered();
 
-        let root_existed = root.exists();
-        if !root_existed {
-            fs::create_dir_all(&root).map_err(|source| ProjectError::Io {
-                path: root.clone(),
-                source,
-            })?;
+        let result = Self::create_inner(request);
+
+        match &result {
+            Ok(project) => tracing::info!(
+                root = %project.root().display(),
+                signature = %project.definition().signature,
+                pages = project.definition().pages.len(),
+                constants = project.definition().constants.len(),
+                "project created"
+            ),
+            Err(error) => tracing::warn!(
+                error_kind = error.kind(),
+                %error,
+                "project creation failed"
+            ),
         }
 
-        let mut written: Vec<PathBuf> = Vec::new();
-        let project = Self::scaffold(&root, &name, request, &mut written).inspect_err(|_| {
-            rollback(&root, root_existed, &written);
+        result
+    }
+
+    /// The body of [`Self::create`], split out so one place logs its outcome.
+    fn create_inner(request: &CreateRequest) -> Result<Self, ProjectError> {
+        let name = validate_project_name(&request.name)?;
+        let root = request.root();
+        ensure_target_free(&root)?;
+        let ini_bytes = read_definition(&request.ini_path)?;
+        tracing::debug!(
+            path = %request.ini_path.display(),
+            bytes = ini_bytes.len(),
+            "definition read for the new project"
+        );
+
+        fs::create_dir_all(&root).map_err(|source| ProjectError::Io {
+            path: root.clone(),
+            source,
         })?;
+
+        let mut written: Vec<PathBuf> = Vec::new();
+        let project =
+            Self::scaffold(&root, &name, request, &ini_bytes, &mut written).inspect_err(|_| {
+                rollback(&root, &written);
+            })?;
 
         Ok(project)
     }
@@ -109,13 +209,21 @@ impl Project {
         root: &Path,
         name: &str,
         request: &CreateRequest,
+        ini_bytes: &[u8],
         written: &mut Vec<PathBuf>,
     ) -> Result<Self, ProjectError> {
         let config = root.join(CONFIG_DIR);
         let definition_path = config.join(MAIN_DEFINITION);
 
-        let text = oxtuner_ini::source::decode(&request.ini_bytes).text;
-        let settings = SettingsContext::new();
+        let text = oxtuner_ini::source::decode(ini_bytes).text;
+        // A chosen setting group marks its option active, exactly like the
+        // `<settings>` entry a saved tune carries. The group's own name is
+        // activated too, so an `#if` written against either half resolves.
+        let overrides: Vec<(String, bool)> = chosen_flags(&request.settings)
+            .into_iter()
+            .map(|option| (option, true))
+            .collect();
+        let settings = SettingsContext::new().with_overrides(overrides);
         // The parser resolves `#include` through a `Fn` resolver, so the names
         // it asks for are recorded through interior mutability.
         let includes = RefCell::new(Vec::new());
@@ -125,6 +233,13 @@ impl Project {
         };
         let definition = oxtuner_ini::parse_str_with_includes(&text, &settings, &resolver)
             .map_err(ProjectError::Ini)?;
+        tracing::debug!(
+            signature = %definition.signature,
+            pages = definition.pages.len(),
+            constants = definition.constants.len(),
+            settings = request.settings.len(),
+            "definition parsed for the new project"
+        );
 
         // Creation copies one file. A definition that pulls in more would open
         // with those pages missing, so it is refused instead of half-built.
@@ -149,30 +264,71 @@ impl Project {
             }
         })?;
         let tune_bytes = document.save()?;
+        tracing::debug!(
+            bytes = tune_bytes.len(),
+            "tune scaffolded from the definition defaults"
+        );
 
         // Nothing below is a validation step: from here on, a failure means the
         // disk refused a write and rollback removes what was written.
         create_tracked(written, config.clone())?;
-        write_tracked(written, definition_path, &request.ini_bytes)?;
+        write_tracked(written, definition_path, ini_bytes)?;
         write_tracked(written, root.join(TUNE_FILE), &tune_bytes)?;
 
+        // The keys are the ones TunerStudio reads, so a project created here
+        // opens there without a settings mismatch. `ecuSettings` is the flag
+        // list the definition's setting groups produced; TunerStudio stores it
+        // pipe-separated with a trailing separator.
+        //
         // The signature is trimmed: a definition can carry a trailing NUL,
         // which a Java-properties file must not hold (a reader would see it as
         // part of the value and report the project as corrupt).
         let signature = definition.signature.trim();
-        let mut properties = format!("# Created by OxTuner.\nprojectName={name}\n");
+        let mut ecu_settings = String::new();
+        for flag in chosen_flags(&request.settings) {
+            ecu_settings.push_str(&flag);
+            ecu_settings.push('|');
+        }
+
+        let mut properties = String::from("# Created by OxTuner.\n");
+        properties.push_str("projectName=");
+        properties.push_str(&oxtuner_encoding::escape_java_property(name));
+        properties.push('\n');
+        properties.push_str("projectDescription=\n");
+        properties.push_str("ecuConfigFile=");
+        properties.push_str(MAIN_DEFINITION);
+        properties.push('\n');
         if !signature.is_empty() {
-            properties.push_str("signature=");
-            properties.push_str(signature);
+            properties.push_str("firmwareDescription=");
+            properties.push_str(&oxtuner_encoding::escape_java_property(signature));
             properties.push('\n');
         }
-        write_tracked(written, config.join(PROPERTIES_FILE), properties.as_bytes())?;
+        properties.push_str("ecuSettings=");
+        properties.push_str(&ecu_settings);
+        properties.push('\n');
+
+        let properties_path = config.join(PROPERTIES_FILE);
+        write_tracked(written, properties_path.clone(), properties.as_bytes())?;
+
+        // TunerStudio rotates a `.bkup` beside its properties file and reads it
+        // when the main file is damaged. Writing the same bytes now means a
+        // project this build created never looks half-written there.
+        let mut backup = properties_path.into_os_string();
+        backup.push(".bkup");
+        write_tracked(written, PathBuf::from(backup), properties.as_bytes())?;
 
         for dir in SCAFFOLD_DIRS {
             create_tracked(written, root.join(dir))?;
         }
 
-        let project = Self::open(root)?;
+        tracing::debug!(
+            settings = request.settings.len(),
+            "project properties and backup written"
+        );
+
+        let mut project = Self::open(root)?;
+        project.state.connection.last_port.clone_from(&request.port);
+        project.state.connection.baud_override = (request.baud != 0).then_some(request.baud);
 
         project
             .state
@@ -186,6 +342,35 @@ impl Project {
     }
 }
 
+/// Reads the definition creation will copy.
+///
+/// Refused before anything is written, with the path in the error so the UI can
+/// say which pick failed.
+fn read_definition(path: &Path) -> Result<Vec<u8>, ProjectError> {
+    if !accepts_definition(path) {
+        return Err(ProjectError::DefinitionNotIni {
+            path: path.to_owned(),
+        });
+    }
+
+    fs::read(path).map_err(|source| ProjectError::Io {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// The option names that stand for a flag, in the order the caller listed them.
+///
+/// The option named `DEFAULT` is not a flag: the dialect ignores it and falls
+/// into the `#else` branch, so a project must not record it.
+fn chosen_flags(settings: &[String]) -> Vec<String> {
+    settings
+        .iter()
+        .filter(|option| !option.eq_ignore_ascii_case("DEFAULT"))
+        .cloned()
+        .collect()
+}
+
 /// The folder name, trimmed and checked for every desktop OS.
 ///
 /// Projects move between machines, so the Windows rules apply everywhere:
@@ -195,7 +380,16 @@ impl Project {
 /// - a Windows-reserved character `< > : " | ? *`, or a reserved device
 ///   name (`CON`, `NUL`, `COM1`…) with or without an extension
 /// - a trailing space or dot, which Windows strips
-fn validate_name(name: &str) -> Result<String, ProjectError> {
+///
+/// The UI applies this before enabling its next step, and creation applies it
+/// again before touching the disk: one rule, so a name the wizard accepted can
+/// never fail later for a reason the wizard did not show.
+///
+/// # Errors
+///
+/// Returns [`ProjectError::InvalidName`] naming the reason the name cannot be
+/// used.
+pub fn validate_project_name(name: &str) -> Result<String, ProjectError> {
     let invalid = |reason: &'static str| ProjectError::InvalidName {
         name: name.to_owned(),
         reason,
@@ -263,21 +457,28 @@ fn is_windows_device_name(name: &str) -> bool {
     )
 }
 
-/// Refuses a target that already holds files.
+/// Refuses a target that already exists, as a folder or as a file.
 ///
-/// The check and the creation are not atomic, but creation is a deliberate
-/// user action and the worst case is a plain I/O error, never a merged
-/// folder: an existing non-empty folder is always refused.
-fn ensure_target_empty(root: &Path) -> Result<(), ProjectError> {
-    match fs::read_dir(root) {
-        Ok(mut entries) => {
-            if entries.next().is_some() {
-                return Err(ProjectError::TargetNotEmpty {
-                    path: root.to_owned(),
-                });
-            }
-            Ok(())
-        }
+/// Creation only ever writes into a folder it made itself. A folder the user
+/// already has may hold a hidden file (macOS writes `.DS_Store` into a folder
+/// the moment it is opened in Finder), and a folder that looks empty in a
+/// dialog is then not empty on disk, so "empty" is not a safe test. A file with
+/// the project's name is refused with the same message instead of failing later
+/// as a directory error.
+///
+/// The check and the creation are not atomic, but creation is a deliberate user
+/// action and the worst case is a plain I/O error, never a merged folder: the
+/// entry is re-checked by `create_dir_all` refusing an existing file.
+///
+/// # Errors
+///
+/// Returns [`ProjectError::TargetExists`] when anything is already there, and
+/// [`ProjectError::Io`] when the path cannot be inspected.
+pub fn ensure_target_free(root: &Path) -> Result<(), ProjectError> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => Err(ProjectError::TargetExists {
+            path: root.to_owned(),
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(ProjectError::Io {
             path: root.to_owned(),
@@ -310,22 +511,17 @@ fn create_tracked(written: &mut Vec<PathBuf>, path: PathBuf) -> Result<(), Proje
     Ok(())
 }
 
-/// Removes what a failed creation wrote, best effort.
+/// Removes the folder a failed creation made, best effort.
 ///
-/// A root the creation itself made disappears whole; a pre-existing empty
-/// folder keeps existing, with only the written paths removed.
-fn rollback(root: &Path, root_existed: bool, written: &[PathBuf]) {
-    if !root_existed {
-        let _ = fs::remove_dir_all(root);
-        return;
-    }
-    for path in written.iter().rev() {
-        if path.is_dir() {
-            let _ = fs::remove_dir(path);
-        } else {
-            let _ = fs::remove_file(path);
-        }
-    }
+/// The folder is always one creation created itself, so it disappears whole;
+/// `written` is kept for the debug line that names what was there.
+fn rollback(root: &Path, written: &[PathBuf]) {
+    tracing::debug!(
+        root = %root.display(),
+        written = written.len(),
+        "removing the folder a failed creation wrote"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(test)]
@@ -338,8 +534,11 @@ mod tests {
 
     #[test]
     fn usable_names_trim_and_pass() {
-        assert_eq!(validate_name("  Roadster  ").unwrap(), "Roadster");
-        assert_eq!(validate_name("Sonic_150 (E85)").unwrap(), "Sonic_150 (E85)");
+        assert_eq!(validate_project_name("  Roadster  ").unwrap(), "Roadster");
+        assert_eq!(
+            validate_project_name("Sonic_150 (E85)").unwrap(),
+            "Sonic_150 (E85)"
+        );
     }
 
     #[test]
@@ -349,14 +548,121 @@ mod tests {
             "LPT9.csv",
         ] {
             assert!(
-                matches!(validate_name(name), Err(ProjectError::InvalidName { .. })),
+                matches!(
+                    validate_project_name(name),
+                    Err(ProjectError::InvalidName { .. })
+                ),
                 "{name:?} must be refused"
             );
         }
         let long = "x".repeat(MAX_NAME_LEN + 1);
         assert!(
-            matches!(validate_name(&long), Err(ProjectError::InvalidName { .. })),
+            matches!(
+                validate_project_name(&long),
+                Err(ProjectError::InvalidName { .. })
+            ),
             "a name over the cap must be refused"
         );
+    }
+
+    fn destination(path: &str) -> (Option<String>, Option<String>) {
+        let (folder, file_name) = split_destination(Path::new(path));
+
+        (folder.map(|folder| folder.display().to_string()), file_name)
+    }
+
+    #[test]
+    fn a_destination_path_splits_into_folder_and_name() {
+        assert_eq!(
+            destination("/Users/me/OxTunerProjects/MyProject"),
+            (
+                Some("/Users/me/OxTunerProjects".to_owned()),
+                Some("MyProject".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn a_trailing_separator_names_a_folder_only() {
+        assert_eq!(
+            destination("/Users/me/OxTunerProjects/"),
+            (Some("/Users/me/OxTunerProjects".to_owned()), None)
+        );
+    }
+
+    #[test]
+    fn a_bare_component_is_a_name_inside_the_current_folder() {
+        assert_eq!(
+            destination("MyProject"),
+            (None, Some("MyProject".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_windows_path_splits_on_backslashes() {
+        assert_eq!(
+            destination("C:\\Users\\me\\OxTunerProjects\\MyProject"),
+            (
+                Some("C:\\Users\\me\\OxTunerProjects".to_owned()),
+                Some("MyProject".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn a_drive_root_keeps_its_separator() {
+        assert_eq!(
+            destination("C:\\MyProject"),
+            (Some("C:\\".to_owned()), Some("MyProject".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_unc_share_is_one_folder() {
+        assert_eq!(
+            destination("\\\\server\\share\\MyProject"),
+            (
+                Some("\\\\server\\share".to_owned()),
+                Some("MyProject".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn a_posix_root_keeps_its_separator() {
+        assert_eq!(
+            destination("/MyProject"),
+            (Some("/".to_owned()), Some("MyProject".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_windows_path_accepts_forward_slashes() {
+        assert_eq!(
+            destination("C:/Users/me/MyProject"),
+            (Some("C:/Users/me".to_owned()), Some("MyProject".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_windows_trailing_separator_names_a_folder_only() {
+        assert_eq!(
+            destination("C:\\Users\\me\\OxTunerProjects\\"),
+            (Some("C:\\Users\\me\\OxTunerProjects".to_owned()), None)
+        );
+    }
+
+    #[test]
+    fn a_refused_name_carries_a_stable_error_kind() {
+        let error = validate_project_name("a/b").expect_err("the separator is refused");
+        assert_eq!(error.kind(), "invalid-name");
+    }
+
+    #[test]
+    fn only_ini_files_are_definitions() {
+        assert!(accepts_definition(Path::new("speeduino.ini")));
+        assert!(accepts_definition(Path::new("SPEEDUINO.INI")));
+        assert!(!accepts_definition(Path::new("speeduino.txt")));
+        assert!(!accepts_definition(Path::new("speeduino")));
     }
 }

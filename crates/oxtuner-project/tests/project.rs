@@ -78,6 +78,18 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 "#;
 
 /// A single-page definition without includes, for standalone and creation tests.
+/// A definition with no includes, for tests that only need a scaffold.
+const CONNECTION_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
 const STANDALONE_DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -131,6 +143,12 @@ impl TempDir {
             fs::create_dir_all(parent).expect("fixture parent is creatable");
         }
         fs::write(path, contents).expect("fixture is writable");
+    }
+
+    /// Writes a definition into the sandbox and returns the path creation takes.
+    fn definition(&self, contents: &str) -> PathBuf {
+        self.write("definition.ini", contents);
+        self.path.join("definition.ini")
     }
 }
 
@@ -863,6 +881,75 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
 }
 
 #[test]
+fn a_hand_edited_state_file_is_applied_on_open() {
+    let dir = project_dir("state-hand-edited");
+    dir.write(
+        ".oxtuner/project.json",
+        r#"{
+            "schema_version": 1,
+            "connection": { "last_port": "/dev/ttyACM9", "baud_override": 57600 },
+            "ui": {
+                "primary_sidebar_width": 321.0,
+                "secondary_sidebar_width": 222.0,
+                "bottom_panel_height": 199.0,
+                "primary_sidebar_visible": false,
+                "secondary_sidebar_visible": true,
+                "bottom_panel_visible": false,
+                "table_low_at_top": true
+            }
+        }"#,
+    );
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert_eq!(
+        project.state().connection.last_port.as_deref(),
+        Some("/dev/ttyACM9")
+    );
+    assert_eq!(project.state().connection.baud_override, Some(57_600));
+    assert_eq!(project.state().ui.primary_sidebar_width, 321.0);
+    assert!(!project.state().ui.primary_sidebar_visible);
+    assert!(!project.state().ui.bottom_panel_visible);
+    assert!(project.state().ui.table_low_at_top);
+}
+
+#[test]
+fn the_tune_snapshot_beats_ecu_settings_on_a_duplicate() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+    // The project file turns CELSIUS on, the tune snapshot turns it off.
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"/>
+    <settings>
+        <setting name="CELSIUS_OFF"/>
+    </settings>
+</msq>
+"#;
+
+    let dir = TempDir::new("settings-precedence");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write("projectCfg/project.properties", "ecuSettings=CELSIUS|\n");
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+    assert!(
+        !project.settings().is_active("CELSIUS"),
+        "the tune snapshot is the settings context and wins on a duplicate"
+    );
+}
+
+#[test]
 fn the_project_pc_values_win_over_the_tune_page() {
     const DEFINITION: &str = r#"
 [MegaTune]
@@ -1100,8 +1187,11 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Roadster".to_owned(),
-        ini_bytes: DEFINITION.as_bytes().to_vec(),
+        ini_path: sandbox.definition(DEFINITION),
         expected_signature: Some("speeduino 202501".to_owned()),
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1117,6 +1207,20 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
         fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties exist");
     assert!(properties.contains("projectName=Roadster"));
     assert!(properties.contains("speeduino 202501"));
+    assert!(properties.contains("ecuConfigFile=mainController.ini"));
+    assert!(properties.contains("firmwareDescription=speeduino 202501"));
+    assert!(
+        properties.contains("ecuSettings=\n"),
+        "no group selected yet: {properties}"
+    );
+    assert!(
+        root.join("projectCfg/project.properties.bkup").is_file(),
+        "TunerStudio expects a backup copy beside the properties"
+    );
+    assert!(
+        !properties.contains("signature="),
+        "the TS key is firmwareDescription: {properties}"
+    );
 
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
     assert_close(project.tune().scalar_user("reqFuel").unwrap(), 0.0);
@@ -1131,8 +1235,46 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
 }
 
 #[test]
-fn creating_a_project_refuses_a_target_that_holds_files() {
-    let sandbox = TempDir::new("create-nonempty");
+fn a_non_ascii_project_name_is_escaped_for_java_properties() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
+    let sandbox = TempDir::new("create-non-ascii");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Café".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let bytes =
+        fs::read(project.root().join("projectCfg/project.properties")).expect("properties exist");
+    assert!(
+        bytes.is_ascii(),
+        "TunerStudio reads ISO-8859-1, so the file stays ASCII: {bytes:?}"
+    );
+    let text = String::from_utf8(bytes).expect("ASCII is UTF-8");
+    assert!(
+        text.contains("projectName=Caf\\u00E9"),
+        "an accented name is escaped, not encoded: {text}"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_a_folder_that_already_exists() {
+    let sandbox = TempDir::new("create-existing-folder");
     let target = sandbox.path().join("Taken");
     fs::create_dir_all(&target).expect("the target exists");
     fs::write(target.join("existing.txt"), "x").expect("the target holds a file");
@@ -1140,14 +1282,73 @@ fn creating_a_project_refuses_a_target_that_holds_files() {
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Taken".to_owned(),
-        ini_bytes: Vec::new(),
+        ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     assert!(matches!(
         Project::create(&request),
-        Err(ProjectError::TargetNotEmpty { .. })
+        Err(ProjectError::TargetExists { .. })
     ));
     assert!(target.join("existing.txt").is_file());
+}
+
+#[test]
+fn creating_a_project_refuses_an_empty_folder_that_already_exists() {
+    // A folder that looks empty in a picker may hold a hidden file (Finder
+    // writes `.DS_Store` on open), so creation only writes into a folder it
+    // made itself.
+    let sandbox = TempDir::new("create-empty-folder");
+    let target = sandbox.path().join("Empty");
+    fs::create_dir_all(&target).expect("the target exists");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Empty".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetExists { .. })
+    ));
+    assert!(target.is_dir());
+    assert_eq!(
+        fs::read_dir(&target).expect("readable").count(),
+        0,
+        "the existing folder is left untouched"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_a_file_that_holds_the_name() {
+    let sandbox = TempDir::new("create-existing-file");
+    let target = sandbox.path().join("Taken");
+    fs::write(&target, "not a folder").expect("the file is writable");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Taken".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetExists { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(&target).expect("the file is readable"),
+        "not a folder",
+        "the file is left untouched"
+    );
 }
 
 #[test]
@@ -1156,8 +1357,11 @@ fn creating_a_project_refuses_an_unusable_name() {
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "../escape".to_owned(),
-        ini_bytes: Vec::new(),
+        ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1172,8 +1376,11 @@ fn creating_a_project_checks_the_detected_signature() {
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Mismatch".to_owned(),
-        ini_bytes: b"[MegaTune]\nsignature = \"speeduino 202501\"\n".to_vec(),
+        ini_path: sandbox.definition("[MegaTune]\nsignature = \"speeduino 202501\"\n"),
         expected_signature: Some("other 9999".to_owned()),
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1186,13 +1393,37 @@ fn creating_a_project_checks_the_detected_signature() {
 }
 
 #[test]
+fn creating_a_project_refuses_a_definition_that_is_not_ini() {
+    let sandbox = TempDir::new("create-not-ini");
+    sandbox.write("notes.txt", "not a definition");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Notes".to_owned(),
+        ini_path: sandbox.path().join("notes.txt"),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
+    };
+
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::DefinitionNotIni { .. })
+    ));
+    assert!(!sandbox.path().join("Notes").exists());
+}
+
+#[test]
 fn creating_a_project_refuses_an_unreadable_definition() {
     let sandbox = TempDir::new("create-bad-ini");
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Broken".to_owned(),
-        ini_bytes: b"this is not an ini file\n".to_vec(),
+        ini_path: sandbox.definition("this is not an ini file\n"),
         expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1265,8 +1496,11 @@ page = 1
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Includes".to_owned(),
-        ini_bytes: INCLUDING.as_bytes().to_vec(),
+        ini_path: sandbox.definition(INCLUDING),
         expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     let error = Project::create(&request).expect_err("an include cannot be copied");
     assert!(
@@ -1313,11 +1547,16 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
     let bytes = fs::read(source).expect("the reference definition is readable");
 
     let sandbox = TempDir::new("create-reference");
+    let reference = sandbox.path().join("reference.ini");
+    fs::write(&reference, &bytes).expect("the reference is copied to the sandbox");
     let request = CreateRequest {
         parent: sandbox.path().to_path_buf(),
         name: "Reference".to_owned(),
-        ini_bytes: bytes,
+        ini_path: reference,
         expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1349,4 +1588,98 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
         tune,
         "opening and saving a scaffold must not rewrite it"
     );
+}
+
+#[test]
+fn a_chosen_setting_group_compiles_the_branch_and_is_recorded() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+
+[SettingGroups]
+settingGroup = pressure_units, "Pressure Display"
+settingOption = DEFAULT, "PSI"
+settingOption = pressure_bar, "BAR"
+"#;
+
+    let sandbox = TempDir::new("create-settings");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Bar".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: vec!["pressure_bar".to_owned()],
+        port: None,
+        baud: 0,
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert!(
+        project.settings().is_active("pressure_bar"),
+        "the chosen option is active for the definition"
+    );
+
+    let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
+    assert!(
+        tune.contains("pressure_bar"),
+        "the snapshot records the choice: {tune}"
+    );
+    assert!(
+        !tune.contains("DEFAULT"),
+        "the default option is not a flag: {tune}"
+    );
+
+    let properties = fs::read_to_string(project.root().join("projectCfg/project.properties"))
+        .expect("properties exist");
+    assert!(
+        properties.contains("ecuSettings=pressure_bar|"),
+        "TunerStudio reads the choice from there: {properties}"
+    );
+}
+
+#[test]
+fn creation_remembers_the_connection_the_wizard_picked() {
+    let sandbox = TempDir::new("create-connection");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_path: sandbox.definition(CONNECTION_DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: Some("/dev/cu.test".to_owned()),
+        baud: 57_600,
+    };
+    Project::create(&request).expect("creation succeeds");
+
+    let root = sandbox.path().join("Roadster");
+    let reopened = Project::open(&root).expect("the project reopens");
+    assert_eq!(
+        reopened.state().connection.last_port.as_deref(),
+        Some("/dev/cu.test")
+    );
+    assert_eq!(reopened.state().connection.baud_override, Some(57_600));
+}
+
+#[test]
+fn creation_without_a_baud_keeps_the_definition_rate() {
+    let sandbox = TempDir::new("create-no-baud");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_path: sandbox.definition(CONNECTION_DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        port: None,
+        baud: 0,
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert_eq!(project.state().connection.last_port, None);
+    assert_eq!(project.state().connection.baud_override, None);
 }
