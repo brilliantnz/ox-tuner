@@ -69,7 +69,7 @@ impl SimProbe {
             }
             LinkMode::Envelope => {
                 let mut payload = Vec::with_capacity(text.len() + 1);
-                if self.spec.behavior.as_dyn().default_reply_code() == ReplyCode::Leading {
+                if self.spec.behavior.as_dyn().reply_code() == ReplyCode::Leading {
                     payload.push(0);
                 }
                 payload.extend_from_slice(text);

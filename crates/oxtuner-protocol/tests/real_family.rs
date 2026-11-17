@@ -58,10 +58,7 @@ fn a_real_speeduino_definition_selects_the_speeduino_behavior() {
     assert_eq!(behavior.as_dyn().id(), "speeduino");
     assert_eq!(behavior.as_dyn().name(), "Speeduino");
     assert_eq!(behavior.as_dyn().matches(&definition), Match::Exact);
-    assert_eq!(
-        behavior.as_dyn().reply_code(&definition),
-        ReplyCode::Leading
-    );
+    assert_eq!(behavior.as_dyn().reply_code(), ReplyCode::Leading);
 }
 
 #[test]
@@ -76,7 +73,7 @@ fn a_real_rusefi_definition_selects_the_rusefi_behavior() {
     assert!(matches!(behavior, BehaviorKind::Rusefi(_)));
     assert_eq!(behavior.as_dyn().id(), "rusefi");
     assert_eq!(behavior.as_dyn().name(), "rusEFI");
-    assert_eq!(behavior.as_dyn().reply_code(&definition), ReplyCode::Absent);
+    assert_eq!(behavior.as_dyn().reply_code(), ReplyCode::Absent);
 }
 
 #[test]
@@ -94,5 +91,5 @@ fn a_real_fome_definition_selects_the_fome_behavior_before_rusefi() {
     assert!(matches!(behavior, BehaviorKind::Fome(_)));
     assert_eq!(behavior.as_dyn().id(), "fome");
     assert_eq!(behavior.as_dyn().name(), "FOME");
-    assert_eq!(behavior.as_dyn().reply_code(&definition), ReplyCode::Absent);
+    assert_eq!(behavior.as_dyn().reply_code(), ReplyCode::Absent);
 }

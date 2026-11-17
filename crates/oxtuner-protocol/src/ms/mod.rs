@@ -241,8 +241,8 @@ impl Parts {
             behavior_id: spec.behavior_id(),
             signature_request: Some(spec.query.to_vec()),
             link: spec.link,
-            reply_code: spec.behavior.as_dyn().default_reply_code(),
-            port_open_delay: crate::probe::PROBE_PORT_SETTLE,
+            reply_code: spec.behavior.as_dyn().reply_code(),
+            port_open_delay: spec.settle,
             ..Self::default()
         }
     }
@@ -401,7 +401,7 @@ impl MsProtocol {
             wire_order: order,
             realtime,
             link: default_link(definition),
-            reply_code: behavior.reply_code(definition),
+            reply_code: behavior.reply_code(),
         }))
     }
 

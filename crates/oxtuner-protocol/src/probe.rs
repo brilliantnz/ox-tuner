@@ -1,11 +1,17 @@
 //! What a probe needs to ask an unknown ECU for its signature.
 //!
 //! Autodetecting an ECU needs three protocol facts before any definition
-//! exists: which query byte the family answers and how the reply is framed.
-//! Both are protocol knowledge, so they live here as constants rather than as a
-//! definition of our own. The reply shape comes from the family's behavior,
-//! which already owns that fact. A probe carries no calibration data and never
-//! becomes project data.
+//! exists: which query byte the family answers, how the reply is framed, and
+//! how long the port may settle. All three are protocol knowledge, so they live
+//! here as constants rather than as a definition of our own. The reply shape
+//! comes from the family's behavior, which already owns that fact. A probe
+//! carries no calibration data and never becomes project data.
+//!
+//! A probe is a question, a family is how the answer is classified. The query
+//! byte belongs to the family — see [`EcuBehavior::probe_query`] — so two
+//! families that answer the same byte share one probe and are told apart by the
+//! signature that comes back. FOME answers `S` and is classified afterwards,
+//! which is why there is no FOME probe const.
 //!
 //! The order matters. A MegaSquirt-compatible board answers `Q`; a rusEFI board
 //! answers `S`. Trying both on a port answers which family is attached without
@@ -33,8 +39,8 @@ pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
 /// rate.
 pub const COMMON_BAUDS: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
 
-/// One signature probe: a family, the byte that asks for its signature, and
-/// how that answer is framed.
+/// One signature probe: a family, the byte that asks for its signature, how
+/// that answer is framed, and how long the port may settle before it is asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProbeSpec {
@@ -45,6 +51,12 @@ pub struct ProbeSpec {
     pub query: &'static [u8],
     /// The framing the probe sends with.
     pub link: LinkMode,
+    /// How long the port may settle before the query is sent.
+    ///
+    /// Opening a serial port resets an Arduino into its bootloader, so every
+    /// shipped probe waits out the same settle. A scan that meets a slower
+    /// board lengthens this per attempt instead of changing the family.
+    pub settle: Duration,
 }
 
 impl ProbeSpec {
@@ -62,6 +74,16 @@ impl ProbeSpec {
     pub fn with_link(self, link: LinkMode) -> Self {
         Self { link, ..self }
     }
+
+    /// The same probe with a longer settle for a slow board.
+    ///
+    /// A port that opens into a long bootloader needs more than the default
+    /// before the query is sent. Lengthening the settle only moves the ask
+    /// later; the family, the query and the framing stay the same.
+    #[must_use]
+    pub fn with_settle(self, settle: Duration) -> Self {
+        Self { settle, ..self }
+    }
 }
 
 /// MegaSquirt-compatible boards, including Speeduino, answer `Q`.
@@ -73,6 +95,7 @@ pub const SPEEDUINO: ProbeSpec = ProbeSpec {
     behavior: BehaviorKind::Speeduino(SpeeduinoBehavior),
     query: b"Q",
     link: LinkMode::Legacy,
+    settle: PROBE_PORT_SETTLE,
 };
 
 /// rusEFI and FOME answer `S`, and reply with the data alone.
@@ -80,6 +103,7 @@ pub const RUSEFI: ProbeSpec = ProbeSpec {
     behavior: BehaviorKind::Rusefi(RusefiBehavior),
     query: b"S",
     link: LinkMode::Legacy,
+    settle: PROBE_PORT_SETTLE,
 };
 
 /// The probes tried on each port, in order.
@@ -223,14 +247,8 @@ mod tests {
         let speeduino = MsProtocol::for_probe(&SPEEDUINO);
         let rusefi = MsProtocol::for_probe(&RUSEFI);
 
-        assert_eq!(
-            SPEEDUINO.behavior.as_dyn().default_reply_code(),
-            ReplyCode::Leading
-        );
-        assert_eq!(
-            RUSEFI.behavior.as_dyn().default_reply_code(),
-            ReplyCode::Absent
-        );
+        assert_eq!(SPEEDUINO.behavior.as_dyn().reply_code(), ReplyCode::Leading);
+        assert_eq!(RUSEFI.behavior.as_dyn().reply_code(), ReplyCode::Absent);
         // The spec does not restate the shape; the protocol takes it from the
         // family, so the two cannot disagree.
         assert_eq!(speeduino.reply_code(), ReplyCode::Leading);
@@ -254,11 +272,22 @@ mod tests {
     fn a_probe_waits_for_the_port_to_settle() {
         let protocol = MsProtocol::for_probe(&SPEEDUINO);
 
+        assert_eq!(SPEEDUINO.settle, PROBE_PORT_SETTLE);
         assert_eq!(
             protocol.port_open_delay(),
             PROBE_PORT_SETTLE,
             "opening an Arduino resets it, so the probe spends the settle"
         );
+    }
+
+    #[test]
+    fn a_slow_board_gets_a_longer_settle_without_changing_the_probe() {
+        let slow = SPEEDUINO.with_settle(Duration::from_secs(3));
+        let protocol = MsProtocol::for_probe(&slow);
+
+        assert_eq!(protocol.port_open_delay(), Duration::from_secs(3));
+        assert_eq!(slow.query, b"Q");
+        assert_eq!(slow.behavior_id(), "speeduino");
     }
 
     #[test]

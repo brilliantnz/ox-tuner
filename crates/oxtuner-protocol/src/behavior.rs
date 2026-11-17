@@ -163,6 +163,17 @@ pub trait EcuBehavior: Send + Sync {
     /// through [`supports_compatible`](Self::supports_compatible) instead.
     fn matches_signature(&self, signature: &str) -> Match;
 
+    /// The query byte this family answers, if it has one.
+    ///
+    /// The byte is family knowledge: it is what a probe sends before any
+    /// definition exists. A scan asks one query at a time, so two families
+    /// that answer the same byte share one probe and are told apart by the
+    /// signature that comes back. A behavior with no family identity answers
+    /// `None`.
+    fn probe_query(&self) -> Option<&'static [u8]> {
+        None
+    }
+
     /// Whether this behavior claims a definition its signature did not name,
     /// because the declared message set is enough.
     ///
@@ -211,17 +222,11 @@ pub trait EcuBehavior: Send + Sync {
     }
 
     /// How a framed reply is shaped (see [`ReplyCode`]).
-    fn reply_code(&self, _definition: &Definition) -> ReplyCode {
-        self.default_reply_code()
-    }
-
-    /// The reply shape when no definition is in hand.
     ///
-    /// The shape is a family fact, so a probe needs it before a definition
-    /// exists. [`reply_code`](Self::reply_code) delegates here; an
-    /// implementation that ever needs the definition overrides that method
-    /// instead.
-    fn default_reply_code(&self) -> ReplyCode {
+    /// The shape is a family fact: the definition never states it, so the
+    /// method takes no definition. One method means a session and a probe can
+    /// never read two different shapes from the same family.
+    fn reply_code(&self) -> ReplyCode {
         ReplyCode::Leading
     }
 }
@@ -343,6 +348,10 @@ impl EcuBehavior for SpeeduinoBehavior {
             Match::No
         }
     }
+
+    fn probe_query(&self) -> Option<&'static [u8]> {
+        Some(b"Q")
+    }
 }
 
 /// FOME, which builds on rusEFI and says so in its signature.
@@ -370,7 +379,11 @@ impl EcuBehavior for FomeBehavior {
         }
     }
 
-    fn default_reply_code(&self) -> ReplyCode {
+    fn probe_query(&self) -> Option<&'static [u8]> {
+        Some(b"S")
+    }
+
+    fn reply_code(&self) -> ReplyCode {
         // Same reply shape as rusEFI: data alone, and an empty payload
         // acknowledges a write.
         ReplyCode::Absent
@@ -406,7 +419,11 @@ impl EcuBehavior for RusefiBehavior {
         }
     }
 
-    fn default_reply_code(&self) -> ReplyCode {
+    fn probe_query(&self) -> Option<&'static [u8]> {
+        Some(b"S")
+    }
+
+    fn reply_code(&self) -> ReplyCode {
         // `sendResponse(TS_CRC, data, count)`: the payload is the data itself,
         // and an empty payload acknowledges a write.
         ReplyCode::Absent
@@ -522,7 +539,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         assert!(matches!(behavior, BehaviorKind::Rusefi(_)));
         assert_eq!(behavior.as_dyn().id(), "rusefi");
         assert_eq!(behavior.as_dyn().name(), "rusEFI");
-        assert_eq!(behavior.as_dyn().reply_code(&definition), ReplyCode::Absent);
+        assert_eq!(behavior.as_dyn().reply_code(), ReplyCode::Absent);
     }
 
     #[test]
@@ -533,7 +550,7 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
         assert!(matches!(behavior, BehaviorKind::Fome(_)));
         assert_eq!(behavior.as_dyn().id(), "fome");
         assert_eq!(behavior.as_dyn().name(), "FOME");
-        assert_eq!(behavior.as_dyn().reply_code(&definition), ReplyCode::Absent);
+        assert_eq!(behavior.as_dyn().reply_code(), ReplyCode::Absent);
     }
 
     #[test]
@@ -590,6 +607,42 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
             BehaviorKind::for_signature("  ").is_none(),
             "an empty signature has no family"
         );
+    }
+
+    #[test]
+    fn every_probe_asks_what_its_family_answers() {
+        for probe in crate::PROBES {
+            assert_eq!(
+                Some(probe.query),
+                probe.behavior.as_dyn().probe_query(),
+                "{} sends a byte its own family does not answer",
+                probe.behavior_id()
+            );
+            assert!(
+                FAMILIES.contains(&probe.behavior),
+                "{} probes a family the selector does not know",
+                probe.behavior_id()
+            );
+        }
+    }
+
+    #[test]
+    fn every_family_is_reachable_by_a_probe() {
+        // A probe is a question, a family is how the answer is classified:
+        // two families may share one query byte and are told apart by the
+        // signature that comes back. What must hold is that some probe sends
+        // the family's byte with the family's reply shape.
+        for family in FAMILIES {
+            let Some(query) = family.as_dyn().probe_query() else {
+                continue;
+            };
+
+            assert!(
+                crate::PROBES.iter().any(|probe| probe.query == query
+                    && probe.behavior.as_dyn().reply_code() == family.as_dyn().reply_code()),
+                "{family:?} answers {query:?} but no probe asks for it"
+            );
+        }
     }
 
     #[test]
@@ -666,16 +719,10 @@ rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
     fn the_shared_defaults_cover_the_family_facts() {
         let definition = definition("speeduino 202501");
 
-        assert_eq!(
-            SpeeduinoBehavior.reply_code(&definition),
-            ReplyCode::Leading
-        );
-        assert_eq!(FomeBehavior.reply_code(&definition), ReplyCode::Absent);
-        assert_eq!(RusefiBehavior.reply_code(&definition), ReplyCode::Absent);
-        assert_eq!(
-            MsCompatibleBehavior.reply_code(&definition),
-            ReplyCode::Leading
-        );
+        assert_eq!(SpeeduinoBehavior.reply_code(), ReplyCode::Leading);
+        assert_eq!(FomeBehavior.reply_code(), ReplyCode::Absent);
+        assert_eq!(RusefiBehavior.reply_code(), ReplyCode::Absent);
+        assert_eq!(MsCompatibleBehavior.reply_code(), ReplyCode::Leading);
 
         let behaviors: [&dyn EcuBehavior; 4] = [
             &SpeeduinoBehavior,
