@@ -5300,6 +5300,7 @@ dependencies = [
 name = "oxtuner-registry"
 version = "0.0.0"
 dependencies = [
+ "oxtuner-protocol",
  "proptest",
  "reqwest",
  "serde",
