@@ -589,108 +589,126 @@ fn load_entry(
             tune.set_raw_at(&spec.name, 0, raw)
                 .map_err(|error| error.to_string())
         }
-        EntryShape::Scalar | EntryShape::Array { .. } => {
-            let tokens = entry.tokens();
-            let expected = spec.element_count();
-            if tokens.len() != expected {
-                return Err(format!(
-                    "the file has {} values, the definition declares {expected}",
-                    tokens.len()
-                ));
-            }
-
-            // Every token is parsed before any cell is written: a bad value
-            // halfway through a list must leave the variable at its default,
-            // not half from the file.
-            let mut users = Vec::with_capacity(tokens.len());
-            for token in &tokens {
-                let user = match token.parse::<f64>() {
-                    Ok(value) if value.is_finite() => value,
-                    Ok(_) => return Err(format!("`{token}` is not a finite number")),
-                    Err(_) => return Err(format!("`{token}` is not a number")),
-                };
-                users.push(user);
-            }
-
-            let mut clamped: Option<(f64, f64, f64)> = None;
-            let mut out_of_storage: Option<(usize, f64)> = None;
-            let mut raws = Vec::with_capacity(users.len());
-
-            for (index, user) in users.into_iter().enumerate() {
-                // A file value outside the declared range is clamped the way
-                // `TunerStudio` loads one, and reported once per variable.
-                // The writer is what rounds a bound to the written step, so
-                // a file this build wrote reopens without a clamp.
-                let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
-                let high = spec.maximum.unwrap_or(f64::INFINITY);
-                let (low, high) = (low.min(high), low.max(high));
-                let clamped_user = user.clamp(low, high);
-                let conversion = spec
-                    .to_raw(clamped_user)
-                    .map_err(|error| error.to_string())?;
-
-                // Only a clamp that changes the stored value is reported.
-                // A text that rounds below a bound but converts back to the
-                // same raw value changed nothing.
-                let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
-                let cell_clamped = written_raw != Some(conversion.raw);
-                if cell_clamped {
-                    clamped.get_or_insert((user, low, high));
-                } else if conversion.is_out_of_range() {
-                    out_of_storage.get_or_insert((index, clamped_user));
-                }
-
-                if !conversion.raw.is_finite() {
-                    return Err(format!(
-                        "`{}`[{index}] = {user} has no finite raw value",
-                        spec.name
-                    ));
-                }
-                raws.push(conversion.raw);
-            }
-
-            // Every cell converted before any is written, so a refused value
-            // leaves the variable entirely at its default.
-            for (index, raw) in raws.into_iter().enumerate() {
-                tune.set_raw_at(&spec.name, index, raw)
-                    .map_err(|error| error.to_string())?;
-            }
-
-            if let Some((index, value)) = out_of_storage {
-                let cell = if expected > 1 {
-                    format!("`{}`[{index}]", spec.name)
-                } else {
-                    format!("`{}`", spec.name)
-                };
-                report.warn(
-                    IssueKind::ValueOutOfRange,
-                    format!(
-                        "{cell} = {value} does not fit the declared storage type; the value is \
-                         kept as written"
-                    ),
-                );
-            }
-
-            if let Some((found, low, high)) = clamped {
-                let range = match (low.is_finite(), high.is_finite()) {
-                    (true, true) => format!("{low}..{high}"),
-                    (true, false) => format!("the declared minimum {low}"),
-                    (false, true) => format!("the declared maximum {high}"),
-                    (false, false) => "its declared range".to_owned(),
-                };
-
-                report.warn(
-                    IssueKind::ValueClamped,
-                    format!(
-                        "`{}` = {found} is outside {range}; it was clamped",
-                        spec.name
-                    ),
-                );
-            }
-
-            Ok(())
-        }
+        EntryShape::Scalar | EntryShape::Array { .. } => load_numbers(tune, spec, entry, report),
     }
+}
+
+/// Loads a scalar or array value: parse, convert, then write.
+///
+/// Every token is parsed and converted before any cell is written, so a bad
+/// value halfway through a list leaves the variable entirely at its default.
+fn load_numbers(
+    tune: &mut Tune,
+    spec: &VariableSpec,
+    entry: &Entry,
+    report: &mut LoadReport,
+) -> Result<(), String> {
+    let tokens = entry.tokens();
+    let expected = spec.element_count();
+    if tokens.len() != expected {
+        return Err(format!(
+            "the file has {} values, the definition declares {expected}",
+            tokens.len()
+        ));
+    }
+
+    // Parse every token before converting or writing any cell: a bad value
+    // halfway through a list must leave the variable at its default, not half
+    // from the file.
+    let mut users = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        let user = match token.parse::<f64>() {
+            Ok(value) if value.is_finite() => value,
+            Ok(_) => return Err(format!("`{token}` at {index} is not a finite number")),
+            Err(_) => return Err(format!("`{token}` at {index} is not a number")),
+        };
+        users.push(user);
+    }
+
+    let mut clamped: Option<(f64, f64, f64)> = None;
+    let mut clamped_overflow = false;
+    let mut out_of_storage: Option<(usize, f64)> = None;
+    let mut raws = Vec::with_capacity(users.len());
+
+    for (index, user) in users.into_iter().enumerate() {
+        // A file value outside the declared range is clamped the way
+        // `TunerStudio` loads one, and reported once per variable. The writer
+        // is what rounds a bound to the written step, so a file this build
+        // wrote reopens without a clamp.
+        let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
+        let high = spec.maximum.unwrap_or(f64::INFINITY);
+        let (low, high) = (low.min(high), low.max(high));
+        let clamped_user = user.clamp(low, high);
+        let conversion = spec
+            .to_raw(clamped_user)
+            .map_err(|error| error.to_string())?;
+
+        // Only a clamp that changes the stored value is reported. A text that
+        // rounds below a bound but converts back to the same raw value changed
+        // nothing.
+        let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
+        let cell_clamped = written_raw != Some(conversion.raw);
+        if cell_clamped {
+            clamped.get_or_insert((user, low, high));
+            clamped_overflow |= conversion.raw_out_of_range;
+        } else if conversion.is_out_of_range() {
+            out_of_storage.get_or_insert((index, clamped_user));
+        }
+
+        if !conversion.raw.is_finite() {
+            return Err(format!(
+                "`{}`[{index}] = {user} has no finite raw value",
+                spec.name
+            ));
+        }
+        raws.push(conversion.raw);
+    }
+
+    // Every cell converted before any is written, so a refused value leaves
+    // the variable entirely at its default.
+    for (index, raw) in raws.into_iter().enumerate() {
+        tune.set_raw_at(&spec.name, index, raw)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some((index, value)) = out_of_storage {
+        let cell = if matches!(spec.shape, EntryShape::Array { .. }) {
+            format!("`{}`[{index}]", spec.name)
+        } else {
+            format!("`{}`", spec.name)
+        };
+        report.warn(
+            IssueKind::ValueOutOfRange,
+            format!(
+                "{cell} = {value} does not fit the declared storage type; the value is kept as \
+                 written"
+            ),
+        );
+    }
+
+    if let Some((found, low, high)) = clamped {
+        let range = match (low.is_finite(), high.is_finite()) {
+            (true, true) => format!("{low}..{high}"),
+            (true, false) => format!("the declared minimum {low}"),
+            (false, true) => format!("the declared maximum {high}"),
+            (false, false) => "its declared range".to_owned(),
+        };
+
+        report.warn(
+            IssueKind::ValueClamped,
+            format!(
+                "`{}` = {found} is outside {range}; it was clamped{}",
+                spec.name,
+                if clamped_overflow {
+                    ", and the clamped value does not fit the declared storage type"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+
+    Ok(())
 }
 
 /// The bit value a label stands for.

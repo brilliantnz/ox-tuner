@@ -59,7 +59,7 @@ pub enum IssueKind {
     Definition,
     /// A value could not be loaded (bad text, wrong element count, …).
     ValueSkipped,
-    /// A value was stored but lies outside the declared range.
+    /// A value was stored but does not fit the declared storage type.
     ValueOutOfRange,
     /// A file value outside the declared range was clamped on load.
     ValueClamped,

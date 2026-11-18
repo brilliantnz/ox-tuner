@@ -1520,6 +1520,57 @@ axis = array, U08, 0, [2], "", 1, 0, 0, 1000, 0
         1,
         "the 500 cell fits the range but not U08"
     );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("`axis`[1]")),
+        "the storage warning names the cell: {:?}",
+        project.report().warnings
+    );
+}
+
+#[test]
+fn a_later_cell_that_cannot_convert_leaves_every_cell_at_its_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+big = array, U08, 0, [2], "", 1e-9, 0, -1e308, 1e308, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="big">1 1e308</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("later-cell");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert_eq!(
+        project.tune().raw_at("big", 0).expect("cell 0"),
+        0.0,
+        "the first cell is not written before the second is refused"
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("`big`[1]")),
+        "the refusal names the cell: {:?}",
+        project.report().warnings
+    );
 }
 
 #[test]
