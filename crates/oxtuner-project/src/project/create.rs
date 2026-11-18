@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn a_display_choice_the_file_only_tests_is_recorded() {
+    fn chosen_flags_accepts_a_flag_the_file_only_tests() {
         const DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"

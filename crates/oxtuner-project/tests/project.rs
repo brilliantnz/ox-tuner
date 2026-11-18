@@ -1395,6 +1395,84 @@ ego = scalar, U08, 0, "", 0.006802721088435375, 0, 0.4761904761904762, 1.7006802
 }
 
 #[test]
+fn an_array_the_file_omits_opens_on_its_declared_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"/>
+</msq>
+"#;
+
+    let dir = TempDir::new("array-default-open");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1), values.number(2)),
+        (Some(10.0), Some(20.0), Some(30.0)),
+        "an omitted array starts from the definition's declared values"
+    );
+}
+
+#[test]
+fn a_minimum_between_two_written_decimals_keeps_the_text_inside() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+p = scalar, F32, 0, "", 0.145038, 0, 7.25, 101526, 0
+
+[ConstantsExtensions]
+defaultValue = p, 7.25
+"#;
+
+    let sandbox = TempDir::new("create-bound-rounding");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "BoundRounding".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let reopened = Project::open(project.root()).expect("the project reopens");
+    assert!(
+        reopened
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| issue.kind != IssueKind::ValueClamped),
+        "a minimum between two written decimals is written at the next one: {:?}",
+        reopened.report().warnings
+    );
+}
+
+#[test]
 fn a_rejected_scaffold_names_itself() {
     let error = ProjectError::ScaffoldRejected {
         reasons: vec!["`pageSize` disagrees".to_owned()],

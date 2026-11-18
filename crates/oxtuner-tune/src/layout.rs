@@ -828,7 +828,7 @@ fn default_raw(
         .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
     {
-        return raw;
+        return spec.clamp_raw(raw);
     }
 
     if let Some(user) = definition
@@ -838,10 +838,10 @@ fn default_raw(
         .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {
-        return conversion.raw;
+        return spec.clamp_raw(conversion.raw);
     }
 
-    0.0
+    spec.clamp_raw(0.0)
 }
 
 #[cfg(test)]

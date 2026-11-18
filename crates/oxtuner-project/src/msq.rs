@@ -23,9 +23,7 @@ use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ChannelKind, Definition, SettingsContext, Shape};
-use oxtuner_tune::{
-    EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec, storage_range,
-};
+use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec};
 
 use crate::flags;
 use crate::load;
@@ -348,7 +346,7 @@ fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item 
     for (index, value) in values.enumerate() {
         let Some(value) = value else { continue };
 
-        let raw = clamp_raw(spec, value);
+        let raw = spec.clamp_raw(value);
         if let Err(error) = tune.set_image_raw(&spec.name, index, raw) {
             tracing::debug!(
                 name = %spec.name,
@@ -370,43 +368,10 @@ fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item 
 fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
     match values {
         Values::Numbers(numbers) => {
-            Values::Numbers(numbers.iter().map(|raw| clamp_raw(spec, *raw)).collect())
+            Values::Numbers(numbers.iter().map(|raw| spec.clamp_raw(*raw)).collect())
         }
         Values::Text(text) => Values::Text(text.clone()),
     }
-}
-
-/// One raw value pulled inside the declared range and the storage type.
-///
-/// The declared bounds are first pulled in to the decimals the file writes:
-/// a minimum of `7.25` written with one decimal reads back as `7.2`, below the
-/// minimum again. Rounding each bound to the file's own step, without leaving
-/// the declared range, keeps the written text inside it.
-fn clamp_raw(spec: &VariableSpec, raw: f64) -> f64 {
-    let (storage_low, storage_high) = storage_range(spec.data_type);
-    let Some(user) = spec.to_user(raw).ok() else {
-        return raw.clamp(storage_low, storage_high);
-    };
-
-    let declared_low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
-    let declared_high = spec.maximum.unwrap_or(f64::INFINITY);
-    let (declared_low, declared_high) = (
-        declared_low.min(declared_high),
-        declared_low.max(declared_high),
-    );
-
-    let step = 10f64.powi(-i32::from(spec.digits.max(1)));
-    let low = ((declared_low / step - 1e-9).ceil() * step).max(declared_low);
-    let high = ((declared_high / step + 1e-9).floor() * step).min(declared_high);
-    let user = if low <= high {
-        user.clamp(low, high)
-    } else {
-        user.clamp(declared_low, declared_high)
-    };
-
-    let raw = spec.to_raw(user).map_or(raw, |conversion| conversion.raw);
-
-    raw.clamp(storage_low, storage_high)
 }
 
 /// Whether the definition declares `name` as a one-dimensional list.

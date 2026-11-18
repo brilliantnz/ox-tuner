@@ -228,6 +228,49 @@ impl VariableSpec {
         })
     }
 
+    /// Pulls a raw value inside the declared range and the storage type.
+    ///
+    /// A default or a written value outside either would otherwise read back
+    /// changed. The declared bounds are first pulled in to the decimals a file
+    /// writes: a minimum of `7.25` written with one decimal reads back as
+    /// `7.2`, below the minimum again. A declared range narrower than one
+    /// written step keeps its own bounds and leaves the text alone.
+    #[must_use]
+    pub fn clamp_raw(&self, raw: f64) -> f64 {
+        let (storage_low, storage_high) = storage_range(self.data_type);
+        let Some(user) = self.to_user(raw).ok() else {
+            return raw.clamp(storage_low, storage_high);
+        };
+
+        let declared_low = self.minimum.unwrap_or(f64::NEG_INFINITY);
+        let declared_high = self.maximum.unwrap_or(f64::INFINITY);
+        let (declared_low, declared_high) = (
+            declared_low.min(declared_high),
+            declared_low.max(declared_high),
+        );
+
+        let step = 10f64.powi(-i32::from(self.digits.max(1)));
+        let low = {
+            let steps = declared_low / step;
+            let epsilon = f64::EPSILON * 8.0 * steps.abs().max(1.0);
+            ((steps - epsilon).ceil() * step).max(declared_low)
+        };
+        let high = {
+            let steps = declared_high / step;
+            let epsilon = f64::EPSILON * 8.0 * steps.abs().max(1.0);
+            ((steps + epsilon).floor() * step).min(declared_high)
+        };
+        let user = if low <= high {
+            user.clamp(low, high)
+        } else {
+            user.clamp(declared_low, declared_high)
+        };
+
+        let raw = self.to_raw(user).map_or(raw, |conversion| conversion.raw);
+
+        raw.clamp(storage_low, storage_high)
+    }
+
     /// Formats a user value with the definition's digit count.
     pub fn format_user(&self, user: f64) -> String {
         format_fixed(normalize_zero(user), usize::from(self.digits))

@@ -600,13 +600,14 @@ fn load_entry(
             }
 
             let mut clamped: Option<(f64, f64, f64)> = None;
+            let mut out_of_range_reported = false;
 
             for (index, token) in tokens.iter().enumerate() {
-                let user = token
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|value| value.is_finite())
-                    .ok_or_else(|| format!("`{token}` is not a finite number"))?;
+                let user = match token.parse::<f64>() {
+                    Ok(value) if value.is_finite() => value,
+                    Ok(_) => return Err(format!("`{token}` is not a finite number")),
+                    Err(_) => return Err(format!("`{token}` is not a number")),
+                };
 
                 // A file value outside the declared range is clamped the way
                 // `TunerStudio` loads one, and reported once per variable.
@@ -627,7 +628,8 @@ fn load_entry(
                 if written_raw != Some(conversion.raw) {
                     clamped.get_or_insert((user, low, high));
                 }
-                if conversion.is_out_of_range() && clamped.is_none() {
+                if conversion.is_out_of_range() && !out_of_range_reported {
+                    out_of_range_reported = true;
                     report.warn(
                         IssueKind::ValueOutOfRange,
                         format!(
@@ -688,6 +690,7 @@ fn label_to_raw(
 
     if !is_quoted(written)
         && let Ok(number) = text.trim().parse::<f64>()
+        && number.is_finite()
     {
         return Ok(number);
     }
@@ -702,9 +705,16 @@ fn label_to_raw(
 
     // A bit field without labels is a raw value; the file quotes it (`"0"`).
     if options.is_empty() {
-        return text.trim().parse::<f64>().map_err(|_| {
-            format!("`{text}` is not a number, and the definition labels none of its bits")
-        });
+        return text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                format!(
+                    "`{text}` is not a finite number, and the definition labels none of its bits"
+                )
+            });
     }
 
     options
