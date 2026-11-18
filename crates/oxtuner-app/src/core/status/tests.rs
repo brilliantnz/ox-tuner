@@ -6,6 +6,17 @@
 use super::*;
 use oxtuner_core::ConnectionState;
 
+/// A published port row with a path as its label, enough for ordering.
+fn port(name: &str) -> PortView {
+    PortView {
+        name: name.to_owned(),
+        label: name.to_owned(),
+        vid: None,
+        pid: None,
+        serial: None,
+    }
+}
+
 fn summary() -> DefinitionView {
     DefinitionView {
         label: "speeduino.ini".to_owned(),
@@ -319,6 +330,44 @@ fn a_bad_import_is_not_halted() {
 }
 
 #[test]
+fn an_appearing_port_joins_the_order_last_and_a_removed_one_leaves() {
+    let mut status = CoreStatus::default();
+
+    status.note_ports(&[port("/dev/cu.first"), port("/dev/cu.second")]);
+    assert_eq!(status.port_order, ["/dev/cu.first", "/dev/cu.second"]);
+
+    // The same set in another enumeration order is not a new appearance.
+    status.note_ports(&[port("/dev/cu.second"), port("/dev/cu.first")]);
+    assert_eq!(status.port_order, ["/dev/cu.first", "/dev/cu.second"]);
+
+    status.note_ports(&[
+        port("/dev/cu.first"),
+        port("/dev/cu.second"),
+        port("/dev/cu.third"),
+    ]);
+    assert_eq!(
+        status.port_order.last().expect("the newest port"),
+        "/dev/cu.third"
+    );
+
+    status.note_ports(&[port("/dev/cu.second"), port("/dev/cu.third")]);
+    assert_eq!(
+        status.port_order,
+        ["/dev/cu.second", "/dev/cu.third"],
+        "a port that left stops being a candidate"
+    );
+
+    // Unplug the ECU and plug it back in: it is the newest port again.
+    status.note_ports(&[port("/dev/cu.second")]);
+    status.note_ports(&[port("/dev/cu.third"), port("/dev/cu.second")]);
+    assert_eq!(
+        status.port_order.last().expect("the newest port"),
+        "/dev/cu.third",
+        "a device that comes back is new"
+    );
+}
+
+#[test]
 fn unloading_drops_the_project_but_keeps_machine_state() {
     let mut status = CoreStatus {
         ports: vec![PortView {
@@ -329,6 +378,7 @@ fn unloading_drops_the_project_but_keeps_machine_state() {
             serial: None,
         }],
         ports_revision: 3,
+        port_order: vec!["/dev/cu.usbmodem".to_owned()],
         ..CoreStatus::default()
     };
     status.apply(Update::Opened(Box::new(project())));
@@ -349,6 +399,11 @@ fn unloading_drops_the_project_but_keeps_machine_state() {
             .collect::<Vec<_>>(),
         ["/dev/cu.usbmodem"],
         "the sampled port list is machine state, not project state"
+    );
+    assert_eq!(
+        status.port_order,
+        ["/dev/cu.usbmodem"],
+        "the appearance order describes the list that survives with it"
     );
 }
 

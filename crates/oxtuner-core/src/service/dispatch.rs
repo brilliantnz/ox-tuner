@@ -88,11 +88,9 @@ pub(super) fn handle(
         CommandRequest::TestConnection { port, framing } => {
             connect(op, session, live, events, report, &port, framing, true)
         }
-        CommandRequest::ProbeFirmware {
-            port,
-            framing,
-            probe,
-        } => probe_firmware(op, &port, probe, framing, live.is_some(), events, report),
+        CommandRequest::ProbeFirmware { port, queries } => {
+            probe_firmware(op, &port, &queries, live.is_some(), events, report)
+        }
         CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {
                 send(

@@ -87,6 +87,12 @@ pub(crate) struct CoreStatus {
     /// Zero means no sample has arrived yet; a view renders that as still
     /// looking rather than as an empty machine.
     pub(crate) ports_revision: u64,
+    /// The published ports in the order they first appeared, oldest first.
+    ///
+    /// The core sorts its list by name, so the position in [`Self::ports`]
+    /// says nothing about when a device was plugged in. A scan reads this to
+    /// try the newest port first. Names leave the list when the port does.
+    pub(crate) port_order: Vec<String>,
     /// The port a signature test is running against.
     pub(crate) testing: Option<TestingConnection>,
     /// The last signature test.
@@ -204,6 +210,23 @@ pub(crate) struct TraceSaved {
 }
 
 impl CoreStatus {
+    /// Records which ports are new since the last published list.
+    ///
+    /// A name that is still present keeps its place, so re-enumerating the
+    /// same set in another order is not a new appearance, and a device that
+    /// leaves and comes back counts as new. The order is what a scan reads to
+    /// try the port the user just plugged in before the others.
+    pub(crate) fn note_ports(&mut self, ports: &[PortView]) {
+        self.port_order
+            .retain(|name| ports.iter().any(|port| &port.name == name));
+
+        for port in ports {
+            if !self.port_order.iter().any(|name| name == &port.name) {
+                self.port_order.push(port.name.clone());
+            }
+        }
+    }
+
     /// Clears the pending prompt, the running fetch and its progress.
     ///
     /// The decline is a user decision, not download state, so it stays.
@@ -329,14 +352,33 @@ pub(crate) struct ProbeAttempt {
     pub(crate) framing: LinkMode,
 }
 
-/// A scan across the ports, one probe at a time.
+/// A scan across the ports, one probe group at a time.
 #[derive(Debug, Clone)]
 pub(crate) struct FirmwareScan {
+    /// Every attempt the scan will make, in order.
     pub(crate) attempts: Vec<ProbeAttempt>,
-    /// Index of the attempt in flight.
+    /// Index of the first attempt that has not been answered yet.
     pub(crate) next: usize,
+    /// Queries carried by the command in flight.
+    pub(crate) sent: usize,
+    /// The query the core reported it is asking, for the progress line.
+    pub(crate) current: usize,
     /// The command that is waiting for an answer.
     pub(crate) op: Option<OpId>,
+}
+
+impl FirmwareScan {
+    /// Where `probe` in `framing` sits among the queries still in flight.
+    ///
+    /// The core answers one query at a time from the group the command
+    /// carried, so this is what places an answer on the scan's flat list.
+    pub(crate) fn offset_of(&self, probe: FirmwareProbe, framing: LinkMode) -> Option<usize> {
+        let end = (self.next + self.sent).min(self.attempts.len());
+
+        self.attempts[self.next..end]
+            .iter()
+            .position(|attempt| attempt.probe == probe && attempt.framing == framing)
+    }
 }
 
 /// The ECU a scan found.
@@ -654,12 +696,16 @@ impl CoreStatus {
                 // The port list is machine state, not project state: the core
                 // publishes only on change, so dropping the sampled list here
                 // would read as "not sampled yet" until a device is plugged.
+                // The appearance order describes that same list, so it stays
+                // with it.
                 let ports = std::mem::take(&mut self.ports);
+                let port_order = std::mem::take(&mut self.port_order);
                 let ports_revision = self.ports_revision;
                 let writes_enabled = self.writes_enabled;
                 *self = Self {
                     ports,
                     ports_revision,
+                    port_order,
                     writes_enabled,
                     ..Self::default()
                 };

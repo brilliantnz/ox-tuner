@@ -132,12 +132,12 @@ pub enum Event {
     /// including the first sample when it found ports: a view that opens later
     /// renders the last published list and never has to ask for the initial
     /// one. A steady machine produces no traffic. The same snapshot answers
-    /// [`super::CoreCommand::ListPorts`].
+    /// [`super::EcuCommand::ListPorts`].
     PortsChanged {
         /// The ports as they are now.
         ports: Vec<PortView>,
     },
-    /// A [`super::CoreCommand::TestConnection`] read a signature.
+    /// An [`super::EcuCommand::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
     /// and read-only rule, without a session or a page read.
@@ -147,7 +147,20 @@ pub enum Event {
         /// What the test found.
         view: ConnectionView,
     },
-    /// A [`super::CoreCommand::ProbeFirmware`] read a signature without a
+    /// An [`super::EcuCommand::ProbeFirmware`] is about to send one query.
+    ///
+    /// One command asks several queries over the same open port, so this is
+    /// what lets a progress line name the family and framing in flight instead
+    /// of the first query in the group.
+    ProbeStarted {
+        /// The command this belongs to.
+        op: OpId,
+        /// The family probe being sent.
+        probe: FirmwareProbe,
+        /// The framing it is sent in.
+        framing: LinkMode,
+    },
+    /// An [`super::EcuCommand::ProbeFirmware`] read a signature without a
     /// definition.
     ///
     /// There is no verdict here because there is nothing to compare against:
@@ -316,13 +329,17 @@ pub enum Event {
 }
 
 impl Event {
-    /// The operation this event answers, if it answers one.
+    /// The operation this event belongs to, if any.
+    ///
+    /// Most events answer their command. `ProbeStarted` does not: it is progress
+    /// from a probe group, and the terminal answer follows it.
     #[must_use]
     pub fn op(&self) -> Option<OpId> {
         match self {
             Self::DefinitionLoaded { op, .. }
             | Self::DefinitionInspected { op, .. }
             | Self::FirmwareProbed { op, .. }
+            | Self::ProbeStarted { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
             | Self::ProjectLayoutSaved { op, .. }

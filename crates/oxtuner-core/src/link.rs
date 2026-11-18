@@ -16,8 +16,7 @@ use std::sync::Arc;
 use oxtuner_ini::Definition;
 use oxtuner_transport::Transport;
 
-use crate::LinkMode;
-use crate::contract::FirmwareProbe;
+use crate::contract::ProbeQuery;
 
 /// A link the core cannot open by itself.
 ///
@@ -39,23 +38,26 @@ pub trait CustomLink: Send + Sync + 'static {
     /// Returns the user-facing reason the link could not be opened.
     fn open(&self, definition: &Definition) -> Result<Box<dyn Transport>, String>;
 
-    /// Opens the transport for a signature probe, which has no definition.
+    /// Opens the transport for a signature probe group, which has no
+    /// definition.
+    ///
+    /// A group asks its queries over one open port, so the transport must be
+    /// able to answer any of them: the families arrive in the core's own
+    /// vocabulary (the protocol spec they imply is one
+    /// [`crate::FirmwareProbe::spec`] call away), and each framing is the one
+    /// the core will put that query in.
+    ///
+    /// The core stops at the first answer. A query the transport cannot answer
+    /// must stay silent, like a read timeout, not fail: a read or link error
+    /// ends the group and hides the query that would have answered.
     ///
     /// A link that can only answer with a definition says so, and the probe
     /// reports the reason instead of pretending to have opened a session.
-    /// The family arrives in the core's own vocabulary; the protocol spec it
-    /// implies is one [`FirmwareProbe::spec`] call away. `framing` is the
-    /// framing the core will put the query in, so the transport can answer the
-    /// same one.
     ///
     /// # Errors
     ///
     /// Returns the user-facing reason the probe cannot run on this link.
-    fn open_for_probe(
-        &self,
-        _probe: &FirmwareProbe,
-        _framing: LinkMode,
-    ) -> Result<Box<dyn Transport>, String> {
+    fn open_for_probe(&self, _queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
         Err(format!(
             "{} cannot answer a signature probe without a definition",
             self.label()

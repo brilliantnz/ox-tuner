@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// What a successful [`super::CoreCommand::SaveTune`] wrote.
+/// What a successful [`super::ProjectCommand::Save`] wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveReport {
     /// The tune file that was rewritten.
