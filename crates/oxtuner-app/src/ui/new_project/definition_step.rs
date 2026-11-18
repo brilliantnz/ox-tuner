@@ -17,7 +17,7 @@ use rust_i18n::t;
 
 use super::shared::section_title;
 use super::state::{DefinitionMode, SharedWizard};
-use crate::core::{self, firmware};
+use crate::core::{self, ProbeAttempt, firmware};
 
 /// Step 2: detect the ECU, download its definition when the registry has it,
 /// or upload the file by hand.
@@ -198,6 +198,28 @@ fn detect_controls(status: &crate::core::CoreStatus, locked: bool) -> AnyElement
         .into_any_element()
 }
 
+/// The line that says which attempt is in flight.
+fn scan_line(attempt: &ProbeAttempt, number: usize, total: usize) -> String {
+    t!(
+        "app.new_project.scanning_firmware",
+        port = attempt.port.clone(),
+        baud = attempt.baud,
+        family = attempt.probe.label(),
+        framing = framing_label(attempt.framing),
+        attempt = number,
+        total = total
+    )
+    .to_string()
+}
+
+/// The framing as the firmware names it, for the scan line and the detection.
+fn framing_label(framing: LinkMode) -> &'static str {
+    match framing {
+        LinkMode::Envelope => "msEnvelope_1.0",
+        LinkMode::Legacy => "legacy",
+    }
+}
+
 /// Step 2, first section: probe the ECU and fetch its definition.
 fn auto_detect_section(
     model: &SharedWizard,
@@ -228,22 +250,18 @@ fn auto_detect_section(
     if let Some(scan) = &status.firmware_scan
         && let Some(attempt) = scan.attempts.get(scan.next)
     {
-        body = body.child(div().text_xs().text_color(muted).child(t!(
-            "app.new_project.scanning_firmware",
-            port = attempt.port.clone(),
-            baud = attempt.baud
+        body = body.child(div().text_xs().text_color(muted).child(scan_line(
+            attempt,
+            scan.next + 1,
+            scan.attempts.len(),
         )));
     } else if let Some(detected) = &status.detected_firmware {
-        let framing = match detected.framing {
-            LinkMode::Envelope => "msEnvelope_1.0",
-            LinkMode::Legacy => "legacy",
-        };
         body = body.child(div().text_xs().child(t!(
             "app.new_project.firmware_detected",
             signature = detected.signature.clone(),
             port = detected.port.clone(),
             baud = detected.baud,
-            framing = framing
+            framing = framing_label(detected.framing)
         )));
     }
 
@@ -532,6 +550,28 @@ fn use_definition(path: &Path, model: &SharedWizard, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use oxtuner_core::FirmwareProbe;
+
+    use super::*;
+
+    #[test]
+    fn the_scan_line_fills_every_placeholder() {
+        let attempt = ProbeAttempt {
+            port: "/dev/cu.usbmodem".to_owned(),
+            baud: 115_200,
+            probe: FirmwareProbe::Speeduino,
+            framing: LinkMode::Envelope,
+        };
+
+        let line = super::scan_line(&attempt, 2, 16);
+
+        assert!(!line.contains("%{"), "{line}");
+        assert!(line.contains("/dev/cu.usbmodem"), "{line}");
+        assert!(line.contains("Speeduino"), "{line}");
+        assert!(line.contains("msEnvelope_1.0"), "{line}");
+        assert!(line.contains("2 of 16"), "{line}");
+    }
+
     #[test]
     fn byte_counts_read_as_units() {
         assert_eq!(super::format_bytes(0), "0 B");

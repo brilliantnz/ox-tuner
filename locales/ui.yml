@@ -797,7 +797,7 @@ app:
     stop_scan:
       en: Stop scanning
     scanning_firmware:
-      en: 'Scanning port %{port} @ %{baud}…'
+      en: 'Scanning %{port} @ %{baud} baud, %{family} via %{framing} (attempt %{attempt} of %{total})…'
     scan_no_ports:
       en: No serial port to scan.
     scan_ports_pending:

@@ -329,6 +329,7 @@ fn unloading_drops_the_project_but_keeps_machine_state() {
             serial: None,
         }],
         ports_revision: 3,
+        port_order: vec!["/dev/cu.usbmodem".to_owned()],
         ..CoreStatus::default()
     };
     status.apply(Update::Opened(Box::new(project())));
@@ -349,6 +350,11 @@ fn unloading_drops_the_project_but_keeps_machine_state() {
             .collect::<Vec<_>>(),
         ["/dev/cu.usbmodem"],
         "the sampled port list is machine state, not project state"
+    );
+    assert_eq!(
+        status.port_order,
+        ["/dev/cu.usbmodem"],
+        "the appearance order describes the list that survives with it"
     );
 }
 

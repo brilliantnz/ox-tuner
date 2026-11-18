@@ -6,13 +6,14 @@
 //! the registry is served from the cache; a miss waits for the user's consent
 //! before the background download starts.
 
+use std::cmp::Reverse;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, AsyncApp};
-use oxtuner_core::{COMMON_PROBE_BAUD_RATES, FirmwareProbe, LinkMode, OpId, PortChoice};
+use oxtuner_core::{COMMON_PROBE_BAUD_RATES, FirmwareProbe, LinkMode, OpId, PortChoice, PortView};
 use oxtuner_registry::{BlockingClient, CacheStore, ErrorKind, Registry, ResolvedDefinition};
 use rust_i18n::t;
 
@@ -49,13 +50,17 @@ pub(crate) fn host_of(url: &str) -> String {
         .to_owned()
 }
 
-/// Starts a scan across the ports the core last published, newest last-listed first.
+/// Starts a scan across the ports the core last published, newest appearance first.
 ///
-/// A freshly plugged device lands at the end of the port list, so the scan
-/// walks that list back to front to meet it sooner. The list is the core's
-/// pushed snapshot; when no sample arrived yet the scan waits for it instead
-/// of reporting a portless machine. The request hurries the baseline along,
-/// and the next Detect press scans it.
+/// The core publishes its list sorted by name, so the order says nothing about
+/// when a device was plugged in. This keeps the appearance order the port
+/// events carry and sorts it newest first: the ECU the user just connected is
+/// usually the newest port, and meeting it first is what keeps a scan short on
+/// a machine with several serial adapters. On the very first sample nothing has
+/// been plugged in yet, so that baseline is just the name order reversed. The
+/// list is the core's pushed snapshot; when no sample arrived yet the scan
+/// waits for it instead of reporting a portless machine. The request hurries
+/// the baseline along, and the next Detect press scans it.
 pub(crate) fn start_scan(cx: &mut App) {
     // A scan already owns the core's probe path; a second one would drop the
     // op of the attempt in flight and leave its answer unattributed.
@@ -72,7 +77,7 @@ pub(crate) fn start_scan(cx: &mut App) {
         cx.refresh_windows();
         return;
     };
-    let ports: Vec<String> = published.iter().map(|port| port.name.clone()).collect();
+    let ports = scan_order(published, &cx.global::<CoreService>().status.port_order);
 
     let status = &mut cx.global_mut::<CoreService>().status;
     clear_detection(status);
@@ -102,6 +107,37 @@ pub(crate) fn start_scan(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Records which ports first appeared when, oldest first.
+///
+/// Called for every published port list. A name that is still present keeps
+/// its place, so re-enumerating the same set in another order is not a new
+/// appearance, and a device that leaves and comes back counts as new.
+pub(crate) fn note_appearance(order: &mut Vec<String>, ports: &[PortView]) {
+    order.retain(|name| ports.iter().any(|port| &port.name == name));
+
+    for port in ports {
+        if !order.iter().any(|name| name == &port.name) {
+            order.push(port.name.clone());
+        }
+    }
+}
+
+/// The order a scan walks the ports in: newest appearance first, then name.
+///
+/// A port the order does not know sorts as the oldest, which is only reachable
+/// when a list arrived without passing through [`note_appearance`].
+fn scan_order(ports: &[PortView], appeared: &[String]) -> Vec<String> {
+    let mut names: Vec<&str> = ports.iter().map(|port| port.name.as_str()).collect();
+    names.sort_by_key(|name| (Reverse(rank(appeared, name)), *name));
+
+    names.into_iter().map(str::to_owned).collect()
+}
+
+/// How recently a port appeared: a later index is newer.
+fn rank(appeared: &[String], name: &str) -> Option<usize> {
+    appeared.iter().position(|seen| seen == name)
+}
+
 /// Clears the answers a scan produced, so starting over never shows them.
 ///
 /// Both branches of [`start_scan`] run this: a new scan is a new attempt,
@@ -123,8 +159,11 @@ fn clear_detection(status: &mut CoreStatus) {
 /// miss.
 const PROBE_FRAMINGS: [LinkMode; 2] = [LinkMode::Envelope, LinkMode::Legacy];
 
-/// The attempts a scan makes, in order: newest port first, then common baud,
+/// The attempts a scan makes, in order: the ports as given, then common baud,
 /// then family, then framing.
+///
+/// The caller passes the ports already in scan order, so this stays a pure
+/// expansion and the ordering rule lives in one place.
 fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
     let mut attempts = Vec::with_capacity(
         ports.len()
@@ -133,7 +172,7 @@ fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
             * PROBE_FRAMINGS.len(),
     );
 
-    for port in ports.iter().rev() {
+    for port in ports {
         for baud in COMMON_PROBE_BAUD_RATES {
             for probe in FirmwareProbe::ALL {
                 for framing in PROBE_FRAMINGS {
@@ -753,7 +792,7 @@ mod tests {
         assert_eq!(
             attempts[0],
             ProbeAttempt {
-                port: "second".to_owned(),
+                port: "first".to_owned(),
                 baud: 115_200,
                 probe: FirmwareProbe::Speeduino,
                 framing: LinkMode::Envelope,
@@ -763,18 +802,112 @@ mod tests {
         assert_eq!(attempts[2].probe, FirmwareProbe::Rusefi);
         assert_eq!(attempts[2].framing, LinkMode::Envelope);
         assert_eq!(attempts[4].baud, COMMON_PROBE_BAUD_RATES[1]);
-        assert_eq!(attempts.last().expect("attempts").port, "first");
+        assert_eq!(attempts.last().expect("attempts").port, "second");
+    }
+
+    /// A published port row, with the label the UI shows.
+    fn port(name: &str) -> PortView {
+        PortView {
+            name: name.to_owned(),
+            label: name.to_owned(),
+            vid: None,
+            pid: None,
+            serial: None,
+        }
     }
 
     #[test]
-    fn the_scan_starts_from_the_last_listed_port() {
-        let attempts = attempts_for(&[
-            "/dev/cu.built-in".to_owned(),
-            "/dev/cu.usbmodem-new".to_owned(),
-        ]);
+    fn an_appearing_port_joins_the_order_last_and_a_removed_one_leaves() {
+        let mut order = Vec::new();
 
-        assert_eq!(attempts[0].port, "/dev/cu.usbmodem-new");
-        assert_eq!(attempts.last().expect("attempts").port, "/dev/cu.built-in");
+        note_appearance(&mut order, &[port("/dev/cu.first"), port("/dev/cu.second")]);
+        assert_eq!(order, ["/dev/cu.first", "/dev/cu.second"]);
+
+        // The same set in another enumeration order is not a new appearance.
+        note_appearance(&mut order, &[port("/dev/cu.second"), port("/dev/cu.first")]);
+        assert_eq!(order, ["/dev/cu.first", "/dev/cu.second"]);
+
+        note_appearance(
+            &mut order,
+            &[
+                port("/dev/cu.first"),
+                port("/dev/cu.second"),
+                port("/dev/cu.third"),
+            ],
+        );
+        assert_eq!(order.last().expect("the newest port"), "/dev/cu.third");
+
+        note_appearance(&mut order, &[port("/dev/cu.second"), port("/dev/cu.third")]);
+        assert_eq!(
+            order,
+            ["/dev/cu.second", "/dev/cu.third"],
+            "a port that left stops being a candidate"
+        );
+
+        // Unplug the ECU and plug it back in: it is the newest port again.
+        note_appearance(&mut order, &[port("/dev/cu.second")]);
+        note_appearance(&mut order, &[port("/dev/cu.third"), port("/dev/cu.second")]);
+        assert_eq!(
+            order.last().expect("the newest port"),
+            "/dev/cu.third",
+            "a device that comes back is new"
+        );
+    }
+
+    #[test]
+    fn the_scan_starts_with_the_newest_port_not_the_last_name() {
+        // Neither ascending nor descending: only the appearance order produces
+        // this sequence, so a name sort cannot pass in its place.
+        let ports = [
+            port("/dev/cu.aaa"),
+            port("/dev/cu.mmm"),
+            port("/dev/cu.zzz"),
+        ];
+        let appeared = ["/dev/cu.zzz", "/dev/cu.aaa", "/dev/cu.mmm"].map(str::to_owned);
+
+        assert_eq!(
+            scan_order(&ports, &appeared),
+            ["/dev/cu.mmm", "/dev/cu.aaa", "/dev/cu.zzz"]
+        );
+    }
+
+    #[test]
+    fn a_port_the_order_does_not_know_is_scanned_after_a_known_one() {
+        let ports = [port("/dev/cu.aaa"), port("/dev/cu.zzz")];
+
+        assert_eq!(
+            scan_order(&ports, &["/dev/cu.zzz".to_owned()]),
+            ["/dev/cu.zzz", "/dev/cu.aaa"]
+        );
+        assert_eq!(
+            scan_order(&ports, &[]),
+            ["/dev/cu.aaa", "/dev/cu.zzz"],
+            "with no appearance at all the name keeps the order stable"
+        );
+    }
+
+    #[test]
+    fn the_published_lists_decide_the_first_attempt() {
+        // The seam a Detect press runs: record the samples, then expand the
+        // ordered ports. The port that appeared between two samples is asked
+        // first, even though it is not the last name or the first one.
+        let ports = [
+            port("/dev/cu.aaa"),
+            port("/dev/cu.mmm"),
+            port("/dev/cu.zzz"),
+        ];
+        let mut order = Vec::new();
+        note_appearance(&mut order, &[port("/dev/cu.aaa"), port("/dev/cu.zzz")]);
+        note_appearance(&mut order, &ports);
+
+        let attempts = attempts_for(&scan_order(&ports, &order));
+
+        assert_eq!(
+            attempts[0].port, "/dev/cu.mmm",
+            "the just-plugged port is tried first"
+        );
+        assert_eq!(attempts[0].baud, COMMON_PROBE_BAUD_RATES[0]);
+        assert_eq!(attempts.last().expect("attempts").port, "/dev/cu.aaa");
     }
 
     #[test]
@@ -860,10 +993,11 @@ mod tests {
         let core = start_core(cx);
 
         // Send the first attempt the way Detect does, so the scan owns a real
-        // op id to answer.
+        // op id to answer. The scan walks this list in order, so the noisy
+        // port comes first and the ECU port is what it must still reach.
         cx.update(|cx| {
             cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
-                attempts: attempts_for(&["/dev/ecu".to_owned(), "/dev/noise".to_owned()]),
+                attempts: attempts_for(&["/dev/noise".to_owned(), "/dev/ecu".to_owned()]),
                 next: 0,
                 op: None,
             });

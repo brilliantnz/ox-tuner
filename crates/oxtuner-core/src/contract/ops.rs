@@ -893,6 +893,16 @@ impl FirmwareProbe {
     pub fn as_str(self) -> &'static str {
         self.spec().behavior_id()
     }
+
+    /// The family label a person reads, as the behavior spells it.
+    ///
+    /// The name comes from the behavior rather than from this enum, so a
+    /// display that has to spell a family asks the behavior instead of
+    /// hardcoding it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.spec().behavior.as_dyn().name()
+    }
 }
 
 /// One command plus the id it will be answered under.
