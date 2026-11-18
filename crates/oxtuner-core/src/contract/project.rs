@@ -319,11 +319,15 @@ pub struct ConnectionView {
 ///
 /// The port is kept beside the summary on purpose: on failure the summary is
 /// gone and the port is the only thing the dialog can still show. On success
-/// it always equals the summary's own port.
+/// it always equals the summary's own port. The baud is kept for the same
+/// reason: a result only describes the rate it ran at, so a dialog that
+/// changed the picker afterwards must not keep showing it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectionTest {
     /// The port the test ran against.
     pub port: String,
+    /// The rate it ran at, when the choice named one.
+    pub baud: Option<u32>,
     /// The summary, or the failure message.
     pub outcome: Result<ConnectionView, String>,
 }
@@ -385,6 +389,7 @@ mod tests {
     fn tested(port: &str, signature: &str) -> ConnectionTest {
         ConnectionTest {
             port: port.to_owned(),
+            baud: Some(115_200),
             outcome: Ok(ConnectionView {
                 port: port.to_owned(),
                 custom: false,
@@ -418,6 +423,7 @@ mod tests {
     fn a_failed_check_contributes_no_signature() {
         let failed = ConnectionTest {
             port: "/dev/ttyACM0".to_owned(),
+            baud: Some(115_200),
             outcome: Err("no answer".to_owned()),
         };
 

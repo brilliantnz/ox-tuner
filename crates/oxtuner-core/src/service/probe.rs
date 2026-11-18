@@ -85,10 +85,9 @@ pub(super) fn probe_firmware(
         Err(error) => return reject(op, probe, &error.to_string(), events, report),
     };
     // A port that could not be opened is not a silent ECU, so its own message
-    // is what the user needs to see.
-    //
-    // The answer is reported before the thread is joined: the join blocks, so
-    // joining first would let a stuck port swallow the reply.
+    // is what the user needs to see. The answer is reported before the thread
+    // is joined: the join blocks, so joining first would let a stuck port
+    // swallow the reply.
     let event = match reply {
         Ok(reply) => match reply.outcome {
             IoOutcome::Signature { signature } if !signature.trim().is_empty() => {
@@ -150,7 +149,7 @@ fn probe_failed(op: OpId, reason: &str) -> Event {
     }
 }
 
-/// Reports a probe that produced no signature.
+/// Reports a probe that produced no signature and counts it.
 fn reject(
     op: OpId,
     probe: FirmwareProbe,
@@ -160,16 +159,7 @@ fn reject(
 ) -> Outcome {
     report.failures += 1;
     tracing::debug!(%op, ?probe, reason, "firmware probe found nothing");
-    send(
-        events,
-        Event::Failed {
-            op,
-            failure: Failure {
-                code: FailureCode::FirmwareNotDetected,
-                message: reason.to_owned(),
-            },
-        },
-    );
+    send(events, probe_failed(op, reason));
 
     Outcome::Continue
 }
