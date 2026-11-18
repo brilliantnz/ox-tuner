@@ -392,15 +392,24 @@ fn apply_extension_flags(definition: &mut Definition) {
     // The lists live beside the constants, not inside them: destructuring
     // borrows each field once, so the sets are read in place instead of being
     // cloned (`readOnly` can name every constant in the file).
+    //
+    // The same lists also name PC variables, so both collections are walked.
     let Definition {
         extensions,
         constants,
+        pc_variables,
         ..
     } = definition;
 
     for (name, constant) in constants.iter_mut() {
         if extensions.is_read_only(name) || extensions.is_controller_priority(name) {
             constant.flags.controller_priority = true;
+        }
+    }
+
+    for (name, variable) in pc_variables.iter_mut() {
+        if extensions.is_read_only(name) || extensions.is_controller_priority(name) {
+            variable.flags.controller_priority = true;
         }
     }
 }
@@ -634,6 +643,96 @@ mod tests {
         assert_eq!(literal(&variable.minimum), Some(-4.0));
         assert_eq!(literal(&variable.maximum), Some(4.0));
         assert_eq!(literal(&variable.digits), Some(1.0));
+    }
+
+    #[test]
+    fn a_pc_scalar_with_an_offset_keeps_its_units() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = scalar, U16, 2, \"u\", 1.0, 0.0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("v")
+            .expect("the variable parses");
+        assert_eq!(variable.units.literal(), Some("u"));
+        assert_eq!(
+            variable.scale.as_ref().and_then(crate::Number::literal),
+            Some(1.0)
+        );
+        assert!(
+            !definition
+                .diagnostics
+                .iter()
+                .any(|issue| issue.code == "pc-offset-guess"),
+            "an unambiguous offset needs no warning"
+        );
+    }
+
+    #[test]
+    fn a_pc_bits_variable_with_an_offset_keeps_its_options() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = bits, U08, 2, [0:1], \"Off\", \"On\"\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("v")
+            .expect("the variable parses");
+        assert!(matches!(
+            variable.shape,
+            crate::Shape::Bits {
+                low: 0,
+                high: 1,
+                ..
+            }
+        ));
+        assert_eq!(variable.options.len(), 2);
+    }
+
+    #[test]
+    fn two_numeric_fields_before_the_units_warn_about_the_offset_guess() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = scalar, U16, 2, 7, 1.0, 0.0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .diagnostics
+                .iter()
+                .any(|issue| issue.code == "pc-offset-guess"),
+            "an ambiguous entry is reported instead of guessed in silence"
+        );
+    }
+
+    #[test]
+    fn the_extension_lists_reach_pc_variables_too() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    gearCount = scalar, U08, 0, \"\", 1.0, 0.0\n\
+                    bias = scalar, U08, 1, \"\", 1.0, 0.0\n\
+                    [ConstantsExtensions]\n\
+                    readOnly = gearcount\n\
+                    controllerPriority = BIAS\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .pc_variables
+                .get("gearCount")
+                .is_some_and(|variable| variable.flags.controller_priority),
+            "readOnly names a PC variable in another case"
+        );
+        assert!(
+            definition
+                .pc_variables
+                .get("bias")
+                .is_some_and(|variable| variable.flags.controller_priority),
+            "controllerPriority names a PC variable"
+        );
     }
 
     #[test]

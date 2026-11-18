@@ -30,9 +30,16 @@ fuzz_target!(|data: &str| {
         panic!("the same text parsed twice must give the same answer");
     };
 
-    assert_eq!(
-        first.summary(),
-        second.summary(),
-        "the option list must not depend on hidden state"
-    );
+    // The summary does not carry the option table, so compare the parsed field
+    // itself: a hidden cache would show up here as a different table.
+    match (first.constant("field"), second.constant("field")) {
+        (Some(field), Some(again)) => {
+            assert_eq!(
+                field.options, again.options,
+                "the option list must not depend on hidden state"
+            );
+        }
+        (None, None) => {}
+        _ => panic!("the same text parsed twice must store the same entry"),
+    }
 });

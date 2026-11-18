@@ -64,7 +64,7 @@ impl SettingsContext {
 
     /// Records an explicit choice.
     pub fn set_override(&mut self, name: impl AsRef<str>, active: bool) {
-        let name = name.as_ref();
+        let name = name.as_ref().trim_ascii();
         self.spelling
             .entry(name.to_ascii_lowercase())
             .or_insert_with(|| name.to_owned());

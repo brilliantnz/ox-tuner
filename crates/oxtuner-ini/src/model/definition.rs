@@ -271,6 +271,43 @@ impl Definition {
             );
         }
         let _ = writeln!(out, "pc_variables|{}", self.pc_variables.len());
+        for (name, variable) in self.pc_variables.iter() {
+            let _ = writeln!(
+                out,
+                "pc_variable|{name}|{:?}|{}|{}|units={}|scale={}|translate={}|min={}|max={}|\
+                 digits={}|flags={:?}",
+                variable.class,
+                variable.data_type,
+                variable.shape,
+                variable.units,
+                variable
+                    .scale
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                variable
+                    .translate
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                variable
+                    .minimum
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                variable
+                    .maximum
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                variable
+                    .digits
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                variable.flags,
+            );
+        }
     }
 
     fn write_channels(&self, out: &mut String) {

@@ -65,7 +65,7 @@ mod tests {
 
         let decoded = decode(&bytes);
 
-        assert!(decoded.text.contains("°±") || decoded.text.contains('±'));
+        assert!(decoded.text.contains('±'));
         assert!(decoded.text.contains("[Constants]"));
         assert_eq!(
             decoded.diagnostic.as_ref().map(|d| d.severity),

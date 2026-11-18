@@ -1005,11 +1005,28 @@ fn split_option_field(field: &str) -> Vec<&str> {
 /// `[Constants]` does. A bare number where a `scalar` has its units is that
 /// offset; for a `bits` or `array` entry the shape is the bracket field, so a
 /// field before it is an offset.
-fn pc_shape_index(class: ConstantClass, fields: &Fields<'_>) -> usize {
+fn pc_shape_index(
+    class: ConstantClass,
+    fields: &Fields<'_>,
+    section: &mut SectionParser,
+    key: &str,
+    line: u32,
+) -> usize {
     // An offset is a number or `nextOffset`/`lastOffset`; anything else is the
     // units or the shape, and a mis-typed entry keeps its positions so the
     // parser can warn about the token instead of silently eating it.
     let has_offset = class != ConstantClass::String && fields.get(2).is_some_and(is_offset_field);
+
+    if class == ConstantClass::Scalar && has_offset && fields.get(3).is_some_and(is_offset_field) {
+        section.warn(
+            "pc-offset-guess",
+            format!(
+                "`{key}` has two numeric fields where the units belong; the first is taken as an \
+                 offset"
+            ),
+            line,
+        );
+    }
 
     2 + usize::from(has_offset)
 }
@@ -1120,7 +1137,7 @@ pub(crate) fn parse_pc_variables(
             continue;
         };
 
-        let mut index = pc_shape_index(class, &fields);
+        let mut index = pc_shape_index(class, &fields, section, key, *line);
         let (shape, used) = parse_pc_shape(class, &fields, index);
         index += used;
 

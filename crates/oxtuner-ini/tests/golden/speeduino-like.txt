@@ -20,6 +20,7 @@ constant|fuelLoadBins|Array|U08|page=2|addr=Some(16)|shape=[16]|units=%|scale=1|
 constant|veTable|Array|U08|page=2|addr=Some(32)|shape=[16x16]|units=%|scale=1|translate=0
 constant|afrTable|Array|U08|page=2|addr=Some(32)|shape=[16x16]|units=AFR|scale=0.1|translate=0
 pc_variables|1
+pc_variable|tsCanId|Bits|U08|[0:3]|units=|scale=|translate=|min=|max=|digits=|flags=ConstantFlags { no_msq_save: false, controller_priority: false }
 channels|7
 channel|secl|U08@0|units=sec
 channel|status1|U08@1|units=bits

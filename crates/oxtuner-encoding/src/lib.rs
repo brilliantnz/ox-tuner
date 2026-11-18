@@ -170,6 +170,11 @@ pub fn escape_java_property(value: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
+            // Any other C0 or DEL byte would be read differently by the two
+            // loaders, so it is escaped like a non-ASCII character.
+            character if character.is_ascii_control() => {
+                let _ = write!(escaped, "\\u{:04X}", u32::from(character));
+            }
             character if character.is_ascii() => escaped.push(character),
             character => {
                 let mut units = [0_u16; 2];
@@ -253,6 +258,11 @@ mod tests {
             escape_java_property(" leading"),
             "\\ leading",
             "the loader trims an unescaped leading space"
+        );
+        assert_eq!(
+            escape_java_property("\u{1}bell\u{7}"),
+            "\\u0001bell\\u0007",
+            "a control character outside the named escapes is escaped too"
         );
         assert_eq!(
             escape_java_property("🚗"),

@@ -36,10 +36,11 @@ fuzz_target!(|data: &str| {
         "a PC variable must not depend on hidden state"
     );
 
-    if let Some(variable) = first.pc_variables.get("v") {
-        assert_eq!(
-            variable.name, "v",
-            "a stored PC variable keeps the name it declared"
-        );
-    }
+    // The summary names the variable; this pins the parsed fields themselves,
+    // so the shape, scale and flags are compared field for field.
+    assert_eq!(
+        first.pc_variables.get("v"),
+        second.pc_variables.get("v"),
+        "the same entry text must produce the same variable"
+    );
 });
