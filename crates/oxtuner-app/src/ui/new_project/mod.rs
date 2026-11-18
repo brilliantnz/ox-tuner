@@ -172,6 +172,9 @@ fn render(
         .pending_project
         .as_ref()
         .is_some_and(|pending| pending.kind == crate::core::PendingProjectKind::Create);
+    // A running download owns the dialog: no cancel, back, next, close or
+    // source change until it succeeds or fails.
+    let downloading = status.downloading_definition;
     let created = target.as_ref().is_some_and(|target| {
         status
             .project
@@ -277,6 +280,7 @@ fn render(
             step,
             created,
             creating,
+            downloading,
             retry: failure.is_some(),
             can_advance: match step {
                 // The button checks the cheap half; the target lives on
@@ -297,7 +301,7 @@ fn render(
     dialog
         .title(t!("app.new_project.title"))
         .width(px(560.))
-        .close_button(!creating)
+        .close_button(!creating && !downloading)
         .child(
             v_flex()
                 .gap_3()

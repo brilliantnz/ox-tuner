@@ -25,6 +25,9 @@ pub(super) struct FooterState {
     pub(super) step: Step,
     pub(super) created: bool,
     pub(super) creating: bool,
+    /// A definition download is running: the dialog keeps the user on the
+    /// download until it succeeds or fails.
+    pub(super) downloading: bool,
     pub(super) retry: bool,
     pub(super) can_advance: bool,
 }
@@ -66,10 +69,11 @@ pub(super) fn footer(
         step,
         created,
         creating,
+        downloading,
         retry,
         can_advance,
     } = state;
-    let can_leave = !creating;
+    let can_leave = !creating && !downloading;
 
     let cancel = if created {
         Button::new("new-project-done")
@@ -124,7 +128,7 @@ pub(super) fn footer(
                     t!("app.new_project.create")
                 })
                 .primary()
-                .disabled(creating || !can_advance)
+                .disabled(creating || downloading || !can_advance)
                 .on_click(move |_, _, cx| {
                     create(&create_model, &parent, &name, cx);
                 }),
@@ -137,7 +141,7 @@ pub(super) fn footer(
             Button::new("new-project-next")
                 .label(t!("app.new_project.next"))
                 .primary()
-                .disabled(!can_advance || creating)
+                .disabled(!can_advance || creating || downloading)
                 .on_click(move |_, _, cx| {
                     let step = next_model.borrow().step;
                     if step == Step::Name {

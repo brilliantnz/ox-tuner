@@ -696,7 +696,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_forgotten_layout_is_sent_again() {
+    fn forget_sent_layout_clears_the_record() {
         SENT_LAYOUT.with(|last| {
             *last.borrow_mut() = Some((PathBuf::from("/project"), ProjectLayout::default()));
         });

@@ -30,13 +30,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// new byte count arrived; the tick stops with the download.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
-/// How long one probe may stay unanswered before the scan moves on.
+/// How long one attempt may stay unanswered before the scan moves on.
 ///
-/// This is a last resort for a lost answer, not a per-attempt budget: the core
-/// opens the port with no timeout and joins a stuck probe thread, so no number
-/// here can bound an attempt precisely. A dropped event or a wedged thread must
-/// not leave Detect disabled forever, so the attempt expires; the op check
-/// makes a late answer harmless.
+/// This bounds the UI, not the core: the core opens the port without a timeout
+/// and joins a wedged probe thread, so no number here can bound an attempt
+/// precisely. After this the attempt counts as a miss and the scan tries the
+/// next one; a late answer is ignored by the op check.
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The host a download prompt names, for the consent text.
@@ -341,16 +340,24 @@ pub(crate) fn missed(op: OpId, miss: Miss<'_>, cx: &mut App) -> bool {
 
     let attempts = scan.attempts.len();
     status.firmware_scan = None;
-    status.firmware_error = Some(match miss {
-        Miss::Refused(reason) => reason.to_owned(),
-        Miss::Silent => t!("app.new_project.scan_no_answer").to_string(),
-        Miss::Expired => t!("app.new_project.scan_timed_out").to_string(),
-        Miss::Stopped => t!("app.new_project.scan_core_stopped").to_string(),
-    });
+    status.firmware_error = Some(miss_message(miss));
     tracing::info!(attempts, "the firmware scan found no ECU");
     cx.refresh_windows();
 
     true
+}
+
+/// The sentence an unanswered scan ends with.
+///
+/// A refusal keeps the core's own reason; everything else is the UI's own
+/// wording for what happened.
+fn miss_message(miss: Miss<'_>) -> String {
+    match miss {
+        Miss::Refused(reason) => reason.to_owned(),
+        Miss::Silent => t!("app.new_project.scan_no_answer").to_string(),
+        Miss::Expired => t!("app.new_project.scan_timed_out").to_string(),
+        Miss::Stopped => t!("app.new_project.scan_core_stopped").to_string(),
+    }
 }
 
 /// Resolves a signature through the registry and the local cache.
@@ -579,6 +586,18 @@ pub(crate) fn inspect_detected(cx: &mut App) {
     inspect_definition(&path, cx);
 }
 
+/// Drops the prompt because the user switched source, not because they said no.
+///
+/// Looking at the Manual tab must not count as declining: returning to Auto
+/// still offers the download the detection found.
+pub(crate) fn drop_download(cx: &mut App) {
+    let status = &mut cx.global_mut::<CoreService>().status;
+    status.definition_download = None;
+    status.downloading_definition = false;
+    status.download_progress = None;
+    cx.refresh_windows();
+}
+
 /// Drops a download the user declined.
 pub(crate) fn skip_download(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
@@ -658,6 +677,19 @@ mod tests {
 
         assert_eq!(attempts[0].port, "/dev/cu.usbmodem-new");
         assert_eq!(attempts.last().expect("attempts").port, "/dev/cu.built-in");
+    }
+
+    #[test]
+    fn a_lost_attempt_keeps_its_own_verdict() {
+        assert_eq!(
+            miss_message(Miss::Expired),
+            t!("app.new_project.scan_timed_out").to_string()
+        );
+        assert_eq!(
+            miss_message(Miss::Stopped),
+            t!("app.new_project.scan_core_stopped").to_string()
+        );
+        assert_eq!(miss_message(Miss::Refused("port busy")), "port busy");
     }
 
     #[test]

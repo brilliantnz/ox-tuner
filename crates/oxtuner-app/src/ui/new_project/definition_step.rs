@@ -40,6 +40,9 @@ pub(super) fn definition_body(
     creating: bool,
 ) -> AnyElement {
     let mode = model.borrow().definition_mode;
+    // A running download keeps the source, the tabs and every control fixed
+    // until it finishes; only the progress and the outcome are actionable.
+    let locked = creating || status.downloading_definition;
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let mut body = v_flex()
@@ -64,7 +67,7 @@ pub(super) fn definition_body(
                     cx,
                 )),
         )
-        .child(mode_tabs(model, creating));
+        .child(mode_tabs(model, locked));
 
     body = match mode {
         DefinitionMode::Auto => body.child(auto_detect_section(model, status, cx, creating)),
@@ -73,7 +76,7 @@ pub(super) fn definition_body(
             definition,
             definition_error,
             cx,
-            creating,
+            locked,
         )),
     };
 
@@ -104,7 +107,7 @@ pub(super) fn definition_body(
 /// A segmented control that fills the width; the active tab is the wizard's
 /// source. Each mode owns its source, so toggling keeps the other side's
 /// answers around and switching back restores them.
-fn mode_tabs(model: &SharedWizard, creating: bool) -> AnyElement {
+fn mode_tabs(model: &SharedWizard, locked: bool) -> AnyElement {
     let selected = match model.borrow().definition_mode {
         DefinitionMode::Auto => 0,
         DefinitionMode::Manual => 1,
@@ -119,13 +122,13 @@ fn mode_tabs(model: &SharedWizard, creating: bool) -> AnyElement {
             Tab::new()
                 .flex_1()
                 .label(t!("app.new_project.definition_auto").to_string())
-                .disabled(creating),
+                .disabled(locked),
         )
         .child(
             Tab::new()
                 .flex_1()
                 .label(t!("app.new_project.definition_manual").to_string())
-                .disabled(creating),
+                .disabled(locked),
         )
         .on_click(move |index, _, cx| {
             set_definition_mode(
@@ -159,7 +162,7 @@ fn set_definition_mode(model: &SharedWizard, mode: DefinitionMode, cx: &mut App)
     match mode {
         DefinitionMode::Manual => {
             firmware::cancel_scan(cx);
-            firmware::skip_download(cx);
+            firmware::drop_download(cx);
         }
         DefinitionMode::Auto => firmware::inspect_detected(cx),
     }
@@ -380,7 +383,7 @@ fn manual_upload_section(
     definition: Option<&Path>,
     error: Option<String>,
     cx: &App,
-    creating: bool,
+    locked: bool,
 ) -> AnyElement {
     let chosen = definition.map_or_else(
         || t!("app.new_project.definition_none").to_string(),
@@ -395,7 +398,7 @@ fn manual_upload_section(
 
     v_flex()
         .gap_2()
-        .child(definition_dropzone(model, cx, creating))
+        .child(definition_dropzone(model, cx, locked))
         .child(div().flex_1().min_w_0().truncate().text_sm().child(chosen))
         .when_some(error, |this, message| {
             this.child(div().text_xs().text_color(danger).child(message))
@@ -405,7 +408,7 @@ fn manual_upload_section(
 
 /// The dashed drop target: a file drop lands here on every platform and a
 /// click anywhere opens the native picker.
-fn definition_dropzone(model: &SharedWizard, cx: &App, creating: bool) -> AnyElement {
+fn definition_dropzone(model: &SharedWizard, cx: &App, locked: bool) -> AnyElement {
     let click_model = std::rc::Rc::clone(model);
     let drop_model = std::rc::Rc::clone(model);
     let muted = cx.theme().muted_foreground;
@@ -426,13 +429,13 @@ fn definition_dropzone(model: &SharedWizard, cx: &App, creating: bool) -> AnyEle
         .gap_1()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            if creating {
+            if locked {
                 return;
             }
             choose_definition(std::rc::Rc::clone(&click_model), cx);
         })
         .on_drop::<ExternalPaths>(move |paths, _, cx| {
-            if creating {
+            if locked {
                 return;
             }
             if let Some(path) = paths.paths().first() {
