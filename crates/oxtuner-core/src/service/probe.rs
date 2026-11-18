@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use crate::contract::FirmwareProbe;
-use oxtuner_protocol::{PROBE_PORT_SETTLE, ProbeSpec};
+use oxtuner_protocol::ProbeSpec;
 
 use super::{
     CoreReport, Event, EventTx, Failure, FailureCode, IoOp, IoOutcome, IoPlan, IoThread, OpId,
@@ -25,17 +25,20 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 ///
 /// Nothing bounds the open itself. An open that overruns this comes out of the
 /// slack the rest of the wait holds, so a reply that uses its own timeout reads
-/// as a silent port. The I/O thread is still joined afterwards, so an open that
-/// hangs delays the answer without changing it.
+/// as a silent port.
 const PROBE_OPEN_BUDGET: Duration = Duration::from_millis(750);
 
 /// How long the core waits for the I/O thread to answer.
 ///
-/// Covers the settle, the open and one shared reply deadline, with a second
-/// deadline of slack for the thread start.
-const PROBE_WAIT: Duration = PROBE_PORT_SETTLE
-    .saturating_add(PROBE_OPEN_BUDGET)
-    .saturating_add(PROBE_TIMEOUT.saturating_mul(2));
+/// Covers the probe's own settle, the open and one shared reply deadline, with
+/// a second deadline of slack for the thread start. A probe that lengthens its
+/// settle stretches the wait with it, so a slow board never times out against
+/// a budget computed from the default settle.
+fn probe_wait(spec: &ProbeSpec) -> Duration {
+    spec.settle
+        .saturating_add(PROBE_OPEN_BUDGET)
+        .saturating_add(PROBE_TIMEOUT.saturating_mul(2))
+}
 
 /// Sends one probe and reports the signature, or that the port stayed silent.
 pub(super) fn probe_firmware(
@@ -62,8 +65,9 @@ pub(super) fn probe_firmware(
     }
 
     let spec: ProbeSpec = probe.spec();
+    let wait = probe_wait(&spec);
     let link = port.clone();
-    let plan = IoPlan::probe(spec, link.clone());
+    let plan = IoPlan::probe(probe, link.clone());
 
     let (thread, replies) = match IoThread::start(&plan) {
         Ok(pair) => pair,
@@ -77,59 +81,73 @@ pub(super) fn probe_firmware(
             timeout: Some(PROBE_TIMEOUT),
         },
     ) {
-        Ok(()) => replies.recv_timeout(PROBE_WAIT),
+        Ok(()) => replies.recv_timeout(wait),
         Err(error) => return reject(op, probe, &error.to_string(), events, report),
     };
-    thread.shutdown();
-
     // A port that could not be opened is not a silent ECU, so its own message
     // is what the user needs to see.
-    let signature = match reply {
+    //
+    // The answer is reported before the thread is joined: the join blocks, so
+    // joining first would let a stuck port swallow the reply.
+    let event = match reply {
         Ok(reply) => match reply.outcome {
             IoOutcome::Signature { signature } if !signature.trim().is_empty() => {
-                signature.trim().to_owned()
+                let signature = signature.trim().to_owned();
+                tracing::info!(
+                    %op,
+                    port = %link.label(),
+                    probe = probe.as_str(),
+                    %signature,
+                    "ECU firmware probed"
+                );
+                Event::FirmwareProbed {
+                    op,
+                    port: link.label(),
+                    baud: match link {
+                        PortChoice::Serial { baud, .. } => Some(baud),
+                        PortChoice::Custom(_) => None,
+                    },
+                    probe,
+                    signature,
+                }
             }
             IoOutcome::Failed(failure) => {
-                return reject(op, probe, &failure.message, events, report);
+                tracing::debug!(%op, ?probe, reason = failure.message, "firmware probe failed");
+                probe_failed(op, &failure.message)
             }
-            _ => return reject(op, probe, "the ECU did not answer", events, report),
+            _ => {
+                tracing::debug!(%op, ?probe, "firmware probe found no signature");
+                probe_failed(op, "the ECU did not answer")
+            }
         },
         Err(crossfire::RecvTimeoutError::Timeout) => {
-            return reject(op, probe, "the ECU did not answer", events, report);
+            tracing::debug!(%op, ?probe, "firmware probe timed out");
+            probe_failed(op, "the ECU did not answer")
         }
         Err(crossfire::RecvTimeoutError::Disconnected) => {
-            return reject(
-                op,
-                probe,
-                "the probe thread stopped before answering",
-                events,
-                report,
-            );
+            tracing::debug!(%op, ?probe, "firmware probe thread stopped");
+            probe_failed(op, "the probe thread stopped before answering")
         }
     };
 
-    tracing::info!(
-        %op,
-        port = %link.label(),
-        probe = probe.as_str(),
-        %signature,
-        "ECU firmware probed"
-    );
-    send(
-        events,
-        Event::FirmwareProbed {
-            op,
-            port: link.label(),
-            baud: match link {
-                PortChoice::Serial { baud, .. } => Some(baud),
-                PortChoice::Custom(_) => None,
-            },
-            probe,
-            signature,
-        },
-    );
+    if matches!(event, Event::Failed { .. }) {
+        report.failures += 1;
+    }
+    send(events, event);
+    thread.shutdown();
 
     Outcome::Continue
+}
+
+/// Builds the event for a probe that produced no signature.
+fn probe_failed(op: OpId, reason: &str) -> Event {
+    Event::Failed {
+        op,
+        failure: Failure {
+            code: FailureCode::FirmwareNotDetected,
+            message: reason.to_owned(),
+        },
+    }
 }
 
 /// Reports a probe that produced no signature.

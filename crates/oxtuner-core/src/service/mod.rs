@@ -151,6 +151,10 @@ pub struct CoreReport {
     /// Tune files saved successfully.
     pub tune_saves: u64,
     /// Commands that failed, so the shutdown report shows how much went wrong.
+    ///
+    /// A silent probe counts too: a scan that finds no ECU reports one miss
+    /// per attempt, so a miss-heavy shutdown is an empty bench, not a broken
+    /// core.
     pub failures: u64,
     /// Connections opened.
     pub connects: u64,
