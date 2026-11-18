@@ -316,6 +316,10 @@ pub struct ConnectionView {
 ///
 /// A test proves a port, a baud and a framing without opening a session, so it
 /// is also what a new project checks a definition against.
+///
+/// The port is kept beside the summary on purpose: on failure the summary is
+/// gone and the port is the only thing the dialog can still show. On success
+/// it always equals the summary's own port.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectionTest {
     /// The port the test ran against.

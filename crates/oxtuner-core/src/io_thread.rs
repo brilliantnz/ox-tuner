@@ -24,13 +24,13 @@ use std::time::Duration;
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
 use oxtuner_protocol::{
-    BehaviorKind, LinkMode, MsProtocol, PageSpec, ProbeSpec, Protocol, ProtocolError,
-    RawCommandReport,
+    BehaviorKind, LinkMode, MsProtocol, PageSpec, Protocol, ProtocolError, RawCommandReport,
 };
 use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
 
+use crate::contract::FirmwareProbe;
 use crate::link::PortChoice;
 use crate::service::CoreError;
 
@@ -82,7 +82,10 @@ pub(crate) enum ProtocolSource {
         behavior: BehaviorKind,
     },
     /// A signature probe, with no definition in hand.
-    Probe(ProbeSpec),
+    ///
+    /// The family it asks, in the core's own vocabulary; the spec it needs is
+    /// one method call away.
+    Probe(FirmwareProbe),
 }
 
 impl IoPlan {
@@ -104,9 +107,9 @@ impl IoPlan {
     }
 
     /// A plan for a signature probe.
-    pub(crate) fn probe(spec: ProbeSpec, link: PortChoice) -> Self {
+    pub(crate) fn probe(probe: FirmwareProbe, link: PortChoice) -> Self {
         Self {
-            source: ProtocolSource::Probe(spec),
+            source: ProtocolSource::Probe(probe),
             link_mode: None,
             link,
         }
@@ -343,8 +346,8 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
         (PortChoice::Custom(link), ProtocolSource::Definition { definition, .. }) => {
             link.open(definition).map_err(CoreError::Connect)?
         }
-        (PortChoice::Custom(link), ProtocolSource::Probe(spec)) => {
-            link.open_for_probe(spec).map_err(CoreError::Connect)?
+        (PortChoice::Custom(link), ProtocolSource::Probe(probe)) => {
+            link.open_for_probe(probe).map_err(CoreError::Connect)?
         }
     };
 
@@ -361,10 +364,11 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
             MsProtocol::new(definition, behavior.as_dyn())
                 .map_err(|error| CoreError::Connect(error.to_string()))?
         }
-        ProtocolSource::Probe(spec) => {
+        ProtocolSource::Probe(probe) => {
+            let spec = probe.spec();
             recorder.note(format!("probe: {}", spec.behavior_id()));
 
-            MsProtocol::for_probe(spec)
+            MsProtocol::for_probe(&spec)
         }
     };
 

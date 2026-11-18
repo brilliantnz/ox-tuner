@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
-    BlockingEventStream, CustomLink, Definition, Event, PortChoice, ProbeSpec, Transport,
+    BlockingEventStream, CustomLink, Definition, Event, FirmwareProbe, PortChoice, Transport,
 };
 use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
 
@@ -40,8 +40,8 @@ impl CustomLink for Simulator {
             .map_err(|error| error.to_string())
     }
 
-    fn open_for_probe(&self, probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::new(*probe)))
+    fn open_for_probe(&self, probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::new(probe.spec())))
     }
 }
 
@@ -67,8 +67,8 @@ impl CustomLink for Silent {
         Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
-    fn open_for_probe(&self, probe: &ProbeSpec) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::silent(*probe)))
+    fn open_for_probe(&self, probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::silent(probe.spec())))
     }
 }
 

@@ -486,10 +486,10 @@ pub enum ProjectCommand {
         expected_signature: Option<String>,
         /// `#if` flags chosen from the definition's setting groups.
         settings: Vec<String>,
-        /// Serial port the project starts on, when the wizard picked one.
-        port: Option<String>,
-        /// Baud rate paired with `port`; zero keeps the definition's rate.
-        baud: u32,
+        /// Serial port and baud the project starts on, when the wizard picked one.
+        connection: Option<oxtuner_project::ConnectionSeed>,
+        /// The panel layout the project starts with.
+        layout: oxtuner_project::ProjectLayout,
     },
     /// Write changed values back to the tune file.
     Save,
@@ -781,8 +781,8 @@ impl From<CoreCommand> for CommandRequest {
                 ini_path,
                 expected_signature,
                 settings,
-                port,
-                baud,
+                connection,
+                layout,
             }) => Self::CreateProject {
                 request: oxtuner_project::CreateRequest {
                     parent,
@@ -790,8 +790,8 @@ impl From<CoreCommand> for CommandRequest {
                     ini_path,
                     expected_signature,
                     settings,
-                    port,
-                    baud,
+                    connection,
+                    layout,
                 },
             },
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
@@ -913,10 +913,7 @@ impl FirmwareProbe {
     /// A stable lowercase key for logs and the detection result.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Speeduino => oxtuner_protocol::SPEEDUINO.behavior_id(),
-            Self::Rusefi => oxtuner_protocol::RUSEFI.behavior_id(),
-        }
+        self.spec().behavior_id()
     }
 }
 

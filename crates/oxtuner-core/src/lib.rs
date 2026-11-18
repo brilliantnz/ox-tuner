@@ -128,7 +128,8 @@ pub use oxtuner_ini::{Definition, SettingsContext};
 pub use oxtuner_tune::{CellState, TuneStatus};
 
 /// Re-exported so a caller can pick the connection's framing without taking a
-/// dependency on `oxtuner-protocol`.
+/// dependency on `oxtuner-protocol`. `ProbeSpec` stays for the protocol-level
+/// details; a [`CustomLink`] implementation only ever names [`FirmwareProbe`].
 pub use oxtuner_protocol::{LinkMode, ProbeSpec};
 
 /// Re-exported so a [`CustomLink`] implementation can name the transport it
@@ -139,6 +140,6 @@ pub use oxtuner_transport::Transport;
 /// project's panel layout without adding a dependency on
 /// `oxtuner-project` themselves.
 pub use oxtuner_project::{
-    CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition, ensure_target_free,
-    split_destination, validate_project_name,
+    ConnectionSeed, CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition,
+    ensure_target_free, split_destination, validate_project_name,
 };
