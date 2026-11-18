@@ -268,9 +268,10 @@ pub(crate) fn reset_detection(cx: &mut App) {
 /// Handles a probe that answered with a signature.
 ///
 /// The core reports any answer long enough to be a signature, so the registry
-/// decides what the text is before the scan acts on it. Only a served
-/// definition ends the scan as a detection; a device that answered with
-/// something else is a miss, and the scan keeps its remaining attempts.
+/// decides what the text is before the scan acts on it. A served definition is
+/// the detection, a family no source serves stops the scan for a manual INI,
+/// and anything the registry does not recognise is a miss that leaves the scan
+/// looking.
 pub(crate) fn probed(
     op: OpId,
     port: String,
@@ -300,21 +301,10 @@ pub(crate) fn probed(
             // Real firmware nobody serves a definition for. Scanning on would
             // replace a known answer with a worse one, so the detection stays
             // and the user supplies the INI by hand.
-            let message = t!(
-                "app.new_project.scan_unsupported",
-                signature = signature.to_owned()
-            )
-            .to_string();
             let status = &mut cx.global_mut::<CoreService>().status;
             status.firmware_scan = None;
-            status.detected_firmware = Some(DetectedFirmware {
-                port,
-                baud: baud.unwrap_or(0),
-                framing,
-                signature: signature.to_owned(),
-                definition: None,
-            });
-            status.firmware_error = Some(message);
+            status.detected_firmware = Some(detected(port, baud, framing, signature));
+            status.firmware_error = Some(unsupported_message(signature));
 
             tracing::info!(baud, ?framing, %signature, %reason, "firmware detected without a definition source");
             cx.refresh_windows();
@@ -323,13 +313,7 @@ pub(crate) fn probed(
             let status = &mut cx.global_mut::<CoreService>().status;
             status.firmware_scan = None;
             status.firmware_error = None;
-            status.detected_firmware = Some(DetectedFirmware {
-                port,
-                baud: baud.unwrap_or(0),
-                framing,
-                signature: signature.to_owned(),
-                definition: None,
-            });
+            status.detected_firmware = Some(detected(port, baud, framing, signature));
 
             tracing::info!(baud, ?framing, %signature, ?probe, "firmware detected");
             serve(resolved, signature, cx);
@@ -338,7 +322,33 @@ pub(crate) fn probed(
     }
 }
 
+/// The detection one probe answer describes, before its definition is found.
+fn detected(
+    port: String,
+    baud: Option<u32>,
+    framing: LinkMode,
+    signature: &str,
+) -> DetectedFirmware {
+    DetectedFirmware {
+        port,
+        baud: baud.unwrap_or(0),
+        framing,
+        signature: signature.to_owned(),
+        definition: None,
+    }
+}
+
+/// What the wizard says about firmware no source serves.
+fn unsupported_message(signature: &str) -> String {
+    t!(
+        "app.new_project.scan_unsupported",
+        signature = signature.to_owned()
+    )
+    .to_string()
+}
+
 /// What the registry makes of a probed signature.
+#[derive(Debug)]
 enum Verdict {
     /// The registry serves a definition for this ECU.
     Served(ResolvedDefinition),
@@ -357,11 +367,17 @@ enum Verdict {
 fn classify(signature: &str) -> Verdict {
     match Registry::with_defaults().resolve(signature) {
         Ok(resolved) => Verdict::Served(resolved),
-        Err(error) if error.kind() == ErrorKind::InvalidSignature => {
-            tracing::debug!(%signature, reason = %error, "the probe answer is not a firmware signature");
+        Err(error) if error.kind() == ErrorKind::Unsupported => {
+            Verdict::Unserved(error.to_string())
+        }
+        Err(error) => {
+            // `unsupported` is the only verdict that says the firmware is real
+            // but has no source. An invalid signature names no firmware, and
+            // any other failure leaves the answer unexplained, so the scan
+            // keeps looking either way.
+            tracing::debug!(%signature, reason = %error, "the probe answer did not resolve");
             Verdict::Noise
         }
-        Err(error) => Verdict::Unserved(error.to_string()),
     }
 }
 
@@ -438,12 +454,7 @@ fn resolve(signature: &str, cx: &mut App) {
             // The detection outlives the scan, so the round trip through the
             // Manual tab must land on the same instruction the scan showed.
             tracing::warn!(signature, reason, "no definition source for the signature");
-            let message = t!(
-                "app.new_project.scan_unsupported",
-                signature = signature.to_owned()
-            )
-            .to_string();
-            fail_detection(message, cx);
+            fail_detection(unsupported_message(signature), cx);
         }
         Verdict::Noise => fail_detection(t!("app.new_project.scan_not_ecu").to_string(), cx),
     }
@@ -833,6 +844,19 @@ mod tests {
             send_current(cx);
         });
 
+        let noisy_attempts = cx.update(|cx| {
+            cx.global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .expect("the scan runs")
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.port == "/dev/noise")
+                .count()
+        });
+        assert!(noisy_attempts > 0, "the noisy port has attempts to answer");
+
         // Port 1 answers every attempt with an NMEA sentence. The core reports
         // any long enough answer as a signature, so the scan is what must
         // reject it and work through the rest of the port's attempts.
@@ -867,7 +891,10 @@ mod tests {
             });
 
             noise_answers += 1;
-            assert!(noise_answers <= 16, "the scan never left the noisy port");
+            assert!(
+                noise_answers <= noisy_attempts,
+                "the scan never left the noisy port"
+            );
         }
 
         let (ecu, ecu_op) = cx.update(|cx| {
@@ -883,7 +910,11 @@ mod tests {
 
             (attempt, scan.op.expect("the second port is being probed"))
         });
-        assert_eq!(noise_answers, 16, "every attempt on the noisy port ran");
+        assert_eq!(
+            noise_answers, noisy_attempts,
+            "every attempt on the noisy port ran"
+        );
+        assert_eq!(ecu.port, "/dev/ecu");
 
         // Port 2 answers with a Speeduino signature: this is ECU #2.
         cx.update(|cx| {
