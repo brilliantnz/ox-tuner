@@ -28,7 +28,8 @@
 //!   exactly one `DefinitionLoaded` / `ProjectOpened` / `TuneSaved` /
 //!   `DefinitionUnloaded` / `Failed` / `Rejected` event. A refused command
 //!   ([`CoreError::QueueFull`]) never enters the core and receives no event —
-//!   its id is simply unused.
+//!   its id is simply unused. A probe group is the one command that also reports
+//!   progress: its `ProbeStarted` events come before the terminal answer.
 //! - **Bounded and non-blocking for the UI.** Sending never blocks; a full
 //!   command queue is reported, not waited on.
 //! - **Realtime never enters the event queue.** The poller publishes
@@ -98,10 +99,10 @@ pub use contract::{
     DialogWidgetKind, EcuCommand, Event, Failure, FailureCode, FirmwareProbe, FrontPageGauge,
     GateState, GaugeTemplate, ImportReport, IndicatorSpec, JournalCommand, JournalEntry,
     KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortView,
-    ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier, ReferenceTableLimit,
-    ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport, SafetyCommand,
-    SaveReport, SettingGroupView, SettingOptionView, SignatureVerdict, TableView, TuneCommand,
-    WriteReport,
+    ProbeQuery, ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier,
+    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport,
+    SafetyCommand, SaveReport, SettingGroupView, SettingOptionView, SignatureVerdict, TableView,
+    TuneCommand, WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{

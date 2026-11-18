@@ -84,7 +84,7 @@ mod transport;
 pub use faults::{Fault, FaultRule, SimOp};
 pub use memory::{Memory, PageMemory};
 pub use oxtuner_protocol::LinkMode;
-pub use probe::SimProbe;
+pub use probe::{SimProbe, SimProbeSet};
 pub use scenario::{Scenario, ScenarioError};
 pub use transport::{SimConfig, SimTransport, Transcript};
 

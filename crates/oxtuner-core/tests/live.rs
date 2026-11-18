@@ -5,11 +5,12 @@
 //! trace and survives an injected link loss — so these tests exercise the
 //! production session code, not a mock of it.
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, LatestFrame, OpId,
-    SignatureVerdict,
+    ProbeQuery, SignatureVerdict,
 };
 use oxtuner_ini::{SettingsContext, parse_str};
 use oxtuner_protocol::{BehaviorKind, LinkMode, MsProtocol, Protocol};
@@ -98,6 +99,22 @@ impl Harness {
         }
     }
 
+    /// Collects whatever arrives within `window`.
+    fn drain_for(&self, window: Duration) -> Vec<Event> {
+        let deadline = Instant::now() + window;
+        let mut events = Vec::new();
+
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Some(event) = self.events.recv_timeout(left) else {
+                break;
+            };
+
+            events.push(event);
+        }
+
+        events
+    }
+
     /// Waits for the definition load.
     fn wait_loaded(&self) {
         self.wait(|event| matches!(event, Event::DefinitionLoaded { .. }));
@@ -141,8 +158,10 @@ fn a_probe_reads_a_signature_without_a_loaded_definition() {
         .handle
         .probe_firmware(
             support::simulator(),
-            oxtuner_core::LinkMode::Legacy,
-            oxtuner_core::FirmwareProbe::Speeduino,
+            vec![ProbeQuery::new(
+                oxtuner_core::FirmwareProbe::Speeduino,
+                oxtuner_core::LinkMode::Legacy,
+            )],
         )
         .expect("queued");
 
@@ -178,8 +197,10 @@ fn a_probe_reads_an_enveloped_signature() {
         .handle
         .probe_firmware(
             support::simulator(),
-            oxtuner_core::LinkMode::Envelope,
-            oxtuner_core::FirmwareProbe::Speeduino,
+            vec![ProbeQuery::new(
+                oxtuner_core::FirmwareProbe::Speeduino,
+                oxtuner_core::LinkMode::Envelope,
+            )],
         )
         .expect("queued");
 
@@ -210,8 +231,10 @@ fn a_probe_reports_whatever_text_a_device_answers_with() {
         .handle
         .probe_firmware(
             support::answering_probe(NMEA),
-            oxtuner_core::LinkMode::Legacy,
-            oxtuner_core::FirmwareProbe::Speeduino,
+            vec![ProbeQuery::new(
+                oxtuner_core::FirmwareProbe::Speeduino,
+                oxtuner_core::LinkMode::Legacy,
+            )],
         )
         .expect("queued");
 
@@ -234,8 +257,10 @@ fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
         .handle
         .probe_firmware(
             support::silent(),
-            oxtuner_core::LinkMode::Legacy,
-            oxtuner_core::FirmwareProbe::Speeduino,
+            vec![ProbeQuery::new(
+                oxtuner_core::FirmwareProbe::Speeduino,
+                oxtuner_core::LinkMode::Legacy,
+            )],
         )
         .expect("queued");
 
@@ -251,6 +276,106 @@ fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
 }
 
 #[test]
+fn a_probe_group_opens_the_port_once_and_stops_at_the_first_answer() {
+    let harness = Harness::start();
+    let (port, opens) = support::counting_probe(1);
+
+    // The first query is met with silence, so the group has to reach the
+    // second family on the same open port. The third would answer too, which is
+    // what proves the group stopped.
+    harness
+        .handle
+        .probe_firmware(
+            port,
+            vec![
+                ProbeQuery::new(oxtuner_core::FirmwareProbe::Speeduino, LinkMode::Legacy),
+                ProbeQuery::new(oxtuner_core::FirmwareProbe::Rusefi, LinkMode::Legacy),
+                ProbeQuery::new(oxtuner_core::FirmwareProbe::Rusefi, LinkMode::Envelope),
+            ],
+        )
+        .expect("queued");
+
+    let Event::ProbeStarted { probe, .. } =
+        harness.wait(|event| matches!(event, Event::ProbeStarted { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        probe,
+        oxtuner_core::FirmwareProbe::Speeduino,
+        "the group asks its first query first"
+    );
+
+    let Event::FirmwareProbed { probe, .. } =
+        harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        probe,
+        oxtuner_core::FirmwareProbe::Rusefi,
+        "the silent query moved the group on to the second family"
+    );
+    assert_eq!(
+        opens.load(Ordering::Relaxed),
+        1,
+        "one open serves the whole group"
+    );
+    assert!(
+        !harness
+            .drain_for(Duration::from_millis(200))
+            .iter()
+            .any(|event| matches!(event, Event::ProbeStarted { .. })),
+        "the group stopped at the answer: the third query was never asked"
+    );
+
+    harness.thread.join();
+}
+
+#[test]
+fn a_silent_group_reports_one_failure_for_several_queries() {
+    let harness = Harness::start();
+    let (port, _opens) = support::counting_probe(usize::MAX);
+
+    harness
+        .handle
+        .probe_firmware(
+            port,
+            vec![
+                ProbeQuery::new(oxtuner_core::FirmwareProbe::Speeduino, LinkMode::Legacy),
+                ProbeQuery::new(oxtuner_core::FirmwareProbe::Rusefi, LinkMode::Legacy),
+            ],
+        )
+        .expect("queued");
+
+    let mut started = 0;
+    loop {
+        match harness
+            .wait(|event| matches!(event, Event::ProbeStarted { .. } | Event::Failed { .. }))
+        {
+            Event::ProbeStarted { .. } => started += 1,
+            Event::Failed { failure, .. } => {
+                assert_eq!(failure.code, FailureCode::FirmwareNotDetected);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(started, 2, "every query of the group was asked");
+    assert!(
+        !harness
+            .drain_for(Duration::from_millis(200))
+            .iter()
+            .any(|event| matches!(event, Event::Failed { .. })),
+        "a group reports one failure, not one per query"
+    );
+
+    let report = harness.thread.join();
+    assert_eq!(report.failures, 1);
+}
+
+#[test]
 fn a_probe_is_refused_while_a_session_is_live() {
     let harness = Harness::start();
     harness.load();
@@ -262,8 +387,10 @@ fn a_probe_is_refused_while_a_session_is_live() {
         .handle
         .probe_firmware(
             support::simulator(),
-            oxtuner_core::LinkMode::Legacy,
-            oxtuner_core::FirmwareProbe::Rusefi,
+            vec![ProbeQuery::new(
+                oxtuner_core::FirmwareProbe::Rusefi,
+                oxtuner_core::LinkMode::Legacy,
+            )],
         )
         .expect("queued");
 

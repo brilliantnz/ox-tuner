@@ -248,20 +248,24 @@ pub(crate) enum CommandRequest {
         /// Framing override, as for [`Self::Connect`].
         framing: Option<LinkMode>,
     },
-    /// Ask one port for a firmware signature with a built-in probe.
+    /// Ask one port for a firmware signature with the built-in probes.
     ///
-    /// Unlike [`Self::TestConnection`], this needs no loaded definition: the
-    /// probe carries the query byte and the reply shape for its family. The
-    /// reply is [`super::Event::FirmwareProbed`], or
-    /// [`super::Event::Failed`] with [`super::FailureCode::FirmwareNotDetected`]
-    /// when the port stays silent.
+    /// Unlike [`Self::TestConnection`], this needs no loaded definition: each
+    /// query carries the family probe byte and the framing to send it in. The
+    /// port is opened once and asked the queries in order, so a silent family
+    /// and a second framing do not pay for another settle. The conversation
+    /// stops at the first answer: only the application can tell an ECU from a
+    /// chatty adapter, so it decides what to ask next.
+    ///
+    /// Each query starts with [`super::Event::ProbeStarted`]. An answer is
+    /// [`super::Event::FirmwareProbed`]; a port that answered nothing is
+    /// [`super::Event::Failed`] with
+    /// [`super::FailureCode::FirmwareNotDetected`].
     ProbeFirmware {
         /// Where the bytes go.
         port: PortChoice,
-        /// Framing to send the query with.
-        framing: LinkMode,
-        /// Which family probe to send.
-        probe: FirmwareProbe,
+        /// The queries to send, in order, over one open port.
+        queries: Vec<ProbeQuery>,
     },
     /// Close the connection and release the port.
     Disconnect,
@@ -600,14 +604,12 @@ pub enum EcuCommand {
         /// Framing override.
         framing: Option<LinkMode>,
     },
-    /// Ask one port for a firmware signature with a built-in probe.
+    /// Ask one port for firmware signatures with the built-in probes.
     ProbeFirmware {
         /// Where the bytes go.
         port: PortChoice,
-        /// Framing to send the query with.
-        framing: LinkMode,
-        /// Which family probe to send.
-        probe: FirmwareProbe,
+        /// The queries to send, in order, over one open port.
+        queries: Vec<ProbeQuery>,
     },
     /// Close the connection.
     Disconnect,
@@ -809,15 +811,9 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Ecu(EcuCommand::TestConnection { port, framing }) => {
                 Self::TestConnection { port, framing }
             }
-            CoreCommand::Ecu(EcuCommand::ProbeFirmware {
-                port,
-                framing,
-                probe,
-            }) => Self::ProbeFirmware {
-                port,
-                framing,
-                probe,
-            },
+            CoreCommand::Ecu(EcuCommand::ProbeFirmware { port, queries }) => {
+                Self::ProbeFirmware { port, queries }
+            }
             CoreCommand::Ecu(EcuCommand::Disconnect) => Self::Disconnect,
             CoreCommand::Ecu(EcuCommand::ReadAll) => Self::ReadAll,
             CoreCommand::Ecu(EcuCommand::StartRealtime { interval_ms }) => {
@@ -902,6 +898,28 @@ impl FirmwareProbe {
     #[must_use]
     pub fn label(self) -> &'static str {
         self.spec().behavior.as_dyn().name()
+    }
+}
+
+/// One signature query: the family to ask and the framing to ask it in.
+///
+/// A scan groups several queries per port and baud, so one open port answers
+/// every family and framing before it is released. The pair is the whole
+/// instruction: the protocol derives the query byte and the reply shape from
+/// the family, and the framing is the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeQuery {
+    /// Which family probe to send.
+    pub probe: FirmwareProbe,
+    /// How the query and its reply are framed.
+    pub framing: LinkMode,
+}
+
+impl ProbeQuery {
+    /// A query for `probe` sent in `framing`.
+    #[must_use]
+    pub fn new(probe: FirmwareProbe, framing: LinkMode) -> Self {
+        Self { probe, framing }
     }
 }
 

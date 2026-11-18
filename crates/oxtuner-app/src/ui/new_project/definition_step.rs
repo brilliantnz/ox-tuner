@@ -248,11 +248,11 @@ fn auto_detect_section(
     }
 
     if let Some(scan) = &status.firmware_scan
-        && let Some(attempt) = scan.attempts.get(scan.next)
+        && let Some(attempt) = scan.attempts.get(scan.current)
     {
         body = body.child(div().text_xs().text_color(muted).child(scan_line(
             attempt,
-            scan.next + 1,
+            scan.current + 1,
             scan.attempts.len(),
         )));
     } else if let Some(detected) = &status.detected_firmware {

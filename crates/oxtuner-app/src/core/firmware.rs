@@ -13,7 +13,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, AsyncApp};
-use oxtuner_core::{COMMON_PROBE_BAUD_RATES, FirmwareProbe, LinkMode, OpId, PortChoice, PortView};
+use oxtuner_core::{
+    COMMON_PROBE_BAUD_RATES, FirmwareProbe, LinkMode, OpId, PortChoice, PortView, ProbeQuery,
+};
 use oxtuner_registry::{BlockingClient, CacheStore, ErrorKind, Registry, ResolvedDefinition};
 use rust_i18n::t;
 
@@ -32,12 +34,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// new byte count arrived; the tick stops with the download.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
-/// How long one attempt may stay unanswered before the scan moves on.
+/// How long one probe group may stay unanswered before the scan moves on.
 ///
-/// This bounds the UI, not the core: the core opens the port without a timeout
-/// and joins a wedged probe thread, so no number here can bound an attempt
-/// precisely. After this the attempt counts as a miss and the scan tries the
-/// next one; a late answer is ignored by the op check.
+/// This bounds the UI, not the core: the core bounds its own wait and releases a
+/// wedged thread, but a started group still takes its settle, its open and every
+/// query's reply deadline. After this the group counts as a miss and the scan
+/// tries the next one; a late answer is ignored by the op check.
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The host a download prompt names, for the consent text.
@@ -96,6 +98,8 @@ pub(crate) fn start_scan(cx: &mut App) {
     status.firmware_scan = Some(FirmwareScan {
         attempts,
         next: 0,
+        sent: 0,
+        current: 0,
         op: None,
     });
     tracing::info!(
@@ -142,15 +146,18 @@ fn clear_detection(status: &mut CoreStatus) {
 ///
 /// Both shipped definitions declare `msEnvelope_1.0`, so the modern framing is
 /// asked first and the legacy query second. A family that answers only the
-/// plain query costs one extra settle and timeout per port and rate, never a
-/// miss.
+/// plain query costs one extra query per port and rate, never a miss.
 const PROBE_FRAMINGS: [LinkMode; 2] = [LinkMode::Envelope, LinkMode::Legacy];
 
 /// The attempts a scan makes, in order: the ports as given, then common baud,
-/// then family, then framing.
+/// then framing, then family.
 ///
 /// The caller passes the ports already in scan order, so this stays a pure
-/// expansion and the ordering rule lives in one place.
+/// expansion and the ordering rule lives in one place. Framing comes before
+/// family because a group holds one open port: a bare query puts an
+/// envelope-speaking firmware's parser into a length-wait state, and a framed
+/// query after it is swallowed. Asking every framed query first means that can
+/// only ever hit the bare queries that follow, never a framed one.
 fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
     let mut attempts = Vec::with_capacity(
         ports.len()
@@ -161,8 +168,8 @@ fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
 
     for port in ports {
         for baud in COMMON_PROBE_BAUD_RATES {
-            for probe in FirmwareProbe::ALL {
-                for framing in PROBE_FRAMINGS {
+            for framing in PROBE_FRAMINGS {
+                for probe in FirmwareProbe::ALL {
                     attempts.push(ProbeAttempt {
                         port: port.clone(),
                         baud,
@@ -177,14 +184,19 @@ fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
     attempts
 }
 
-/// Sends the attempt at `scan.next`.
+/// Sends the queries left on the group at `scan.next`.
+///
+/// A group is every attempt left on the same port at the same baud. The core
+/// opens and settles the port once per group, so a silent family and the second
+/// framing ride on the same open instead of paying a settle each.
 fn send_current(cx: &mut App) {
-    let Some(attempt) = ({
+    let Some((attempt, queries)) = ({
         let status = &cx.global::<CoreService>().status;
-        status
-            .firmware_scan
-            .as_ref()
-            .and_then(|scan| scan.attempts.get(scan.next).cloned())
+        status.firmware_scan.as_ref().and_then(|scan| {
+            let attempt = scan.attempts.get(scan.next)?.clone();
+
+            Some((attempt, query_group(&scan.attempts, scan.next)))
+        })
     }) else {
         // The scan has no attempt at this index; leaving it set would disable
         // Detect with no timer armed to advance it.
@@ -197,13 +209,15 @@ fn send_current(cx: &mut App) {
         return;
     };
 
+    let sent = queries.len();
     match handle.probe_firmware(
         PortChoice::serial(attempt.port.clone(), attempt.baud),
-        attempt.framing,
-        attempt.probe,
+        queries,
     ) {
         Ok(op) => {
             if let Some(scan) = cx.global_mut::<CoreService>().status.firmware_scan.as_mut() {
+                scan.sent = sent;
+                scan.current = scan.next;
                 scan.op = Some(op);
             }
 
@@ -221,8 +235,7 @@ fn send_current(cx: &mut App) {
             tracing::debug!(
                 port = %attempt.port,
                 baud = attempt.baud,
-                probe = ?attempt.probe,
-                framing = ?attempt.framing,
+                queries = sent,
                 %op,
                 "firmware probe sent"
             );
@@ -239,6 +252,20 @@ fn send_current(cx: &mut App) {
             );
         }
     }
+}
+
+/// The queries one command sends: every attempt left on the same port at the
+/// same baud, starting at `next`.
+fn query_group(attempts: &[ProbeAttempt], next: usize) -> Vec<ProbeQuery> {
+    let Some(first) = attempts.get(next) else {
+        return Vec::new();
+    };
+
+    attempts[next..]
+        .iter()
+        .take_while(|attempt| attempt.port == first.port && attempt.baud == first.baud)
+        .map(|attempt| ProbeQuery::new(attempt.probe, attempt.framing))
+        .collect()
 }
 
 /// Ends the scan with a visible reason.
@@ -319,9 +346,12 @@ pub(crate) fn probed(
 
     match classify(signature) {
         Verdict::Noise => {
-            // Nothing was detected, so the scan is still the one owning this
-            // op: its next attempt is the answer to this sentence.
-            missed(op, Miss::Noise, cx);
+            // The port answered, but not with firmware. The queries the core
+            // asked before this one were silent, so the scan resumes right
+            // after it and asks what is left of the group; that reopens the
+            // port, which is the price of an answer only the app can judge.
+            let done = settled(cx, framing, probe);
+            advance(cx, done, Miss::Noise);
         }
         Verdict::Unserved(reason) => {
             // Real firmware nobody serves a definition for. Scanning on would
@@ -431,28 +461,87 @@ pub(crate) enum Miss<'a> {
 ///
 /// Returns whether the failure belonged to the scan.
 pub(crate) fn missed(op: OpId, miss: Miss<'_>, cx: &mut App) -> bool {
-    let status = &mut cx.global_mut::<CoreService>().status;
-    let Some(scan) = status.firmware_scan.as_mut() else {
-        return false;
+    let done = {
+        let status = &cx.global::<CoreService>().status;
+        match status.firmware_scan.as_ref() {
+            Some(scan) if scan.op == Some(op) => scan.sent.max(1),
+            _ => return false,
+        }
     };
-    if scan.op != Some(op) {
-        return false;
-    }
 
-    scan.next += 1;
-    if scan.next < scan.attempts.len() {
+    advance(cx, done, miss)
+}
+
+/// How many queries of the in-flight group the scan is done with.
+///
+/// A noise answer ends the command at the query that answered, with the ones
+/// before it already silent; a query the scan cannot place spent the whole
+/// group by default.
+fn settled(cx: &App, framing: LinkMode, probe: FirmwareProbe) -> usize {
+    let status = &cx.global::<CoreService>().status;
+    let Some(scan) = status.firmware_scan.as_ref() else {
+        return 1;
+    };
+
+    scan.offset_of(probe, framing)
+        .map_or(scan.sent.max(1), |offset| offset + 1)
+}
+
+/// Moves the scan past `done` queries and asks what is left.
+///
+/// `done` is the whole group for a miss, and the answered query plus the silent
+/// ones before it for a noise answer. Returns whether a scan was running.
+fn advance(cx: &mut App, done: usize, miss: Miss<'_>) -> bool {
+    let more = {
+        let status = &mut cx.global_mut::<CoreService>().status;
+        let Some(scan) = status.firmware_scan.as_mut() else {
+            return false;
+        };
+
+        scan.next += done.clamp(1, scan.sent.max(1));
+        scan.op = None;
+
+        if scan.next < scan.attempts.len() {
+            true
+        } else {
+            let attempts = scan.attempts.len();
+            status.firmware_scan = None;
+            status.firmware_error = Some(miss_message(miss));
+            tracing::info!(attempts, "the firmware scan found no ECU");
+            false
+        }
+    };
+
+    if more {
         send_current(cx);
-        cx.refresh_windows();
-        return true;
     }
-
-    let attempts = scan.attempts.len();
-    status.firmware_scan = None;
-    status.firmware_error = Some(miss_message(miss));
-    tracing::info!(attempts, "the firmware scan found no ECU");
     cx.refresh_windows();
 
     true
+}
+
+/// Moves the progress line to the query the core is asking.
+///
+/// One command asks several queries over the same open port, so the answer's
+/// family and framing are what say which attempt is on the wire.
+pub(crate) fn probe_started(op: OpId, framing: LinkMode, probe: FirmwareProbe, cx: &mut App) {
+    let moved = {
+        let status = &mut cx.global_mut::<CoreService>().status;
+        status.firmware_scan.as_mut().and_then(|scan| {
+            if scan.op != Some(op) {
+                return None;
+            }
+
+            let offset = scan.offset_of(probe, framing)?;
+            scan.current = scan.next + offset;
+
+            Some(())
+        })
+    };
+
+    if moved.is_some() {
+        cx.refresh_windows();
+    }
 }
 
 /// The sentence a scan that found no ECU ends with.
@@ -769,6 +858,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_group_is_every_query_left_on_one_port_and_baud() {
+        let attempts = attempts_for(&["/dev/ecu".to_owned()]);
+        let per_baud = FirmwareProbe::ALL.len() * PROBE_FRAMINGS.len();
+
+        let first = query_group(&attempts, 0);
+        assert_eq!(first.len(), per_baud);
+        // Every framed query comes before any bare one: a bare query can leave
+        // an envelope firmware waiting for a length and swallow what follows.
+        assert_eq!(
+            first[0],
+            ProbeQuery::new(FirmwareProbe::Speeduino, LinkMode::Envelope)
+        );
+        assert_eq!(
+            first[1],
+            ProbeQuery::new(FirmwareProbe::Rusefi, LinkMode::Envelope)
+        );
+        assert_eq!(
+            first[2],
+            ProbeQuery::new(FirmwareProbe::Speeduino, LinkMode::Legacy)
+        );
+
+        // A partial group keeps only the queries left on that baud.
+        assert_eq!(query_group(&attempts, per_baud - 1).len(), 1);
+
+        // The next baud starts its own group.
+        assert_ne!(attempts[per_baud].baud, attempts[0].baud);
+        assert_eq!(query_group(&attempts, per_baud).len(), per_baud);
+    }
+
+    #[test]
     fn the_scan_tries_every_baud_and_family_per_port() {
         let attempts = attempts_for(&["first".to_owned(), "second".to_owned()]);
 
@@ -785,9 +904,10 @@ mod tests {
                 framing: LinkMode::Envelope,
             }
         );
-        assert_eq!(attempts[1].framing, LinkMode::Legacy);
-        assert_eq!(attempts[2].probe, FirmwareProbe::Rusefi);
-        assert_eq!(attempts[2].framing, LinkMode::Envelope);
+        assert_eq!(attempts[1].framing, LinkMode::Envelope);
+        assert_eq!(attempts[1].probe, FirmwareProbe::Rusefi);
+        assert_eq!(attempts[2].framing, LinkMode::Legacy);
+        assert_eq!(attempts[2].probe, FirmwareProbe::Speeduino);
         assert_eq!(attempts[4].baud, COMMON_PROBE_BAUD_RATES[1]);
         assert_eq!(attempts.last().expect("attempts").port, "second");
     }
@@ -948,6 +1068,8 @@ mod tests {
             cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
                 attempts: attempts_for(&["/dev/noise".to_owned(), "/dev/ecu".to_owned()]),
                 next: 0,
+                sent: 0,
+                current: 0,
                 op: None,
             });
             send_current(cx);
@@ -1072,6 +1194,8 @@ mod tests {
             cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
                 attempts,
                 next: 0,
+                sent: 0,
+                current: 0,
                 op: None,
             });
             send_current(cx);
@@ -1116,6 +1240,76 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_progress_follows_the_query_on_the_wire(cx: &mut gpui_kit::TestAppContext) {
+        let core = start_core(cx);
+
+        // One group of four queries is sent as one command.
+        let (op, third) = cx.update(|cx| {
+            cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
+                attempts: attempts_for(&["/dev/noise".to_owned()]),
+                next: 0,
+                sent: 0,
+                current: 0,
+                op: None,
+            });
+            send_current(cx);
+
+            let scan = cx
+                .global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .expect("the scan runs");
+            assert_eq!(scan.sent, 4, "one command carries the baud's queries");
+
+            (
+                scan.op.expect("the group is in flight"),
+                scan.attempts[2].clone(),
+            )
+        });
+
+        // The core reports each query as it starts, so the line names the one
+        // actually on the wire rather than the group's first.
+        cx.update(|cx| probe_started(op, third.framing, third.probe, cx));
+        cx.update(|cx| {
+            let scan = cx
+                .global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .expect("the scan runs");
+            assert_eq!(scan.current, 2, "the third query is on the wire");
+        });
+
+        // A noise answer there means the two before it were silent: the scan
+        // resumes right after it, with only the last query left in the group.
+        cx.update(|cx| {
+            probed(
+                op,
+                third.port.clone(),
+                Some(third.baud),
+                third.framing,
+                third.probe,
+                NMEA,
+                cx,
+            );
+        });
+        cx.update(|cx| {
+            let scan = cx
+                .global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .expect("the scan continues");
+            assert_eq!(scan.next, 3, "the silent queries and this one are done");
+            assert_eq!(scan.sent, 1, "only the query after it is left");
+            assert_eq!(scan.current, 3, "the line follows the resumed group");
+        });
+
+        core.join();
+    }
+
+    #[gpui_kit::test]
     fn an_unserved_ecu_stops_the_scan_and_asks_for_the_ini(cx: &mut gpui_kit::TestAppContext) {
         let core = start_core(cx);
         let signature = FOME;
@@ -1126,6 +1320,8 @@ mod tests {
             cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
                 attempts: attempts_for(&["/dev/ecu".to_owned()]),
                 next: 0,
+                sent: 0,
+                current: 0,
                 op: None,
             });
             send_current(cx);

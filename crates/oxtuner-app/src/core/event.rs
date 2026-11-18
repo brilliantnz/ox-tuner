@@ -118,8 +118,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     }
 
     // Firmware probing is a scan: a reply moves to the registry, a miss moves
-    // to the next attempt. It never becomes a connection test result, and a
+    // to the next query. It never becomes a connection test result, and a
     // miss that belongs to no scan is not a visible failure either.
+    if let Event::ProbeStarted { op, probe, framing } = &event {
+        crate::core::firmware::probe_started(*op, *framing, *probe, cx);
+        return;
+    }
     if let Event::FirmwareProbed {
         op,
         port,
@@ -272,7 +276,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
         // No view reads a probe result yet, so the core log carries the answer.
+        // `ProbeStarted` is answered above and only reaches this arm as the
+        // exhaustive fallback; the wizard's progress line reads it today.
         Event::FirmwareProbed { .. }
+        | Event::ProbeStarted { .. }
         | Event::ProjectLayoutSaved { .. }
         | Event::PortsListed { .. }
         | Event::PortsChanged { .. }

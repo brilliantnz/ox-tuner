@@ -473,9 +473,12 @@ impl CoreHandle {
         self.send_request(CommandRequest::TestConnection { port, framing })
     }
 
-    /// Asks one port for a firmware signature, with no definition loaded.
+    /// Asks one port for firmware signatures, with no definition loaded.
     ///
-    /// The reply is [`crate::Event::FirmwareProbed`] or [`crate::Event::Failed`].
+    /// The port is opened once and asked `queries` in order, stopping at the
+    /// first answer. Every query reports [`crate::Event::ProbeStarted`], an
+    /// answer reports [`crate::Event::FirmwareProbed`], and a port that
+    /// answered nothing reports [`crate::Event::Failed`].
     ///
     /// # Errors
     ///
@@ -484,14 +487,9 @@ impl CoreHandle {
     pub fn probe_firmware(
         &self,
         port: crate::PortChoice,
-        framing: crate::LinkMode,
-        probe: crate::FirmwareProbe,
+        queries: Vec<crate::ProbeQuery>,
     ) -> Result<OpId, CoreError> {
-        self.send_request(CommandRequest::ProbeFirmware {
-            port,
-            framing,
-            probe,
-        })
+        self.send_request(CommandRequest::ProbeFirmware { port, queries })
     }
 
     /// Closes the connection.

@@ -10,12 +10,14 @@
     reason = "not every integration test binary uses every helper"
 )]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use oxtuner_core::{
-    BlockingEventStream, CustomLink, Definition, Event, FirmwareProbe, PortChoice, Transport,
+    BlockingEventStream, CustomLink, Definition, Event, PortChoice, ProbeQuery, Transport,
 };
-use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
+use oxtuner_sim::{SimConfig, SimProbe, SimProbeSet, SimTransport};
 
 /// The simulator as a link implementation.
 pub(crate) struct Simulator {
@@ -40,12 +42,12 @@ impl CustomLink for Simulator {
             .map_err(|error| error.to_string())
     }
 
-    fn open_for_probe(
-        &self,
-        probe: &FirmwareProbe,
-        framing: oxtuner_core::LinkMode,
-    ) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::new(probe.spec().with_link(framing))))
+    fn open_for_probe(&self, queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbeSet::new(
+            queries
+                .iter()
+                .map(|query| query.probe.spec().with_link(query.framing)),
+        )))
     }
 }
 
@@ -62,6 +64,50 @@ pub(crate) fn silent() -> PortChoice {
 /// A port that opens and answers nothing, like one with no ECU attached.
 struct Silent;
 
+/// A probe link that counts its opens and leaves the first `silent` queries
+/// unanswered, like a port where the first family tried is not the one there.
+pub(crate) fn counting_probe(silent: usize) -> (PortChoice, Arc<AtomicUsize>) {
+    let opens = Arc::new(AtomicUsize::new(0));
+
+    (
+        PortChoice::custom(Counting {
+            opens: Arc::clone(&opens),
+            silent,
+        }),
+        opens,
+    )
+}
+
+struct Counting {
+    opens: Arc<AtomicUsize>,
+    silent: usize,
+}
+
+impl CustomLink for Counting {
+    fn label(&self) -> &'static str {
+        "counting"
+    }
+
+    fn open(&self, _definition: &Definition) -> Result<Box<dyn Transport>, String> {
+        Err("the counting link only answers probes".to_owned())
+    }
+
+    fn open_for_probe(&self, queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+        self.opens.fetch_add(1, Ordering::Relaxed);
+
+        let probes = queries.iter().enumerate().map(|(index, query)| {
+            let spec = query.probe.spec().with_link(query.framing);
+            if index < self.silent {
+                SimProbe::silent(spec)
+            } else {
+                SimProbe::new(spec)
+            }
+        });
+
+        Ok(Box::new(SimProbeSet::from_probes(probes)))
+    }
+}
+
 impl CustomLink for Silent {
     fn label(&self) -> &'static str {
         "silent"
@@ -71,12 +117,12 @@ impl CustomLink for Silent {
         Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
-    fn open_for_probe(
-        &self,
-        probe: &FirmwareProbe,
-        framing: oxtuner_core::LinkMode,
-    ) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::silent(probe.spec().with_link(framing))))
+    fn open_for_probe(&self, queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbeSet::silent(
+            queries
+                .iter()
+                .map(|query| query.probe.spec().with_link(query.framing)),
+        )))
     }
 }
 
@@ -101,13 +147,11 @@ impl CustomLink for Answering {
         Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
-    fn open_for_probe(
-        &self,
-        probe: &FirmwareProbe,
-        framing: oxtuner_core::LinkMode,
-    ) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::with_signature(
-            probe.spec().with_link(framing),
+    fn open_for_probe(&self, queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbeSet::with_signature(
+            queries
+                .iter()
+                .map(|query| query.probe.spec().with_link(query.framing)),
             self.0,
         )))
     }

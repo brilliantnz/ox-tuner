@@ -352,14 +352,33 @@ pub(crate) struct ProbeAttempt {
     pub(crate) framing: LinkMode,
 }
 
-/// A scan across the ports, one probe at a time.
+/// A scan across the ports, one probe group at a time.
 #[derive(Debug, Clone)]
 pub(crate) struct FirmwareScan {
+    /// Every attempt the scan will make, in order.
     pub(crate) attempts: Vec<ProbeAttempt>,
-    /// Index of the attempt in flight.
+    /// Index of the first attempt that has not been answered yet.
     pub(crate) next: usize,
+    /// Queries carried by the command in flight.
+    pub(crate) sent: usize,
+    /// The query the core reported it is asking, for the progress line.
+    pub(crate) current: usize,
     /// The command that is waiting for an answer.
     pub(crate) op: Option<OpId>,
+}
+
+impl FirmwareScan {
+    /// Where `probe` in `framing` sits among the queries still in flight.
+    ///
+    /// The core answers one query at a time from the group the command
+    /// carried, so this is what places an answer on the scan's flat list.
+    pub(crate) fn offset_of(&self, probe: FirmwareProbe, framing: LinkMode) -> Option<usize> {
+        let end = (self.next + self.sent).min(self.attempts.len());
+
+        self.attempts[self.next..end]
+            .iter()
+            .position(|attempt| attempt.probe == probe && attempt.framing == framing)
+    }
 }
 
 /// The ECU a scan found.

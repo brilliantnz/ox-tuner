@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossfire::{Rx, TrySendError, spsc};
 use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
@@ -30,7 +30,7 @@ use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
 
-use crate::contract::FirmwareProbe;
+use crate::contract::ProbeQuery;
 use crate::link::PortChoice;
 use crate::service::CoreError;
 
@@ -57,6 +57,9 @@ const REPLY_CAPACITY: usize = 48;
 /// never hangs on a crowded queue.
 const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How often a bounded shutdown re-checks whether the thread has finished.
+const THREAD_POLL: Duration = Duration::from_millis(2);
+
 /// Everything the I/O thread needs to build its side.
 pub(crate) struct IoPlan {
     /// What the protocol is built from.
@@ -81,11 +84,15 @@ pub(crate) enum ProtocolSource {
         /// The behavior selected for it.
         behavior: BehaviorKind,
     },
-    /// A signature probe, with no definition in hand.
+    /// A signature probe group, with no definition in hand.
     ///
-    /// The family it asks, in the core's own vocabulary; the spec it needs is
-    /// one method call away.
-    Probe(FirmwareProbe),
+    /// The queries are the whole instruction: the port is opened once, and the
+    /// thread builds a probe protocol per query so one group can mix families
+    /// and framings.
+    Probe {
+        /// The queries the group will ask, in order.
+        queries: Vec<ProbeQuery>,
+    },
 }
 
 impl IoPlan {
@@ -106,11 +113,13 @@ impl IoPlan {
         }
     }
 
-    /// A plan for a signature probe.
-    pub(crate) fn probe(probe: FirmwareProbe, framing: LinkMode, link: PortChoice) -> Self {
+    /// A plan for a signature probe group.
+    pub(crate) fn probe(queries: &[ProbeQuery], link: PortChoice) -> Self {
         Self {
-            source: ProtocolSource::Probe(probe),
-            link_mode: Some(framing),
+            source: ProtocolSource::Probe {
+                queries: queries.to_vec(),
+            },
+            link_mode: queries.first().map(|query| query.framing),
             link,
         }
     }
@@ -126,6 +135,16 @@ pub(crate) enum IoOp {
         /// A port probe passes a short one, where a silent port must cost
         /// little.
         timeout: Option<Duration>,
+    },
+    /// Ask one signature query on an open probe link.
+    ///
+    /// The family and the framing ride with the query, so one open port can
+    /// serve a group that mixes both.
+    ProbeSignature {
+        /// The family and framing to ask.
+        query: ProbeQuery,
+        /// How long the reply may take.
+        timeout: Duration,
     },
     /// Read a list of whole pages, in order.
     ReadPages { pages: Vec<u8> },
@@ -252,10 +271,12 @@ pub(crate) struct IoReply {
 
 /// The core's end of the I/O thread.
 ///
-/// Dropping (or [`IoThread::shutdown`]) blocks until the request in flight
-/// reaches its own I/O deadline. Quitting deliberately waits instead of
-/// detaching: a detached thread would keep the serial port open while another
-/// process could claim it.
+/// Dropping, and [`Self::shutdown`], block until the request in flight reaches
+/// its own I/O deadline. A session waits deliberately, because a detached thread
+/// would keep the serial port open while another process could claim it.
+/// [`Self::shutdown_within`] detaches a thread that overruns its grace instead:
+/// a probe uses it so one wedged port cannot hold the core, and accepts that the
+/// thread keeps the port until its blocking call returns.
 pub(crate) struct IoThread {
     requests: crossfire::Tx<spsc::Array<IoRequest>>,
     stop: Arc<AtomicBool>,
@@ -303,12 +324,54 @@ impl IoThread {
         self.finish();
     }
 
-    fn finish(&mut self) {
+    /// Stops the thread, waiting at most `grace` for it to finish.
+    ///
+    /// Returns whether the thread ended. One that overruns the grace is
+    /// detached: it keeps the port until its own I/O call returns, and then
+    /// closes it like any other exit. That is what makes a probe's cost
+    /// bounded, since `Transport::open` has no timeout of its own. The detached
+    /// thread still holds the port until then, so the next group on that port
+    /// may fail to open it; that failure is reported, not retried here. A
+    /// session keeps [`Self::shutdown`], because leaving a serial port open in
+    /// the background is worse than waiting for the conversation to end.
+    pub(crate) fn shutdown_within(mut self, grace: Duration) -> bool {
+        self.signal_stop();
+
+        let Some(join) = self.join.take() else {
+            return true;
+        };
+        let deadline = Instant::now() + grace;
+
+        while !join.is_finished() {
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    grace_ms = grace.as_millis(),
+                    "the I/O thread overran its grace and was detached"
+                );
+                return false;
+            }
+
+            std::thread::sleep(THREAD_POLL);
+        }
+
+        if join.join().is_err() {
+            tracing::error!("the I/O thread panicked");
+        }
+
+        true
+    }
+
+    /// Asks the thread to stop after the request it is running.
+    fn signal_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.requests.try_send(IoRequest {
             id: 0,
             op: IoOp::Close,
         });
+    }
+
+    fn finish(&mut self) {
+        self.signal_stop();
         if let Some(join) = self.join.take()
             && join.join().is_err()
         {
@@ -346,10 +409,8 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
         (PortChoice::Custom(link), ProtocolSource::Definition { definition, .. }) => {
             link.open(definition).map_err(CoreError::Connect)?
         }
-        (PortChoice::Custom(link), ProtocolSource::Probe(probe)) => {
-            let framing = plan.link_mode.unwrap_or(LinkMode::Legacy);
-            link.open_for_probe(probe, framing)
-                .map_err(CoreError::Connect)?
+        (PortChoice::Custom(link), ProtocolSource::Probe { queries }) => {
+            link.open_for_probe(queries).map_err(CoreError::Connect)?
         }
     };
 
@@ -366,8 +427,11 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
             MsProtocol::new(definition, behavior.as_dyn())
                 .map_err(|error| CoreError::Connect(error.to_string()))?
         }
-        ProtocolSource::Probe(probe) => {
-            let spec = probe.spec();
+        ProtocolSource::Probe { queries } => {
+            let first = queries.first().copied().ok_or_else(|| {
+                CoreError::Connect("a probe group needs at least one query".to_owned())
+            })?;
+            let spec = first.probe.spec();
             recorder.note(format!("probe: {}", spec.behavior_id()));
 
             MsProtocol::for_probe(&spec)
@@ -558,6 +622,24 @@ fn execute(
                 Err(error) => (failure(&error), false),
             }
         }
+        IoOp::ProbeSignature { query, timeout } => {
+            // A group may mix families and framings over one open port, so the
+            // probe protocol is built per query from the family it asks. The
+            // trace records which one, or a replay would show the group's first
+            // probe for every conversation.
+            let spec = query.probe.spec();
+            transport.note(format!(
+                "probe: {} · framing: {:?}",
+                spec.behavior_id(),
+                query.framing
+            ));
+            let mut probe = MsProtocol::for_probe(&spec).with_link_mode(query.framing);
+
+            match probe.signature_with_timeout(transport, timeout) {
+                Ok(signature) => (IoOutcome::Signature { signature }, false),
+                Err(error) => (failure(&error), false),
+            }
+        }
         IoOp::ReadPages { pages } => {
             let mut read = Vec::with_capacity(pages.len());
             for page in pages {
@@ -740,8 +822,149 @@ impl RequestId {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Condvar, Mutex};
+
     use super::*;
+    use crate::FirmwareProbe;
     use oxtuner_sim::{SimConfig, SimTransport};
+
+    /// A gate a test opens when it wants a blocked transport to continue.
+    #[derive(Default)]
+    struct Gate {
+        open: Mutex<bool>,
+        ready: Condvar,
+        entered: AtomicBool,
+    }
+
+    impl Gate {
+        fn wait(&self) {
+            self.entered.store(true, Ordering::SeqCst);
+
+            let mut open = self.open.lock().expect("the gate is not poisoned");
+            while !*open {
+                open = self.ready.wait(open).expect("the gate is not poisoned");
+            }
+        }
+
+        fn release(&self) {
+            *self.open.lock().expect("the gate is not poisoned") = true;
+            self.ready.notify_all();
+        }
+
+        /// Waits until the transport is inside `open`.
+        fn await_entry(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+
+            while !self.entered.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the transport never reached open"
+                );
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// A transport whose open never returns until the test releases it, like a
+    /// serial device wedged in the OS.
+    struct Blocked {
+        gate: Arc<Gate>,
+        reading: Arc<AtomicBool>,
+    }
+
+    impl Transport for Blocked {
+        fn open(&mut self) -> Result<(), TransportError> {
+            self.gate.wait();
+
+            Ok(())
+        }
+
+        fn write_all(&mut self, _bytes: &[u8]) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn read_exact_timeout(
+            &mut self,
+            _buf: &mut [u8],
+            _timeout: Duration,
+        ) -> Result<(), TransportError> {
+            Err(TransportError::Timeout {
+                got: 0,
+                expected: 1,
+            })
+        }
+
+        fn read_until(
+            &mut self,
+            _sink: &mut Vec<u8>,
+            _max: usize,
+            _terminator: u8,
+            _quiet: Duration,
+            timeout: Duration,
+        ) -> Result<(), TransportError> {
+            // A real silent port spends its whole reply deadline before the
+            // timeout, which is what the bounded-wait test measures.
+            self.reading.store(true, Ordering::SeqCst);
+            std::thread::sleep(timeout);
+
+            Err(TransportError::Timeout {
+                got: 0,
+                expected: 1,
+            })
+        }
+
+        fn read_available(&mut self, _buf: &mut [u8]) -> Result<usize, TransportError> {
+            Ok(0)
+        }
+
+        fn flush_input(&mut self) {}
+
+        fn close(&mut self) {}
+    }
+
+    /// The link behind [`Blocked`].
+    struct BlockedLink {
+        gate: Arc<Gate>,
+        reading: Arc<AtomicBool>,
+    }
+
+    impl crate::link::CustomLink for BlockedLink {
+        fn label(&self) -> &'static str {
+            "blocked"
+        }
+
+        fn open(&self, _definition: &Definition) -> Result<Box<dyn Transport>, String> {
+            Err("the blocked link only probes".to_owned())
+        }
+
+        fn open_for_probe(&self, _queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+            Ok(Box::new(Blocked {
+                gate: Arc::clone(&self.gate),
+                reading: Arc::clone(&self.reading),
+            }))
+        }
+    }
+
+    /// A group with one query, for a link that only needs to open.
+    fn probe_plan(gate: Arc<Gate>, reading: Arc<AtomicBool>) -> IoPlan {
+        IoPlan::probe(
+            &[ProbeQuery::new(FirmwareProbe::Speeduino, LinkMode::Legacy)],
+            PortChoice::custom(BlockedLink { gate, reading }),
+        )
+    }
+
+    /// Waits until `flag` is set.
+    fn await_flag(flag: &AtomicBool, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while !flag.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the transport never reached {what}"
+            );
+            std::thread::yield_now();
+        }
+    }
 
     /// A test link: the simulator through the same seam the application uses.
     struct TestSim(SimConfig);
@@ -810,6 +1033,60 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     #[test]
     fn request_ids_advance() {
         assert_eq!(RequestId::FIRST.next().0, 2);
+    }
+
+    #[test]
+    fn a_bounded_shutdown_detaches_a_thread_stuck_in_open() {
+        let gate = Arc::new(Gate::default());
+        let reading = Arc::new(AtomicBool::new(false));
+        let (thread, _replies) =
+            IoThread::start(&probe_plan(Arc::clone(&gate), Arc::clone(&reading))).expect("starts");
+        thread
+            .submit(
+                1,
+                IoOp::ProbeSignature {
+                    query: ProbeQuery::new(FirmwareProbe::Speeduino, LinkMode::Legacy),
+                    timeout: Duration::from_millis(10),
+                },
+            )
+            .expect("queued");
+
+        // The thread is wedged in open: the bounded shutdown must not wait it
+        // out, or one stuck port would hold the core.
+        gate.await_entry();
+        assert!(!thread.shutdown_within(Duration::from_millis(50)));
+
+        // Let the thread finish so the test does not leave it waiting.
+        gate.release();
+    }
+
+    #[test]
+    fn a_bounded_shutdown_waits_for_a_thread_that_finishes() {
+        let gate = Arc::new(Gate::default());
+        gate.release();
+        let reading = Arc::new(AtomicBool::new(false));
+
+        let (thread, _replies) =
+            IoThread::start(&probe_plan(Arc::clone(&gate), Arc::clone(&reading))).expect("starts");
+        thread
+            .submit(
+                1,
+                IoOp::ProbeSignature {
+                    query: ProbeQuery::new(FirmwareProbe::Speeduino, LinkMode::Legacy),
+                    timeout: Duration::from_millis(200),
+                },
+            )
+            .expect("queued");
+
+        // Once the thread is inside the reply wait, the bounded shutdown has to
+        // sit through the rest of it rather than detach early.
+        await_flag(&reading, "the reply wait");
+        let started = Instant::now();
+        assert!(thread.shutdown_within(Duration::from_secs(1)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "the bounded shutdown waited out the query in flight"
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! is handed over through [`oxtuner_core::CustomLink`], so the session layer
 //! never depends on a demo transport (ADR-0022).
 
-use oxtuner_core::{CustomLink, Definition, FirmwareProbe, LinkMode, PortChoice, Transport};
-use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
+use oxtuner_core::{CustomLink, Definition, PortChoice, ProbeQuery, Transport};
+use oxtuner_sim::{SimConfig, SimProbeSet, SimTransport};
 
 /// The simulator, as the core sees it.
 pub(crate) struct SimulatorLink {
@@ -23,12 +23,14 @@ impl CustomLink for SimulatorLink {
             .map_err(|error| error.to_string())
     }
 
-    fn open_for_probe(
-        &self,
-        probe: &FirmwareProbe,
-        framing: LinkMode,
-    ) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::new(probe.spec().with_link(framing))))
+    fn open_for_probe(&self, queries: &[ProbeQuery]) -> Result<Box<dyn Transport>, String> {
+        // The simulated ECU answers every family the scan asks, in the framing
+        // it asked, so one open port serves the whole group.
+        Ok(Box::new(SimProbeSet::new(
+            queries
+                .iter()
+                .map(|query| query.probe.spec().with_link(query.framing)),
+        )))
     }
 }
 

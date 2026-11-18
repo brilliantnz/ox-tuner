@@ -162,6 +162,148 @@ impl Transport for SimProbe {
     }
 }
 
+/// A probe-shaped link that answers any of several queries over one open port.
+///
+/// A scan opens a port once and asks every family and framing before releasing
+/// it, so the virtual link recognises each query instead of one. A query no
+/// probe in the set answers is met with silence, which is what a board that
+/// speaks one family does.
+#[derive(Debug)]
+pub struct SimProbeSet {
+    probes: Vec<SimProbe>,
+    answering: Option<usize>,
+    open: bool,
+}
+
+impl SimProbeSet {
+    /// One probe per spec, each answering its family's default signature.
+    #[must_use]
+    pub fn new(specs: impl IntoIterator<Item = ProbeSpec>) -> Self {
+        Self::from_probes(specs.into_iter().map(SimProbe::new))
+    }
+
+    /// One probe per spec, all silent, like a port with no ECU attached.
+    #[must_use]
+    pub fn silent(specs: impl IntoIterator<Item = ProbeSpec>) -> Self {
+        Self::from_probes(specs.into_iter().map(SimProbe::silent))
+    }
+
+    /// One probe per spec, each answering `signature`.
+    #[must_use]
+    pub fn with_signature(
+        specs: impl IntoIterator<Item = ProbeSpec>,
+        signature: impl Into<String>,
+    ) -> Self {
+        let signature = signature.into();
+
+        Self::from_probes(
+            specs
+                .into_iter()
+                .map(|spec| SimProbe::with_signature(spec, signature.clone())),
+        )
+    }
+
+    /// A set built query by query, so a test can leave the early ones silent.
+    #[must_use]
+    pub fn from_probes(probes: impl IntoIterator<Item = SimProbe>) -> Self {
+        Self {
+            probes: probes.into_iter().collect(),
+            answering: None,
+            open: false,
+        }
+    }
+}
+
+impl Transport for SimProbeSet {
+    fn open(&mut self) -> Result<(), TransportError> {
+        for probe in &mut self.probes {
+            probe.open()?;
+        }
+
+        self.answering = None;
+        self.open = true;
+
+        Ok(())
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        if !self.open {
+            return Err(TransportError::NotOpen);
+        }
+
+        for (index, probe) in self.probes.iter_mut().enumerate() {
+            if probe.is_query(bytes) {
+                probe.write_all(bytes)?;
+                self.answering = Some(index);
+                return Ok(());
+            }
+        }
+
+        // A query no probe speaks is met with silence, not an error. The
+        // previous answer must not stay selected, or the silence would read from
+        // the wrong probe.
+        self.answering = None;
+
+        Ok(())
+    }
+
+    fn read_exact_timeout(
+        &mut self,
+        buf: &mut [u8],
+        timeout: Duration,
+    ) -> Result<(), TransportError> {
+        self.reading(buf.len())?.read_exact_timeout(buf, timeout)
+    }
+
+    fn read_until(
+        &mut self,
+        sink: &mut Vec<u8>,
+        max: usize,
+        terminator: u8,
+        quiet: Duration,
+        timeout: Duration,
+    ) -> Result<(), TransportError> {
+        self.reading(1)?
+            .read_until(sink, max, terminator, quiet, timeout)
+    }
+
+    fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        self.reading(1)?.read_available(buf)
+    }
+
+    fn flush_input(&mut self) {
+        for probe in &mut self.probes {
+            probe.flush_input();
+        }
+    }
+
+    fn close(&mut self) {
+        for probe in &mut self.probes {
+            probe.close();
+        }
+
+        self.answering = None;
+        self.open = false;
+    }
+}
+
+impl SimProbeSet {
+    /// The probe whose answer is pending, or the silence of the whole set.
+    ///
+    /// `expected` is what the caller asked for, so a silent read reports the
+    /// same shape as a real one that ran out of bytes.
+    fn reading(&mut self, expected: usize) -> Result<&mut SimProbe, TransportError> {
+        if !self.open {
+            return Err(TransportError::NotOpen);
+        }
+
+        match self.answering.and_then(|index| self.probes.get_mut(index)) {
+            Some(probe) => Ok(probe),
+            None => Err(TransportError::Timeout { got: 0, expected }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oxtuner_protocol::{RUSEFI, SPEEDUINO};
@@ -198,6 +340,41 @@ mod tests {
         let text = String::from_utf8(reply).expect("the reply is text");
         assert_eq!(text, "speeduino synthetic\0");
         assert_eq!(probe.signature(), "speeduino synthetic");
+    }
+
+    /// Everything queued as an answer, read in one go.
+    ///
+    /// A framed reply starts with a length, so the text terminator is not what
+    /// ends it.
+    fn drain(set: &mut SimProbeSet) -> Vec<u8> {
+        let mut buf = [0u8; 64];
+        let read = set.read_available(&mut buf).expect("the answer is ready");
+
+        buf[..read].to_vec()
+    }
+
+    #[test]
+    fn a_probe_set_answers_each_query_it_was_built_for() {
+        let mut set = SimProbeSet::new([
+            SPEEDUINO.with_link(LinkMode::Envelope),
+            RUSEFI.with_link(LinkMode::Legacy),
+        ]);
+        set.open().expect("the set opens");
+
+        let query = Frame::encode(b"Q").expect("the query fits a frame");
+        set.write_all(&query).expect("the query is written");
+        let frame = Frame::parse(&drain(&mut set)).expect("the answer is framed");
+        assert!(
+            frame.payload.ends_with(b"speeduino synthetic"),
+            "the first query is answered by its own family"
+        );
+
+        set.write_all(b"S").expect("the second query is written");
+        let reply = drain(&mut set);
+        assert!(
+            reply.starts_with(b"rusefi synthetic"),
+            "the second query is answered in its own framing"
+        );
     }
 
     #[test]

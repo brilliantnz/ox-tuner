@@ -147,6 +147,19 @@ pub enum Event {
         /// What the test found.
         view: ConnectionView,
     },
+    /// An [`super::EcuCommand::ProbeFirmware`] is about to send one query.
+    ///
+    /// One command asks several queries over the same open port, so this is
+    /// what lets a progress line name the family and framing in flight instead
+    /// of the first query in the group.
+    ProbeStarted {
+        /// The command this belongs to.
+        op: OpId,
+        /// The family probe being sent.
+        probe: FirmwareProbe,
+        /// The framing it is sent in.
+        framing: LinkMode,
+    },
     /// A [`super::CoreCommand::ProbeFirmware`] read a signature without a
     /// definition.
     ///
@@ -323,6 +336,7 @@ impl Event {
             Self::DefinitionLoaded { op, .. }
             | Self::DefinitionInspected { op, .. }
             | Self::FirmwareProbed { op, .. }
+            | Self::ProbeStarted { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
             | Self::ProjectLayoutSaved { op, .. }

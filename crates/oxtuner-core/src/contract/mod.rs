@@ -37,7 +37,7 @@ pub use gates::GateState;
 pub use ops::{
     AxisEdit, AxisKind, CellEdit, ConflictResolution, CoreCommand, DefinitionCommand, EcuCommand,
     FirmwareProbe, JournalCommand, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId,
-    ProjectCommand, RejectReason, SafetyCommand, TuneCommand,
+    ProbeQuery, ProjectCommand, RejectReason, SafetyCommand, TuneCommand,
 };
 pub(crate) use ops::{CommandRequest, Envelope};
 pub use project::{
