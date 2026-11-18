@@ -128,9 +128,11 @@ fn follow_detection(
         .as_ref()
         .and_then(|select| select.read(cx).selected_index(cx))
         .and_then(|index| PICKABLE_BAUD_RATES.get(index.row).copied());
-    if current_baud != Some(wizard.connection_auto_baud) && current_baud != Some(want_baud) {
-        // The user picked a baud; a later detection leaves it alone.
-    } else if current_baud != Some(want_baud) {
+    // A selection that still matches the last synced default is not the
+    // user's own, so a later detection moves it along. Anything else is left
+    // alone.
+    let follows = current_baud == Some(wizard.connection_auto_baud);
+    if follows && current_baud != Some(want_baud) {
         set_baud_selection(&mut wizard, want_baud, window, cx);
         wizard.connection_auto_baud = want_baud;
     }
@@ -302,7 +304,7 @@ pub(super) fn connection_body(
     if show_test && let Some(test) = &status.test {
         body = body.child(match &test.outcome {
             Ok(view) => div().text_xs().child(t!(
-                "app.new_project.definition_tested",
+                "app.new_project.test_signature",
                 signature = view.signature.clone(),
                 port = test.port.clone()
             )),

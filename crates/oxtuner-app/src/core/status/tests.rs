@@ -319,8 +319,18 @@ fn a_bad_import_is_not_halted() {
 }
 
 #[test]
-fn unloading_clears_every_field() {
-    let mut status = CoreStatus::default();
+fn unloading_drops_the_project_but_keeps_machine_state() {
+    let mut status = CoreStatus {
+        ports: vec![PortView {
+            name: "/dev/cu.usbmodem".to_owned(),
+            label: "/dev/cu.usbmodem".to_owned(),
+            vid: None,
+            pid: None,
+            serial: None,
+        }],
+        ports_revision: 3,
+        ..CoreStatus::default()
+    };
     status.apply(Update::Opened(Box::new(project())));
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
 
@@ -330,6 +340,16 @@ fn unloading_clears_every_field() {
     assert!(status.definition.is_none());
     assert!(status.last_save.is_none());
     assert!(status.failure.is_none());
+    assert_eq!(status.ports_revision, 3);
+    assert_eq!(
+        status
+            .ports
+            .iter()
+            .map(|port| port.name.as_str())
+            .collect::<Vec<_>>(),
+        ["/dev/cu.usbmodem"],
+        "the sampled port list is machine state, not project state"
+    );
 }
 
 #[test]

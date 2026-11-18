@@ -16,6 +16,11 @@ pub(crate) fn connect_to_simulator(cx: &mut App) {
 /// The dialog renders the core's pushed list; the request only hurries the
 /// first snapshot along when the core has not sampled yet.
 pub(crate) fn request_connect(cx: &mut App) {
+    // A portless first sample publishes nothing, so no snapshot can mean no
+    // ports or no sample yet: ask once, and the answer fills the dialog.
+    if crate::core::ports(cx).is_none() {
+        refresh_ports(cx);
+    }
     cx.defer(|cx| {
         if let Some(window) = crate::app::window::main(cx) {
             window

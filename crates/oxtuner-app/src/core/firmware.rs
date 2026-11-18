@@ -45,11 +45,19 @@ pub(crate) fn host_of(url: &str) -> String {
 /// A freshly plugged device lands at the end of the port list, so the scan
 /// walks that list back to front to meet it sooner. The list is the core's
 /// pushed snapshot: no scan is requested here because the core publishes its
-/// first sample on its own.
+/// first sample on its own. When no sample arrived yet the scan waits for it
+/// instead of reporting a portless machine: the request hurries the baseline
+/// along, and the next Detect press scans it.
 pub(crate) fn start_scan(cx: &mut App) {
-    let ports: Vec<String> = crate::core::ports(cx).map_or_else(Vec::new, |ports| {
-        ports.iter().map(|port| port.name.clone()).collect()
-    });
+    let Some(published) = crate::core::ports(cx) else {
+        crate::core::refresh_ports(cx);
+        let status = &mut cx.global_mut::<CoreService>().status;
+        status.firmware_scan = None;
+        status.firmware_error = Some(t!("app.new_project.scan_ports_pending").to_string());
+        cx.refresh_windows();
+        return;
+    };
+    let ports: Vec<String> = published.iter().map(|port| port.name.clone()).collect();
 
     let status = &mut cx.global_mut::<CoreService>().status;
     status.firmware_error = None;
@@ -86,7 +94,7 @@ fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
 
     for port in ports.iter().rev() {
         for baud in COMMON_PROBE_BAUD_RATES {
-            for probe in [FirmwareProbe::Speeduino, FirmwareProbe::Rusefi] {
+            for probe in FirmwareProbe::ALL {
                 attempts.push(ProbeAttempt {
                     port: port.clone(),
                     baud,
@@ -219,21 +227,24 @@ pub(crate) fn probed(
     cx.refresh_windows();
 }
 
-/// Handles a probe that found nothing; returns whether it belonged to a scan.
-pub(crate) fn missed(op: OpId, cx: &mut App) -> bool {
+/// Handles a probe that found nothing.
+///
+/// A miss that belongs to no scan (cancelled, or a stale op) is still not a
+/// visible failure: a scan step is never news on its own.
+pub(crate) fn missed(op: OpId, cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
     let Some(scan) = status.firmware_scan.as_mut() else {
-        return false;
+        return;
     };
     if scan.op != Some(op) {
-        return false;
+        return;
     }
 
     scan.next += 1;
     if scan.next < scan.attempts.len() {
         send_current(cx);
         cx.refresh_windows();
-        return true;
+        return;
     }
 
     let attempts = scan.attempts.len();
@@ -241,8 +252,6 @@ pub(crate) fn missed(op: OpId, cx: &mut App) -> bool {
     status.firmware_error = Some(t!("app.new_project.scan_no_answer").to_string());
     tracing::info!(attempts, "the firmware scan found no ECU");
     cx.refresh_windows();
-
-    true
 }
 
 /// Resolves a signature through the registry and the local cache.
@@ -322,11 +331,20 @@ pub(crate) fn download(cx: &mut App) {
         })
     });
 
+    let tick_progress = Arc::clone(&progress);
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
             cx.background_executor().timer(PROGRESS_TICK).await;
+            // The ticker follows the same handle the completion does: a
+            // second download sets its own progress, and the old ticker must
+            // not repaint for it.
             let running = cx.update(|cx| {
-                let running = cx.global::<CoreService>().status.downloading_definition;
+                let status = &cx.global::<CoreService>().status;
+                let running = status.downloading_definition
+                    && status
+                        .download_progress
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &tick_progress));
                 if running {
                     cx.refresh_windows();
                 }
@@ -392,15 +410,28 @@ pub(crate) fn skip_download(cx: &mut App) {
 }
 
 /// Hands the cached definition to the core and the wizard.
+///
+/// The serial moves with the send: an inspect failure that arrives after this
+/// point belongs to this definition, and the render compares against it.
 fn finish(path: &Path, cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
     if let Some(detected) = status.detected_firmware.as_mut() {
         detected.definition = Some(path.to_path_buf());
     }
     status.firmware_error = None;
+    status.inspect_serial = status.failure_serial;
 
     inspect_definition(path, cx);
     cx.refresh_windows();
+}
+
+/// Records that the active definition was just sent for inspect.
+///
+/// The serial moves with the send: an inspect failure that arrives after this
+/// point belongs to this definition, and the dialog compares against it.
+pub(crate) fn note_inspect_sent(cx: &mut App) {
+    let status = &mut cx.global_mut::<CoreService>().status;
+    status.inspect_serial = status.failure_serial;
 }
 
 #[cfg(test)]
@@ -411,7 +442,10 @@ mod tests {
     fn the_scan_tries_every_baud_and_family_per_port() {
         let attempts = attempts_for(&["first".to_owned(), "second".to_owned()]);
 
-        assert_eq!(attempts.len(), 2 * COMMON_PROBE_BAUD_RATES.len() * 2);
+        assert_eq!(
+            attempts.len(),
+            2 * COMMON_PROBE_BAUD_RATES.len() * FirmwareProbe::ALL.len()
+        );
         assert_eq!(
             attempts[0],
             ProbeAttempt {

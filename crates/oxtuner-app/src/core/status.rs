@@ -58,6 +58,11 @@ pub(crate) struct CoreStatus {
     /// answer can compare this to the value it saw when it asked, so an old
     /// failure still on screen is not mistaken for the new one.
     pub(crate) failure_serial: u64,
+    /// The failure serial seen when the active definition was sent for
+    /// inspect. The wizard renders an inspect failure only when a newer one
+    /// arrived after that send, so a refusal of an earlier pick is never
+    /// shown against the definition that replaced it.
+    pub(crate) inspect_serial: u64,
     /// Bumped whenever an edit or a save may have moved tune values, so a view
     /// can tell that copies it kept are no longer trustworthy.
     pub(crate) tune_revision: u64,
@@ -87,7 +92,7 @@ pub(crate) struct CoreStatus {
     /// The last signature test.
     pub(crate) test: Option<ConnectionTest>,
     /// The last inspected definition, with the file it came from.
-    pub(crate) inspected: Option<(PathBuf, oxtuner_core::DefinitionPreview)>,
+    pub(crate) inspected: Option<InspectedDefinition>,
     /// The firmware scan in progress, if any.
     pub(crate) firmware_scan: Option<FirmwareScan>,
     /// The ECU the last completed scan found.
@@ -211,14 +216,14 @@ impl CoreStatus {
         });
     }
 
-    /// Records the op the core accepted for the pending open.
+    /// Records the op the core accepted for the pending project.
     pub(crate) fn pending_project_sent(&mut self, op: OpId) {
         if let Some(pending) = &mut self.pending_project {
             pending.op = Some(op.get());
         }
     }
 
-    /// Clears the pending open if `op` is its answer.
+    /// Clears the pending project if `op` is its answer.
     ///
     /// The caller repaints on every answer, so the result is not returned.
     /// [`Self::finish_pending_project_at`] keeps it for the tests.
@@ -235,18 +240,18 @@ impl CoreStatus {
         }
         tracing::debug!(
             path = %pending.path.display(),
-            "the pending project open finished"
+            "the pending project finished"
         );
         self.pending_project = None;
         true
     }
 
-    /// Clears the pending open after a command that never reached the core.
+    /// Clears the pending project after a command that never reached the core.
     pub(crate) fn cancel_pending_project(&mut self) {
         self.pending_project = None;
     }
 
-    /// Clears the pending open when its answer never arrived.
+    /// Clears the pending project when its answer never arrived.
     ///
     /// Returns whether this call cleared the state. Only the request with the
     /// same op expires, so a newer open keeps its splash.
@@ -265,6 +270,16 @@ impl CoreStatus {
         waiting
     }
 }
+
+/// A definition the core read for the wizard, with the file it came from.
+#[derive(Debug, Clone)]
+pub(crate) struct InspectedDefinition {
+    /// The file the preview was read from.
+    pub(crate) path: PathBuf,
+    /// The signature and setting groups the dialog renders.
+    pub(crate) preview: oxtuner_core::DefinitionPreview,
+}
+
 /// One probe attempt: a port, a baud rate and a family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProbeAttempt {
@@ -313,6 +328,9 @@ pub(crate) struct DownloadProgress {
 
 impl DownloadProgress {
     /// Fraction completed, or `None` while the total is still unknown.
+    ///
+    /// Clamped to one: the two counters are written by another thread, so a
+    /// tick can read a `done` that already passed the `total` it just read.
     pub(crate) fn fraction(&self) -> Option<f32> {
         let total = self.total.load(Ordering::Relaxed);
         if total == 0 {
@@ -330,7 +348,7 @@ impl DownloadProgress {
             clippy::as_conversions,
             reason = "a 0.0..=1.0 ratio always fits in f32; the bar clamps out-of-range values itself"
         )]
-        let ratio = ratio as f32;
+        let ratio = ratio.clamp(0.0, 1.0) as f32;
         Some(ratio)
     }
 }
@@ -396,7 +414,7 @@ impl CoreStatus {
     pub(super) fn apply(&mut self, update: Update) {
         match update {
             Update::Inspected { path, preview } => {
-                self.inspected = Some((path, preview));
+                self.inspected = Some(InspectedDefinition { path, preview });
             }
             Update::Loaded(summary) => {
                 self.definition = Some(summary);
@@ -588,8 +606,15 @@ impl CoreStatus {
                 }
             }
             Update::Unloaded => {
+                // The port list is machine state, not project state: the core
+                // publishes only on change, so dropping the sampled list here
+                // would read as "not sampled yet" until a device is plugged.
+                let ports = std::mem::take(&mut self.ports);
+                let ports_revision = self.ports_revision;
                 let writes_enabled = self.writes_enabled;
                 *self = Self {
+                    ports,
+                    ports_revision,
                     writes_enabled,
                     ..Self::default()
                 };

@@ -17,7 +17,7 @@ use rust_i18n::t;
 
 use super::shared::section_title;
 use super::state::{DefinitionMode, SharedWizard};
-use crate::core::{self, CoreService, firmware};
+use crate::core::{self, firmware};
 
 /// Step 2: detect the ECU, download its definition when the registry has it,
 /// or upload the file by hand.
@@ -64,7 +64,7 @@ pub(super) fn definition_body(
                     cx,
                 )),
         )
-        .child(mode_tabs(model, cx, creating));
+        .child(mode_tabs(model, creating));
 
     body = match mode {
         DefinitionMode::Auto => body.child(auto_detect_section(model, status, cx, creating)),
@@ -104,10 +104,7 @@ pub(super) fn definition_body(
 /// A segmented control that fills the width; the active tab is the wizard's
 /// source. Each mode owns its source, so toggling keeps the other side's
 /// answers around and switching back restores them.
-///
-/// The context is reserved for future theme-aware tab styling; the segmented
-/// control already carries its own theme, so nothing reads from it yet.
-fn mode_tabs(model: &SharedWizard, _cx: &App, creating: bool) -> AnyElement {
+fn mode_tabs(model: &SharedWizard, creating: bool) -> AnyElement {
     let selected = match model.borrow().definition_mode {
         DefinitionMode::Auto => 0,
         DefinitionMode::Manual => 1,
@@ -316,15 +313,19 @@ fn download_progress(status: &crate::core::CoreStatus, cx: &App) -> AnyElement {
 }
 
 /// Bytes as the tuner reads them: `48 KB`, never a raw count.
+///
+/// Halves round up, so 1536 bytes read as `2 KB` while 1025 bytes still read
+/// as `1 KB`: a count that always rounds up would show a half-downloaded file
+/// as whole kilobytes.
 fn format_bytes(bytes: u64) -> String {
     const UNIT: u64 = 1024;
 
     if bytes < UNIT {
         format!("{bytes} B")
     } else if bytes < UNIT * UNIT {
-        format!("{} KB", bytes.div_ceil(UNIT))
+        format!("{} KB", (bytes + UNIT / 2) / UNIT)
     } else {
-        format!("{} MB", bytes.div_ceil(UNIT * UNIT))
+        format!("{} MB", (bytes + UNIT * UNIT / 2) / (UNIT * UNIT))
     }
 }
 
@@ -430,7 +431,12 @@ fn choose_definition(model: SharedWizard, cx: &mut App) {
     cx.spawn(async move |cx| match receiver.await {
         Ok(Ok(Some(paths))) => {
             if let Some(path) = paths.into_iter().next() {
-                cx.update(|cx| use_definition(&path, &model, cx));
+                cx.update(|cx| {
+                    // A pick that lands after close belongs to no dialog.
+                    if !model.borrow().closed {
+                        use_definition(&path, &model, cx);
+                    }
+                });
             }
         }
         Ok(Ok(None)) => {}
@@ -461,17 +467,17 @@ fn use_definition(path: &Path, model: &SharedWizard, cx: &mut App) {
         return;
     }
 
-    let failure_serial = CoreService::status(cx).failure_serial;
     let mut wizard = model.borrow_mut();
+    if wizard.closed {
+        return;
+    }
     wizard.definition = Some(path.to_path_buf());
-    wizard.definition_error = None;
-    wizard.inspect_serial = failure_serial;
-    wizard.preview_path = None;
-    wizard.display_groups.clear();
-    wizard.choices.clear();
-    // A new definition is a new attempt; an old failure no longer describes it.
-    wizard.target = None;
     drop(wizard);
+
+    // The serial moves with the send: an inspect failure that arrives after
+    // this point belongs to this definition.
+    crate::core::firmware::note_inspect_sent(cx);
+    model.borrow_mut().retry_definition();
 
     // The core reads and parses the file; the answer carries the signature and
     // the setting groups the next two steps render.
@@ -486,6 +492,8 @@ mod tests {
         assert_eq!(super::format_bytes(0), "0 B");
         assert_eq!(super::format_bytes(512), "512 B");
         assert_eq!(super::format_bytes(1024), "1 KB");
+        assert_eq!(super::format_bytes(1025), "1 KB");
+        assert_eq!(super::format_bytes(1536), "2 KB");
         assert_eq!(super::format_bytes(48 * 1024), "48 KB");
         assert_eq!(super::format_bytes(3 * 1024 * 1024), "3 MB");
     }

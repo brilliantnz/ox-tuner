@@ -2,6 +2,11 @@
 //!
 //! The steps render from this state and the footer mutates it; the bodies own
 //! only presentation.
+//!
+//! The model is deliberately a shared [`RefCell`] rather than an entity: the
+//! dialog owns it for one open, every step borrows it briefly, and nothing
+//! outlives the close. Keep each borrow to one statement; a nested borrow is
+//! a panic, not a compile error.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -83,8 +88,6 @@ pub(super) struct Wizard {
     /// The groups the dialog shows: the definition's own, plus the display
     /// choices the application owns but the project records.
     pub(super) display_groups: Vec<oxtuner_core::SettingGroupView>,
-    /// Failure serial captured when the inspect was sent.
-    pub(super) inspect_serial: u64,
     /// The folder a create is building, once Create was pressed.
     pub(super) target: Option<PathBuf>,
     /// The failure serial seen when Create was pressed, so a failure already on
@@ -115,6 +118,9 @@ pub(super) struct Wizard {
     /// pickers afterwards hides the stale result instead of attributing it to
     /// the new selection.
     pub(super) tested: Option<TestedSelection>,
+    /// Whether the dialog closed. Async picker callbacks check this before
+    /// touching the model: a file picked after close belongs to no dialog.
+    pub(super) closed: bool,
 }
 
 /// The connection a Test click ran against.
@@ -138,7 +144,6 @@ impl Wizard {
             choices: std::collections::BTreeMap::new(),
             preview_path: None,
             display_groups: Vec::new(),
-            inspect_serial: 0,
             target: None,
             failure_serial: 0,
             connection_ports: Vec::new(),
@@ -150,7 +155,28 @@ impl Wizard {
             name_subscription: None,
             path_subscription: None,
             tested: None,
+            closed: false,
         }
+    }
+
+    /// Starts over on the active definition.
+    ///
+    /// A new file is a new attempt: nothing from the previous inspect or
+    /// create may linger into it.
+    pub(super) fn retry_definition(&mut self) {
+        self.definition_error = None;
+        self.preview_path = None;
+        self.display_groups.clear();
+        self.choices.clear();
+        self.target = None;
+    }
+
+    /// Points the wizard at another target folder.
+    ///
+    /// A new folder is a new attempt, so a create failure for the old one no
+    /// longer applies.
+    pub(super) fn retarget(&mut self) {
+        self.target = None;
     }
 }
 

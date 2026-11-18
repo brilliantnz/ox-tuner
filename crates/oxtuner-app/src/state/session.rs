@@ -290,8 +290,8 @@ pub(crate) struct LayoutState {
     /// Whether the table grid draws its Y axis downward: low bins at the top.
     ///
     /// The default draws it upward like a chart, so the low bin is at the
-    /// bottom and the column header sits under the table, the way `TunerStudio`
-    /// opens a table.
+    /// bottom and the column header sits under the table, the way a
+    /// reference editor opens a table.
     ///
     /// This one is **not** stored in `state.json`: how a table is drawn belongs
     /// to the project whose table it is, so it lives in the project's own
@@ -587,6 +587,11 @@ thread_local! {
     static SAVE_GENERATION: Cell<u64> = const { Cell::new(0) };
     /// Whether a debounce task is already waiting to write.
     static SAVE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// The layout last sent to the core. Core conversations are strictly
+    /// sequential, so a layout that did not move must not occupy the loop a
+    /// drag never touched — only a change earns a command.
+    static SENT_LAYOUT: std::cell::RefCell<Option<oxtuner_core::ProjectLayout>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Schedules a debounced state write.
@@ -636,7 +641,10 @@ pub(crate) fn schedule_save(cx: &mut App) {
                     "could not save application state"
                 );
             }
-            if let Some(layout) = project_layout {
+            if let Some(layout) = project_layout
+                && SENT_LAYOUT
+                    .with(|last| last.replace(Some(layout.clone())) != Some(layout.clone()))
+            {
                 cx.update(|cx| crate::core::save_project_layout(cx, layout));
             }
 

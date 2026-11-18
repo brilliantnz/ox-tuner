@@ -796,6 +796,8 @@ app:
       en: 'Scanning port %{port} @ %{baud}…'
     scan_no_ports:
       en: No serial port to scan.
+    scan_ports_pending:
+      en: Still looking for ports — Detect again in a moment.
     scan_core_stopped:
       en: The core is not running.
     scan_probe_refused:
@@ -804,7 +806,7 @@ app:
       en: No ECU answered the firmware probes.
     firmware_detected:
       en: 'ECU reports %{signature} on %{port} @ %{baud} baud.'
-    definition_tested:
+    test_signature:
       en: 'ECU reports %{signature} on %{port}.'
     downloading_definition:
       en: Downloading the definition…
@@ -866,6 +868,8 @@ app:
       en: Baud rate
     review_connection:
       en: Connection
+    review_connection_value:
+      en: '%{port} · %{baud}'
     no_connection:
       en: No port selected
     review_port_mismatch:

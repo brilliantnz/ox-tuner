@@ -68,6 +68,9 @@ fn log_outcome(event: &Event, op: Option<OpId>) {
 )]
 pub(super) fn apply(event: Event, cx: &mut App) {
     let event_op = event.op();
+    // A rejection answers the command without an update: the pending open
+    // must still end, or the splash survives until the expiry.
+    let rejected = matches!(event, Event::Rejected { .. });
 
     // Every failure and rejection gets one record with the op field that
     // Diagnostics filters on. The core logs its own technical detail, but not
@@ -94,14 +97,15 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     if let Some(ports) = ports {
         let service = cx.global_mut::<CoreService>();
         service.status.ports.clone_from(ports);
-        service.status.ports_revision = service.status.ports_revision.wrapping_add(1);
+        service.status.ports_revision = service.status.ports_revision.saturating_add(1);
 
         cx.refresh_windows();
         return;
     }
 
     // Firmware probing is a scan: a reply moves to the registry, a miss moves
-    // to the next attempt. It never becomes a connection test result.
+    // to the next attempt. It never becomes a connection test result, and a
+    // miss that belongs to no scan is not a visible failure either.
     if let Event::FirmwareProbed {
         op,
         port,
@@ -116,8 +120,8 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     }
     if let Event::Failed { op, failure, .. } = &event
         && failure.code == FailureCode::FirmwareNotDetected
-        && crate::core::firmware::missed(*op, cx)
     {
+        crate::core::firmware::missed(*op, cx);
         return;
     }
 
@@ -262,7 +266,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     };
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
-    let finishes_open = matches!(&update, Update::Opened(_) | Update::Failed(_));
+    let finishes_open = finishes_open(&update, rejected);
     // A project carries its own panel layout; standalone tunes keep the
     // installation's.
     let project_layout = match &update {
@@ -300,11 +304,6 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             project.connection.last_port = Some(port);
             project.connection.baud_override = baud;
         }
-        if finishes_open {
-            cx.global_mut::<CoreService>()
-                .status
-                .finish_pending_project(event_op);
-        }
         if let Some(path) = import_consent {
             cx.global_mut::<CoreService>().status.import_consent = Some(path);
         }
@@ -313,6 +312,16 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         }
         // Only the main layout shows the core status; the Settings window does not.
         cx.refresh_windows();
+    }
+
+    // Every accepted command answers exactly once — opened, failed or
+    // rejected — so the pending project ends on every answer type. A
+    // rejection carries no update, which is why this sits outside the fold
+    // above instead of beside the other `finishes_open` arm.
+    if finishes_open {
+        cx.global_mut::<CoreService>()
+            .status
+            .finish_pending_project(event_op);
     }
 
     if auto_connect {
@@ -355,5 +364,28 @@ pub(super) fn apply(event: Event, cx: &mut App) {
                     .ok();
             }
         });
+    }
+}
+
+/// Whether the answer ends the pending project.
+///
+/// Every accepted command answers exactly once — opened, failed or rejected —
+/// and a rejection carries no update, so it arrives as its own flag instead
+/// of matching an update arm.
+fn finishes_open(update: &Update, rejected: bool) -> bool {
+    matches!(update, Update::Opened(_) | Update::Failed(_)) || rejected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rejection_ends_the_pending_project() {
+        assert!(
+            finishes_open(&Update::Nothing, true),
+            "a rejection without an update still answers the request"
+        );
+        assert!(!finishes_open(&Update::Nothing, false));
     }
 }

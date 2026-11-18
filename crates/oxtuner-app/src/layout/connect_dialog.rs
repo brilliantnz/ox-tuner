@@ -103,7 +103,7 @@ impl DialogModel {
     }
 }
 
-/// Opens the connect dialog and starts a port scan.
+/// Opens the connect dialog.
 #[expect(
     clippy::too_many_lines,
     reason = "the connect dialog builds its mode, port, test and status sections in one place"
@@ -403,7 +403,14 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             connection.as_ref(),
             link_lost.as_deref(),
             testing.as_deref(),
-            test.as_ref(),
+            // A test answers for the picker state at click time; a changed
+            // picker hides the stale answer instead of attributing it to the
+            // new selection.
+            test.as_ref().filter(|test| {
+                chosen
+                    .as_ref()
+                    .is_some_and(|choice| choice.label() == test.port)
+            }),
             connecting.as_deref(),
             muted,
             danger,

@@ -110,7 +110,7 @@ pub(super) fn footer(
                     wizard.step = previous;
                     // A failure belongs to the request that produced it; going
                     // back to change the inputs starts a new attempt.
-                    wizard.target = None;
+                    wizard.retarget();
                     wizard.failure_serial = 0;
                     drop(wizard);
                     cx.refresh_windows();
@@ -130,7 +130,7 @@ pub(super) fn footer(
                     t!("app.new_project.create")
                 })
                 .primary()
-                .disabled(creating)
+                .disabled(creating || !can_advance)
                 .on_click(move |_, _, cx| {
                     create(&create_model, &parent, &name, cx);
                 }),

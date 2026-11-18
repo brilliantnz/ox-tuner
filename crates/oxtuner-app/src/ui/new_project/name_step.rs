@@ -139,9 +139,12 @@ fn choose_folder(
         Ok(Ok(Some(paths))) => {
             if let Some(folder) = paths.into_iter().next() {
                 let mut wizard = model.borrow_mut();
+                if wizard.closed {
+                    return;
+                }
                 wizard.parent = folder;
                 // A new folder is a new target and therefore a new attempt.
-                wizard.target = None;
+                wizard.retarget();
                 drop(wizard);
 
                 // The path field follows the folder, and rewriting an input
@@ -159,23 +162,32 @@ fn choose_folder(
     .detach();
 }
 
+/// The reason the name step cannot advance, if any.
+///
+/// One predicate for the Next button and the click: the button reads it
+/// through `is_none`, the click reports it. The same project-crate rules
+/// creation applies decide it, so the wizard cannot accept a name or a folder
+/// that Create would refuse.
+pub(super) fn name_target_problem(name: &str, parent: &Path) -> Option<String> {
+    validate_project_name(name)
+        .and_then(|name| ensure_target_free(&parent.join(name)))
+        .err()
+        .map(|error| error.to_string())
+}
+
 /// Advances past the name step once the name and the target are usable.
 ///
-/// The check runs on the click, not on every frame: the same project-crate
-/// rules creation applies decide it, so the wizard cannot accept a name or a
-/// folder that Create would refuse.
+/// The check runs on the click, not on every frame: the same predicate the
+/// Next button reads, so the two cannot disagree.
 pub(super) fn advance_from_name(model: &SharedWizard, name: &str, parent: &Path, cx: &mut App) {
-    let checked =
-        validate_project_name(name).and_then(|name| ensure_target_free(&parent.join(name)));
-
-    match checked {
-        Ok(()) => {
+    match name_target_problem(name, parent) {
+        None => {
             let mut wizard = model.borrow_mut();
             wizard.name_error = None;
             wizard.step = super::state::Step::Definition;
         }
-        Err(error) => {
-            model.borrow_mut().name_error = Some(error.to_string());
+        Some(error) => {
+            model.borrow_mut().name_error = Some(error);
         }
     }
 
