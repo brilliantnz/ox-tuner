@@ -264,15 +264,18 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
 
         let text = unquote(&entry.value);
 
-        // Constants shadow nothing, so they land in their own map; a computed
-        // channel resolves before anything else from the file. Every other
-        // number is a controller setting, which a same-named computed channel
-        // describes.
-        let is_constant = definition.constant(&entry.name).is_some();
-        let map = if is_constant {
-            &mut values.constants
-        } else {
+        // Only a PcVariable the definition lists is a controller setting. A
+        // constant keeps its old precedence, and so does a name the
+        // definition does not list at all: neither can be the file's copy of
+        // a computed channel.
+        let is_pc = definition
+            .pc_variables
+            .get_ignore_case(&entry.name)
+            .is_some();
+        let map = if is_pc {
             &mut values.pc_values
+        } else {
+            &mut values.constants
         };
 
         if let Ok(value) = text.trim().parse::<f64>() {
