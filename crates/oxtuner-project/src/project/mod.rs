@@ -135,6 +135,11 @@ pub enum ProjectError {
         /// Why saving is refused.
         reasons: Vec<String>,
     },
+    /// Creation wrote a tune the definition refuses to load writable.
+    ScaffoldRejected {
+        /// The blockers the created project opened with.
+        reasons: Vec<String>,
+    },
     /// A value cannot be represented in a `.msq`.
     Unrepresentable {
         /// The variable involved.
@@ -187,8 +192,7 @@ impl fmt::Display for ProjectError {
             }
             Self::TargetExists { path } => write!(
                 formatter,
-                "{} already exists, choose another name or folder. A create that failed part-way \
-                 can leave the folder behind",
+                "{} already exists, choose another name or folder",
                 path.display()
             ),
             Self::SignatureMismatch { expected, found } => write!(
@@ -209,6 +213,11 @@ impl fmt::Display for ProjectError {
             Self::ReadOnly { reasons } => {
                 write!(formatter, "the tune is read-only: {}", reasons.join("; "))
             }
+            Self::ScaffoldRejected { reasons } => write!(
+                formatter,
+                "the definition and the tune creation wrote for it disagree: {}",
+                reasons.join("; ")
+            ),
             Self::Unrepresentable { name, source } => write!(formatter, "{name}: {source}"),
             Self::Tune(error) => write!(formatter, "{error}"),
             Self::Sidecar { path, source } => {
@@ -238,6 +247,7 @@ impl ProjectError {
             Self::Msq(_) => "msq",
             Self::Ini(_) => "ini",
             Self::ReadOnly { .. } => "read-only",
+            Self::ScaffoldRejected { .. } => "scaffold-rejected",
             Self::Unrepresentable { .. } => "unrepresentable",
             Self::Tune(_) => "tune",
             Self::Sidecar { .. } => "sidecar",
@@ -262,7 +272,8 @@ impl std::error::Error for ProjectError {
             | Self::SignatureMismatch { .. }
             | Self::DefinitionNotIni { .. }
             | Self::DefinitionNeedsIncludes { .. }
-            | Self::ReadOnly { .. } => None,
+            | Self::ReadOnly { .. }
+            | Self::ScaffoldRejected { .. } => None,
         }
     }
 }

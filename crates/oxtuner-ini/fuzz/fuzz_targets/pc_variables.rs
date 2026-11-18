@@ -43,4 +43,11 @@ fuzz_target!(|data: &str| {
         second.pc_variables.get("v"),
         "the same entry text must produce the same variable"
     );
+
+    if let Some(variable) = first.pc_variables.get("v") {
+        assert!(
+            !variable.raw.is_empty() && variable.line >= 1,
+            "a stored variable keeps the source text and line it was read from"
+        );
+    }
 });

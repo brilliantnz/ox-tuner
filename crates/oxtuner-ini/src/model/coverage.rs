@@ -94,6 +94,14 @@ pub struct Extensions {
     pub defaults: Ordered<Number>,
     /// `rawValue` entries (defaults in unscaled units).
     pub raw_defaults: Ordered<Number>,
+    /// `defaultValue` entries that name one value per array cell.
+    ///
+    /// The dialect writes them as a space-separated list (`injAng, 355 355 355
+    /// 355`), which [`Number`] cannot hold; keeping them here is what lets a
+    /// new tune start from the declared array defaults instead of zeros.
+    pub default_arrays: Ordered<Vec<f64>>,
+    /// `rawValue` entries that name one value per array cell.
+    pub raw_default_arrays: Ordered<Vec<f64>>,
     /// `maximumElements` caps for resizable arrays.
     pub maximum_elements: Ordered<u32>,
     /// Constants the controller owns; never edited locally.

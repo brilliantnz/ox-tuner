@@ -4,9 +4,11 @@
 //! generated from the definition's defaults, `projectCfg/mainController.ini`
 //! copied from the user-supplied file, a minimal `project.properties`, empty
 //! `dashboard/` and `TuneView/` folders, and a fresh
-//! `.oxtuner/project.json`. The definition is parsed before anything is
-//! written, and a failure past that point removes what creation wrote, so a
-//! failed create leaves no half-built folder behind.
+//! `.oxtuner/project.json`. The definition is parsed and the files are built
+//! before anything is written, and a failure past that point removes the
+//! project folder creation made. A parent folder created for it to sit in
+//! stays: deleting an ancestor the user may be using is worse than a leftover
+//! empty folder.
 
 use std::cell::RefCell;
 use std::fs;
@@ -53,9 +55,12 @@ pub struct CreateRequest {
     /// `#if` flags chosen from the definition's setting groups.
     ///
     /// Each entry is an option name the user picked (for example
-    /// `pressure_bar`). The definition is parsed with them active, so the tune
-    /// snapshot records the same choices the user sees in the dialog. An empty
-    /// list keeps the definition's own defaults.
+    /// `pressure_bar`), and the display choices the wizard offers
+    /// (`LAMBDA`, `CELSIUS`). The definition is parsed with them active, so the
+    /// tune snapshot records the same choices the user sees in the dialog. Only
+    /// names the definition declares in a setting group or tests with `#if`
+    /// are written to `ecuSettings`; an unknown name still activates nothing.
+    /// An empty list keeps the definition's own defaults.
     pub settings: Vec<String>,
     /// Serial port and baud the project starts on, when the wizard picked one.
     ///
@@ -109,6 +114,10 @@ pub fn split_destination(typed: &Path) -> (Option<PathBuf>, Option<String>) {
         // Windows, so the project would land in the drive's current folder.
         if folder.ends_with(':') {
             folder.push(text.chars().last().unwrap_or('/'));
+        }
+        // A lone separator is the filesystem root itself, not an empty folder.
+        if folder.is_empty() && text.len() == 1 {
+            folder.push(text.chars().next().unwrap_or('/'));
         }
 
         let folder = (!folder.is_empty()).then(|| PathBuf::from(folder));
@@ -290,7 +299,7 @@ impl Project {
         // the definition and the tune disagree about something creation wrote,
         // and handing it back would only move that failure to the first edit.
         if project.is_read_only() {
-            return Err(ProjectError::ReadOnly {
+            return Err(ProjectError::ScaffoldRejected {
                 reasons: project
                     .report()
                     .blockers
@@ -455,6 +464,13 @@ fn chosen_flags(definition: &oxtuner_ini::Definition, settings: &[String]) -> Ve
             .values()
             .flat_map(|group| group.options.iter())
             .any(|candidate| candidate.name.eq_ignore_ascii_case(option))
+            // The display choices the wizard offers are only ever tested with
+            // `#if`, never declared as a setting group, so the flags the file
+            // tests count too.
+            || definition
+                .tested_flags
+                .iter()
+                .any(|tested| tested.eq_ignore_ascii_case(option))
     };
 
     let mut flags: Vec<String> = Vec::new();
@@ -615,11 +631,11 @@ fn create_tracked(written: &mut Vec<PathBuf>, path: PathBuf) -> Result<(), Proje
 /// Removes the folder a failed creation made, best effort.
 ///
 /// The folder is always one creation created itself, so it disappears whole;
-/// `written` is kept for the debug line that names what was there.
+/// `written` only feeds the debug line that lists what was there.
 fn rollback(root: &Path, written: &[PathBuf]) {
     tracing::debug!(
         root = %root.display(),
-        written = written.len(),
+        written = ?written,
         "removing the folder a failed creation wrote"
     );
     let _ = fs::remove_dir_all(root);
@@ -716,6 +732,21 @@ mod tests {
             destination("C:\\MyProject"),
             (Some("C:\\".to_owned()), Some("MyProject".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_drive_root_on_its_own_stays_a_root() {
+        assert_eq!(
+            destination("C:\\"),
+            (Some("C:\\".to_owned()), None),
+            "without the separator C: is drive-relative"
+        );
+        assert_eq!(destination("C:/"), (Some("C:/".to_owned()), None));
+    }
+
+    #[test]
+    fn a_lone_separator_is_the_root_itself() {
+        assert_eq!(destination("/"), (Some("/".to_owned()), None));
     }
 
     #[test]

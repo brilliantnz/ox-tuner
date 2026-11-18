@@ -17,14 +17,15 @@
 //!   attributes, comments, the `<bibliography>`, elements from a newer
 //!   `TunerStudio` — serializes back byte-for-byte.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ChannelKind, Definition, SettingsContext};
-use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, VariableSpec};
+use oxtuner_tune::{
+    EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec, storage_range,
+};
 
 use crate::flags;
 use crate::load;
@@ -193,7 +194,10 @@ impl fmt::Display for MsqError {
                 write!(formatter, "`{name}` does not exist on {page}")
             }
             Self::UnknownPage { page } => {
-                write!(formatter, "page {page} has no INI counterpart")
+                write!(
+                    formatter,
+                    "the definition declares no page for the values found on page {page}"
+                )
             }
         }
     }
@@ -241,21 +245,21 @@ const MAX_DEFAULT_DEPTH: usize = 16;
 /// recursed into.
 struct DefaultValues<'a> {
     definition: &'a Definition,
-    depth: Cell<usize>,
+    depth: usize,
 }
 
 impl DefaultValues<'_> {
-    fn enter(&self) -> bool {
-        let depth = self.depth.get();
-        if depth >= MAX_DEFAULT_DEPTH {
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_DEFAULT_DEPTH {
             return false;
         }
-        self.depth.set(depth + 1);
+        self.depth += 1;
+
         true
     }
 
-    fn leave(&self) {
-        self.depth.set(self.depth.get().saturating_sub(1));
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 }
 
@@ -303,6 +307,108 @@ impl EvalContext for DefaultValues<'_> {
     }
 }
 
+/// Writes the definition's per-cell array defaults into a fresh tune.
+///
+/// The layout resolves a scalar default on its own, but the dialect writes an
+/// array default as one value per cell, which `Number` cannot hold. Without
+/// this pass an array such as a curve axis would start from zeros even though
+/// the definition names its values.
+fn apply_array_defaults(tune: &mut Tune, definition: &Definition) {
+    let extensions = &definition.extensions;
+
+    for (name, values) in extensions.raw_default_arrays.iter() {
+        apply_cells(tune, name, values.iter().map(|value| Some(*value)));
+    }
+    for (name, values) in extensions.default_arrays.iter() {
+        let Some(spec) = tune.layout().variable(name).cloned() else {
+            continue;
+        };
+        apply_cells(
+            tune,
+            name,
+            values.iter().map(|user| {
+                // A user default outside the storage type is kept as written
+                // by the definition; only the conversion decides the raw form.
+                spec.to_raw(*user).ok().map(|conversion| conversion.raw)
+            }),
+        );
+    }
+}
+
+/// Writes one raw value per index, skipping cells that do not exist.
+fn apply_cells(tune: &mut Tune, name: &str, values: impl Iterator<Item = Option<f64>>) {
+    for (index, value) in values.enumerate() {
+        let Some(value) = value else { continue };
+        let _ = tune.set_raw_at(name, index, value);
+    }
+}
+
+/// The values a scaffold writes for one variable.
+///
+/// A default outside the declared range or the storage type would come back
+/// different from the tune's first open, so it is written inside both. The
+/// value on disk then equals the value the loader reads, which is what makes a
+/// created project exactly an opened one.
+fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
+    match values {
+        Values::Numbers(numbers) => {
+            Values::Numbers(numbers.iter().map(|raw| clamp_raw(spec, *raw)).collect())
+        }
+        Values::Text(text) => Values::Text(text.clone()),
+    }
+}
+
+/// One raw value pulled inside the declared range and the storage type.
+///
+/// The range is pulled in to the decimals the file carries first: a minimum of
+/// `0.4761904` written with three digits reads back as `0.476`, which is below
+/// the minimum again. Rounding the bound to the file's own step keeps the
+/// written text inside the range it came from.
+fn clamp_raw(spec: &VariableSpec, raw: f64) -> f64 {
+    let (storage_low, storage_high) = storage_range(spec.data_type);
+    let Some(user) = spec.to_user(raw).ok() else {
+        return raw.clamp(storage_low, storage_high);
+    };
+
+    let declared_low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
+    let declared_high = spec.maximum.unwrap_or(f64::INFINITY);
+    let (declared_low, declared_high) = (
+        declared_low.min(declared_high),
+        declared_low.max(declared_high),
+    );
+
+    let step = 10f64.powi(-i32::from(spec.digits.max(1)));
+    let low = (declared_low / step).ceil() * step;
+    let high = (declared_high / step).floor() * step;
+    let user = if low <= high {
+        user.clamp(low, high)
+    } else {
+        user
+    };
+
+    let raw = spec.to_raw(user).map_or(raw, |conversion| conversion.raw);
+
+    raw.clamp(storage_low, storage_high)
+}
+
+/// Whether the definition declares `name` as a one-dimensional list.
+///
+/// The flattened shape cannot tell a `[N]` list from a `[Nx1]` table: both are
+/// one column of N rows in the tune. Only a list is written as `cols="1"`.
+fn is_list(definition: &Definition, name: &str) -> bool {
+    let shape = definition
+        .constant(name)
+        .map(|constant| &constant.shape)
+        .or_else(|| {
+            definition
+                .pc_variables
+                .get_ignore_case(name)
+                .map(|variable| &variable.shape)
+        });
+
+    matches!(shape, Some(oxtuner_ini::Shape::List(_)))
+}
+
 impl Msq {
     /// Builds a new tune document with every value at its definition default.
     ///
@@ -318,6 +424,11 @@ impl Msq {
     /// written is left out and the open that follows reports it as missing.
     ///
     /// This is crate-private: project creation is the only caller.
+    /// # Errors
+    ///
+    /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
+    /// page the definition does not declare, and [`MsqError::Encoding`] when a
+    /// written value cannot be represented in ISO-8859-1.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
@@ -328,10 +439,11 @@ impl Msq {
         // would stay unresolved and drop its variable from the new tune.
         let mut defaults = DefaultValues {
             definition,
-            depth: Cell::new(0),
+            depth: 0,
         };
         let layout = TuneLayout::build_with_context(definition, &mut defaults);
-        let tune = Tune::new(Arc::new(layout));
+        let mut tune = Tune::new(Arc::new(layout));
+        apply_array_defaults(&mut tune, definition);
         let layout = Arc::clone(tune.layout());
 
         let mut pc_entries: Vec<Element> = Vec::new();
@@ -346,15 +458,24 @@ impl Msq {
             if values.is_empty() {
                 continue;
             }
-            let Ok(text) = load::format_values(spec, definition, values) else {
-                continue;
+            let values = clamp_values(spec, values);
+            let text = match load::format_values(spec, definition, &values) {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::debug!(
+                        name = %spec.name,
+                        %error,
+                        "the scaffold left this value out"
+                    );
+                    continue;
+                }
             };
 
             let tag = match spec.ini_page() {
                 Some(_) => EntryKind::Constant,
                 None => EntryKind::PcVariable,
             };
-            let element = entry_element(spec, tag, &text);
+            let element = entry_element(spec, is_list(definition, &spec.name), tag, &text);
 
             match spec.ini_page() {
                 Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
@@ -827,15 +948,15 @@ impl Msq {
 ///
 /// Arrays carry their `cols`/`rows` shape, the same attributes the reference
 /// writer stores; scalars and labels need only their name.
-fn entry_element(spec: &VariableSpec, kind: EntryKind, text: &str) -> Element {
+fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str) -> Element {
     let cols_text;
     let rows_text;
     let mut attrs: Vec<(&str, &str)> = vec![("name", spec.name.as_str())];
     if let EntryShape::Array { cols, rows } = spec.shape {
-        // A 1-D list is written as one column of N rows, the way the reference
-        // writer stores it. A reader that takes `rows` as the length would
-        // otherwise see a single element.
-        let (cols, rows) = if rows == 1 && cols > 1 {
+        // A one-dimensional list is written as one column of N rows, the way
+        // the reference writer stores it. A `[Nx1]` table keeps its declared
+        // shape: only the definition's own `[N]` form is a list.
+        let (cols, rows) = if is_list && rows == 1 && cols > 1 {
             (1, cols)
         } else {
             (cols, rows)

@@ -1239,6 +1239,76 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
 }
 
 #[test]
+fn a_one_row_table_keeps_its_declared_shape() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-row-table");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "RowTable".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("a one-row table is a legal shape");
+
+    let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
+    assert!(
+        tune.contains(r#"name="rowWise" cols="4" rows="1""#),
+        "a declared [4x1] table keeps its shape: {tune}"
+    );
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+}
+
+#[test]
+fn a_created_tune_starts_from_the_declared_array_defaults() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+"#;
+
+    let sandbox = TempDir::new("create-array-defaults");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "ArrayDefaults".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(values.number(0), Some(10.0));
+    assert_eq!(values.number(1), Some(20.0));
+    assert_eq!(values.number(2), Some(30.0));
+}
+
+#[test]
 fn a_non_ascii_project_name_is_escaped_for_java_properties() {
     const DEFINITION: &str = r#"
 [MegaTune]
@@ -1593,12 +1663,29 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
         project.report().warnings
     );
 
+    assert!(
+        project.report().warnings.iter().all(|issue| !matches!(
+            issue.kind,
+            IssueKind::ValueClamped | IssueKind::ValueOutOfRange
+        )),
+        "a scaffold writes values its own loader keeps unchanged: {:?}",
+        project.report().warnings
+    );
+
     let tune = fs::read(project.tune_path()).expect("the scaffolded tune is readable");
     drop(project);
 
     let root = sandbox.path().join("Reference");
     let mut reopened = Project::open(&root).expect("the created project reopens");
     assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+    assert_eq!(
+        reopened
+            .snapshot_msq()
+            .expect("the working image serializes"),
+        tune,
+        "a created tune must read back as the file it was written from"
+    );
+
     let outcome = reopened.save().expect("an unedited scaffold saves");
     assert_eq!(outcome.cells, 0);
     assert_eq!(

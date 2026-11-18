@@ -604,22 +604,28 @@ fn load_entry(
 
                 // A file value outside the declared range is clamped the way
                 // `TunerStudio` loads one, and reported once per variable.
+                // A text that only rounds below a bound but converts back to
+                // the same raw value changed nothing, so it is not reported.
                 let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
                 let high = spec.maximum.unwrap_or(f64::INFINITY);
                 let (low, high) = (low.min(high), low.max(high));
-                let user = if user < low || user > high {
-                    clamped.get_or_insert((user, low, high));
-                    user.clamp(low, high)
-                } else {
-                    user
-                };
+                let clamped_user = user.clamp(low, high);
+                let conversion = spec
+                    .to_raw(clamped_user)
+                    .map_err(|error| error.to_string())?;
 
-                let conversion = spec.to_raw(user).map_err(|error| error.to_string())?;
+                // Only a clamp that changes the stored value is reported.
+                // A text that rounds below a bound but converts back to the
+                // same raw value changed nothing.
+                let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
+                if written_raw != Some(conversion.raw) {
+                    clamped.get_or_insert((user, low, high));
+                }
                 if conversion.is_out_of_range() {
                     report.warn(
                         IssueKind::ValueOutOfRange,
                         format!(
-                            "`{}` = {user} cannot be stored in the declared type; it was kept, not clamped",
+                            "`{}` = {clamped_user} cannot be stored in the declared type; it was kept, not clamped",
                             spec.name
                         ),
                     );
@@ -781,8 +787,7 @@ fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, Fi
 /// # Errors
 ///
 /// Returns [`FileValueError`] when text is too long or outside ISO-8859-1, a
-/// bit label is outside ISO-8859-1 or has no label for its value, or the shape
-/// and stored values disagree.
+/// bit label is outside ISO-8859-1, or the shape and stored values disagree.
 #[expect(
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
