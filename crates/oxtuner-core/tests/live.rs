@@ -197,6 +197,36 @@ fn a_probe_reads_an_enveloped_signature() {
 }
 
 #[test]
+fn a_probe_reports_whatever_text_a_device_answers_with() {
+    // The core has no definition to judge an answer against, so a chatty
+    // adapter, an echo or an NMEA device produces a signature just like an ECU.
+    // Classifying that text is the job of the layer that owns the registry; the
+    // core must not swallow the answer.
+    const NMEA: &str = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
+
+    let harness = Harness::start();
+
+    harness
+        .handle
+        .probe_firmware(
+            support::answering_probe(NMEA),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
+        .expect("queued");
+
+    let Event::FirmwareProbed { signature, .. } =
+        harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(signature, NMEA);
+
+    harness.thread.join();
+}
+
+#[test]
 fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
     let harness = Harness::start();
 

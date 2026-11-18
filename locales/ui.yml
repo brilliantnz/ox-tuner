@@ -808,6 +808,10 @@ app:
       en: 'The probe could not be sent: %{message}'
     scan_no_answer:
       en: No ECU answered the firmware probes.
+    scan_not_ecu:
+      en: A serial device answered, but it is not an ECU.
+    scan_unsupported:
+      en: 'The ECU reports %{signature}, but no definition source serves that firmware. Upload its INI file.'
     scan_timed_out:
       en: The ECU did not answer in time.
     scan_no_attempt:
