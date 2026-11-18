@@ -599,20 +599,27 @@ fn load_entry(
                 ));
             }
 
-            let mut clamped: Option<(f64, f64, f64)> = None;
-            let mut out_of_range_reported = false;
-
-            for (index, token) in tokens.iter().enumerate() {
+            // Every token is parsed before any cell is written: a bad value
+            // halfway through a list must leave the variable at its default,
+            // not half from the file.
+            let mut users = Vec::with_capacity(tokens.len());
+            for token in &tokens {
                 let user = match token.parse::<f64>() {
                     Ok(value) if value.is_finite() => value,
                     Ok(_) => return Err(format!("`{token}` is not a finite number")),
                     Err(_) => return Err(format!("`{token}` is not a number")),
                 };
+                users.push(user);
+            }
 
+            let mut clamped: Option<(f64, f64, f64)> = None;
+            let mut out_of_storage: Option<f64> = None;
+
+            for (index, user) in users.into_iter().enumerate() {
                 // A file value outside the declared range is clamped the way
                 // `TunerStudio` loads one, and reported once per variable.
-                // A text that only rounds below a bound but converts back to
-                // the same raw value changed nothing, so it is not reported.
+                // The writer is what rounds a bound to the written step, so
+                // a file this build wrote reopens without a clamp.
                 let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
                 let high = spec.maximum.unwrap_or(f64::INFINITY);
                 let (low, high) = (low.min(high), low.max(high));
@@ -628,18 +635,26 @@ fn load_entry(
                 if written_raw != Some(conversion.raw) {
                     clamped.get_or_insert((user, low, high));
                 }
-                if conversion.is_out_of_range() && !out_of_range_reported {
-                    out_of_range_reported = true;
-                    report.warn(
-                        IssueKind::ValueOutOfRange,
-                        format!(
-                            "`{}` = {clamped_user} cannot be stored in the declared type; it was kept, not clamped",
-                            spec.name
-                        ),
-                    );
+                if conversion.is_out_of_range() {
+                    out_of_storage.get_or_insert(clamped_user);
                 }
+
                 tune.set_raw_at(&spec.name, index, conversion.raw)
                     .map_err(|error| error.to_string())?;
+            }
+
+            // A value already reported as clamped is not also reported as
+            // unstorable: one sentence per variable is what the user can act
+            // on.
+            if let (Some(value), None) = (out_of_storage, clamped) {
+                report.warn(
+                    IssueKind::ValueOutOfRange,
+                    format!(
+                        "`{}` = {value} cannot be stored in the declared type; it was kept, \
+                         not clamped",
+                        spec.name
+                    ),
+                );
             }
 
             if let Some((found, low, high)) = clamped {

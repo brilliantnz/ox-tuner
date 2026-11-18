@@ -1473,6 +1473,59 @@ defaultValue = p, 7.25
 }
 
 #[test]
+fn a_non_finite_value_is_skipped_and_keeps_the_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+p = scalar, U08, 0, "", 1, 0, 0, 255, 0
+mode = bits, U08, 1, [0:1], "Off", "On"
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="p">NaN</constant>
+        <constant name="mode">NaN</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("non-finite");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let skipped = project
+        .report()
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::ValueSkipped)
+        .count();
+    assert_eq!(skipped, 2, "scalar and bit values are both refused");
+    assert_eq!(
+        project
+            .tune()
+            .value("p")
+            .and_then(|values| values.number(0)),
+        Some(0.0),
+        "the scalar keeps the definition default"
+    );
+    assert_eq!(
+        project
+            .tune()
+            .value("mode")
+            .and_then(|values| values.number(0)),
+        Some(0.0),
+        "the bit field keeps the definition default"
+    );
+}
+
+#[test]
 fn a_rejected_scaffold_names_itself() {
     let error = ProjectError::ScaffoldRejected {
         reasons: vec!["`pageSize` disagrees".to_owned()],

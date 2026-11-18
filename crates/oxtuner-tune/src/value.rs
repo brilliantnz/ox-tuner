@@ -7,13 +7,17 @@
 //! raw  = user / scale − translate
 //! ```
 //!
-//! Two rules keep this honest:
+//! Three rules keep this honest:
 //!
 //! - **Integer storage rounds; it never truncates.** `U08` raw 10.5 becomes 11
 //!   (half away from zero) and the fact that rounding happened is reported.
-//! - **Out-of-range is flagged, never clamped.** Clamping is the core's S2
-//!   guardrail (ADR-0011); silently changing a user's edit here would hide both
+//! - **A user's edit is flagged, never clamped.** Clamping an edit is the
+//!   core's S2 guardrail (ADR-0011); silently changing it here would hide both
 //!   the edit and the guardrail.
+//! - **A value at a project-file boundary is clamped.** The file has to carry
+//!   what the definition declares and the storage type holds, so
+//!   [`VariableSpec::clamp_raw`] keeps the round trip intact instead of
+//!   writing a value the next open would change.
 
 use std::fmt;
 
@@ -191,6 +195,7 @@ impl VariableSpec {
     ///
     /// Integer types round half away from zero. Nothing is clamped: the caller
     /// decides what an out-of-range edit means (ADR-0011 S2 lives in the core).
+    /// A file boundary uses [`Self::clamp_raw`] instead.
     ///
     /// # Errors
     ///
@@ -230,14 +235,26 @@ impl VariableSpec {
 
     /// Pulls a raw value inside the declared range and the storage type.
     ///
-    /// A default or a written value outside either would otherwise read back
+    /// A default or a file value outside either would otherwise read back
     /// changed. The declared bounds are first pulled in to the decimals a file
     /// writes: a minimum of `7.25` written with one decimal reads back as
     /// `7.2`, below the minimum again. A declared range narrower than one
     /// written step keeps its own bounds and leaves the text alone.
+    ///
+    /// The storage type narrows here instead of keeping and warning, unlike
+    /// [`Self::to_raw`]: a file boundary has to write something the type can
+    /// hold, and the alternative is a value that changes on the next open.
+    /// A non-finite value has no sane position in the range, so it becomes
+    /// the storage type's own zero.
     #[must_use]
     pub fn clamp_raw(&self, raw: f64) -> f64 {
         let (storage_low, storage_high) = storage_range(self.data_type);
+        if !raw.is_finite() {
+            return 0.0_f64.clamp(storage_low, storage_high);
+        }
+
+        // An attribute that cannot be evaluated leaves only the storage
+        // clamp; the caller still gets a value the type can hold.
         let Some(user) = self.to_user(raw).ok() else {
             return raw.clamp(storage_low, storage_high);
         };

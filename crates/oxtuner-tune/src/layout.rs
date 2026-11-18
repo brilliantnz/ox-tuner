@@ -1010,6 +1010,33 @@ REQFUEL = scalar, U08, 1, "", 1, 0, 0, 3, 0
 "#;
 
     #[test]
+    fn a_default_outside_the_written_step_is_pulled_inside() {
+        const BOUNDED: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+p = scalar, F32, 0, "", 0.145038, 0, 7.25, 101526, 0
+
+[ConstantsExtensions]
+defaultValue = p, 7.25
+"#;
+
+        let definition = parse_str(BOUNDED, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("p").expect("p");
+
+        let user = spec.to_user(spec.default_raw).expect("user units");
+        assert!(
+            user >= 7.25,
+            "an omitted default is written at the next representable value, not below its bound: {user}"
+        );
+    }
+
+    #[test]
     fn the_layout_index_is_case_insensitive_and_keeps_the_first_name() {
         let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
         let layout = TuneLayout::build(&definition, &|_| None);
