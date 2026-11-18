@@ -145,7 +145,11 @@ fn the_settings_snapshot_decides_the_protocol_commands() {
     let event = core.next();
 
     assert_eq!(event.op(), Some(op));
-    assert_eq!(summary_of(&event).active_flags, vec!["comms_compat"]);
+    assert_eq!(
+        summary_of(&event).active_flags,
+        vec!["COMMS_COMPAT"],
+        "the snapshot keeps the definition's spelling for the file"
+    );
 
     core.thread.join();
 }

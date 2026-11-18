@@ -16,6 +16,7 @@ use oxtuner_ini::SettingsContext;
 
 use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
 use crate::msq::Msq;
+use crate::sidecar::ProjectLayout;
 
 /// The longest folder name creation accepts.
 ///
@@ -56,12 +57,25 @@ pub struct CreateRequest {
     /// snapshot records the same choices the user sees in the dialog. An empty
     /// list keeps the definition's own defaults.
     pub settings: Vec<String>,
-    /// Serial port the project starts on, when the wizard picked one.
-    pub port: Option<String>,
-    /// Baud rate paired with [`Self::port`].
+    /// Serial port and baud the project starts on, when the wizard picked one.
     ///
-    /// Zero keeps the definition's own rate, which is what a project created
-    /// without a connection choice needs.
+    /// `None` means no connection choice: the definition's own rate answers
+    /// the first connect.
+    pub connection: Option<ConnectionSeed>,
+    /// The panel layout the project starts with.
+    ///
+    /// Creation is not the place to invent a layout: the caller hands over the
+    /// one the user already arranged, so a new project keeps the workspace as
+    /// it is.
+    pub layout: ProjectLayout,
+}
+
+/// A serial device a new project should remember.
+#[derive(Debug, Clone)]
+pub struct ConnectionSeed {
+    /// Device path.
+    pub port: String,
+    /// Bits per second.
     pub baud: u32,
 }
 
@@ -327,8 +341,11 @@ impl Project {
         );
 
         let mut project = Self::open(root)?;
-        project.state.connection.last_port.clone_from(&request.port);
-        project.state.connection.baud_override = (request.baud != 0).then_some(request.baud);
+        if let Some(connection) = &request.connection {
+            project.state.connection.last_port = Some(connection.port.clone());
+            project.state.connection.baud_override = Some(connection.baud);
+        }
+        project.state.layout = request.layout.clone();
 
         project
             .state

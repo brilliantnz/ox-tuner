@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
 use oxtuner_project::{
-    CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState, TUNE_FILE,
+    ConnectionSeed, CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState,
+    TUNE_FILE,
 };
 
 const MAIN_DEFINITION: &str = r#"
@@ -1190,8 +1191,8 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
         ini_path: sandbox.definition(DEFINITION),
         expected_signature: Some("speeduino 202501".to_owned()),
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1254,8 +1255,8 @@ reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
         ini_path: sandbox.definition(DEFINITION),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1285,8 +1286,8 @@ fn creating_a_project_refuses_a_folder_that_already_exists() {
         ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1310,8 +1311,8 @@ fn creating_a_project_refuses_an_empty_folder_that_already_exists() {
         ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1337,8 +1338,8 @@ fn creating_a_project_refuses_a_file_that_holds_the_name() {
         ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1360,8 +1361,8 @@ fn creating_a_project_refuses_an_unusable_name() {
         ini_path: sandbox.path().join("unused.ini"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1379,8 +1380,8 @@ fn creating_a_project_checks_the_detected_signature() {
         ini_path: sandbox.definition("[MegaTune]\nsignature = \"speeduino 202501\"\n"),
         expected_signature: Some("other 9999".to_owned()),
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1402,8 +1403,8 @@ fn creating_a_project_refuses_a_definition_that_is_not_ini() {
         ini_path: sandbox.path().join("notes.txt"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
 
     assert!(matches!(
@@ -1422,8 +1423,8 @@ fn creating_a_project_refuses_an_unreadable_definition() {
         ini_path: sandbox.definition("this is not an ini file\n"),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     assert!(matches!(
         Project::create(&request),
@@ -1499,8 +1500,8 @@ page = 1
         ini_path: sandbox.definition(INCLUDING),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let error = Project::create(&request).expect_err("an include cannot be copied");
     assert!(
@@ -1564,8 +1565,8 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
         ini_path: reference,
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1624,8 +1625,8 @@ settingOption = pressure_bar, "BAR"
         ini_path: sandbox.definition(DEFINITION),
         expected_signature: None,
         settings: vec!["pressure_bar".to_owned()],
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1661,8 +1662,11 @@ fn creation_remembers_the_connection_the_wizard_picked() {
         ini_path: sandbox.definition(CONNECTION_DEFINITION),
         expected_signature: None,
         settings: Vec::new(),
-        port: Some("/dev/cu.test".to_owned()),
-        baud: 57_600,
+        connection: Some(ConnectionSeed {
+            port: "/dev/cu.test".to_owned(),
+            baud: 57_600,
+        }),
+        layout: ProjectLayout::default(),
     };
     Project::create(&request).expect("creation succeeds");
 
@@ -1684,8 +1688,8 @@ fn creation_without_a_baud_keeps_the_definition_rate() {
         ini_path: sandbox.definition(CONNECTION_DEFINITION),
         expected_signature: None,
         settings: Vec::new(),
-        port: None,
-        baud: 0,
+        connection: None,
+        layout: ProjectLayout::default(),
     };
     let project = Project::create(&request).expect("creation succeeds");
 

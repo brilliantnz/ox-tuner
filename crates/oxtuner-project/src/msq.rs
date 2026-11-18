@@ -568,7 +568,12 @@ impl Msq {
         let missing: Vec<String> = settings
             .active_flags()
             .into_iter()
-            .filter(|flag| tested.contains(flag) && !present.contains(flag))
+            .filter(|flag| {
+                // `tested` and `present` are lowercase match keys; the flag
+                // itself keeps the definition's spelling for the file.
+                let key = flag.to_ascii_lowercase();
+                tested.contains(&key) && !present.contains(&key)
+            })
             .collect();
         let appended = !missing.is_empty();
         if appended {
@@ -1213,7 +1218,7 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
             .expect("settings update");
 
         let saved = String::from_utf8(msq.save().unwrap()).unwrap();
-        assert!(saved.contains("<setting name=\"celsius\""), "{saved}");
+        assert!(saved.contains("<setting name=\"CELSIUS\""), "{saved}");
         assert!(!saved.contains("<settings/>"), "{saved}");
     }
 

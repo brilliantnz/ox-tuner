@@ -15,7 +15,7 @@ use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId, ProjectView,
     SaveReport, start,
 };
-use oxtuner_project::{CreateRequest, TUNE_FILE};
+use oxtuner_project::{ConnectionSeed, CreateRequest, ProjectLayout, TUNE_FILE};
 
 mod support;
 
@@ -385,8 +385,8 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
             ini_path: definition_path(dir.path()),
             expected_signature: Some("speeduino 202501".to_owned()),
             settings: Vec::new(),
-            port: None,
-            baud: 0,
+            connection: None,
+            layout: ProjectLayout::default(),
         })
         .expect("the command is queued");
     let event = core.next();
@@ -453,8 +453,11 @@ fn a_created_project_remembers_the_wizard_connection() {
             ini_path: definition_path(dir.path()),
             expected_signature: None,
             settings: Vec::new(),
-            port: Some("/dev/cu.test".to_owned()),
-            baud: 57_600,
+            connection: Some(ConnectionSeed {
+                port: "/dev/cu.test".to_owned(),
+                baud: 57_600,
+            }),
+            layout: ProjectLayout::default(),
         })
         .expect("the command is queued");
     let event = core.next();
@@ -481,8 +484,8 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
             ini_path: definition_path(dir.path()),
             expected_signature: Some("other firmware".to_owned()),
             settings: Vec::new(),
-            port: None,
-            baud: 0,
+            connection: None,
+            layout: ProjectLayout::default(),
         })
         .expect("the command is queued");
     let event = core.next();

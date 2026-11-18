@@ -74,8 +74,9 @@ pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};
 pub use oxtuner_encoding::Latin1Error as EncodeError;
 pub use project::{
-    CONFIG_DIR, CreateRequest, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome,
-    TUNE_FILE, accepts_definition, ensure_target_free, split_destination, validate_project_name,
+    CONFIG_DIR, ConnectionSeed, CreateRequest, MAIN_DEFINITION, Project, ProjectError, ProjectKind,
+    SaveOutcome, TUNE_FILE, accepts_definition, ensure_target_free, split_destination,
+    validate_project_name,
 };
 pub use sidecar::{
     ConnectionState, DefinitionRef, ProjectLayout, ProjectState, SIDECAR_DIR, STATE_FILE,

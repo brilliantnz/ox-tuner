@@ -143,7 +143,12 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     //   over those values, so a scale like `{fuelLoadRes}` needs one level of
     //   recursion, not just the raw file values.
     let values = collect_file_values(msq, definition);
-    let resolver = Resolver::new(definition, &values.scalars, &values.arrays);
+    let resolver = Resolver::new(
+        definition,
+        &values.constants,
+        &values.pc_values,
+        &values.arrays,
+    );
     let mut context = ExprContext {
         resolver: &resolver,
     };
@@ -199,8 +204,12 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
 /// The values a `.msq` carries, in user units, keyed by lowercased name.
 #[derive(Debug, Default)]
 struct FileValues {
-    /// Single numeric values and bit fields.
-    scalars: HashMap<String, f64>,
+    /// Definition constants and bit fields, which shadow nothing.
+    constants: HashMap<String, f64>,
+    /// `[PcVariables]` settings, which a computed channel of the same name
+    /// shadows: the channel describes what the value means, the file only
+    /// holds the controller's copy of it.
+    pc_values: HashMap<String, f64>,
     /// Arrays with more than one element, for `arrayValue`.
     arrays: HashMap<String, Vec<f64>>,
 }
@@ -255,9 +264,20 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
 
         let text = unquote(&entry.value);
 
+        // Constants shadow nothing, so they land in their own map; a computed
+        // channel resolves before anything else from the file. Every other
+        // number is a controller setting, which a same-named computed channel
+        // describes.
+        let is_constant = definition.constant(&entry.name).is_some();
+        let map = if is_constant {
+            &mut values.constants
+        } else {
+            &mut values.pc_values
+        };
+
         if let Ok(value) = text.trim().parse::<f64>() {
             // A scalar number, or a bit field written as a bare number.
-            values.scalars.insert(key, value);
+            map.insert(key, value);
 
             continue;
         }
@@ -275,7 +295,7 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
 
             if let Some(option) = options.iter().find(|option| option.label.trim() == trimmed) {
                 let raw = f64::from(option.value);
-                values.scalars.insert(key, raw);
+                map.insert(key, raw);
             }
         }
     }
@@ -308,7 +328,10 @@ fn lower_key<'a>(name: &'a str, buffer: &'a mut String) -> &'a str {
 /// Files values plus the definition's computed channels, resolved on demand.
 struct Resolver<'a> {
     definition: &'a Definition,
-    base: &'a HashMap<String, f64>,
+    /// Constants and bit fields, which shadow nothing.
+    constants: &'a HashMap<String, f64>,
+    /// Controller settings, which a computed channel of the same name shadows.
+    pc_values: &'a HashMap<String, f64>,
     /// File arrays, keyed by lowercased name, for `arrayValue`.
     arrays: &'a HashMap<String, Vec<f64>>,
     /// The channels currently being resolved, outermost first.
@@ -320,24 +343,33 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn new(
         definition: &'a Definition,
-        base: &'a HashMap<String, f64>,
+        constants: &'a HashMap<String, f64>,
+        pc_values: &'a HashMap<String, f64>,
         arrays: &'a HashMap<String, Vec<f64>>,
     ) -> Self {
         Self {
             definition,
-            base,
+            constants,
+            pc_values,
             arrays,
             stack: std::cell::RefCell::new(Vec::new()),
             too_deep: std::cell::RefCell::new(None),
         }
     }
 
-    /// Resolves one identifier: a file value first, then a computed channel.
+    /// Resolves one identifier: a constant first, then a computed channel,
+    /// then a controller setting.
+    ///
+    /// A `[PcVariables]` scalar that shares a name with an `[OutputChannels]`
+    /// channel is the controller's copy of a computed value (Speeduino's
+    /// `fuelLoadMax` is 255 in the file while the channel computes 511), so
+    /// the channel wins and the file value only answers when no channel
+    /// claims the name.
     fn resolve(&self, name: &str) -> Option<f64> {
         let mut lowered = String::new();
         let key = lower_key(name, &mut lowered);
 
-        if let Some(value) = self.base.get(key) {
+        if let Some(value) = self.constants.get(key) {
             return Some(*value);
         }
 
@@ -372,7 +404,9 @@ impl<'a> Resolver<'a> {
 
         self.stack.borrow_mut().pop();
 
-        value
+        // A controller setting answers only when no computed channel claims
+        // the name: it is the ECU's copy of a value the definition derives.
+        value.or_else(|| self.pc_values.get(key).copied())
     }
 
     fn take_too_deep(&self) -> Option<String> {
@@ -966,6 +1000,56 @@ fuelLoadRes = { ((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500 }
         assert_eq!(loaded.tune.scalar_raw("algorithm").unwrap(), 1.0);
         // TPS selects the 0.5 scale, so user `20` is raw `40`.
         assert_eq!(loaded.tune.raw_at("fuelLoadBins", 0).unwrap(), 40.0);
+    }
+
+    #[test]
+    fn a_computed_channel_shadows_a_pc_variable_of_the_same_name() {
+        // A controller setting can share a name with the channel that
+        // describes it. The channel wins: with `algorithm = "MAP"` the max
+        // is 511, not the 255 the file carries for the ECU's own copy.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+algorithm = bits, U08, 0, [0:2], "MAP", "TPS", "MAF"
+
+[PcVariables]
+fuelLoadMax = scalar, U16, 0, "", 1, 0, 0, 1000, 0
+
+[OutputChannels]
+fuelLoadMax = { (algorithm == 0 || algorithm == 2) ? 511 : 100.0 }
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("definition parses");
+        let msq = Msq::parse(
+            r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="algorithm">"MAP"</constant>
+    </page>
+    <page>
+        <pcVariable name="fuelLoadMax">255</pcVariable>
+    </page>
+</msq>"#
+                .as_bytes(),
+        )
+        .expect("msq parses");
+        let values = collect_file_values(&msq, &definition);
+        let resolver = Resolver::new(
+            &definition,
+            &values.constants,
+            &values.pc_values,
+            &values.arrays,
+        );
+
+        assert_eq!(values.pc_values.get("fuelloadmax"), Some(&255.0));
+        assert_eq!(resolver.resolve("fuelLoadMax"), Some(511.0));
     }
 
     const DEEP_DEFINITION: &str = r#"
