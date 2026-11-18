@@ -456,6 +456,9 @@ impl Table {
                 }
                 "escape" => {
                     self.model.cancel_axis_edit();
+                    // The layout root blurs focus on an unconsumed Escape; this
+                    // component used the key, so it keeps it.
+                    cx.stop_propagation();
                     cx.notify();
                 }
                 "backspace" => {
@@ -484,7 +487,10 @@ impl Table {
                     }
                     Err(_) => self.model.mark_edit_invalid(),
                 },
-                "escape" => self.model.cancel_edit(),
+                "escape" => {
+                    self.model.cancel_edit();
+                    cx.stop_propagation();
+                }
                 "backspace" => self.model.pop_char(),
                 _ => {}
             }

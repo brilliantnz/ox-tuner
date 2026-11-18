@@ -35,7 +35,7 @@ use gpui_kit::{App, AppContext as _, Entity, ParentElement as _, Styled as _, Wi
 use oxtuner_core::{FailureCode, validate_project_name};
 use rust_i18n::t;
 
-use self::configuration_step::{configuration_body, ensure_pickers, sync_pickers};
+use self::configuration_step::{choices, configuration_body, ensure_pickers};
 use self::connection_step::{
     connection_body, connection_type, effective_connection, sync_connection_pickers,
 };
@@ -157,8 +157,6 @@ fn render(
         ensure_pickers(model, definition.as_ref(), preview, window, cx);
     }
 
-    sync_pickers(model, cx);
-
     sync_connection_pickers(
         model,
         &ports,
@@ -264,7 +262,7 @@ fn render(
                             })
                         }),
                     &model.borrow().display_groups,
-                    &model.borrow().choices,
+                    &choices(model, cx),
                     connection,
                     port_mismatch,
                     cx,

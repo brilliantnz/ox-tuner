@@ -45,12 +45,10 @@ pub(super) fn handle(
             Outcome::Stop
         }
         CommandRequest::ListPorts => {
-            // Answer from the snapshot so a view that asks on demand never sees
-            // a list that disagrees with the last change the core published. The
-            // first command still takes the first sample itself.
-            if !ports.is_primed()
-                && let Err(error) = ports.refresh()
-            {
+            // The command is the on-demand resync, so it samples now and
+            // answers from the snapshot it just published: a view never sees a
+            // list that disagrees with the last change the core pushed.
+            if let Err(error) = ports.refresh() {
                 tracing::warn!(%op, %error, "serial ports could not be listed");
                 report.failures += 1;
                 send(
@@ -80,9 +78,11 @@ pub(super) fn handle(
         CommandRequest::TestConnection { port, framing } => {
             connect(op, session, live, events, report, &port, framing, true)
         }
-        CommandRequest::ProbeFirmware { port, probe } => {
-            probe_firmware(op, &port, probe, live.is_some(), events, report)
-        }
+        CommandRequest::ProbeFirmware {
+            port,
+            framing,
+            probe,
+        } => probe_firmware(op, &port, probe, framing, live.is_some(), events, report),
         CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {
                 send(
@@ -584,11 +584,16 @@ pub(super) fn handle(
                 tracing::debug_span!("core_open_project", %op, path = %path.display()).entered();
             match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
-                    let cache_hit = project.definition_source() == DefinitionSource::Cache;
+                    let cache = if project.definition_source() == DefinitionSource::Cache {
+                        CacheSource::Hit
+                    } else {
+                        CacheSource::Fresh
+                    };
+
                     adopt_project(
                         project,
                         op,
-                        cache_hit,
+                        cache,
                         session,
                         live,
                         safety,
@@ -618,7 +623,7 @@ pub(super) fn handle(
                     adopt_project(
                         project,
                         op,
-                        false,
+                        CacheSource::Fresh,
                         session,
                         live,
                         safety,
@@ -638,19 +643,25 @@ pub(super) fn handle(
             Outcome::Continue
         }
         CommandRequest::SetProjectLayout { layout } => {
-            if let Session::Project(project) = session
-                && let Err(error) = project.set_layout(layout)
-            {
-                // The layout is a convenience next to the tune, so a write
-                // failure is logged and never fails the session.
-                tracing::warn!(
-                    %op,
-                    error_kind = error.kind(),
-                    %error,
-                    "the project layout could not be persisted"
-                );
+            let mut stored = false;
+
+            if let Session::Project(project) = session {
+                match project.set_layout(layout) {
+                    Ok(()) => stored = true,
+                    Err(error) => {
+                        // The layout is a convenience next to the tune, so a
+                        // write failure is logged and never fails the session.
+                        tracing::warn!(
+                            %op,
+                            error_kind = error.kind(),
+                            %error,
+                            "the project layout could not be persisted"
+                        );
+                    }
+                }
             }
-            send(events, Event::ProjectLayoutSaved { op });
+
+            send(events, Event::ProjectLayoutSaved { op, stored });
             Outcome::Continue
         }
         CommandRequest::SaveTune => {
@@ -1097,6 +1108,21 @@ pub(super) fn handle(
     }
 }
 
+/// Where a project's definition came from, for the open log line.
+#[derive(Debug, Clone, Copy)]
+enum CacheSource {
+    /// Read from the project's own `projectCfg/` copy.
+    Fresh,
+    /// Reused from the shared definition cache.
+    Hit,
+}
+
+impl CacheSource {
+    fn is_hit(self) -> bool {
+        matches!(self, Self::Hit)
+    }
+}
+
 /// Makes a freshly opened or created project the live session.
 ///
 /// The old session's frame belongs to another definition and must be gone
@@ -1108,7 +1134,7 @@ pub(super) fn handle(
 fn adopt_project(
     project: Project,
     op: OpId,
-    cache_hit: bool,
+    cache: CacheSource,
     session: &mut Session,
     live: &mut Option<Live>,
     safety: &mut Safety,
@@ -1130,6 +1156,7 @@ fn adopt_project(
         history,
         log,
     );
+
     let summary = ProjectView::from_project(&project, latest.get().as_deref());
     tracing::info!(
         %op,
@@ -1139,9 +1166,10 @@ fn adopt_project(
         skipped = summary.skipped,
         warnings = summary.warnings.len(),
         read_only = summary.read_only,
-        cache_hit,
+        cache_hit = cache.is_hit(),
         "project opened"
     );
+
     log_load_report(op, project.report());
     configure_history(history, project.definition());
     *session = Session::Project(Box::new(project));

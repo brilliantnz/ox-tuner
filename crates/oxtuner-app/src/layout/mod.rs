@@ -41,7 +41,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div, px,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    px,
 };
 
 pub mod bottom_panel;
@@ -374,6 +375,19 @@ impl Render for AppLayout {
             // Background presses release focus; the helper blurs only when the
             // press took focus nowhere.
             .capture_any_mouse_down(crate::ui::release_focus_on_background())
+            // Escape releases focus. A focused control that handles Escape
+            // itself stops the event, so only an unconsumed Escape lands here.
+            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "escape"
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                {
+                    window.blur(cx);
+                    cx.stop_propagation();
+                }
+            }))
             // One bar across the whole window: menus, title, panel toggles and
             // the window controls. Both sidebars therefore start below it and
             // keep their own header rows, so the layout reads as one workspace

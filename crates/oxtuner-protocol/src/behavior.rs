@@ -281,8 +281,8 @@ impl BehaviorKind {
 
     /// Selects the first behavior that claims `definition`.
     ///
-    /// `Exact` matches win over `Compatible` ones; see [`FAMILIES`] for the
-    /// order.
+    /// `Exact` matches win over `Compatible` ones. The families are tried in
+    /// declaration order: Speeduino, FOME, rusEFI, then the generic fallback.
     pub fn select(definition: &Definition) -> Option<Self> {
         // One pass: the first exact match wins outright, while the first
         // compatible one is only remembered in case nothing is exact.

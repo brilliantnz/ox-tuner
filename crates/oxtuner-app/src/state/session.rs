@@ -295,7 +295,8 @@ pub(crate) struct LayoutState {
     ///
     /// This one is **not** stored in `state.json`: how a table is drawn belongs
     /// to the project whose table it is, so it lives in the project's own
-    /// `project.json` and is echoed here only while that project is open.
+    /// `project.json` and is echoed here only while that project is open. A
+    /// standalone definition has no state file, so it starts from the default.
     #[serde(skip)]
     pub(crate) table_low_at_top: bool,
 }
@@ -352,9 +353,9 @@ impl LayoutState {
 
     /// Takes the panel layout a project stored.
     ///
-    /// The stored numbers are used as they are: [`Self::primary`] and the other
-    /// readers clamp them, so a file edited by hand cannot open a panel at an
-    /// unusable size.
+    /// The stored numbers are used as they are: [`Self::primary_sidebar`] and
+    /// the other readers clamp them, so a file edited by hand cannot open a
+    /// panel at an unusable size.
     pub(crate) fn apply_project_layout(&mut self, layout: &ProjectLayout) {
         self.primary_sidebar_width = layout.primary_sidebar_width;
         self.secondary_sidebar_width = layout.secondary_sidebar_width;
@@ -644,17 +645,27 @@ pub(crate) fn schedule_save(cx: &mut App) {
                 );
             }
             if let Some((root, layout)) = project_snapshot {
-                let changed = SENT_LAYOUT.with(|last| {
-                    let mut last = last.borrow_mut();
-                    let fresh = (root.clone(), layout.clone());
-                    if last.as_ref() == Some(&fresh) {
-                        return false;
+                // The snapshot was taken up to a debounce interval ago: a
+                // project switch in that window would write project A's
+                // layout into B's state file. Only the open project's own
+                // root may receive it.
+                let fresh = SENT_LAYOUT
+                    .with(|last| last.borrow().as_ref() != Some(&(root.clone(), layout.clone())));
+                if fresh {
+                    let accepted = cx.update(|cx| {
+                        let still_open = CoreService::status(cx)
+                            .project
+                            .as_ref()
+                            .is_some_and(|project| project.root == root);
+                        still_open && crate::core::save_project_layout(cx, layout.clone())
+                    });
+
+                    // Recorded only after the send was accepted, so a refused
+                    // command is retried on the next change instead of being
+                    // remembered as stored.
+                    if accepted {
+                        SENT_LAYOUT.with(|last| *last.borrow_mut() = Some((root, layout)));
                     }
-                    *last = Some(fresh);
-                    true
-                });
-                if changed {
-                    cx.update(|cx| crate::core::save_project_layout(cx, layout));
                 }
             }
 

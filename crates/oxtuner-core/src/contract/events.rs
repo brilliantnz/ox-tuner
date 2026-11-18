@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use oxtuner_datalog::SessionLogReport;
+use oxtuner_protocol::LinkMode;
 use oxtuner_tune::TuneStatus;
 
 use crate::menu::MenuNode;
@@ -57,6 +58,10 @@ pub enum Event {
     ProjectLayoutSaved {
         /// The command this answers.
         op: OpId,
+        /// Whether the layout reached the state file. A layout is a
+        /// convenience next to the tune, so a failed write is reported here
+        /// instead of failing the session.
+        stored: bool,
     },
     /// A table was read from the open project.
     TableRead {
@@ -127,12 +132,12 @@ pub enum Event {
     /// including the first sample when it found ports: a view that opens later
     /// renders the last published list and never has to ask for the initial
     /// one. A steady machine produces no traffic. The same snapshot answers
-    /// [`super::Command::ListPorts`].
+    /// [`super::CoreCommand::ListPorts`].
     PortsChanged {
         /// The ports as they are now.
         ports: Vec<PortView>,
     },
-    /// A [`super::Command::TestConnection`] read a signature.
+    /// A [`super::CoreCommand::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
     /// and read-only rule, without a session or a page read.
@@ -142,7 +147,7 @@ pub enum Event {
         /// What the test found.
         view: ConnectionView,
     },
-    /// A [`super::Command::ProbeFirmware`] read a signature without a
+    /// A [`super::CoreCommand::ProbeFirmware`] read a signature without a
     /// definition.
     ///
     /// There is no verdict here because there is nothing to compare against:
@@ -155,6 +160,8 @@ pub enum Event {
         port: String,
         /// The baud rate that answered, when the port was a serial device.
         baud: Option<u32>,
+        /// The framing the probe used.
+        framing: LinkMode,
         /// The family probe that answered.
         probe: FirmwareProbe,
         /// The signature text the ECU sent.
@@ -318,7 +325,7 @@ impl Event {
             | Self::FirmwareProbed { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
-            | Self::ProjectLayoutSaved { op }
+            | Self::ProjectLayoutSaved { op, .. }
             | Self::TableRead { op, .. }
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }

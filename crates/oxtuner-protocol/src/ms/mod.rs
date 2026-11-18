@@ -762,6 +762,7 @@ impl MsProtocol {
         };
         let mut header = [0u8; 2];
         io.read_exact_timeout(&mut header, first)?;
+
         let length = Frame::length(header);
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
@@ -772,6 +773,7 @@ impl MsProtocol {
             }
             .into());
         }
+
         let mut rest = vec![0u8; length + 4];
         let second = match deadline {
             ReplyDeadline::Shared { end, .. } => {

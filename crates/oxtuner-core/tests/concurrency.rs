@@ -332,11 +332,9 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
     let mut answered = std::collections::HashSet::new();
     while let Some(event) = events.recv_timeout(Duration::from_millis(200)) {
         // The port baseline is the core's own publication, not a command's
-        // answer, so it stays out of the accounting below.
-        if matches!(
-            event,
-            Event::PortsChanged { .. } | Event::PortsListed { .. }
-        ) {
+        // answer. It is the only event that is neither a command answer nor
+        // `Stopped`, and at most one sample runs in this test.
+        if matches!(event, Event::PortsChanged { .. }) {
             continue;
         }
         delivered += 1;
@@ -352,14 +350,15 @@ fn shutdown_is_bounded_when_the_ui_stops_reading_with_a_full_event_queue() {
 
     // Every accepted command produced exactly one event (its answer or a
     // `Rejected`), plus the single final `Stopped`; each of those either
-    // reached the UI or was counted as dropped. The port baseline is at most
-    // one publication, so a machine with ports may account for one extra
-    // dropped event when the baseline lost the single queue slot.
+    // reached the UI or was counted as dropped. A delivered port baseline adds
+    // at most one to the count; a dropped one is already inside
+    // `dropped_events`.
     let expected = u64::try_from(accepted.len()).unwrap_or(u64::MAX) + 1;
     let accounted = delivered + report.dropped_events;
     assert!(
         accounted == expected || accounted == expected + 1,
-        "delivered {delivered} + dropped {} should account for {expected} events ({report:?})",
+        "delivered {delivered} + dropped {} should account for {expected} command events, \
+         allowing one port baseline ({report:?})",
         report.dropped_events
     );
     assert!(

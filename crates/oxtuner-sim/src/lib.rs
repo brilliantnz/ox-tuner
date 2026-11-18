@@ -76,6 +76,7 @@ mod ecu;
 mod faults;
 mod memory;
 mod probe;
+mod queue;
 mod realtime;
 mod scenario;
 mod transport;

@@ -258,6 +258,8 @@ pub(crate) enum CommandRequest {
     ProbeFirmware {
         /// Where the bytes go.
         port: PortChoice,
+        /// Framing to send the query with.
+        framing: LinkMode,
         /// Which family probe to send.
         probe: FirmwareProbe,
     },
@@ -476,20 +478,8 @@ pub enum ProjectCommand {
     },
     /// Create a project folder and open it.
     Create {
-        /// The folder the project is created inside.
-        parent: PathBuf,
-        /// Display name, also used as the folder name.
-        name: String,
-        /// The user-supplied definition file copied into `projectCfg/`.
-        ini_path: PathBuf,
-        /// Signature the ECU reported, when the project came from a detection.
-        expected_signature: Option<String>,
-        /// `#if` flags chosen from the definition's setting groups.
-        settings: Vec<String>,
-        /// Serial port and baud the project starts on, when the wizard picked one.
-        connection: Option<oxtuner_project::ConnectionSeed>,
-        /// The panel layout the project starts with.
-        layout: oxtuner_project::ProjectLayout,
+        /// Everything the core needs to scaffold and open the project.
+        request: oxtuner_project::CreateRequest,
     },
     /// Write changed values back to the tune file.
     Save,
@@ -614,6 +604,8 @@ pub enum EcuCommand {
     ProbeFirmware {
         /// Where the bytes go.
         port: PortChoice,
+        /// Framing to send the query with.
+        framing: LinkMode,
         /// Which family probe to send.
         probe: FirmwareProbe,
     },
@@ -754,10 +746,6 @@ impl CoreCommand {
 }
 
 impl From<CoreCommand> for CommandRequest {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one exhaustive match over every command reads as a single conversion"
-    )]
     fn from(command: CoreCommand) -> Self {
         match command {
             CoreCommand::Lifecycle(LifecycleCommand::Shutdown) => Self::Shutdown,
@@ -775,25 +763,9 @@ impl From<CoreCommand> for CommandRequest {
             }
             CoreCommand::Definition(DefinitionCommand::Unload) => Self::UnloadDefinition,
             CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
-            CoreCommand::Project(ProjectCommand::Create {
-                parent,
-                name,
-                ini_path,
-                expected_signature,
-                settings,
-                connection,
-                layout,
-            }) => Self::CreateProject {
-                request: oxtuner_project::CreateRequest {
-                    parent,
-                    name,
-                    ini_path,
-                    expected_signature,
-                    settings,
-                    connection,
-                    layout,
-                },
-            },
+            CoreCommand::Project(ProjectCommand::Create { request }) => {
+                Self::CreateProject { request }
+            }
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
             CoreCommand::Project(ProjectCommand::SetLayout { layout }) => {
                 Self::SetProjectLayout { layout }
@@ -837,9 +809,15 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Ecu(EcuCommand::TestConnection { port, framing }) => {
                 Self::TestConnection { port, framing }
             }
-            CoreCommand::Ecu(EcuCommand::ProbeFirmware { port, probe }) => {
-                Self::ProbeFirmware { port, probe }
-            }
+            CoreCommand::Ecu(EcuCommand::ProbeFirmware {
+                port,
+                framing,
+                probe,
+            }) => Self::ProbeFirmware {
+                port,
+                framing,
+                probe,
+            },
             CoreCommand::Ecu(EcuCommand::Disconnect) => Self::Disconnect,
             CoreCommand::Ecu(EcuCommand::ReadAll) => Self::ReadAll,
             CoreCommand::Ecu(EcuCommand::StartRealtime { interval_ms }) => {

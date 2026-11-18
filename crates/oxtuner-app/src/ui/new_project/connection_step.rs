@@ -190,6 +190,21 @@ pub(super) fn connection_type(model: &SharedWizard, cx: &App) -> ConnectionType 
     }
 }
 
+/// Whether the last test answer describes the pickers' current state.
+///
+/// A test proves one connection, not the step: changing the port, the baud or
+/// the type afterwards hides the result, and Create must ignore it too.
+pub(super) fn test_matches_pickers(model: &SharedWizard, cx: &App) -> bool {
+    let kind = connection_type(model, cx);
+    let (port, baud) = effective_connection(model, cx);
+
+    model
+        .borrow()
+        .tested
+        .as_ref()
+        .is_some_and(|tested| tested.kind == kind && tested.port == port && tested.baud == baud)
+}
+
 /// The connection the project is created with: the pickers' selection.
 ///
 /// With no serial ports there is nothing to pair, so the baud falls back to
@@ -238,10 +253,7 @@ pub(super) fn connection_body(
     // A test answer belongs to the pickers' state when Test was pressed, not
     // to whatever they show now: changing the selection afterwards hides the
     // stale result instead of attributing it to the new target.
-    let show_test =
-        model.borrow().tested.as_ref().is_some_and(|tested| {
-            tested.kind == kind && tested.port == port && tested.baud == baud
-        });
+    let show_test = test_matches_pickers(model, cx);
     let test_model = Rc::clone(model);
 
     let mut body = v_flex()

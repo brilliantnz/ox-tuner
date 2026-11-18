@@ -154,15 +154,22 @@ pub(crate) fn save_tune(cx: &mut App) {
 ///
 /// Called from the debounced layout write, so a drag never sends one command
 /// per frame. The layout is a convenience next to the tune: a refused send is
-/// a debug line, not a notification.
-pub(crate) fn save_project_layout(cx: &mut App, layout: oxtuner_core::ProjectLayout) {
+/// a debug line, not a notification. Returns whether the command was accepted,
+/// so the caller only records the layout as sent when it really was.
+pub(crate) fn save_project_layout(cx: &mut App, layout: oxtuner_core::ProjectLayout) -> bool {
     let Some(handle) = CoreService::handle(cx) else {
-        return;
+        return false;
     };
-    if let Err(error) = handle.set_project_layout(layout) {
-        tracing::debug!(%error, "the core refused the project layout update");
+    match handle.set_project_layout(layout) {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::debug!(%error, "the core refused the project layout update");
+
+            false
+        }
     }
 }
+
 /// Closes the open project (and any standalone definition).
 pub(crate) fn close_project(cx: &mut App) {
     send(

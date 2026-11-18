@@ -484,9 +484,14 @@ impl CoreHandle {
     pub fn probe_firmware(
         &self,
         port: crate::PortChoice,
+        framing: crate::LinkMode,
         probe: crate::FirmwareProbe,
     ) -> Result<OpId, CoreError> {
-        self.send_request(CommandRequest::ProbeFirmware { port, probe })
+        self.send_request(CommandRequest::ProbeFirmware {
+            port,
+            framing,
+            probe,
+        })
     }
 
     /// Closes the connection.

@@ -69,7 +69,10 @@ pub struct ProbeSpec {
     pub behavior: BehaviorKind,
     /// The exact query bytes.
     pub query: &'static [u8],
-    /// The framing the probe sends with.
+    /// The framing the probe uses when the caller does not override it.
+    ///
+    /// A scan passes its own framing, so both framings can be tried without a
+    /// separate probe per framing.
     pub link: LinkMode,
     /// How long the port may settle before the query is sent.
     ///
@@ -108,9 +111,10 @@ impl ProbeSpec {
 
 /// MegaSquirt-compatible boards, including Speeduino, answer `Q`.
 ///
-/// The scan tries the legacy framing first because that is the path verified on
-/// hardware, and a firmware that also speaks `msEnvelope_1.0` still answers the
-/// plain query.
+/// The spec itself carries the legacy framing, the plain query a board answers
+/// without any envelope. A scan overrides the framing and tries
+/// `msEnvelope_1.0` first, because every shipped Speeduino definition declares
+/// it, then falls back to this one.
 pub const SPEEDUINO: ProbeSpec = ProbeSpec {
     behavior: BehaviorKind::Speeduino(SpeeduinoBehavior),
     query: b"Q",

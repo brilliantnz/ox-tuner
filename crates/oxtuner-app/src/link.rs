@@ -4,7 +4,7 @@
 //! is handed over through [`oxtuner_core::CustomLink`], so the session layer
 //! never depends on a demo transport (ADR-0022).
 
-use oxtuner_core::{CustomLink, Definition, FirmwareProbe, PortChoice, Transport};
+use oxtuner_core::{CustomLink, Definition, FirmwareProbe, LinkMode, PortChoice, Transport};
 use oxtuner_sim::{SimConfig, SimProbe, SimTransport};
 
 /// The simulator, as the core sees it.
@@ -23,8 +23,12 @@ impl CustomLink for SimulatorLink {
             .map_err(|error| error.to_string())
     }
 
-    fn open_for_probe(&self, probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::new(probe.spec())))
+    fn open_for_probe(
+        &self,
+        probe: &FirmwareProbe,
+        framing: LinkMode,
+    ) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::new(probe.spec().with_link(framing))))
     }
 }
 

@@ -54,11 +54,14 @@ pub(super) fn ensure_pickers(
     wizard.preview_path = definition.cloned();
 }
 
-/// Fold the pickers' current choices into the model.
+/// The pickers' current choices, read where they are needed.
 ///
-/// The selects own their selection; the review and Create read the copy here,
-/// so they cannot disagree with what the dialog shows.
-pub(super) fn sync_pickers(model: &SharedWizard, cx: &mut App) {
+/// The selects own their selection, so the review and Create read it here
+/// instead of keeping a copy the render pass would have to refresh.
+pub(super) fn choices(
+    model: &SharedWizard,
+    cx: &App,
+) -> std::collections::BTreeMap<String, Option<String>> {
     let selects: Vec<GroupSelectSnapshot> = model
         .borrow()
         .group_selects
@@ -80,72 +83,52 @@ pub(super) fn sync_pickers(model: &SharedWizard, cx: &mut App) {
             .map_or(0, |index| index.row);
         choices.insert(name, values.get(index).cloned().flatten());
     }
-    model.borrow_mut().choices = choices;
+
+    choices
 }
 
 /// The groups the configuration step shows.
 ///
-/// The definition's `[SettingGroups]` come from the INI. The display choices
-/// the reference application keeps in its own configuration are owned by the
-/// application too, so a definition never declares them; they are offered only
-/// when it tests the matching flag (`#if LAMBDA`, `#if CELSIUS`). The value is
-/// still per project: the choice is written into that project's tune and
-/// properties, so two projects can use different units.
+/// The derivation rule lives in [`oxtuner_core::DefinitionPreview`], so the
+/// step, the review and creation read the same list. Only the text is local:
+/// the canonical labels are replaced by the interface language here.
 pub(super) fn display_groups(
     preview: &oxtuner_core::DefinitionPreview,
 ) -> Vec<oxtuner_core::SettingGroupView> {
-    let tests = |flag: &str| {
-        preview
-            .tested_flags
-            .iter()
-            .any(|tested| tested.eq_ignore_ascii_case(flag))
-    };
-    let option = |name: &str, label: &str| oxtuner_core::SettingOptionView {
-        name: name.to_owned(),
-        label: label.to_owned(),
-    };
+    preview
+        .groups_with_display_choices()
+        .into_iter()
+        .map(localized)
+        .collect()
+}
 
-    // A definition can declare these choices itself (`lambdaSensor`, a
-    // `CELSIUS` option, …). Its labels win: the application row exists only
-    // when the file has no such group.
-    let declared = |name: &str, option_name: &str| {
-        preview.groups.iter().any(|group| {
-            group.name.eq_ignore_ascii_case(name)
-                || group
-                    .options
-                    .iter()
-                    .any(|option| option.name.eq_ignore_ascii_case(option_name))
-        })
-    };
-
-    let mut groups = Vec::new();
-    if tests("lambda") && !declared("lambdaSensor", "LAMBDA") {
-        groups.push(oxtuner_core::SettingGroupView {
-            name: "lambda_display".to_owned(),
-            label: t!("app.new_project.lambda_display").to_string(),
-            options: vec![
-                option("DEFAULT", &t!("app.new_project.afr")),
-                option("LAMBDA", &t!("app.new_project.lambda")),
-            ],
-            default: Some("DEFAULT".to_owned()),
-            default_active: false,
-        });
-    }
-    if tests("celsius") && !declared("temperature", "CELSIUS") {
-        groups.push(oxtuner_core::SettingGroupView {
-            name: "temperature_display".to_owned(),
-            label: t!("app.new_project.temperature_display").to_string(),
-            options: vec![
-                option("DEFAULT", &t!("app.new_project.fahrenheit")),
-                option("CELSIUS", &t!("app.new_project.celsius")),
-            ],
-            default: Some("DEFAULT".to_owned()),
-            default_active: false,
-        });
+/// Replaces a derived group's canonical labels with the interface language.
+fn localized(mut group: oxtuner_core::SettingGroupView) -> oxtuner_core::SettingGroupView {
+    match group.name.as_str() {
+        "lambda_display" => {
+            group.label = t!("app.new_project.lambda_display").to_string();
+            for option in &mut group.options {
+                option.label = if option.name.eq_ignore_ascii_case("LAMBDA") {
+                    t!("app.new_project.lambda").to_string()
+                } else {
+                    t!("app.new_project.afr").to_string()
+                };
+            }
+        }
+        "temperature_display" => {
+            group.label = t!("app.new_project.temperature_display").to_string();
+            for option in &mut group.options {
+                option.label = if option.name.eq_ignore_ascii_case("CELSIUS") {
+                    t!("app.new_project.celsius").to_string()
+                } else {
+                    t!("app.new_project.fahrenheit").to_string()
+                };
+            }
+        }
+        _ => {}
     }
 
-    groups.extend(preview.groups.iter().cloned());
-    groups
+    group
 }
 
 /// The rows a group's picker offers, their values, and the preselected row.

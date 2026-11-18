@@ -16,6 +16,7 @@ use std::sync::Arc;
 use oxtuner_ini::Definition;
 use oxtuner_transport::Transport;
 
+use crate::LinkMode;
 use crate::contract::FirmwareProbe;
 
 /// A link the core cannot open by itself.
@@ -43,12 +44,18 @@ pub trait CustomLink: Send + Sync + 'static {
     /// A link that can only answer with a definition says so, and the probe
     /// reports the reason instead of pretending to have opened a session.
     /// The family arrives in the core's own vocabulary; the protocol spec it
-    /// implies is one [`FirmwareProbe::spec`] call away.
+    /// implies is one [`FirmwareProbe::spec`] call away. `framing` is the
+    /// framing the core will put the query in, so the transport can answer the
+    /// same one.
     ///
     /// # Errors
     ///
     /// Returns the user-facing reason the probe cannot run on this link.
-    fn open_for_probe(&self, _probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
+    fn open_for_probe(
+        &self,
+        _probe: &FirmwareProbe,
+        _framing: LinkMode,
+    ) -> Result<Box<dyn Transport>, String> {
         Err(format!(
             "{} cannot answer a signature probe without a definition",
             self.label()

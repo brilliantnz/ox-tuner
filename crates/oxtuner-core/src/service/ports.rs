@@ -64,16 +64,16 @@ impl PortsWatch {
     }
 
     /// Whether anything has been sampled yet.
+    #[cfg(test)]
     pub(crate) fn is_primed(&self) -> bool {
         self.primed
     }
 
     /// Re-reads the ports, reporting an enumeration failure to the caller.
     ///
-    /// Returns the new list when it differs from the last one published,
-    /// including the first sample: a view that opens later renders the last
-    /// published list, so the baseline must be published too. A first sample
-    /// that found no ports publishes nothing, since empty equals empty.
+    /// Returns the new list when it is the first sample or differs from the
+    /// last one published: a view that opens later renders the last published
+    /// list, so the baseline is published even when it found no ports.
     pub(crate) fn refresh(&mut self) -> Result<Option<Vec<PortView>>, TransportError> {
         self.refresh_with(crate::io_thread::list_ports)
     }
@@ -90,7 +90,7 @@ impl PortsWatch {
         // did not have.
         next.sort_by(|left, right| left.name.cmp(&right.name));
 
-        let publish = should_publish(&self.list, &next);
+        let publish = should_publish(self.primed, &self.list, &next);
 
         self.list = next;
         self.primed = true;
@@ -151,11 +151,11 @@ fn board_name(vid: u16, pid: u16) -> Option<&'static str> {
 
 /// Whether a sample is news.
 ///
-/// The first sample counts when it found ports: a view that opens later
-/// renders the last published list, so the baseline must be published too.
-/// An empty first sample publishes nothing, since empty equals empty.
-fn should_publish(previous: &[PortView], next: &[PortView]) -> bool {
-    previous != next
+/// The first sample is always published, even when it is empty: a view that
+/// opens later renders the last published list, so "nothing published yet"
+/// must mean "not sampled", never "sampled and found nothing".
+fn should_publish(primed: bool, previous: &[PortView], next: &[PortView]) -> bool {
+    !primed || previous != next
 }
 
 #[cfg(test)]
@@ -174,33 +174,42 @@ mod tests {
 
     #[test]
     fn a_first_sample_with_ports_publishes_the_baseline() {
-        assert!(should_publish(&[], &[port("/dev/cu.first")]));
+        assert!(should_publish(false, &[], &[port("/dev/cu.first")]));
     }
 
     #[test]
-    fn a_first_sample_without_ports_publishes_nothing() {
+    fn a_first_sample_without_ports_publishes_the_empty_baseline() {
         let empty: [PortView; 0] = [];
-        assert!(!should_publish(&empty, &empty));
+        assert!(
+            should_publish(false, &empty, &empty),
+            "an empty first sample still tells the views that sampling happened"
+        );
     }
 
     #[test]
     fn an_unchanged_list_publishes_nothing() {
         let list = [port("/dev/cu.first")];
-        assert!(!should_publish(&list, &list));
+        assert!(!should_publish(true, &list, &list));
+    }
+
+    #[test]
+    fn an_empty_list_after_the_baseline_publishes_nothing() {
+        let empty: [PortView; 0] = [];
+        assert!(!should_publish(true, &empty, &empty));
     }
 
     #[test]
     fn a_new_port_publishes() {
         let before = [port("/dev/cu.first")];
         let after = [port("/dev/cu.first"), port("/dev/cu.second")];
-        assert!(should_publish(&before, &after));
+        assert!(should_publish(true, &before, &after));
     }
 
     #[test]
     fn a_removed_port_publishes() {
         let before = [port("/dev/cu.first"), port("/dev/cu.second")];
         let after = [port("/dev/cu.first")];
-        assert!(should_publish(&before, &after));
+        assert!(should_publish(true, &before, &after));
     }
 
     fn described(vid: u16, pid: u16, product: Option<&str>) -> PortInfo {
@@ -293,12 +302,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_first_sample_publishes_nothing_but_primes_the_watch() {
+    fn an_empty_first_sample_publishes_the_empty_baseline() {
         let mut watch = PortsWatch::new();
         let none = || Ok(Vec::new());
 
-        assert!(watch.refresh_with(none).expect("reads").is_none());
-        assert!(watch.is_primed(), "even an empty sample primes the watch");
+        let published = watch
+            .refresh_with(none)
+            .expect("reads")
+            .expect("the first sample is published even when it is empty");
+        assert!(published.is_empty(), "the baseline carries no ports");
+        assert!(watch.is_primed(), "an empty sample primes the watch");
         assert_eq!(watch.snapshot().len(), 0);
     }
 

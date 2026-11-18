@@ -98,10 +98,10 @@ pub use contract::{
     DialogWidgetKind, EcuCommand, Event, Failure, FailureCode, FirmwareProbe, FrontPageGauge,
     GateState, GaugeTemplate, ImportReport, IndicatorSpec, JournalCommand, JournalEntry,
     KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortView,
-    ProjectCommand, ProjectConnection, ProjectView, ReadReport, ReferenceTableIdentifier,
-    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport,
-    SafetyCommand, SaveReport, SettingGroupView, SettingOptionView, SignatureVerdict, TableView,
-    TuneCommand, WriteReport,
+    ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier, ReferenceTableLimit,
+    ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport, SafetyCommand,
+    SaveReport, SettingGroupView, SettingOptionView, SignatureVerdict, TableView, TuneCommand,
+    WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
@@ -140,6 +140,6 @@ pub use oxtuner_transport::Transport;
 /// project's panel layout without adding a dependency on
 /// `oxtuner-project` themselves.
 pub use oxtuner_project::{
-    ConnectionSeed, CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition,
+    ConnectionSeed, ConnectionState, CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition,
     ensure_target_free, split_destination, validate_project_name,
 };

@@ -145,7 +145,7 @@ impl AppPaths {
     /// The folder the new-project dialog starts in.
     ///
     /// A default, never a constraint: the dialog lets the user save a project
-    /// anywhere and remembers whatever folder was used.
+    /// anywhere and does not remember a different folder between runs.
     pub fn projects_dir(&self) -> &Path {
         &self.projects_dir
     }

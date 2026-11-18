@@ -29,8 +29,8 @@ use gpui_kit::{
     Styled as _, Window, div, px,
 };
 use oxtuner_core::{
-    ConnectionTest, ConnectionView, DEFAULT_BAUD_RATE, FailureCode, LinkMode, PICKABLE_BAUD_RATES,
-    PortChoice, PortView, ProjectConnection, SignatureVerdict,
+    ConnectionState, ConnectionTest, ConnectionView, DEFAULT_BAUD_RATE, FailureCode, LinkMode,
+    PICKABLE_BAUD_RATES, PortChoice, PortView, SignatureVerdict,
 };
 
 use crate::core::{self, CoreService};
@@ -75,7 +75,7 @@ struct DialogModel {
 }
 
 impl DialogModel {
-    fn new(connection: ProjectConnection) -> Self {
+    fn new(connection: ConnectionState) -> Self {
         Self {
             mode: Mode::Serial,
             selected_port: connection.last_port,

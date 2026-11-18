@@ -4,7 +4,7 @@
 )]
 
 use super::*;
-use oxtuner_core::ProjectConnection;
+use oxtuner_core::ConnectionState;
 
 fn summary() -> DefinitionView {
     DefinitionView {
@@ -48,7 +48,7 @@ fn project() -> ProjectView {
         skipped: 0,
         warnings: Vec::new(),
         layout: oxtuner_core::ProjectLayout::default(),
-        connection: ProjectConnection::default(),
+        connection: ConnectionState::default(),
     }
 }
 

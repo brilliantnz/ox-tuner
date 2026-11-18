@@ -3,8 +3,8 @@ use oxtuner_project::Project;
 
 use crate::contract::frontpage::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 use crate::contract::project::{
-    ConnectionView, DefinitionView, ProjectConnection, ProjectView, ReadReport,
-    ReferenceTableIdentifier, ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
+    ConnectionView, DefinitionView, ProjectView, ReadReport, ReferenceTableIdentifier,
+    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView,
 };
 use crate::contract::{KeyActionInfo, SignatureVerdict};
 use crate::gate::GateEvaluator;
@@ -192,10 +192,7 @@ impl ProjectView {
                 .iter()
                 .map(|issue| issue.message.clone())
                 .collect(),
-            connection: ProjectConnection {
-                last_port: project.state().connection.last_port.clone(),
-                baud_override: project.state().connection.baud_override,
-            },
+            connection: project.state().connection.clone(),
             layout: project.state().layout.clone(),
         }
     }

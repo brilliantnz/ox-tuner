@@ -216,6 +216,15 @@ impl Curve {
         let key = event.keystroke.key.as_str();
         let coarse = event.keystroke.modifiers.shift;
 
+        if key == "escape" {
+            // The layout root blurs focus on an unconsumed Escape; a cancelled
+            // drag used the key, so it keeps it.
+            if self.cancel_drag(cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+
         match key {
             "left" => self.move_selection(-1, cx),
             "right" => self.move_selection(1, cx),
@@ -225,7 +234,6 @@ impl Curve {
             "pagedown" => self.nudge(-10, cx),
             "home" => self.move_to_first(cx),
             "end" => self.move_to_last(cx),
-            "escape" => self.cancel_drag(cx),
             _ => {}
         }
     }
@@ -266,11 +274,14 @@ impl Curve {
         }
     }
 
-    fn cancel_drag(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(index) = self.model.cancel_drag() {
-            cx.emit(CurveEvent::PreviewChanged { index, value: None });
-            cx.notify();
-        }
+    fn cancel_drag(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let Some(index) = self.model.cancel_drag() else {
+            return false;
+        };
+        cx.emit(CurveEvent::PreviewChanged { index, value: None });
+        cx.notify();
+
+        true
     }
 
     fn finish_drag(&mut self, cx: &mut Context<'_, Self>) {

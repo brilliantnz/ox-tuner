@@ -139,7 +139,11 @@ fn a_probe_reads_a_signature_without_a_loaded_definition() {
     // No definition is loaded: the probe carries the query and reply shape.
     harness
         .handle
-        .probe_firmware(support::simulator(), oxtuner_core::FirmwareProbe::Speeduino)
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
         .expect("queued");
 
     let Event::FirmwareProbed {
@@ -167,12 +171,42 @@ fn a_probe_reads_a_signature_without_a_loaded_definition() {
 }
 
 #[test]
+fn a_probe_reads_an_enveloped_signature() {
+    let harness = Harness::start();
+
+    harness
+        .handle
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Envelope,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
+        .expect("queued");
+
+    let Event::FirmwareProbed {
+        framing, signature, ..
+    } = harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(framing, oxtuner_core::LinkMode::Envelope);
+    assert!(signature.starts_with("speeduino"), "{signature}");
+
+    harness.thread.join();
+}
+
+#[test]
 fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
     let harness = Harness::start();
 
     harness
         .handle
-        .probe_firmware(support::silent(), oxtuner_core::FirmwareProbe::Speeduino)
+        .probe_firmware(
+            support::silent(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
         .expect("queued");
 
     let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
@@ -196,7 +230,11 @@ fn a_probe_is_refused_while_a_session_is_live() {
 
     harness
         .handle
-        .probe_firmware(support::simulator(), oxtuner_core::FirmwareProbe::Rusefi)
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Rusefi,
+        )
         .expect("queued");
 
     let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))

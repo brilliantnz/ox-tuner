@@ -39,7 +39,6 @@ gpui_kit::actions!(
         EnableWrites,
         ImportTune,
         WriteJournal,
-        OpenSnapshots,
-        BlurFocused
+        OpenSnapshots
     ]
 );

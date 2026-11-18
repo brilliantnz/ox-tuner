@@ -17,6 +17,72 @@ pub struct DefinitionPreview {
     pub groups: Vec<SettingGroupView>,
 }
 
+impl DefinitionPreview {
+    /// The groups the new-project wizard shows.
+    ///
+    /// The definition's own `[SettingGroups]` come first-class. The display
+    /// choices the reference application keeps in its own configuration are
+    /// owned by the application too, so a definition never declares them; they
+    /// are offered only when it tests the matching flag (`#if LAMBDA`,
+    /// `#if CELSIUS`), and only when the definition has no group of its own
+    /// for that choice.
+    ///
+    /// The labels are the canonical English text; the UI localizes them by
+    /// group and option name. The rule lives here so the configuration step,
+    /// the review and creation cannot drift apart.
+    #[must_use]
+    pub fn groups_with_display_choices(&self) -> Vec<SettingGroupView> {
+        let tests = |flag: &str| {
+            self.tested_flags
+                .iter()
+                .any(|tested| tested.eq_ignore_ascii_case(flag))
+        };
+        let option = |name: &str, label: &str| SettingOptionView {
+            name: name.to_owned(),
+            label: label.to_owned(),
+        };
+
+        // A definition can declare these choices itself (`lambdaSensor`, a
+        // `CELSIUS` option, …). Its labels win: the application row exists
+        // only when the file has no such group.
+        let declared = |name: &str, option_name: &str| {
+            self.groups.iter().any(|group| {
+                group.name.eq_ignore_ascii_case(name)
+                    || group
+                        .options
+                        .iter()
+                        .any(|option| option.name.eq_ignore_ascii_case(option_name))
+            })
+        };
+
+        let mut groups = Vec::new();
+        if tests("lambda") && !declared("lambdaSensor", "LAMBDA") {
+            groups.push(SettingGroupView {
+                name: "lambda_display".to_owned(),
+                label: "Lambda display".to_owned(),
+                options: vec![option("DEFAULT", "AFR"), option("LAMBDA", "Lambda")],
+                default: Some("DEFAULT".to_owned()),
+                default_active: false,
+            });
+        }
+        if tests("celsius") && !declared("temperature", "CELSIUS") {
+            groups.push(SettingGroupView {
+                name: "temperature_display".to_owned(),
+                label: "Temperature display".to_owned(),
+                options: vec![
+                    option("DEFAULT", "Fahrenheit"),
+                    option("CELSIUS", "Celsius"),
+                ],
+                default: Some("DEFAULT".to_owned()),
+                default_active: false,
+            });
+        }
+
+        groups.extend(self.groups.iter().cloned());
+        groups
+    }
+}
+
 /// One `[SettingGroups]` entry as the wizard shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingGroupView {
@@ -222,16 +288,7 @@ pub struct ProjectView {
     /// The panel layout this project was last read with.
     pub layout: oxtuner_project::ProjectLayout,
     /// The connection this project last used, when state has it.
-    pub connection: ProjectConnection,
-}
-
-/// The project's remembered connection: what the connect dialog starts from.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProjectConnection {
-    /// Serial port last opened from this project.
-    pub last_port: Option<String>,
-    /// Baud rate paired with that port.
-    pub baud_override: Option<u32>,
+    pub connection: oxtuner_project::ConnectionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

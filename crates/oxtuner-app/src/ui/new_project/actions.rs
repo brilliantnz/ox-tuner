@@ -5,7 +5,7 @@ use std::path::Path;
 use gpui_kit::App;
 use oxtuner_core::{ConnectionSeed, CreateRequest};
 
-use super::connection_step::effective_connection;
+use super::connection_step::{effective_connection, test_matches_pickers};
 use super::name_step::name_target_problem;
 use super::state::{DefinitionMode, SharedWizard, Step};
 use crate::core::{self, CoreService};
@@ -17,6 +17,12 @@ use crate::state::session::AppState;
 /// in Manual. The port and baud always come from the connection step's
 /// pickers, which default to the detection while the user has not chosen.
 pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut App) {
+    // A create already in flight owns the wizard: a second click that lands
+    // before the first repaint must not send another command.
+    if CoreService::status(cx).pending_project.is_some() {
+        return;
+    }
+
     // The target is checked again here: the folder can appear between the
     // Next click that validated it and this one. A refusal belongs to the
     // Name step, which is the only step that renders it — so go back there
@@ -30,18 +36,14 @@ pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut A
         return;
     }
 
-    let (mode, settings, picked) = {
+    let (mode, picked) = {
         let wizard = model.borrow();
-        (
-            wizard.definition_mode,
-            wizard
-                .choices
-                .values()
-                .filter_map(Clone::clone)
-                .collect::<Vec<String>>(),
-            wizard.definition.clone(),
-        )
+        (wizard.definition_mode, wizard.definition.clone())
     };
+    let settings = super::configuration_step::choices(model, cx)
+        .values()
+        .filter_map(Clone::clone)
+        .collect::<Vec<String>>();
 
     let status = CoreService::status(cx);
     let detected = status.detected_firmware.clone();
@@ -60,23 +62,30 @@ pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut A
     };
 
     // A Test run on this connection outranks the detection: it is the
-    // freshest proof of what the ECU reports.
-    let expected_signature = status
-        .test
-        .as_ref()
-        .and_then(|test| test.signature_for(port.as_deref()))
-        .or_else(|| {
-            detected
-                .as_ref()
-                .filter(|detected| {
-                    // The signature only vouches for the definition on the port it was
-                    // probed on. A different pick means an unverified pairing: drop
-                    // the expectation here and let first connect verify it instead.
-                    detected.definition.as_deref() == Some(definition.as_path())
-                        && Some(detected.port.as_str()) == port.as_deref()
-                })
-                .map(|detected| detected.signature.clone())
-        });
+    // freshest proof of what the ECU reports. A test that ran on other pickers
+    // proves nothing about this connection, so it is ignored like the step
+    // ignores its stale result.
+    let test_matches = test_matches_pickers(model, cx);
+    let expected_signature = if test_matches {
+        status
+            .test
+            .as_ref()
+            .and_then(|test| test.signature_for(port.as_deref()))
+    } else {
+        None
+    }
+    .or_else(|| {
+        detected
+            .as_ref()
+            .filter(|detected| {
+                // The signature only vouches for the definition on the port it was
+                // probed on. A different pick means an unverified pairing: drop
+                // the expectation here and let first connect verify it instead.
+                detected.definition.as_deref() == Some(definition.as_path())
+                    && Some(detected.port.as_str()) == port.as_deref()
+            })
+            .map(|detected| detected.signature.clone())
+    });
     let failure_serial = status.failure_serial;
 
     let request = CreateRequest {

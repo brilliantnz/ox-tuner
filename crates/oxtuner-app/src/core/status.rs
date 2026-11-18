@@ -10,9 +10,9 @@ use std::sync::{
 use gpui_kit::SharedString;
 use oxtuner_core::{
     BurnReport, ConnectionTest, ConnectionView, DefinitionView, DialogView, Failure, FailureCode,
-    FirmwareProbe, ImportReport, JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView,
-    ReadReport, RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot, TableView,
-    TuneStatus, WriteReport,
+    FirmwareProbe, ImportReport, JournalEntry, LinkMode, MenuNode, OpId, PortChoice, PortView,
+    ProjectView, ReadReport, RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot,
+    TableView, TuneStatus, WriteReport,
 };
 use oxtuner_registry::FirmwareId;
 
@@ -103,6 +103,11 @@ pub(crate) struct CoreStatus {
     pub(crate) firmware_error: Option<String>,
     /// Whether a definition download is running on the background executor.
     pub(crate) downloading_definition: bool,
+    /// A Detect press waiting for the first port sample.
+    ///
+    /// The scan starts as soon as the snapshot arrives, so one press is
+    /// enough when the dialog opened before the core sampled the ports.
+    pub(crate) scan_after_ports: bool,
     /// Byte counts of the in-flight definition download, if any.
     ///
     /// Shared with the background fetch, which writes while the UI reads once
@@ -296,12 +301,13 @@ pub(crate) struct TestingConnection {
     pub(crate) baud: Option<u32>,
 }
 
-/// One probe attempt: a port, a baud rate and a family.
+/// One probe attempt: a port, a baud rate, a family and a framing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProbeAttempt {
     pub(crate) port: String,
     pub(crate) baud: u32,
     pub(crate) probe: FirmwareProbe,
+    pub(crate) framing: LinkMode,
 }
 
 /// A scan across the ports, one probe at a time.
@@ -319,6 +325,8 @@ pub(crate) struct FirmwareScan {
 pub(crate) struct DetectedFirmware {
     pub(crate) port: String,
     pub(crate) baud: u32,
+    /// The framing that answered.
+    pub(crate) framing: LinkMode,
     pub(crate) signature: String,
     /// The definition downloaded or cached for this signature.
     pub(crate) definition: Option<PathBuf>,

@@ -107,10 +107,10 @@ impl IoPlan {
     }
 
     /// A plan for a signature probe.
-    pub(crate) fn probe(probe: FirmwareProbe, link: PortChoice) -> Self {
+    pub(crate) fn probe(probe: FirmwareProbe, framing: LinkMode, link: PortChoice) -> Self {
         Self {
             source: ProtocolSource::Probe(probe),
-            link_mode: None,
+            link_mode: Some(framing),
             link,
         }
     }
@@ -347,7 +347,9 @@ fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
             link.open(definition).map_err(CoreError::Connect)?
         }
         (PortChoice::Custom(link), ProtocolSource::Probe(probe)) => {
-            link.open_for_probe(probe).map_err(CoreError::Connect)?
+            let framing = plan.link_mode.unwrap_or(LinkMode::Legacy);
+            link.open_for_probe(probe, framing)
+                .map_err(CoreError::Connect)?
         }
     };
 

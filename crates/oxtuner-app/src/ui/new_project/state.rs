@@ -31,6 +31,30 @@ pub(super) enum Step {
     Review,
 }
 
+impl Step {
+    /// The step before this one, when there is one.
+    pub(super) fn previous(self) -> Option<Self> {
+        match self {
+            Self::Name => None,
+            Self::Definition => Some(Self::Name),
+            Self::Configuration => Some(Self::Definition),
+            Self::Connection => Some(Self::Configuration),
+            Self::Review => Some(Self::Connection),
+        }
+    }
+
+    /// The step after this one. Review is the last step.
+    pub(super) fn next(self) -> Option<Self> {
+        match self {
+            Self::Name => Some(Self::Definition),
+            Self::Definition => Some(Self::Configuration),
+            Self::Configuration => Some(Self::Connection),
+            Self::Connection => Some(Self::Review),
+            Self::Review => None,
+        }
+    }
+}
+
 /// Where the definition comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum DefinitionMode {
@@ -81,9 +105,7 @@ pub(super) struct Wizard {
     pub(super) name_error: Option<String>,
     /// One picker per displayed group, built when a preview arrives.
     pub(super) group_selects: Vec<GroupSelect>,
-    /// Chosen option per setting group; `None` is a boolean group left off.
-    pub(super) choices: std::collections::BTreeMap<String, Option<String>>,
-    /// The definition whose preview filled `choices`.
+    /// The definition whose preview filled the group pickers.
     pub(super) preview_path: Option<PathBuf>,
     /// The groups the dialog shows: the definition's own, plus the display
     /// choices the application owns but the project records.
@@ -141,7 +163,6 @@ impl Wizard {
             definition_error: None,
             name_error: None,
             group_selects: Vec::new(),
-            choices: std::collections::BTreeMap::new(),
             preview_path: None,
             display_groups: Vec::new(),
             target: None,
@@ -162,22 +183,24 @@ impl Wizard {
     /// Starts over on the active definition.
     ///
     /// A new file is a new attempt: nothing from the previous inspect or
-    /// create may linger into it.
+    /// create may linger into it. The group pickers go with the groups, so the
+    /// next preview cannot be rendered into a picker built for the old file.
     pub(super) fn retry_definition(&mut self) {
         self.definition_error = None;
         self.preview_path = None;
         self.display_groups.clear();
-        self.choices.clear();
+        self.group_selects.clear();
         self.target = None;
     }
 
     /// Points the wizard at another target folder.
     ///
-    /// A new folder is a new attempt: the target goes, and so does the
-    /// failure serial of the create it belonged to.
-    pub(super) fn retarget(&mut self) {
+    /// A new folder is a new attempt: the target goes, and the failure serial
+    /// moves to the current one. Resetting it to zero would let a failure that
+    /// is still on screen count as the new attempt's answer.
+    pub(super) fn retarget(&mut self, failure_serial: u64) {
         self.target = None;
-        self.failure_serial = 0;
+        self.failure_serial = failure_serial;
     }
 }
 
@@ -252,9 +275,6 @@ mod tests {
             let mut wizard = model.borrow_mut();
             wizard.definition_error = Some("refused".to_owned());
             wizard.preview_path = Some(PathBuf::from("/tmp/old.ini"));
-            wizard
-                .choices
-                .insert("group".to_owned(), Some("option".to_owned()));
             wizard.target = Some(PathBuf::from("/tmp/Old"));
         }
 
@@ -263,7 +283,6 @@ mod tests {
         let wizard = model.borrow();
         assert!(wizard.definition_error.is_none());
         assert!(wizard.preview_path.is_none());
-        assert_eq!(wizard.choices.len(), 0);
         assert_eq!(wizard.display_groups.len(), 0);
         assert!(wizard.target.is_none());
     }

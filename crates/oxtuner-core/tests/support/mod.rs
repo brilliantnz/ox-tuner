@@ -40,8 +40,12 @@ impl CustomLink for Simulator {
             .map_err(|error| error.to_string())
     }
 
-    fn open_for_probe(&self, probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::new(probe.spec())))
+    fn open_for_probe(
+        &self,
+        probe: &FirmwareProbe,
+        framing: oxtuner_core::LinkMode,
+    ) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::new(probe.spec().with_link(framing))))
     }
 }
 
@@ -67,8 +71,12 @@ impl CustomLink for Silent {
         Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
-    fn open_for_probe(&self, probe: &FirmwareProbe) -> Result<Box<dyn Transport>, String> {
-        Ok(Box::new(SimProbe::silent(probe.spec())))
+    fn open_for_probe(
+        &self,
+        probe: &FirmwareProbe,
+        framing: oxtuner_core::LinkMode,
+    ) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::silent(probe.spec().with_link(framing))))
     }
 }
 

@@ -111,7 +111,7 @@ impl Transport for SimProbe {
         // what a probe reports as "no answer".
         if self.is_query(bytes) {
             let reply = self.reply()?;
-            self.output.extend(reply);
+            super::queue::fill(&mut self.output, reply);
         }
 
         Ok(())
@@ -126,18 +126,7 @@ impl Transport for SimProbe {
             return Err(TransportError::NotOpen);
         }
 
-        let mut filled = 0;
-        while filled < buf.len() {
-            let Some(byte) = self.output.pop_front() else {
-                return Err(TransportError::Timeout {
-                    got: filled,
-                    expected: buf.len(),
-                });
-            };
-            buf[filled] = byte;
-            filled += 1;
-        }
-        Ok(())
+        super::queue::read_exact(&mut self.output, buf)
     }
 
     fn read_until(
@@ -152,24 +141,7 @@ impl Transport for SimProbe {
             return Err(TransportError::NotOpen);
         }
 
-        let before = sink.len();
-        while sink.len() - before < max {
-            let Some(byte) = self.output.pop_front() else {
-                break;
-            };
-            sink.push(byte);
-            if byte == terminator {
-                break;
-            }
-        }
-
-        if sink.len() == before {
-            return Err(TransportError::Timeout {
-                got: 0,
-                expected: 1,
-            });
-        }
-        Ok(())
+        super::queue::read_until(&mut self.output, sink, max, terminator)
     }
 
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
@@ -177,15 +149,7 @@ impl Transport for SimProbe {
             return Err(TransportError::NotOpen);
         }
 
-        let mut read = 0;
-        while read < buf.len() {
-            let Some(byte) = self.output.pop_front() else {
-                break;
-            };
-            buf[read] = byte;
-            read += 1;
-        }
-        Ok(read)
+        Ok(super::queue::read_available(&mut self.output, buf))
     }
 
     fn flush_input(&mut self) {

@@ -103,7 +103,14 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         service.status.ports.clone_from(ports);
         service.status.ports_revision = service.status.ports_revision.saturating_add(1);
 
+        // A Detect press that arrived before the first sample asked for that
+        // sample instead of scanning; now it can.
+        let scan_now = std::mem::take(&mut service.status.scan_after_ports);
+
         cx.refresh_windows();
+        if scan_now {
+            crate::core::firmware::start_scan(cx);
+        }
         return;
     }
 
@@ -114,18 +121,18 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         op,
         port,
         baud,
+        framing,
         probe,
         signature,
         ..
     } = &event
     {
-        crate::core::firmware::probed(*op, port.clone(), *baud, *probe, signature, cx);
+        crate::core::firmware::probed(*op, port.clone(), *baud, *framing, *probe, signature, cx);
         return;
     }
     if let Event::Failed { op, failure, .. } = &event
-        && failure.code == FailureCode::FirmwareNotDetected
+        && crate::core::firmware::missed(*op, Some(&failure.message), cx)
     {
-        crate::core::firmware::missed(*op, cx);
         return;
     }
 

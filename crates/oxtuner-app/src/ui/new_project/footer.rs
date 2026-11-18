@@ -98,22 +98,17 @@ pub(super) fn footer(
             .outline()
             .disabled(!can_leave || step == Step::Name)
             .on_click(move |_, _, cx| {
-                let previous = match back_model.borrow().step {
-                    Step::Review => Some(Step::Connection),
-                    Step::Connection => Some(Step::Configuration),
-                    Step::Configuration => Some(Step::Definition),
-                    Step::Definition => Some(Step::Name),
-                    Step::Name => None,
+                let Some(previous) = back_model.borrow().step.previous() else {
+                    return;
                 };
-                if let Some(previous) = previous {
-                    let mut wizard = back_model.borrow_mut();
-                    wizard.step = previous;
-                    // A failure belongs to the request that produced it; going
-                    // back to change the inputs starts a new attempt.
-                    wizard.retarget();
-                    drop(wizard);
-                    cx.refresh_windows();
-                }
+                let failure_serial = crate::core::CoreService::status(cx).failure_serial;
+                let mut wizard = back_model.borrow_mut();
+                wizard.step = previous;
+                // A failure belongs to the request that produced it; going
+                // back to change the inputs starts a new attempt.
+                wizard.retarget(failure_serial);
+                drop(wizard);
+                cx.refresh_windows();
             }),
     );
 
@@ -150,11 +145,8 @@ pub(super) fn footer(
                         return;
                     }
 
-                    let next = match step {
-                        Step::Definition => Step::Configuration,
-                        Step::Configuration => Step::Connection,
-                        Step::Connection | Step::Review => Step::Review,
-                        Step::Name => return,
+                    let Some(next) = step.next() else {
+                        return;
                     };
                     next_model.borrow_mut().step = next;
                     cx.refresh_windows();

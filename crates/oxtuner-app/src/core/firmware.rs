@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, AsyncApp};
-use oxtuner_core::{COMMON_PROBE_BAUD_RATES, FirmwareProbe, OpId, PortChoice};
+use oxtuner_core::{COMMON_PROBE_BAUD_RATES, FirmwareProbe, LinkMode, OpId, PortChoice};
 use oxtuner_registry::{BlockingClient, CacheStore, Registry};
 use rust_i18n::t;
 
@@ -52,6 +52,7 @@ pub(crate) fn start_scan(cx: &mut App) {
         crate::core::refresh_ports(cx);
         let status = &mut cx.global_mut::<CoreService>().status;
         clear_detection(status);
+        status.scan_after_ports = true;
         status.firmware_error = Some(t!("app.new_project.scan_ports_pending").to_string());
         cx.refresh_windows();
         return;
@@ -60,6 +61,7 @@ pub(crate) fn start_scan(cx: &mut App) {
 
     let status = &mut cx.global_mut::<CoreService>().status;
     clear_detection(status);
+    status.scan_after_ports = false;
     status.firmware_error = None;
 
     if ports.is_empty() {
@@ -88,25 +90,40 @@ pub(crate) fn start_scan(cx: &mut App) {
 /// Clears the answers a scan produced, so starting over never shows them.
 ///
 /// Both branches of [`start_scan`] run this: a new scan is a new attempt,
-/// whether the last one found an ECU, found nothing, or never started.
+/// whether the last one found an ECU, found nothing, or never started. An
+/// in-flight download is dropped with it: its progress handle is what decides
+/// whether the answer still belongs to a live detection.
 fn clear_detection(status: &mut CoreStatus) {
     status.firmware_scan = None;
     status.definition_download = None;
     status.detected_firmware = None;
+    status.downloading_definition = false;
+    status.download_progress = None;
 }
 
-/// The attempts a scan makes, in order: newest port first, then common baud, then family.
+/// The framings a scan tries, in order.
+///
+/// Both shipped definitions declare `msEnvelope_1.0`, so the modern framing is
+/// asked first and the legacy query second. A family that answers only the
+/// plain query still costs one extra timeout per port and rate, never a miss.
+const PROBE_FRAMINGS: [LinkMode; 2] = [LinkMode::Envelope, LinkMode::Legacy];
+
+/// The attempts a scan makes, in order: newest port first, then common baud,
+/// then family, then framing.
 fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
-    let mut attempts = Vec::with_capacity(ports.len() * COMMON_PROBE_BAUD_RATES.len() * 2);
+    let mut attempts = Vec::with_capacity(ports.len() * COMMON_PROBE_BAUD_RATES.len() * 4);
 
     for port in ports.iter().rev() {
         for baud in COMMON_PROBE_BAUD_RATES {
             for probe in FirmwareProbe::ALL {
-                attempts.push(ProbeAttempt {
-                    port: port.clone(),
-                    baud,
-                    probe,
-                });
+                for framing in PROBE_FRAMINGS {
+                    attempts.push(ProbeAttempt {
+                        port: port.clone(),
+                        baud,
+                        probe,
+                        framing,
+                    });
+                }
             }
         }
     }
@@ -133,6 +150,7 @@ fn send_current(cx: &mut App) {
 
     match handle.probe_firmware(
         PortChoice::serial(attempt.port.clone(), attempt.baud),
+        attempt.framing,
         attempt.probe,
     ) {
         Ok(op) => {
@@ -144,6 +162,7 @@ fn send_current(cx: &mut App) {
                 port = %attempt.port,
                 baud = attempt.baud,
                 probe = ?attempt.probe,
+                framing = ?attempt.framing,
                 %op,
                 "firmware probe sent"
             );
@@ -211,6 +230,7 @@ pub(crate) fn probed(
     op: OpId,
     port: String,
     baud: Option<u32>,
+    framing: LinkMode,
     probe: FirmwareProbe,
     signature: &str,
     cx: &mut App,
@@ -228,11 +248,12 @@ pub(crate) fn probed(
     status.detected_firmware = Some(DetectedFirmware {
         port,
         baud: baud.unwrap_or(0),
+        framing,
         signature: signature.to_owned(),
         definition: None,
     });
 
-    tracing::info!(baud, %signature, ?probe, "firmware detected");
+    tracing::info!(baud, ?framing, %signature, ?probe, "firmware detected");
     resolve(signature, cx);
     cx.refresh_windows();
 }
@@ -240,28 +261,37 @@ pub(crate) fn probed(
 /// Handles a probe that found nothing.
 ///
 /// A miss that belongs to no scan (cancelled, or a stale op) is still not a
-/// visible failure: a scan step is never news on its own.
-pub(crate) fn missed(op: OpId, cx: &mut App) {
+/// visible failure: a scan step is never news on its own. Any failure that
+/// answers the attempt in flight counts as a miss, so a refusal such as "a
+/// session is connected" cannot leave the scan spinning on the same step.
+///
+/// Returns whether the failure belonged to the scan.
+pub(crate) fn missed(op: OpId, reason: Option<&str>, cx: &mut App) -> bool {
     let status = &mut cx.global_mut::<CoreService>().status;
     let Some(scan) = status.firmware_scan.as_mut() else {
-        return;
+        return false;
     };
     if scan.op != Some(op) {
-        return;
+        return false;
     }
 
     scan.next += 1;
     if scan.next < scan.attempts.len() {
         send_current(cx);
         cx.refresh_windows();
-        return;
+        return true;
     }
 
     let attempts = scan.attempts.len();
     status.firmware_scan = None;
-    status.firmware_error = Some(t!("app.new_project.scan_no_answer").to_string());
+    status.firmware_error = Some(reason.map_or_else(
+        || t!("app.new_project.scan_no_answer").to_string(),
+        str::to_owned,
+    ));
     tracing::info!(attempts, "the firmware scan found no ECU");
     cx.refresh_windows();
+
+    true
 }
 
 /// Resolves a signature through the registry and the local cache.
@@ -410,6 +440,33 @@ pub(crate) fn download(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Points the wizard back at the detected definition.
+///
+/// The manual pick replaces the inspected file, so switching back to Auto has
+/// to inspect the detected one again or the step would show a preview that
+/// belongs to the other source. Nothing happens when the current preview
+/// already is the detected file, or when detection has not resolved one yet.
+pub(crate) fn inspect_detected(cx: &mut App) {
+    let status = &cx.global::<CoreService>().status;
+    let Some(path) = status
+        .detected_firmware
+        .as_ref()
+        .and_then(|detected| detected.definition.clone())
+    else {
+        return;
+    };
+    if status
+        .inspected
+        .as_ref()
+        .is_some_and(|inspected| inspected.path == path)
+    {
+        return;
+    }
+
+    note_inspect_sent(cx);
+    inspect_definition(&path, cx);
+}
+
 /// Drops a download the user declined.
 pub(crate) fn skip_download(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
@@ -454,7 +511,7 @@ mod tests {
 
         assert_eq!(
             attempts.len(),
-            2 * COMMON_PROBE_BAUD_RATES.len() * FirmwareProbe::ALL.len()
+            2 * COMMON_PROBE_BAUD_RATES.len() * FirmwareProbe::ALL.len() * 2
         );
         assert_eq!(
             attempts[0],
@@ -462,10 +519,13 @@ mod tests {
                 port: "second".to_owned(),
                 baud: 115_200,
                 probe: FirmwareProbe::Speeduino,
+                framing: LinkMode::Envelope,
             }
         );
-        assert_eq!(attempts[1].probe, FirmwareProbe::Rusefi);
-        assert_eq!(attempts[2].baud, COMMON_PROBE_BAUD_RATES[1]);
+        assert_eq!(attempts[1].framing, LinkMode::Legacy);
+        assert_eq!(attempts[2].probe, FirmwareProbe::Rusefi);
+        assert_eq!(attempts[2].framing, LinkMode::Envelope);
+        assert_eq!(attempts[4].baud, COMMON_PROBE_BAUD_RATES[1]);
         assert_eq!(attempts.last().expect("attempts").port, "first");
     }
 

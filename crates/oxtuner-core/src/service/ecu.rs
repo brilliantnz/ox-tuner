@@ -467,8 +467,15 @@ pub(super) fn on_reply(
             );
             // A connect that answered is the one worth reopening next time;
             // remembering it in the project keeps each project on its own ECU.
+            // A reconnect to the same port has nothing to persist, so the state
+            // file is left alone.
             if let Session::Project(project) = session
                 && let Some(saved) = &live.connection.saved_connection
+                && {
+                    let connection = &project.state().connection;
+                    connection.last_port.as_deref() != Some(saved.port.as_str())
+                        || connection.baud_override != Some(saved.baud)
+                }
                 && let Err(error) =
                     project.set_connection(Some(saved.port.clone()), Some(saved.baud))
             {

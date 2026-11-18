@@ -108,7 +108,14 @@ fn sync_from_path(
     let (folder, file_name) = split_destination(&typed);
 
     if let Some(folder) = folder {
-        model.borrow_mut().parent = folder;
+        let failure_serial = crate::core::CoreService::status(cx).failure_serial;
+        let mut wizard = model.borrow_mut();
+        if wizard.parent != folder {
+            // The path field describes another folder: the create target and
+            // the failure it produced belong to the old one.
+            wizard.retarget(failure_serial);
+        }
+        wizard.parent = folder;
     }
 
     let current_name = name.read(cx).value().trim().to_owned();
@@ -138,13 +145,15 @@ fn choose_folder(
     cx.spawn(async move |cx| match receiver.await {
         Ok(Ok(Some(paths))) => {
             if let Some(folder) = paths.into_iter().next() {
+                let failure_serial =
+                    cx.update(|cx| crate::core::CoreService::status(cx).failure_serial);
                 let mut wizard = model.borrow_mut();
                 if wizard.closed {
                     return;
                 }
                 wizard.parent = folder;
                 // A new folder is a new target and therefore a new attempt.
-                wizard.retarget();
+                wizard.retarget(failure_serial);
                 drop(wizard);
 
                 // The path field follows the folder, and rewriting an input
@@ -184,8 +193,11 @@ pub(super) fn name_target_problem(name: &str, parent: &Path) -> Option<String> {
 pub(super) fn advance_from_name(model: &SharedWizard, name: &str, parent: &Path, cx: &mut App) {
     match name_target_problem(name, parent) {
         None => {
+            let failure_serial = crate::core::CoreService::status(cx).failure_serial;
             let mut wizard = model.borrow_mut();
             wizard.name_error = None;
+            // Leaving the step with a new target is a new create attempt.
+            wizard.retarget(failure_serial);
             wizard.step = super::state::Step::Definition;
         }
         Some(error) => {

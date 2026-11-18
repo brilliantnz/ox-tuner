@@ -12,7 +12,7 @@ use gpui_kit::{
     AnyElement, App, ExternalPaths, FontWeight, InteractiveElement as _, IntoElement as _,
     ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _, Styled as _, div,
 };
-use oxtuner_core::accepts_definition;
+use oxtuner_core::{LinkMode, accepts_definition};
 use rust_i18n::t;
 
 use super::shared::section_title;
@@ -143,19 +143,27 @@ fn mode_tabs(model: &SharedWizard, creating: bool) -> AnyElement {
 
 /// Switches the definition source.
 ///
-/// Toggling never clears either side: the scan's answers and the picked file
-/// both stay, and the step, the review and Create read only the active one.
-/// Leaving Auto stops the scan, so a late probe answer cannot fill the step
-/// after the user chose the file instead.
+/// Toggling never clears either side's answer: the scan's detection and the
+/// picked file both stay, and the step, the review and Create read only the
+/// active one. Leaving Auto stops the scan and drops the download it prompted
+/// for, so a late answer cannot fill the step after the user chose the file
+/// instead. Returning to Auto re-inspects the detected definition when the
+/// manual pick replaced the inspected one.
 fn set_definition_mode(model: &SharedWizard, mode: DefinitionMode, cx: &mut App) {
     if model.borrow().definition_mode == mode {
         return;
     }
 
     model.borrow_mut().definition_mode = mode;
-    if mode == DefinitionMode::Manual {
-        firmware::cancel_scan(cx);
+
+    match mode {
+        DefinitionMode::Manual => {
+            firmware::cancel_scan(cx);
+            firmware::skip_download(cx);
+        }
+        DefinitionMode::Auto => firmware::inspect_detected(cx),
     }
+
     cx.refresh_windows();
 }
 
@@ -180,9 +188,18 @@ fn auto_detect_section(
             .label(t!("app.new_project.detect_firmware_button"))
             .icon(IconName::Cpu)
             .outline()
-            .disabled(creating || status.firmware_scan.is_some())
+            .disabled(creating || status.firmware_scan.is_some() || status.connection.is_some())
             .on_click(|_, _, cx| firmware::start_scan(cx)),
     );
+
+    if status.connection.is_some() {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child(t!("app.new_project.detect_while_connected")),
+        );
+    }
 
     if let Some(scan) = &status.firmware_scan
         && let Some(attempt) = scan.attempts.get(scan.next)
@@ -193,11 +210,16 @@ fn auto_detect_section(
             baud = attempt.baud
         )));
     } else if let Some(detected) = &status.detected_firmware {
+        let framing = match detected.framing {
+            LinkMode::Envelope => "msEnvelope_1.0",
+            LinkMode::Legacy => "legacy",
+        };
         body = body.child(div().text_xs().child(t!(
             "app.new_project.firmware_detected",
             signature = detected.signature.clone(),
             port = detected.port.clone(),
-            baud = detected.baud
+            baud = detected.baud,
+            framing = framing
         )));
     }
 
