@@ -375,6 +375,9 @@ impl Render for AppLayout {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Background presses release focus; the helper blurs only when the
+            // press took focus nowhere.
+            .capture_any_mouse_down(crate::ui::release_focus_on_background())
             // One bar across the whole window: menus, title, panel toggles and
             // the window controls. Both sidebars therefore start below it and
             // keep their own header rows, so the layout reads as one workspace

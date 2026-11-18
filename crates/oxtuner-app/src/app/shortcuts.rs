@@ -24,8 +24,8 @@ use gpui_kit::{
 };
 
 use super::actions::{
-    CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenProject, Quit, SaveTune, Settings,
-    ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
+    BlurFocused, CloseProject, ConnectEcu, DisconnectEcu, ManageProjects, OpenProject, Quit,
+    SaveTune, Settings, ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar,
 };
 use crate::i18n::t;
 
@@ -242,25 +242,32 @@ pub fn apply_shortcuts(cx: &mut App) {
     cx.set_global(AppliedShortcuts);
 }
 
-/// The bindings [`SHORTCUTS`] describes, for this platform.
+/// The bindings [`SHORTCUTS`] describes, for this platform, plus the
+/// unlisted Escape key that releases focus.
+///
+/// Escape stays out of [`SHORTCUTS`] on purpose: the table feeds the Settings
+/// page, and defocusing is not a command worth listing there. It is bound
+/// without a context so it fires wherever focus currently is, but gpui-kit's
+/// own contextual Escape bindings (popups, menus, text fields) still win while
+/// they consume the key.
 pub(super) fn key_bindings(cx: &App) -> Vec<KeyBinding> {
-    SHORTCUTS
-        .iter()
-        .filter_map(|shortcut| {
-            let keys = shortcut.keys();
-            if keys.is_empty() {
-                return None;
-            }
-            // `KeyBinding::new` wants a concrete action type; the table hands
-            // out `Box<dyn Action>`, which `load` accepts.
-            let predicate = shortcut
-                .contexts
-                .first()
-                .and_then(|context| KeyBindingContextPredicate::parse(context).ok())
-                .map(Rc::new);
-            KeyBinding::load(keys, shortcut.action(), predicate, false, None, cx).ok()
-        })
-        .collect()
+    let table = SHORTCUTS.iter().filter_map(|shortcut| {
+        let keys = shortcut.keys();
+        if keys.is_empty() {
+            return None;
+        }
+        // `KeyBinding::new` wants a concrete action type; the table hands
+        // out `Box<dyn Action>`, which `load` accepts.
+        let predicate = shortcut
+            .contexts
+            .first()
+            .and_then(|context| KeyBindingContextPredicate::parse(context).ok())
+            .map(Rc::new);
+        KeyBinding::load(keys, shortcut.action(), predicate, false, None, cx).ok()
+    });
+    let defocus = KeyBinding::load("escape", Box::new(BlurFocused), None, false, None, cx).ok();
+
+    table.chain(defocus).collect()
 }
 
 /// The keys of `keys` as separate caps: `["⌘", "B"]` on macOS,
@@ -316,6 +323,8 @@ pub fn key_text(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    use gpui_kit::TestAppContext;
 
     use super::*;
 
@@ -384,5 +393,26 @@ mod tests {
         assert_eq!(key_caps(""), Vec::<SharedString>::new());
         assert_eq!(key_text(""), "");
         assert_ne!(key_text("cmd-b"), "");
+    }
+
+    /// Escape releases focus without appearing in the Settings page.
+    #[gpui_kit::test]
+    fn escape_is_bound_to_defocus_outside_the_settings_table(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+
+        assert!(
+            SHORTCUTS
+                .iter()
+                .all(|shortcut| shortcut.mac != "escape" && shortcut.other != "escape"),
+            "Escape is a global defocus key, not a listed shortcut"
+        );
+
+        let bindings = cx.update(|cx| key_bindings(cx));
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding.action().name().ends_with("BlurFocused")),
+            "Escape releases focus wherever it currently is"
+        );
     }
 }

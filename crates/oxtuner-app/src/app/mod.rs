@@ -134,6 +134,16 @@ pub fn init(cx: &mut App) {
             }
         });
     });
+
+    // Keyboard defocus: Escape releases focus wherever it currently is. The
+    // focused control sees the key first, so a popup or a text field that
+    // consumes Escape keeps its own behavior and only an unconsumed Escape
+    // lands here.
+    cx.on_action(|_: &actions::BlurFocused, cx| {
+        if let Some(window) = cx.active_window() {
+            window.update(cx, |_, window, cx| window.blur(cx)).ok();
+        }
+    });
 }
 
 /// Runs `open` against the main window, after the current action dispatch.
