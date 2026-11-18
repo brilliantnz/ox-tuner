@@ -260,6 +260,12 @@ impl SerialSettings {
     ///
     /// rusEFI and FOME use the same default; a definition that needs another
     /// speed says so in the connection settings.
+    ///
+    /// This intentionally mirrors `oxtuner_protocol::DEFAULT_BAUD_RATE` without
+    /// depending on it: the transport crate is the dependency leaf, so the
+    /// value is duplicated here rather than imported from the protocol layer.
+    /// Both describe the same physical default, from opposite sides of the
+    /// transport boundary.
     pub const DEFAULT_BAUD: u32 = 115_200;
 
     /// Settings for `port` at the default speed.

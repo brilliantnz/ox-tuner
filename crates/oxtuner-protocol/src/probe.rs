@@ -37,20 +37,20 @@ pub const PROBE_PORT_SETTLE: Duration = Duration::from_millis(1_000);
 /// fails. 115200 is the Speeduino/rusEFI rate, then the common `MegaSquirt`
 /// rates. The list is short on purpose; every silent port costs a timeout per
 /// rate.
-pub const COMMON_BAUDS: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
+pub const COMMON_PROBE_BAUD_RATES: [u32; 4] = [115_200, 57_600, 38_400, 9_600];
 
 /// The baud rate used when no other rate is known.
 ///
 /// This is the first rate the scan tries, so a fresh picker defaults to the
 /// rate most likely to answer instead of hardcoding 115200 at every call site.
-pub const DEFAULT_BAUD: u32 = COMMON_BAUDS[0];
+pub const DEFAULT_BAUD_RATE: u32 = COMMON_PROBE_BAUD_RATES[0];
 
 /// The baud rates a user can pick from, slowest first.
 ///
-/// Unlike [`COMMON_BAUDS`], which is ordered for probing, this list is for
-/// display: it covers the rates USB serial adapters and aftermarket ECUs
-/// actually speak, so a device on an uncommon rate stays selectable.
-pub const PICKABLE_BAUDS: [u32; 13] = [
+/// Unlike [`COMMON_PROBE_BAUD_RATES`], which is ordered for probing, this list
+/// is for display: it covers the rates USB serial adapters and aftermarket
+/// ECUs actually speak, so a device on an uncommon rate stays selectable.
+pub const PICKABLE_BAUD_RATES: [u32; 13] = [
     9_600, 14_400, 19_200, 38_400, 57_600, 115_200, 230_400, 250_000, 460_800, 500_000, 576_000,
     921_600, 1_000_000,
 ];
@@ -372,23 +372,25 @@ mod tests {
     }
 
     #[test]
-    fn the_common_bauds_start_at_the_speeduino_rate() {
-        assert_eq!(COMMON_BAUDS[0], 115_200);
+    fn the_common_probe_bauds_start_at_the_speeduino_rate() {
+        assert_eq!(COMMON_PROBE_BAUD_RATES[0], 115_200);
         assert!(
-            COMMON_BAUDS.windows(2).all(|pair| pair[0] > pair[1]),
-            "the list is tried in order: {COMMON_BAUDS:?}"
+            COMMON_PROBE_BAUD_RATES
+                .windows(2)
+                .all(|pair| pair[0] > pair[1]),
+            "the list is tried in order: {COMMON_PROBE_BAUD_RATES:?}"
         );
     }
 
     #[test]
     fn the_pickable_bauds_stay_sorted_and_keep_the_default() {
         assert!(
-            PICKABLE_BAUDS.contains(&DEFAULT_BAUD),
-            "the default must stay selectable: {PICKABLE_BAUDS:?}"
+            PICKABLE_BAUD_RATES.contains(&DEFAULT_BAUD_RATE),
+            "the default must stay selectable: {PICKABLE_BAUD_RATES:?}"
         );
         assert!(
-            PICKABLE_BAUDS.windows(2).all(|pair| pair[0] < pair[1]),
-            "the picker lists rates slowest-first: {PICKABLE_BAUDS:?}"
+            PICKABLE_BAUD_RATES.windows(2).all(|pair| pair[0] < pair[1]),
+            "the picker lists rates slowest-first: {PICKABLE_BAUD_RATES:?}"
         );
     }
 }

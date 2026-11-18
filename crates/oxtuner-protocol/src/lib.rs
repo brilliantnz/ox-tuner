@@ -79,6 +79,6 @@ pub use ms::{LinkMode, MsProtocol, PageSpec, Protocol, RawCommandReport, Realtim
 pub use oxtuner_ini::WireOrder;
 pub use pattern::{CommandPattern, PatternMatch, page_identifier};
 pub use probe::{
-    COMMON_BAUDS, DEFAULT_BAUD, PICKABLE_BAUDS, PROBE_PORT_SETTLE, PROBES, ProbeSpec, RUSEFI,
-    SPEEDUINO,
+    COMMON_PROBE_BAUD_RATES, DEFAULT_BAUD_RATE, PICKABLE_BAUD_RATES, PROBE_PORT_SETTLE, PROBES,
+    ProbeSpec, RUSEFI, SPEEDUINO,
 };

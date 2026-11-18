@@ -111,7 +111,7 @@ pub use history::{
 pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use oxtuner_datalog::{LogColumn, LogStatus, SessionLogReport, SessionLogSnapshot};
-pub use oxtuner_protocol::{COMMON_BAUDS, DEFAULT_BAUD, PICKABLE_BAUDS};
+pub use oxtuner_protocol::{COMMON_PROBE_BAUD_RATES, DEFAULT_BAUD_RATE, PICKABLE_BAUD_RATES};
 pub use realtime::{
     BlockingFrameWatch, FrameWatch, IndicatorReading, LatestFrame, LiveValue, RealtimeDecoder,
     RealtimeFrame,
