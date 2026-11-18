@@ -108,6 +108,11 @@ pub(crate) struct CoreStatus {
     pub(crate) firmware_error: Option<String>,
     /// Whether a definition download is running on the background executor.
     pub(crate) downloading_definition: bool,
+    /// The signature whose download the user declined.
+    ///
+    /// Leaving Auto and returning must not ask the same question again; a new
+    /// detection clears it.
+    pub(crate) download_declined: Option<String>,
     /// A Detect press waiting for the first port sample.
     ///
     /// The scan starts as soon as the snapshot arrives, so one press is

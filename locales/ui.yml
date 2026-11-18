@@ -794,6 +794,8 @@ app:
       en: The scan tries the common serial rates on every port. Nothing is written.
     detect_while_connected:
       en: Disconnect the ECU before scanning.
+    stop_scan:
+      en: Stop scanning
     scanning_firmware:
       en: 'Scanning port %{port} @ %{baud}…'
     scan_no_ports:
@@ -806,6 +808,10 @@ app:
       en: 'The probe could not be sent: %{message}'
     scan_no_answer:
       en: No ECU answered the firmware probes.
+    scan_timed_out:
+      en: The ECU did not answer in time.
+    scan_no_attempt:
+      en: The firmware scan had nothing left to try.
     firmware_detected:
       en: 'ECU reports %{signature} on %{port} @ %{baud} baud, %{framing} framing.'
     test_signature:

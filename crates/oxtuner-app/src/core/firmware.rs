@@ -32,10 +32,11 @@ const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
 /// How long one probe may stay unanswered before the scan moves on.
 ///
-/// The core answers an attempt in a few seconds at most: the port settle, the
-/// bounded open and one reply timeout. A dropped event or a lost thread must
-/// not leave Detect disabled forever, so the attempt expires and counts as a
-/// miss; the op check makes a late answer harmless.
+/// This is a last resort for a lost answer, not a per-attempt budget: the core
+/// opens the port with no timeout and joins a stuck probe thread, so no number
+/// here can bound an attempt precisely. A dropped event or a wedged thread must
+/// not leave Detect disabled forever, so the attempt expires; the op check
+/// makes a late answer harmless.
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The host a download prompt names, for the consent text.
@@ -113,13 +114,15 @@ fn clear_detection(status: &mut CoreStatus) {
     status.detected_firmware = None;
     status.downloading_definition = false;
     status.download_progress = None;
+    status.download_declined = None;
 }
 
 /// The framings a scan tries, in order.
 ///
 /// Both shipped definitions declare `msEnvelope_1.0`, so the modern framing is
 /// asked first and the legacy query second. A family that answers only the
-/// plain query still costs one extra timeout per port and rate, never a miss.
+/// plain query costs one extra settle and timeout per port and rate, never a
+/// miss.
 const PROBE_FRAMINGS: [LinkMode; 2] = [LinkMode::Envelope, LinkMode::Legacy];
 
 /// The attempts a scan makes, in order: newest port first, then common baud,
@@ -159,6 +162,9 @@ fn send_current(cx: &mut App) {
             .as_ref()
             .and_then(|scan| scan.attempts.get(scan.next).cloned())
     }) else {
+        // The scan has no attempt at this index; leaving it set would disable
+        // Detect with no timer armed to advance it.
+        fail_scan(cx, t!("app.new_project.scan_no_attempt").as_ref());
         return;
     };
 
@@ -183,7 +189,7 @@ fn send_current(cx: &mut App) {
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(PROBE_DEADLINE).await;
                 cx.update(|cx| {
-                    crate::core::firmware::missed(op, None, cx);
+                    crate::core::firmware::missed(op, Miss::Expired, cx);
                 });
             })
             .detach();
@@ -233,6 +239,8 @@ pub(crate) fn cancel_scan(cx: &mut App) {
     if status.firmware_scan.take().is_some() {
         tracing::debug!("the firmware scan was cancelled");
     }
+
+    cx.refresh_windows();
 }
 
 /// Clears every detection answer the wizard rendered.
@@ -294,6 +302,19 @@ pub(crate) fn probed(
     cx.refresh_windows();
 }
 
+/// Why an attempt did not produce a signature.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Miss<'a> {
+    /// The port stayed silent.
+    Silent,
+    /// The core refused to run the probe; the message says why.
+    Refused(&'a str),
+    /// No answer arrived before the deadline.
+    Expired,
+    /// The core stopped before answering.
+    Stopped,
+}
+
 /// Handles a probe that found nothing.
 ///
 /// A miss that belongs to no scan (cancelled, or a stale op) is still not a
@@ -302,7 +323,7 @@ pub(crate) fn probed(
 /// session is connected" cannot leave the scan spinning on the same step.
 ///
 /// Returns whether the failure belonged to the scan.
-pub(crate) fn missed(op: OpId, reason: Option<&str>, cx: &mut App) -> bool {
+pub(crate) fn missed(op: OpId, miss: Miss<'_>, cx: &mut App) -> bool {
     let status = &mut cx.global_mut::<CoreService>().status;
     let Some(scan) = status.firmware_scan.as_mut() else {
         return false;
@@ -320,12 +341,12 @@ pub(crate) fn missed(op: OpId, reason: Option<&str>, cx: &mut App) -> bool {
 
     let attempts = scan.attempts.len();
     status.firmware_scan = None;
-    // A silent port gets the localized summary; a refusal keeps the core's own
-    // sentence, which says why the probe could not run at all.
-    status.firmware_error = Some(reason.map_or_else(
-        || t!("app.new_project.scan_no_answer").to_string(),
-        str::to_owned,
-    ));
+    status.firmware_error = Some(match miss {
+        Miss::Refused(reason) => reason.to_owned(),
+        Miss::Silent => t!("app.new_project.scan_no_answer").to_string(),
+        Miss::Expired => t!("app.new_project.scan_timed_out").to_string(),
+        Miss::Stopped => t!("app.new_project.scan_core_stopped").to_string(),
+    });
     tracing::info!(attempts, "the firmware scan found no ECU");
     cx.refresh_windows();
 
@@ -525,7 +546,9 @@ pub(crate) fn inspect_detected(cx: &mut App) {
         (
             detected.definition.clone(),
             detected.signature.clone(),
-            status.definition_download.is_none() && !status.downloading_definition,
+            status.definition_download.is_none()
+                && !status.downloading_definition
+                && status.download_declined.as_deref() != Some(detected.signature.as_str()),
         )
     };
 
@@ -559,7 +582,11 @@ pub(crate) fn inspect_detected(cx: &mut App) {
 /// Drops a download the user declined.
 pub(crate) fn skip_download(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
-    status.definition_download = None;
+    if let Some(prompt) = status.definition_download.take() {
+        // A declined prompt stays declined while the same detection is on
+        // screen; leaving Auto and coming back must not ask again.
+        status.download_declined = Some(prompt.signature);
+    }
     status.downloading_definition = false;
     status.download_progress = None;
     cx.refresh_windows();

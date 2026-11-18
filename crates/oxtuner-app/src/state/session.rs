@@ -696,6 +696,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_forgotten_layout_is_sent_again() {
+        SENT_LAYOUT.with(|last| {
+            *last.borrow_mut() = Some((PathBuf::from("/project"), ProjectLayout::default()));
+        });
+
+        forget_sent_layout();
+
+        assert!(
+            SENT_LAYOUT.with(|last| last.borrow().is_none()),
+            "a layout the core did not store is offered again"
+        );
+    }
+
+    #[test]
     fn state_round_trips_through_json() {
         let data = AppStateData {
             schema_version: STATE_SCHEMA_VERSION,

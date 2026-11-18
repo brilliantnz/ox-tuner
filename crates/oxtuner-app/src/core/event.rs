@@ -5,6 +5,7 @@ use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, 
 use rust_i18n::t;
 
 use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
+use super::firmware;
 use super::service::CoreService;
 use super::status::{JournalView, TraceSaved, Update};
 
@@ -134,9 +135,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     if let Event::Failed { op, failure, .. } = &event {
         // Only a refusal from the core keeps its own sentence; a silent port
         // gets the localized summary.
-        let reason =
-            (failure.code == FailureCode::ConnectFailed).then_some(failure.message.as_str());
-        if crate::core::firmware::missed(*op, reason, cx) {
+        let miss = if failure.code == FailureCode::ConnectFailed {
+            firmware::Miss::Refused(&failure.message)
+        } else {
+            firmware::Miss::Silent
+        };
+        if firmware::missed(*op, miss, cx) {
             return;
         }
     }
@@ -144,7 +148,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // A rejection (the core drained the queue on shutdown) still answers the
     // attempt in flight, so the scan cannot keep waiting for it.
     if let Event::Rejected { op, .. } = &event
-        && crate::core::firmware::missed(*op, None, cx)
+        && firmware::missed(*op, firmware::Miss::Stopped, cx)
     {
         return;
     }

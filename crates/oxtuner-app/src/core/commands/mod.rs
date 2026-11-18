@@ -82,6 +82,10 @@ pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
     let status = &mut cx.global_mut::<CoreService>().status;
     status.failure_serial = status.failure_serial.wrapping_add(1);
     status.failure = Some(Failure { code, message });
+    if code == FailureCode::DefinitionRejected {
+        // The send was refused, so no answer is coming for it.
+        status.inspect_pending = None;
+    }
     cx.refresh_windows();
 }
 

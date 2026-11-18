@@ -167,6 +167,32 @@ fn set_definition_mode(model: &SharedWizard, mode: DefinitionMode, cx: &mut App)
     cx.refresh_windows();
 }
 
+/// The Detect button, with Stop beside it while a scan runs.
+///
+/// A scan of several ports can take a while with every other control disabled,
+/// so the running state always offers a way out.
+fn detect_controls(status: &crate::core::CoreStatus, creating: bool) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .child(
+            Button::new("new-project-detect-firmware")
+                .label(t!("app.new_project.detect_firmware_button"))
+                .icon(IconName::Cpu)
+                .outline()
+                .disabled(creating || status.firmware_scan.is_some() || status.connection.is_some())
+                .on_click(|_, _, cx| firmware::start_scan(cx)),
+        )
+        .when(status.firmware_scan.is_some(), |row| {
+            row.child(
+                Button::new("new-project-stop-scan")
+                    .label(t!("app.new_project.stop_scan"))
+                    .outline()
+                    .on_click(|_, _, cx| firmware::cancel_scan(cx)),
+            )
+        })
+        .into_any_element()
+}
+
 /// Step 2, first section: probe the ECU and fetch its definition.
 fn auto_detect_section(
     model: &SharedWizard,
@@ -183,14 +209,7 @@ fn auto_detect_section(
             .child(t!("app.new_project.detect_firmware_hint")),
     );
 
-    body = body.child(
-        Button::new("new-project-detect-firmware")
-            .label(t!("app.new_project.detect_firmware_button"))
-            .icon(IconName::Cpu)
-            .outline()
-            .disabled(creating || status.firmware_scan.is_some() || status.connection.is_some())
-            .on_click(|_, _, cx| firmware::start_scan(cx)),
-    );
+    body = body.child(detect_controls(status, creating));
 
     if status.connection.is_some() {
         body = body.child(
