@@ -17,15 +17,17 @@
 //!   attributes, comments, the `<bibliography>`, elements from a newer
 //!   `TunerStudio` — serializes back byte-for-byte.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use oxtuner_ini::{Definition, SettingsContext};
-use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, VariableSpec};
+use oxtuner_ini::expr::EvalContext;
+use oxtuner_ini::{ChannelKind, Definition, SettingsContext};
+use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, VariableSpec};
 
 use crate::flags;
-use crate::load::{self, FileValueError};
+use crate::load;
 use crate::xml::{Document, Element, Node, XmlError};
 use oxtuner_encoding::Latin1Error as EncodeError;
 
@@ -172,6 +174,11 @@ pub enum MsqError {
         /// The entry name.
         name: String,
     },
+    /// A scaffold found a page with no INI counterpart.
+    UnknownPage {
+        /// The page number with no definition page.
+        page: u16,
+    },
 }
 
 impl fmt::Display for MsqError {
@@ -185,6 +192,9 @@ impl fmt::Display for MsqError {
             Self::EntryNotFound { page, name } => {
                 write!(formatter, "`{name}` does not exist on {page}")
             }
+            Self::UnknownPage { page } => {
+                write!(formatter, "page {page} has no INI counterpart")
+            }
         }
     }
 }
@@ -194,7 +204,9 @@ impl std::error::Error for MsqError {
         match self {
             Self::Xml(error) => Some(error),
             Self::Encoding(error) => Some(error),
-            Self::RootIsNotMsq { .. } | Self::EntryNotFound { .. } => None,
+            Self::RootIsNotMsq { .. } | Self::EntryNotFound { .. } | Self::UnknownPage { .. } => {
+                None
+            }
         }
     }
 }
@@ -216,6 +228,81 @@ const SCAFFOLD_FILE_FORMAT: &str = "5.0";
 /// The namespace observed on tunes the reference writer produces.
 const SCAFFOLD_NAMESPACE: &str = "http://www.msefi.com/:msq";
 
+/// How deep a default may chain through other defaults and computed channels.
+const MAX_DEFAULT_DEPTH: usize = 16;
+
+/// The definition's declared defaults, as values a scaffold can evaluate.
+///
+/// A scaffold has no tune values yet, so the only thing a presentation
+/// attribute can name is another default from `[ConstantsExtensions]` or a
+/// computed channel the definition derives from those defaults.
+/// `rawValue` wins over `defaultValue`, matching how the layout picks a
+/// variable's own default. A chain that runs away is cut off rather than
+/// recursed into.
+struct DefaultValues<'a> {
+    definition: &'a Definition,
+    depth: Cell<usize>,
+}
+
+impl DefaultValues<'_> {
+    fn enter(&self) -> bool {
+        let depth = self.depth.get();
+        if depth >= MAX_DEFAULT_DEPTH {
+            return false;
+        }
+        self.depth.set(depth + 1);
+        true
+    }
+
+    fn leave(&self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
+    }
+}
+
+impl EvalContext for DefaultValues<'_> {
+    fn value(&mut self, name: &str) -> Option<f64> {
+        let definition = self.definition;
+
+        if let Some(number) = definition
+            .extensions
+            .raw_defaults
+            .get_ignore_case(name)
+            .or_else(|| definition.extensions.defaults.get_ignore_case(name))
+        {
+            if let Some(literal) = number.literal() {
+                return Some(literal);
+            }
+            if !self.enter() {
+                return None;
+            }
+            let value = number.evaluate_with(self);
+            self.leave();
+
+            return value;
+        }
+
+        let Some(channel) = definition.channel(name) else {
+            // A declared variable with no `defaultValue` starts at zero, the
+            // same fallback the layout uses for its own default. An unknown
+            // name stays unresolved.
+            let declared = definition.constant(name).is_some()
+                || definition.pc_variables.get_ignore_case(name).is_some();
+
+            return declared.then_some(0.0);
+        };
+        let ChannelKind::Computed(expression) = &channel.kind else {
+            return None;
+        };
+        if !self.enter() {
+            return None;
+        }
+        let value = expression.evaluate_with(self);
+        self.leave();
+
+        value
+    }
+}
+
 impl Msq {
     /// Builds a new tune document with every value at its definition default.
     ///
@@ -225,18 +312,26 @@ impl Msq {
     /// flags. Variables the definition marks `noMsqSave` are left out, the
     /// same rule the save path applies.
     ///
-    /// A variable whose value cannot be written from a tune with only defaults
-    /// is left out as well, exactly once, and the open that follows reports it
-    /// as a missing value. Speeduino's `iacCLminValue` is the known case: its
-    /// `scale` is an expression over other values, and a tune with only
-    /// defaults has nothing to resolve it from.
+    /// Presentation attributes are evaluated against the definition's declared
+    /// defaults, so an expression such as `{fuelLoadMax}` or `{0.1/stoich}`
+    /// resolves before the value is written. A value that still cannot be
+    /// written is left out and the open that follows reports it as missing.
     ///
     /// This is crate-private: project creation is the only caller.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
-    ) -> Result<Self, FileValueError> {
-        let tune = Tune::from_definition(definition);
+    ) -> Result<Self, MsqError> {
+        // A scaffold has no values yet, so presentation attributes are
+        // resolved against the definition's own defaults. Without that, every
+        // attribute written as an expression (`{fuelLoadMax}`, `{0.1/stoich}`)
+        // would stay unresolved and drop its variable from the new tune.
+        let mut defaults = DefaultValues {
+            definition,
+            depth: Cell::new(0),
+        };
+        let layout = TuneLayout::build_with_context(definition, &mut defaults);
+        let tune = Tune::new(Arc::new(layout));
         let layout = Arc::clone(tune.layout());
 
         let mut pc_entries: Vec<Element> = Vec::new();
@@ -271,7 +366,7 @@ impl Msq {
         push_child(
             &mut root.children,
             1,
-            Element::self_closing("bibliography", &[("author", "OxTuner")]),
+            Element::self_closing("bibliography", &[("author", "Ox Tuner")]),
         );
         push_child(&mut root.children, 1, version_element(definition));
 
@@ -298,7 +393,7 @@ impl Msq {
         }
 
         if let Some(leftover) = pages.keys().next() {
-            return Err(FileValueError::UnknownPage { page: *leftover });
+            return Err(MsqError::UnknownPage { page: *leftover });
         }
 
         push_child(&mut root.children, 1, settings_element(settings));
@@ -318,6 +413,7 @@ impl Msq {
         };
         Ok(Self { document })
     }
+
     /// Parses `.msq` bytes (ISO-8859-1) into the document model.
     ///
     /// # Errors
@@ -736,6 +832,14 @@ fn entry_element(spec: &VariableSpec, kind: EntryKind, text: &str) -> Element {
     let rows_text;
     let mut attrs: Vec<(&str, &str)> = vec![("name", spec.name.as_str())];
     if let EntryShape::Array { cols, rows } = spec.shape {
+        // A 1-D list is written as one column of N rows, the way the reference
+        // writer stores it. A reader that takes `rows` as the length would
+        // otherwise see a single element.
+        let (cols, rows) = if rows == 1 && cols > 1 {
+            (1, cols)
+        } else {
+            (cols, rows)
+        };
         cols_text = cols.to_string();
         rows_text = rows.to_string();
         attrs.push(("cols", cols_text.as_str()));

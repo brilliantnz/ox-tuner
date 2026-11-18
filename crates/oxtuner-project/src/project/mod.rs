@@ -187,7 +187,8 @@ impl fmt::Display for ProjectError {
             }
             Self::TargetExists { path } => write!(
                 formatter,
-                "{} already exists, choose another name or folder",
+                "{} already exists, choose another name or folder. A create that failed part-way \
+                 can leave the folder behind",
                 path.display()
             ),
             Self::SignatureMismatch { expected, found } => write!(

@@ -80,11 +80,6 @@ pub enum FileValueError {
         /// Why the label cannot be written.
         reason: String,
     },
-    /// A page has no INI counterpart, so its values have nowhere to go.
-    UnknownPage {
-        /// The page number with no definition page.
-        page: u16,
-    },
 }
 
 impl fmt::Display for FileValueError {
@@ -106,9 +101,6 @@ impl fmt::Display for FileValueError {
                 formatter,
                 "`{name}`: the label for value {raw} cannot be written: {reason}"
             ),
-            Self::UnknownPage { page } => {
-                write!(formatter, "page {page} has no INI counterpart")
-            }
         }
     }
 }
@@ -123,7 +115,6 @@ impl FileValueError {
             | Self::WrongElementCount { name, .. }
             | Self::Text { name, .. }
             | Self::Label { name, .. } => name.clone(),
-            Self::UnknownPage { page } => format!("page {page}"),
         }
     }
 }
@@ -289,7 +280,7 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
             Some(constant) => Some(&constant.options),
             None => definition
                 .pc_variables
-                .get(&entry.name)
+                .get_ignore_case(&entry.name)
                 .map(|variable| &variable.options),
         };
 
@@ -749,6 +740,39 @@ fn unquote(value: &str) -> String {
     }
 }
 
+/// Formats a text value, quoting it when a bare write would not read back.
+fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, FileValueError> {
+    if text.chars().count() > len {
+        return Err(FileValueError::Text {
+            name: spec.name.clone(),
+            reason: format!(
+                "the text is {} characters, the definition allows {len}",
+                text.chars().count()
+            ),
+        });
+    }
+    if let Some(character) = oxtuner_encoding::first_non_latin1(text) {
+        return Err(FileValueError::Text {
+            name: spec.name.clone(),
+            reason: not_latin1_reason(character),
+        });
+    }
+
+    // A string value is the element's text, not a quoted token:
+    // `TunerStudio` writes `<pcVariable name="alias">Aux0</pcVariable>`.
+    // Reading still accepts quotes, so a file written by a tool that quotes the
+    // value keeps working. The reverse holds too: a value the reader would trim
+    // or mistake for a quoted token is written quoted, so it reads back exactly
+    // as it was saved.
+    let needs_quotes = text != text.trim() || is_quoted(text);
+
+    Ok(if needs_quotes {
+        format!("\"{text}\"")
+    } else {
+        text.to_owned()
+    })
+}
+
 /// Formats a variable's stored values as the text a `.msq` carries.
 ///
 /// A `.msq` declares ISO-8859-1 and stores text as bytes, so a character with
@@ -769,28 +793,7 @@ pub fn format_values(
     values: &Values,
 ) -> Result<String, FileValueError> {
     match (&spec.shape, values) {
-        (EntryShape::Text { len }, Values::Text(text)) => {
-            if text.chars().count() > *len {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: format!(
-                        "the text is {} characters, the definition allows {len}",
-                        text.chars().count()
-                    ),
-                });
-            }
-            if let Some(character) = oxtuner_encoding::first_non_latin1(text) {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: not_latin1_reason(character),
-                });
-            }
-            // A string value is the element's text, not a quoted token:
-            // `TunerStudio` writes `<pcVariable name="alias">Aux0</pcVariable>`.
-            // Reading still accepts quotes, so a file written by a tool that
-            // quotes the value keeps working.
-            Ok(text.clone())
-        }
+        (EntryShape::Text { len }, Values::Text(text)) => format_text(spec, text, *len),
         (EntryShape::Bits { .. }, Values::Numbers(numbers)) => {
             let raw = numbers.first().copied().unwrap_or(0.0);
             let options = definition
@@ -799,7 +802,7 @@ pub fn format_values(
                 .or_else(|| {
                     definition
                         .pc_variables
-                        .get(&spec.name)
+                        .get_ignore_case(&spec.name)
                         .map(|variable| &variable.options)
                 });
             let label = options.and_then(|options| {
@@ -830,10 +833,11 @@ pub fn format_values(
                     }
                     Ok(format!("\"{raw:.0}\""))
                 }
-                None => Err(FileValueError::NoLabel {
-                    name: spec.name.clone(),
-                    raw,
-                }),
+                // A bits field whose option list misses the value is written
+                // as the raw number: the reader takes a number wherever it
+                // takes a label, so an incomplete option list cannot drop the
+                // value.
+                None => Ok(raw.to_string()),
             }
         }
         (shape, Values::Numbers(numbers)) => {

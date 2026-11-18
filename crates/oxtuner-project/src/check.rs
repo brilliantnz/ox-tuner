@@ -129,6 +129,10 @@ impl fmt::Display for LoadIssue {
 }
 
 /// The result of checking a tune against its definition.
+///
+/// Non-exhaustive: a new finding list is additive, and every field has a
+/// default, so a caller reads the fields it needs and ignores the rest.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadReport {
     /// Problems that force read-only mode.
@@ -369,9 +373,36 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     }
 }
 
+/// The definition entries the tune has no value for, sorted.
+///
+/// Constants and PC variables marked `noMsqSave` are never written, so their
+/// absence is not a missing value. Names are matched case-insensitively, the
+/// way a lookup by name works.
+fn missing_entries<'a>(definition: &'a Definition, seen: &BTreeSet<String>) -> Vec<&'a str> {
+    let mut missing: Vec<&str> = definition
+        .constants
+        .iter()
+        .filter(|(_, constant)| !constant.flags.no_msq_save)
+        .map(|(name, _)| name)
+        .chain(
+            definition
+                .pc_variables
+                .iter()
+                .filter(|(_, variable)| !variable.flags.no_msq_save)
+                .map(|(name, _)| name),
+        )
+        .filter(|name| !seen.contains(&name.to_ascii_lowercase()))
+        .collect();
+
+    missing.sort_unstable();
+    missing
+}
+
 fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     let entries = msq.entries();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    // Case-folded, because a lookup by name is case-insensitive: an entry that
+    // loaded under another case must not be reported missing as well.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut orphans: Vec<&str> = Vec::new();
     let mut nameless = 0usize;
 
@@ -380,10 +411,10 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             nameless += 1;
             continue;
         }
-        seen.insert(entry.name.as_str());
+        seen.insert(entry.name.to_ascii_lowercase());
 
         let constant = definition.constant(&entry.name);
-        let pc_variable = definition.pc_variables.get(&entry.name);
+        let pc_variable = definition.pc_variables.get_ignore_case(&entry.name);
         if constant.is_none() && pc_variable.is_none() {
             orphans.push(entry.name.as_str());
             continue;
@@ -458,15 +489,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         );
     }
 
-    let mut missing: Vec<&str> = definition
-        .constants
-        .iter()
-        .filter(|(_, constant)| !constant.flags.no_msq_save)
-        .map(|(name, _)| name)
-        .chain(definition.pc_variables.iter().map(|(name, _)| name))
-        .filter(|name| !seen.contains(*name))
-        .collect();
-    missing.sort_unstable();
+    let missing = missing_entries(definition, &seen);
     if !missing.is_empty() {
         report.missing_values = missing.iter().map(|name| (*name).to_owned()).collect();
         report.warn(

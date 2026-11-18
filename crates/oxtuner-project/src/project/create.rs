@@ -103,7 +103,15 @@ pub fn split_destination(typed: &Path) -> (Option<PathBuf>, Option<String>) {
     // A trailing separator means the user named a folder, not a project.
     let folder = text.trim_end_matches(['/', '\\']);
     if folder.len() != text.len() {
-        let folder = (!folder.is_empty()).then(|| PathBuf::from(folder.to_string()));
+        let mut folder = folder.to_string();
+
+        // A root keeps its separator. Without it "C:" is drive-relative on
+        // Windows, so the project would land in the drive's current folder.
+        if folder.ends_with(':') {
+            folder.push(text.chars().last().unwrap_or('/'));
+        }
+
+        let folder = (!folder.is_empty()).then(|| PathBuf::from(folder));
 
         return (folder, None);
     }
@@ -140,9 +148,9 @@ pub fn accepts_definition(path: &Path) -> bool {
 impl Project {
     /// Creates a project folder and opens it.
     ///
-    /// The folder is `parent/name`. It must not exist or must be empty; the
-    /// name must be a usable folder name on every desktop OS. When the ECU
-    /// reported a signature, the definition must declare the same one.
+    /// The folder is `parent/name`, and it must not exist. The name must be a
+    /// usable folder name on every desktop OS. When the ECU reported a
+    /// signature, the definition must declare the same one.
     ///
     /// The definition is parsed twice — once to scaffold the tune, once by
     /// the open that proves the folder is readable — and the second parse does
@@ -196,16 +204,33 @@ impl Project {
             "definition read for the new project"
         );
 
-        fs::create_dir_all(&root).map_err(|source| ProjectError::Io {
-            path: root.clone(),
-            source,
+        // Everything is validated and built in memory before the folder
+        // exists, so a refused definition touches no disk at all.
+        let built = build_scaffold(&name, request, &ini_bytes)?;
+
+        // The target was checked above; `create_dir` makes that check atomic
+        // by refusing a folder that appeared in between. Reusing it would make
+        // the rollback below delete a folder creation did not make.
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent).map_err(|source| ProjectError::Io {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
+        fs::create_dir(&root).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                ProjectError::TargetExists { path: root.clone() }
+            } else {
+                ProjectError::Io {
+                    path: root.clone(),
+                    source,
+                }
+            }
         })?;
 
         let mut written: Vec<PathBuf> = Vec::new();
-        let project =
-            Self::scaffold(&root, &name, request, &ini_bytes, &mut written).inspect_err(|_| {
-                rollback(&root, &written);
-            })?;
+        let project = Self::write_scaffold(&root, request, &ini_bytes, &built, &mut written)
+            .inspect_err(|_| rollback(&root, &written))?;
 
         Ok(project)
     }
@@ -213,123 +238,37 @@ impl Project {
     /// Writes the scaffold, then opens it through the normal open path so a
     /// created project is exactly an opened one.
     ///
-    /// Everything is validated and built in memory first — the definition
-    /// parses, the include and signature gates pass, the tune serializes — and
-    /// only then is anything written. A refusal therefore touches no disk, and
-    /// rollback only has to cover I/O failures. The state file is written last,
-    /// once the project provably opens: no failure past that point is possible,
-    /// so rollback never meets a half-built folder.
-    fn scaffold(
+    /// Only I/O happens here: every value was built by [`build_scaffold`], so a
+    /// failure means the disk refused a write and rollback removes what was
+    /// written. The state file is written last, once the project provably
+    /// opens.
+    fn write_scaffold(
         root: &Path,
-        name: &str,
         request: &CreateRequest,
         ini_bytes: &[u8],
+        built: &BuiltScaffold,
         written: &mut Vec<PathBuf>,
     ) -> Result<Self, ProjectError> {
         let config = root.join(CONFIG_DIR);
         let definition_path = config.join(MAIN_DEFINITION);
 
-        let text = oxtuner_ini::source::decode(ini_bytes).text;
-        // A chosen setting group marks its option active, exactly like the
-        // `<settings>` entry a saved tune carries. The group's own name is
-        // activated too, so an `#if` written against either half resolves.
-        let overrides: Vec<(String, bool)> = chosen_flags(&request.settings)
-            .into_iter()
-            .map(|option| (option, true))
-            .collect();
-        let settings = SettingsContext::new().with_overrides(overrides);
-        // The parser resolves `#include` through a `Fn` resolver, so the names
-        // it asks for are recorded through interior mutability.
-        let includes = RefCell::new(Vec::new());
-        let resolver = |name: &str| {
-            includes.borrow_mut().push(name.to_owned());
-            super::read_include(&config, name)
-        };
-        let definition = oxtuner_ini::parse_str_with_includes(&text, &settings, &resolver)
-            .map_err(ProjectError::Ini)?;
-        tracing::debug!(
-            signature = %definition.signature,
-            pages = definition.pages.len(),
-            constants = definition.constants.len(),
-            settings = request.settings.len(),
-            "definition parsed for the new project"
-        );
-
-        // Creation copies one file. A definition that pulls in more would open
-        // with those pages missing, so it is refused instead of half-built.
-        let includes = includes.into_inner();
-        if !includes.is_empty() {
-            return Err(ProjectError::DefinitionNeedsIncludes { names: includes });
-        }
-
-        if let Some(expected) = &request.expected_signature
-            && definition.signature.trim() != expected.trim()
-        {
-            return Err(ProjectError::SignatureMismatch {
-                expected: expected.clone(),
-                found: definition.signature,
-            });
-        }
-
-        let document = Msq::scaffold(&definition, &settings).map_err(|source| {
-            ProjectError::Unrepresentable {
-                name: source.name(),
-                source,
-            }
-        })?;
-        let tune_bytes = document.save()?;
-        tracing::debug!(
-            bytes = tune_bytes.len(),
-            "tune scaffolded from the definition defaults"
-        );
-
-        // Nothing below is a validation step: from here on, a failure means the
-        // disk refused a write and rollback removes what was written.
         create_tracked(written, config.clone())?;
         write_tracked(written, definition_path, ini_bytes)?;
-        write_tracked(written, root.join(TUNE_FILE), &tune_bytes)?;
-
-        // The keys are the ones TunerStudio reads, so a project created here
-        // opens there without a settings mismatch. `ecuSettings` is the flag
-        // list the definition's setting groups produced; TunerStudio stores it
-        // pipe-separated with a trailing separator.
-        //
-        // The signature is trimmed: a definition can carry a trailing NUL,
-        // which a Java-properties file must not hold (a reader would see it as
-        // part of the value and report the project as corrupt).
-        let signature = definition.signature.trim();
-        let mut ecu_settings = String::new();
-        for flag in chosen_flags(&request.settings) {
-            ecu_settings.push_str(&flag);
-            ecu_settings.push('|');
-        }
-
-        let mut properties = String::from("# Created by OxTuner.\n");
-        properties.push_str("projectName=");
-        properties.push_str(&oxtuner_encoding::escape_java_property(name));
-        properties.push('\n');
-        properties.push_str("projectDescription=\n");
-        properties.push_str("ecuConfigFile=");
-        properties.push_str(MAIN_DEFINITION);
-        properties.push('\n');
-        if !signature.is_empty() {
-            properties.push_str("firmwareDescription=");
-            properties.push_str(&oxtuner_encoding::escape_java_property(signature));
-            properties.push('\n');
-        }
-        properties.push_str("ecuSettings=");
-        properties.push_str(&ecu_settings);
-        properties.push('\n');
+        write_tracked(written, root.join(TUNE_FILE), &built.tune_bytes)?;
 
         let properties_path = config.join(PROPERTIES_FILE);
-        write_tracked(written, properties_path.clone(), properties.as_bytes())?;
+        write_tracked(
+            written,
+            properties_path.clone(),
+            built.properties.as_bytes(),
+        )?;
 
         // TunerStudio rotates a `.bkup` beside its properties file and reads it
         // when the main file is damaged. Writing the same bytes now means a
         // project this build created never looks half-written there.
         let mut backup = properties_path.into_os_string();
         backup.push(".bkup");
-        write_tracked(written, PathBuf::from(backup), properties.as_bytes())?;
+        write_tracked(written, PathBuf::from(backup), built.properties.as_bytes())?;
 
         for dir in SCAFFOLD_DIRS {
             create_tracked(written, root.join(dir))?;
@@ -347,6 +286,20 @@ impl Project {
         }
         project.state.layout = request.layout.clone();
 
+        // A created project must be usable: if the scaffold opened read-only,
+        // the definition and the tune disagree about something creation wrote,
+        // and handing it back would only move that failure to the first edit.
+        if project.is_read_only() {
+            return Err(ProjectError::ReadOnly {
+                reasons: project
+                    .report()
+                    .blockers
+                    .iter()
+                    .map(|blocker| blocker.message.clone())
+                    .collect(),
+            });
+        }
+
         project
             .state
             .write(root)
@@ -357,6 +310,118 @@ impl Project {
 
         Ok(project)
     }
+}
+
+/// The bytes a create writes once its inputs prove valid.
+///
+/// Built before the target folder exists, so a definition that cannot become a
+/// project never leaves anything behind.
+struct BuiltScaffold {
+    tune_bytes: Vec<u8>,
+    properties: String,
+}
+
+/// Validates the request and builds every file's bytes in memory.
+///
+/// Nothing here touches the target folder. The definition is parsed, its
+/// include and signature gates run, the tune is scaffolded and serialized, and
+/// the properties text is assembled; only [`Project::write_scaffold`] writes.
+fn build_scaffold(
+    name: &str,
+    request: &CreateRequest,
+    ini_bytes: &[u8],
+) -> Result<BuiltScaffold, ProjectError> {
+    let text = oxtuner_ini::source::decode(ini_bytes).text;
+    // A chosen setting group marks its option active, exactly like the
+    // `<settings>` entry a saved tune carries. The parser only sees the names
+    // as `#if` conditions, so it is given the request as written.
+    let overrides: Vec<(String, bool)> = request
+        .settings
+        .iter()
+        .filter(|option| !option.eq_ignore_ascii_case("DEFAULT"))
+        .cloned()
+        .map(|option| (option, true))
+        .collect();
+    let settings = SettingsContext::new().with_overrides(overrides);
+    // The parser resolves `#include` through a `Fn` resolver, so the names
+    // it asks for are recorded through interior mutability. The base is the
+    // project's own config folder, which does not exist yet: an include can
+    // never resolve there, and recording the name is what refuses it.
+    let includes = RefCell::new(Vec::new());
+    let config = request.root().join(CONFIG_DIR);
+    let resolver = |name: &str| {
+        includes.borrow_mut().push(name.to_owned());
+        super::read_include(&config, name)
+    };
+    let definition = oxtuner_ini::parse_str_with_includes(&text, &settings, &resolver)
+        .map_err(ProjectError::Ini)?;
+    tracing::debug!(
+        signature = %definition.signature,
+        pages = definition.pages.len(),
+        constants = definition.constants.len(),
+        settings = request.settings.len(),
+        "definition parsed for the new project"
+    );
+
+    // Creation copies one file. A definition that pulls in more would open
+    // with those pages missing, so it is refused instead of half-built.
+    let includes = includes.into_inner();
+    if !includes.is_empty() {
+        return Err(ProjectError::DefinitionNeedsIncludes { names: includes });
+    }
+
+    if let Some(expected) = &request.expected_signature
+        && definition.signature.trim() != expected.trim()
+    {
+        return Err(ProjectError::SignatureMismatch {
+            expected: expected.clone(),
+            found: definition.signature,
+        });
+    }
+
+    let document = Msq::scaffold(&definition, &settings).map_err(ProjectError::Msq)?;
+    let tune_bytes = document.save()?;
+    tracing::debug!(
+        bytes = tune_bytes.len(),
+        "tune scaffolded from the definition defaults"
+    );
+
+    // The keys are the ones TunerStudio reads, so a project created here
+    // opens there without a settings mismatch. `ecuSettings` is the flag
+    // list the definition's setting groups produced; TunerStudio stores it
+    // pipe-separated with a trailing separator.
+    //
+    // The signature is trimmed: a definition can carry a trailing NUL,
+    // which a Java-properties file must not hold (a reader would see it as
+    // part of the value and report the project as corrupt).
+    let signature = definition.signature.trim();
+    let mut ecu_settings = String::new();
+    for flag in chosen_flags(&definition, &request.settings) {
+        ecu_settings.push_str(&flag);
+        ecu_settings.push('|');
+    }
+
+    let mut properties = String::from("# Created by Ox Tuner.\n");
+    properties.push_str("projectName=");
+    properties.push_str(&oxtuner_encoding::escape_java_property(name));
+    properties.push('\n');
+    properties.push_str("projectDescription=\n");
+    properties.push_str("ecuConfigFile=");
+    properties.push_str(MAIN_DEFINITION);
+    properties.push('\n');
+    if !signature.is_empty() {
+        properties.push_str("firmwareDescription=");
+        properties.push_str(&oxtuner_encoding::escape_java_property(signature));
+        properties.push('\n');
+    }
+    properties.push_str("ecuSettings=");
+    properties.push_str(&ecu_settings);
+    properties.push('\n');
+
+    Ok(BuiltScaffold {
+        tune_bytes,
+        properties,
+    })
 }
 
 /// Reads the definition creation will copy.
@@ -379,13 +444,32 @@ fn read_definition(path: &Path) -> Result<Vec<u8>, ProjectError> {
 /// The option names that stand for a flag, in the order the caller listed them.
 ///
 /// The option named `DEFAULT` is not a flag: the dialect ignores it and falls
-/// into the `#else` branch, so a project must not record it.
-fn chosen_flags(settings: &[String]) -> Vec<String> {
-    settings
-        .iter()
-        .filter(|option| !option.eq_ignore_ascii_case("DEFAULT"))
-        .cloned()
-        .collect()
+/// into the `#else` branch, so a project must not record it. A name the
+/// definition's setting groups never declare is dropped too, because it cannot
+/// compile a branch and would only add a setting the definition does not know.
+/// Duplicates collapse to their first occurrence.
+fn chosen_flags(definition: &oxtuner_ini::Definition, settings: &[String]) -> Vec<String> {
+    let declared = |option: &str| {
+        definition
+            .setting_groups
+            .values()
+            .flat_map(|group| group.options.iter())
+            .any(|candidate| candidate.name.eq_ignore_ascii_case(option))
+    };
+
+    let mut flags: Vec<String> = Vec::new();
+    for option in settings {
+        if option.eq_ignore_ascii_case("DEFAULT") || !declared(option) {
+            continue;
+        }
+        if flags.iter().any(|flag| flag.eq_ignore_ascii_case(option)) {
+            continue;
+        }
+
+        flags.push(option.clone());
+    }
+
+    flags
 }
 
 /// The folder name, trimmed and checked for every desktop OS.

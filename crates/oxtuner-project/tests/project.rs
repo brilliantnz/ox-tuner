@@ -1120,12 +1120,14 @@ pageSize = 64
 page = 1
 a = scalar, U08, 0, "", 1, 0, 0, 255, 0
 mode = bits, U08, 1, [0:3], "ONE", "TWO"
+tag = string, ASCII, 8
 "#;
     const TUNE: &str = r#"<msq>
     <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
     <page number="0" size="64">
         <constant name="a">1.0</constant>
         <constant name="mode">"ONE"</constant>
+        <constant name="tag">Ok</constant>
     </page>
 </msq>
 "#;
@@ -1137,8 +1139,9 @@ mode = bits, U08, 1, [0:3], "ONE", "TWO"
 
     let mut project = Project::open(dir.path()).expect("the project opens");
     project.tune_mut().set_user("a", 5.0).unwrap();
-    // `a` is formatted first; a bit value with no option label fails after it.
-    project.tune_mut().set_raw_at("mode", 0, 99.0).unwrap();
+    // `a` is formatted first; the text fails after it, because ISO-8859-1 has
+    // no byte for this character.
+    project.tune_mut().set_text("tag", "🚗").unwrap();
 
     assert!(matches!(
         project.save(),
@@ -1574,6 +1577,11 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
     assert!(
         !project.definition().pages.is_empty(),
         "the definition declares at least one page"
+    );
+    assert!(
+        project.report().missing_values.is_empty(),
+        "a scaffold writes every variable the definition declares: {:?}",
+        project.report().missing_values
     );
     assert!(
         project
