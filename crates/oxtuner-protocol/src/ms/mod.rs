@@ -738,30 +738,30 @@ impl MsProtocol {
         io: &mut dyn Transport,
         timeout: Duration,
     ) -> Result<Vec<u8>, ProtocolError> {
-        let deadline = std::time::Instant::now() + timeout;
-        let mut header = [0u8; 2];
-        io.read_exact_timeout(&mut header, timeout)?;
-        let length = Frame::length(header);
-        // Reject a corrupt length before allocating or waiting for bytes that
-        // cannot belong to a valid reply.
-        if length > crate::frame::MAX_PAYLOAD {
-            return Err(FrameError::TooLarge {
-                declared: length,
-                limit: crate::frame::MAX_PAYLOAD,
-            }
-            .into());
-        }
-        let mut rest = vec![0u8; length + 4];
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        io.read_exact_timeout(&mut rest, remaining)?;
-
-        Self::assemble(header, &rest)
+        Self::read_framed(
+            io,
+            ReplyDeadline::Shared {
+                timeout,
+                end: std::time::Instant::now() + timeout,
+            },
+        )
     }
 
     /// Reads one complete framed reply, giving each read its own timeout.
     fn read_frame(io: &mut dyn Transport, timeout: Duration) -> Result<Vec<u8>, ProtocolError> {
+        Self::read_framed(io, ReplyDeadline::PerRead(timeout))
+    }
+
+    /// Reads one complete framed reply under `deadline`.
+    fn read_framed(
+        io: &mut dyn Transport,
+        deadline: ReplyDeadline,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let first = match deadline {
+            ReplyDeadline::Shared { timeout, .. } | ReplyDeadline::PerRead(timeout) => timeout,
+        };
         let mut header = [0u8; 2];
-        io.read_exact_timeout(&mut header, timeout)?;
+        io.read_exact_timeout(&mut header, first)?;
         let length = Frame::length(header);
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
@@ -773,7 +773,13 @@ impl MsProtocol {
             .into());
         }
         let mut rest = vec![0u8; length + 4];
-        io.read_exact_timeout(&mut rest, timeout)?;
+        let second = match deadline {
+            ReplyDeadline::Shared { end, .. } => {
+                end.saturating_duration_since(std::time::Instant::now())
+            }
+            ReplyDeadline::PerRead(timeout) => timeout,
+        };
+        io.read_exact_timeout(&mut rest, second)?;
 
         Self::assemble(header, &rest)
     }
@@ -841,6 +847,23 @@ impl MsProtocol {
         }
         Ok(data)
     }
+}
+
+/// How a framed read budgets its two reads.
+///
+/// The length guard and the assembly stay in one place; only the second
+/// read's budget differs, so a fix to the guard cannot land in one twin
+/// and miss the other.
+#[derive(Debug, Clone, Copy)]
+enum ReplyDeadline {
+    /// One deadline shared by the header and the payload: the header reads
+    /// with the full timeout, the payload with what is left of it.
+    Shared {
+        timeout: Duration,
+        end: std::time::Instant,
+    },
+    /// Each read gets the full timeout.
+    PerRead(Duration),
 }
 
 impl MsProtocol {

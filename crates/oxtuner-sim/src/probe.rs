@@ -211,6 +211,17 @@ mod tests {
     }
 
     #[test]
+    fn the_default_signature_classifies_as_the_probe_family() {
+        for spec in [SPEEDUINO, RUSEFI] {
+            assert_eq!(
+                oxtuner_protocol::BehaviorKind::for_signature(&default_signature(&spec)),
+                Some(spec.behavior),
+                "the simulator must produce a signature the real classifier accepts"
+            );
+        }
+    }
+
+    #[test]
     fn the_legacy_probe_answers_the_query_and_nothing_else() {
         let mut probe = probe(SPEEDUINO);
 

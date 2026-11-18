@@ -57,6 +57,10 @@ pub const PICKABLE_BAUD_RATES: [u32; 13] = [
 
 /// One signature probe: a family, the byte that asks for its signature, how
 /// that answer is framed, and how long the port may settle before it is asked.
+///
+/// Closed to literal construction on purpose: probes come from the constants
+/// below and the `with_*` adapters, so a new field cannot silently change
+/// what a scan sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProbeSpec {
@@ -391,6 +395,15 @@ mod tests {
         assert!(
             PICKABLE_BAUD_RATES.windows(2).all(|pair| pair[0] < pair[1]),
             "the picker lists rates slowest-first: {PICKABLE_BAUD_RATES:?}"
+        );
+    }
+
+    #[test]
+    fn the_transport_default_matches_the_probe_default() {
+        assert_eq!(
+            oxtuner_transport::SerialSettings::DEFAULT_BAUD,
+            DEFAULT_BAUD_RATE,
+            "the serial default and the probe default describe the same physical rate"
         );
     }
 }
