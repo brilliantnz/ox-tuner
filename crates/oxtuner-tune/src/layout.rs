@@ -849,6 +849,12 @@ fn default_raw(
         && 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
         && 0.0 <= spec.maximum.unwrap_or(f64::INFINITY);
     if zero_in_range {
+        debug_assert_eq!(
+            0.0,
+            spec.clamp_raw(0.0),
+            "the fast path must return what the clamp would"
+        );
+
         return 0.0;
     }
 
@@ -1046,6 +1052,34 @@ defaultValue = p, 7.25
         assert_eq!(
             written, "7.3",
             "an omitted default is written at the next representable value"
+        );
+    }
+
+    #[test]
+    fn an_undefaulted_value_with_an_offset_reads_like_the_clamp() {
+        const OFFSET: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+off = scalar, U08, 0, "", 1, -50, 0, 100, 0
+"#;
+
+        let definition = parse_str(OFFSET, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("off").expect("off");
+
+        assert_eq!(
+            spec.default_raw,
+            spec.clamp_raw(0.0),
+            "the fast path must return what the clamp would"
+        );
+        assert_eq!(
+            spec.default_raw, 50.0,
+            "raw 0 would read back as user -50, below the minimum"
         );
     }
 

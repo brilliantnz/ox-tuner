@@ -173,7 +173,8 @@ fn set_definition_mode(model: &SharedWizard, mode: DefinitionMode, cx: &mut App)
 /// The Detect button, with Stop beside it while a scan runs.
 ///
 /// A scan of several ports can take a while with every other control disabled,
-/// so the running state always offers a way out.
+/// so the running state offers a way out, except while a download holds the
+/// step locked.
 fn detect_controls(status: &crate::core::CoreStatus, locked: bool) -> AnyElement {
     h_flex()
         .gap_2()

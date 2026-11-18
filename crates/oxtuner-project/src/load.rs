@@ -612,8 +612,9 @@ fn load_entry(
                 users.push(user);
             }
 
-            let mut clamped: Option<(usize, f64, f64, f64)> = None;
+            let mut clamped: Option<(f64, f64, f64)> = None;
             let mut out_of_storage: Option<(usize, f64)> = None;
+            let mut raws = Vec::with_capacity(users.len());
 
             for (index, user) in users.into_iter().enumerate() {
                 // A file value outside the declared range is clamped the way
@@ -632,36 +633,45 @@ fn load_entry(
                 // A text that rounds below a bound but converts back to the
                 // same raw value changed nothing.
                 let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
-                if written_raw != Some(conversion.raw) {
-                    clamped.get_or_insert((index, user, low, high));
-                }
-                if conversion.is_out_of_range() {
+                let cell_clamped = written_raw != Some(conversion.raw);
+                if cell_clamped {
+                    clamped.get_or_insert((user, low, high));
+                } else if conversion.is_out_of_range() {
                     out_of_storage.get_or_insert((index, clamped_user));
                 }
-                if !conversion.raw.is_finite() {
-                    return Err(format!("`{}` = {user} has no finite raw value", spec.name));
-                }
 
-                tune.set_raw_at(&spec.name, index, conversion.raw)
+                if !conversion.raw.is_finite() {
+                    return Err(format!(
+                        "`{}`[{index}] = {user} has no finite raw value",
+                        spec.name
+                    ));
+                }
+                raws.push(conversion.raw);
+            }
+
+            // Every cell converted before any is written, so a refused value
+            // leaves the variable entirely at its default.
+            for (index, raw) in raws.into_iter().enumerate() {
+                tune.set_raw_at(&spec.name, index, raw)
                     .map_err(|error| error.to_string())?;
             }
 
-            // A cell already reported as clamped is not also reported as
-            // unstorable; another cell of the same array still is.
-            if let Some((index, value)) = out_of_storage
-                && clamped.is_none_or(|(clamped_index, ..)| clamped_index != index)
-            {
+            if let Some((index, value)) = out_of_storage {
+                let cell = if expected > 1 {
+                    format!("`{}`[{index}]", spec.name)
+                } else {
+                    format!("`{}`", spec.name)
+                };
                 report.warn(
                     IssueKind::ValueOutOfRange,
                     format!(
-                        "`{}` = {value} cannot be stored in the declared type; it was kept, \
-                         not clamped",
-                        spec.name
+                        "{cell} = {value} does not fit the declared storage type; the value is \
+                         kept as written"
                     ),
                 );
             }
 
-            if let Some((_, found, low, high)) = clamped {
+            if let Some((found, low, high)) = clamped {
                 let range = match (low.is_finite(), high.is_finite()) {
                     (true, true) => format!("{low}..{high}"),
                     (true, false) => format!("the declared minimum {low}"),

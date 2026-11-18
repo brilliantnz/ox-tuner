@@ -1473,6 +1473,56 @@ defaultValue = p, 7.25
 }
 
 #[test]
+fn an_unstorable_cell_is_reported_even_when_another_cell_is_clamped() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [2], "", 1, 0, 0, 1000, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="axis">-5.0 500.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("cell-warnings");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+    let kinds: Vec<IssueKind> = project
+        .report()
+        .warnings
+        .iter()
+        .map(|issue| issue.kind)
+        .collect();
+
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == IssueKind::ValueClamped)
+            .count(),
+        1,
+        "the negative cell is clamped to the minimum"
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == IssueKind::ValueOutOfRange)
+            .count(),
+        1,
+        "the 500 cell fits the range but not U08"
+    );
+}
+
+#[test]
 fn a_bad_token_in_an_array_keeps_every_cell_at_its_default() {
     const DEFINITION: &str = r#"
 [MegaTune]
