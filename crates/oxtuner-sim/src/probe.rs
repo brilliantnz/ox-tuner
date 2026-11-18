@@ -268,7 +268,16 @@ impl Transport for SimProbeSet {
     }
 
     fn read_available(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        self.reading(1)?.read_available(buf)
+        if !self.open {
+            return Err(TransportError::NotOpen);
+        }
+
+        // Nothing buffered is an answer here, not a timed-out read: that is
+        // what a silent port does.
+        match self.answering.and_then(|index| self.probes.get_mut(index)) {
+            Some(probe) => probe.read_available(buf),
+            None => Ok(0),
+        }
     }
 
     fn flush_input(&mut self) {
@@ -374,6 +383,21 @@ mod tests {
         assert!(
             reply.starts_with(b"rusefi synthetic"),
             "the second query is answered in its own framing"
+        );
+    }
+
+    #[test]
+    fn a_query_no_probe_speaks_clears_the_previous_answer() {
+        let mut set = SimProbeSet::new([SPEEDUINO]);
+        set.open().expect("the set opens");
+
+        set.write_all(b"Q").expect("the first query is written");
+        set.write_all(b"S").expect("the second query is written");
+
+        let mut buf = [0u8; 64];
+        assert!(
+            matches!(set.read_available(&mut buf), Ok(0)),
+            "an unmatched query leaves nothing to read"
         );
     }
 

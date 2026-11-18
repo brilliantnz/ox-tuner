@@ -38,9 +38,12 @@ const PROGRESS_TICK: Duration = Duration::from_millis(100);
 ///
 /// This bounds the UI, not the core: the core bounds its own wait and releases a
 /// wedged thread, but a started group still takes its settle, its open and every
-/// query's reply deadline. After this the group counts as a miss and the scan
-/// tries the next one; a late answer is ignored by the op check.
-const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// query's reply deadline. The wait covers two groups, because a cancelled scan
+/// leaves one on the core and the next Detect queues behind it; expiring on that
+/// one would skip a group the core never asked. After this the group counts as a
+/// miss and the scan tries the next one; a late answer is ignored by the op
+/// check.
+const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The host a download prompt names, for the consent text.
 pub(crate) fn host_of(url: &str) -> String {

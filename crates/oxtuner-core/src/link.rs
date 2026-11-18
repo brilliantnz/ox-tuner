@@ -48,8 +48,8 @@ pub trait CustomLink: Send + Sync + 'static {
     /// the core will put that query in.
     ///
     /// The core stops at the first answer. A query the transport cannot answer
-    /// must stay silent, like a read timeout, not fail: an error ends the group
-    /// as a link failure and hides the query that would have answered.
+    /// must stay silent, like a read timeout, not fail: a read or link error
+    /// ends the group and hides the query that would have answered.
     ///
     /// A link that can only answer with a definition says so, and the probe
     /// reports the reason instead of pretending to have opened a session.

@@ -160,7 +160,7 @@ pub enum Event {
         /// The framing it is sent in.
         framing: LinkMode,
     },
-    /// A [`super::CoreCommand::ProbeFirmware`] read a signature without a
+    /// An [`super::EcuCommand::ProbeFirmware`] read a signature without a
     /// definition.
     ///
     /// There is no verdict here because there is nothing to compare against:
@@ -329,7 +329,10 @@ pub enum Event {
 }
 
 impl Event {
-    /// The operation this event answers, if it answers one.
+    /// The operation this event belongs to, if any.
+    ///
+    /// Most events answer their command. `ProbeStarted` does not: it is progress
+    /// from a probe group, and the terminal answer follows it.
     #[must_use]
     pub fn op(&self) -> Option<OpId> {
         match self {
