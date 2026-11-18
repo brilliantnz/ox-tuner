@@ -26,6 +26,9 @@ mod event;
 mod service;
 mod status;
 
+use gpui_kit::App;
+use oxtuner_core::PortView;
+
 pub(crate) use commands::{
     acknowledge_write_failure, adopt_ecu_tune, burn_to_flash, choose_definition, choose_import,
     close_project, connect, disconnect, edit_axis, edit_scalar, edit_table,
@@ -37,6 +40,14 @@ pub(crate) use commands::{
 };
 pub(crate) use service::CoreService;
 pub use service::start;
-#[cfg(test)]
-pub(crate) use status::PendingProject;
-pub(crate) use status::TestResult;
+pub(crate) use status::{CoreStatus, PendingProject};
+
+/// The port snapshot the core last published.
+///
+/// `None` until the core's first sample arrives; `Some`, possibly empty,
+/// after that. Views render `None` as still looking and `Some([])` as no
+/// ports, so an empty machine never reads as a broken scan.
+pub(crate) fn ports(cx: &App) -> Option<&[PortView]> {
+    let status = CoreService::status(cx);
+    (status.ports_revision > 0).then_some(status.ports.as_slice())
+}

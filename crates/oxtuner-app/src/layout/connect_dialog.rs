@@ -29,15 +29,12 @@ use gpui_kit::{
     Styled as _, Window, div, px,
 };
 use oxtuner_core::{
-    ConnectionView, FailureCode, LinkMode, PortChoice, PortView, ProjectConnection,
-    SignatureVerdict,
+    ConnectionTest, ConnectionView, DEFAULT_BAUD_RATE, FailureCode, LinkMode, PICKABLE_BAUD_RATES,
+    PortChoice, PortView, ProjectConnection, SignatureVerdict,
 };
 
-use crate::core::{self, CoreService, TestResult};
+use crate::core::{self, CoreService};
 use crate::i18n::t;
-
-/// The baud rates the dialog offers.
-const BAUDS: [u32; 6] = [9_600, 57_600, 115_200, 230_400, 500_000, 1_000_000];
 
 /// Where the bytes go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,14 +119,21 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
     // The pickers own their selection; the dialog reads it each frame.
     let baud_index = connection
         .baud_override
-        .and_then(|baud| BAUDS.iter().position(|rate| *rate == baud))
-        .unwrap_or(2);
+        .and_then(|baud| PICKABLE_BAUD_RATES.iter().position(|rate| *rate == baud))
+        .unwrap_or_else(|| {
+            PICKABLE_BAUD_RATES
+                .iter()
+                .position(|rate| *rate == DEFAULT_BAUD_RATE)
+                .unwrap_or(0)
+        });
     let model = Rc::new(RefCell::new(DialogModel::new(connection)));
-    core::refresh_ports(cx);
 
     let baud_state = cx.new(|cx| {
         SelectState::new(
-            BAUDS.iter().map(u32::to_string).collect::<Vec<_>>(),
+            PICKABLE_BAUD_RATES
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>(),
             Some(IndexPath::new(baud_index)),
             window,
             cx,
@@ -150,8 +154,11 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
 
     crate::app::dialog::open(window, cx, move |dialog, _, cx| {
         let status = CoreService::status(cx);
-        let ports = status.ports.clone();
-        let scanning = status.scanning;
+        // The ports the core last published; empty until its first sample
+        // arrives, so the dialog tells still-looking apart from no-ports.
+        let published = core::ports(cx);
+        let ports: Vec<PortView> = published.map_or_else(Vec::new, <[_]>::to_vec);
+        let primed = published.is_some();
         let testing = status.testing.clone();
         let test = status.test.clone();
         let connection = status.connection.clone();
@@ -169,8 +176,8 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         let baud = baud_state
             .read(cx)
             .selected_index(cx)
-            .and_then(|index| BAUDS.get(index.row).copied())
-            .unwrap_or(115_200);
+            .and_then(|index| PICKABLE_BAUD_RATES.get(index.row).copied())
+            .unwrap_or(DEFAULT_BAUD_RATE);
         let framing = match framing_state
             .read(cx)
             .selected_index(cx)
@@ -264,10 +271,10 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                 })
                 .collect();
 
-            let empty = if scanning {
-                t!("app.connect.scanning").to_string()
-            } else {
+            let empty = if primed {
                 t!("app.connect.no_ports").to_string()
+            } else {
+                t!("app.connect.scanning").to_string()
             };
 
             v_flex()
@@ -404,10 +411,9 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         );
 
         let test_button = Button::new("connect-test")
-            .label(if testing.is_some() {
-                t!("app.connect.testing")
-            } else {
-                t!("app.connect.test")
+            .label(match testing.as_deref() {
+                Some(port) => t!("app.connect.testing", port = port),
+                None => t!("app.connect.test"),
             })
             .icon(IconName::Search)
             .outline()
@@ -542,7 +548,7 @@ fn session_status(
     connection: Option<&ConnectionView>,
     link_lost: Option<&str>,
     testing: Option<&str>,
-    test: Option<&TestResult>,
+    test: Option<&ConnectionTest>,
     connecting: Option<&str>,
     muted: gpui_kit::Hsla,
     danger: gpui_kit::Hsla,

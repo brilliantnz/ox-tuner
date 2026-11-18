@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::SharedString;
 use oxtuner_core::{
-    BurnReport, ConnectionView, DefinitionView, DialogView, Failure, FailureCode, ImportReport,
-    JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport, RevertReport,
-    SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus, WriteReport,
+    BurnReport, ConnectionTest, ConnectionView, DefinitionView, DialogView, Failure, FailureCode,
+    ImportReport, JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport,
+    RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus,
+    WriteReport,
 };
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
@@ -65,14 +66,21 @@ pub(crate) struct CoreStatus {
     pub(crate) realtime: bool,
     /// The last saved session trace.
     pub(crate) last_trace: Option<TraceSaved>,
-    /// The serial ports the last scan found.
+    /// The serial ports the core last published.
+    ///
+    /// Both the on-demand answer and the pushed change land here; use
+    /// [`crate::core::ports`] to read them, which also tells a machine with no
+    /// ports apart from one the core has not sampled yet.
     pub(crate) ports: Vec<PortView>,
-    /// Whether a port scan is running.
-    pub(crate) scanning: bool,
+    /// How many port snapshots have folded into [`Self::ports`].
+    ///
+    /// Zero means no sample has arrived yet; a view renders that as still
+    /// looking rather than as an empty machine.
+    pub(crate) ports_revision: u64,
     /// The port a signature test is running against.
     pub(crate) testing: Option<String>,
     /// The last signature test.
-    pub(crate) test: Option<TestResult>,
+    pub(crate) test: Option<ConnectionTest>,
     /// The connection request that is still being answered.
     pub(crate) pending_connect: Option<PortChoice>,
     /// Whether the global write switch is on.
@@ -130,15 +138,6 @@ pub(crate) struct JournalView {
     pub(crate) path: Option<PathBuf>,
     /// Newest last.
     pub(crate) entries: Vec<JournalEntry>,
-}
-
-/// The outcome of a signature test.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TestResult {
-    /// The port the test ran against.
-    pub(crate) port: String,
-    /// The summary, or the failure message.
-    pub(crate) outcome: Result<ConnectionView, String>,
 }
 
 /// A saved session trace, for the output panel.
@@ -349,7 +348,7 @@ impl CoreStatus {
             }
             Update::Tested(summary) => {
                 let port = summary.port.clone();
-                self.test = Some(TestResult {
+                self.test = Some(ConnectionTest {
                     port,
                     outcome: Ok(summary),
                 });
@@ -484,14 +483,11 @@ impl CoreStatus {
                 if failure.code == FailureCode::DialogUnavailable {
                     self.dialog = None;
                 }
-                // A failed scan or test must not leave the dialog stuck on
-                // "working". The message stays for the dialog to show.
-                if failure.code == FailureCode::ConnectFailed {
-                    self.scanning = false;
-                }
+                // A failed test must not leave the dialog stuck on "working".
+                // The message stays for the dialog to show.
                 if failure.code == FailureCode::TestFailed {
                     let port = self.testing.take().unwrap_or_default();
-                    self.test = Some(TestResult {
+                    self.test = Some(ConnectionTest {
                         port,
                         outcome: Err(failure.message.clone()),
                     });

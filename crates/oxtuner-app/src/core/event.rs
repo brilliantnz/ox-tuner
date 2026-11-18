@@ -78,25 +78,20 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     let link_was_lost = cx.global::<CoreService>().status.link_lost.clone();
     crate::notifications::publish_event(&event, link_was_lost.as_deref(), cx);
 
-    // The port list is stored for the dialog, which stays open while it scans:
-    // closing and reopening would lose the user's selection and scroll. The core
-    // publishes the same snapshot on a change, so both paths land here.
-    // A change carries a fresh list, but only the answer to the scan ends the
-    // scan: a change that arrives mid-scan must not hide the dialog's state for
-    // the rest of the round trip.
+    // The port list is the core's pushed state, not one dialog's scan: the
+    // on-demand answer and the pushed change fold into the same snapshot, and
+    // every fold bumps the revision, so a view tells "no ports" apart from
+    // "no sample yet". Monotonic on purpose: two dialogs asking at once cannot
+    // undo each other's state the way a shared busy flag could.
     let ports = match &event {
-        Event::PortsListed { ports, .. } => Some((ports, true)),
-        Event::PortsChanged { ports } => Some((ports, false)),
+        Event::PortsListed { ports, .. } | Event::PortsChanged { ports } => Some(ports),
         _ => None,
     };
 
-    if let Some((ports, answered)) = ports {
+    if let Some(ports) = ports {
         let service = cx.global_mut::<CoreService>();
         service.status.ports.clone_from(ports);
-
-        if answered {
-            service.status.scanning = false;
-        }
+        service.status.ports_revision = service.status.ports_revision.wrapping_add(1);
 
         cx.refresh_windows();
         return;

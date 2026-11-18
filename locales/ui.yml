@@ -164,9 +164,11 @@ app:
     refresh:
       en: Refresh
     scanning:
-      en: Scanning for serial ports…
+      en: Scanning for ports…
     no_ports:
-      en: No serial ports found. Plug in the ECU and refresh.
+      en: No serial ports found.
+    testing:
+      en: 'Testing %{port}…'
     project_port:
       en: 'This project last talked to this ECU on %{port}.'
     project_port_missing:
@@ -191,8 +193,6 @@ app:
       en: Test reads only the ECU's signature, never a tune page or a write.
     test:
       en: Test Connection
-    testing:
-      en: Testing…
     connect:
       en: Connect
     connecting:

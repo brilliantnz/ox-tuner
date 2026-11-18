@@ -11,10 +11,11 @@ pub(crate) fn connect_to_simulator(cx: &mut App) {
     connect(crate::link::simulator(), None, cx);
 }
 
-/// Asks for the port list, then opens the connect dialog when it arrives.
+/// Asks for the port list, then opens the connect dialog.
+///
+/// The dialog renders the core's pushed list; the request only hurries the
+/// first snapshot along when the core has not sampled yet.
 pub(crate) fn request_connect(cx: &mut App) {
-    // The dialog opens at once and stays open; its port list fills in when the
-    // scan answers, so a refresh never costs the user their selection.
     cx.defer(|cx| {
         if let Some(window) = crate::app::window::main(cx) {
             window
@@ -24,18 +25,19 @@ pub(crate) fn request_connect(cx: &mut App) {
                 .ok();
         }
     });
-    refresh_ports(cx);
 }
 
-/// Rescans the serial ports without touching the dialog.
+/// Asks the core for a fresh port snapshot without touching any dialog.
+///
+/// The core pushes the list on its own whenever it changes; this is the
+/// on-demand resync for the Refresh button and for checks right before a scan
+/// that must not miss a freshly plugged device.
 pub(crate) fn refresh_ports(cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::ConnectFailed) else {
         return;
     };
-    cx.global_mut::<CoreService>().status.scanning = true;
     if let Err(error) = handle.list_ports() {
         tracing::warn!(%error, "the core refused the port scan");
-        cx.global_mut::<CoreService>().status.scanning = false;
         report_failure(cx, FailureCode::ConnectFailed, error.to_string());
     }
 }
