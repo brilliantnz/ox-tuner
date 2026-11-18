@@ -250,7 +250,7 @@ fn resolve(signature: &str, cx: &mut App) {
     let registry = Registry::with_defaults();
     match registry.resolve(signature) {
         Ok(resolved) => {
-            let store = CacheStore::new(AppPaths::get(cx).registry_definition_dir());
+            let store = CacheStore::new(AppPaths::get(cx).registry_dir());
             let path = store.definition_ini(&resolved.id);
 
             if store.verify_file(&path) {
@@ -299,7 +299,7 @@ pub(crate) fn download(cx: &mut App) {
         status.firmware_error = None;
     }
 
-    let directory = AppPaths::get(cx).registry_definition_dir();
+    let directory = AppPaths::get(cx).registry_dir();
     tracing::info!(
         signature = %prompt.signature,
         url = %prompt.url,

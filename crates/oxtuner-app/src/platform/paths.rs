@@ -192,11 +192,6 @@ impl AppPaths {
         self.cache_dir.join("registry")
     }
 
-    /// Cached definition listings and `.ini` downloads.
-    pub fn registry_definition_dir(&self) -> PathBuf {
-        self.registry_dir().join("definition")
-    }
-
     /// Cached firmware listings and images. No flasher reads them yet.
     pub fn registry_firmware_dir(&self) -> PathBuf {
         self.registry_dir().join("firmware")
@@ -496,20 +491,12 @@ mod tests {
         for paths in [&macos, &windows, &linux] {
             assert_eq!(paths.registry_dir(), paths.cache_dir.join("registry"));
             assert_eq!(
-                paths.registry_definition_dir(),
-                paths.cache_dir.join("registry/definition")
-            );
-            assert_eq!(
                 paths.registry_firmware_dir(),
                 paths.cache_dir.join("registry/firmware")
             );
             assert_ne!(paths.registry_dir(), paths.definition_cache_dir());
         }
 
-        assert_eq!(
-            macos.registry_definition_dir(),
-            PathBuf::from("/Users/me/Library/Caches/OxTuner/registry/definition")
-        );
         assert_eq!(
             linux.registry_firmware_dir(),
             PathBuf::from("/home/me/.cache/oxtuner/registry/firmware")
