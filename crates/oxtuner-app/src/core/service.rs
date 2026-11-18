@@ -153,6 +153,30 @@ impl CoreService {
             auto_sim: false,
         });
     }
+
+    /// Installs a service with a live core and no event pumps, for logic tests.
+    ///
+    /// A test that drives a command through the real sender needs the handle
+    /// and nothing else. The pumps [`start`] spawns cannot run here: the core
+    /// thread wakes a foreground task from a thread the headless test scheduler
+    /// does not own, and it refuses to continue. The caller keeps the returned
+    /// thread, or drops it, which shuts the core down.
+    pub(crate) fn install_with_core(cx: &mut App) -> CoreThread {
+        let parts = oxtuner_core::start(&CoreConfig::default()).expect("the core starts");
+
+        cx.set_global(Self {
+            handle: Some(parts.handle),
+            thread: None,
+            status: CoreStatus::default(),
+            latest: parts.latest,
+            history: parts.history,
+            log_status: parts.log,
+            pending_import: None,
+            auto_sim: false,
+        });
+
+        parts.thread
+    }
 }
 
 /// Starts the core and the task that carries its events to the views.

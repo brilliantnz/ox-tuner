@@ -80,6 +80,35 @@ impl CustomLink for Silent {
     }
 }
 
+/// A port whose probe answers with `text`, like an adapter that echoes, spams
+/// debug lines or speaks NMEA over the query.
+pub(crate) fn answering_probe(text: &'static str) -> PortChoice {
+    PortChoice::custom(Answering(text))
+}
+
+struct Answering(&'static str);
+
+impl CustomLink for Answering {
+    fn label(&self) -> &'static str {
+        "answering"
+    }
+
+    fn open(&self, _definition: &Definition) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
+    }
+
+    fn open_for_probe(
+        &self,
+        probe: &FirmwareProbe,
+        framing: oxtuner_core::LinkMode,
+    ) -> Result<Box<dyn Transport>, String> {
+        Ok(Box::new(SimProbe::with_signature(
+            probe.spec().with_link(framing),
+            self.0,
+        )))
+    }
+}
+
 /// A simulator connection with a specific configuration.
 pub(crate) fn simulator_with(config: SimConfig) -> PortChoice {
     PortChoice::custom(Simulator::new(config))
