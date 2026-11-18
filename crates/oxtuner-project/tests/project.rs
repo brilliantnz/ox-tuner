@@ -1309,6 +1309,105 @@ defaultValue = axis, 10 20 30
 }
 
 #[test]
+fn a_raw_array_default_wins_over_the_user_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+rawValue = axis, 1 2 3
+"#;
+
+    let sandbox = TempDir::new("create-raw-defaults");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "RawDefaults".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1), values.number(2)),
+        (Some(1.0), Some(2.0), Some(3.0)),
+        "rawValue wins over defaultValue, as it does for a scalar"
+    );
+}
+
+#[test]
+fn a_text_that_rounds_to_the_same_raw_is_not_reported_as_clamped() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+ego = scalar, U08, 0, "", 0.006802721088435375, 0, 0.4761904761904762, 1.7006802721088436, 3
+"#;
+    // The text carries three decimals, so it reads below the minimum; clamping
+    // it back inside lands on the same raw value the text already meant.
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="ego">0.476</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("rounded-clamp");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| issue.kind != IssueKind::ValueClamped),
+        "a clamp that changes no raw value is not news: {:?}",
+        project.report().warnings
+    );
+    assert_eq!(
+        project
+            .tune()
+            .value("ego")
+            .and_then(|values| values.number(0)),
+        Some(70.0)
+    );
+}
+
+#[test]
+fn a_rejected_scaffold_names_itself() {
+    let error = ProjectError::ScaffoldRejected {
+        reasons: vec!["`pageSize` disagrees".to_owned()],
+    };
+
+    assert_eq!(error.kind(), "scaffold-rejected");
+    assert!(
+        error.to_string().contains("`pageSize` disagrees"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_non_ascii_project_name_is_escaped_for_java_properties() {
     const DEFINITION: &str = r#"
 [MegaTune]

@@ -22,7 +22,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
-use oxtuner_ini::{ChannelKind, Definition, SettingsContext};
+use oxtuner_ini::{ChannelKind, Definition, SettingsContext, Shape};
 use oxtuner_tune::{
     EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec, storage_range,
 };
@@ -307,39 +307,57 @@ impl EvalContext for DefaultValues<'_> {
     }
 }
 
-/// Writes the definition's per-cell array defaults into a fresh tune.
+/// Writes the definition's per-cell array defaults into a tune.
 ///
 /// The layout resolves a scalar default on its own, but the dialect writes an
-/// array default as one value per cell, which `Number` cannot hold. Without
-/// this pass an array such as a curve axis would start from zeros even though
-/// the definition names its values.
-fn apply_array_defaults(tune: &mut Tune, definition: &Definition) {
+/// array default as one value per cell, which `Number` cannot hold. Creation
+/// and the open path both call this, so a definition's declared array default
+/// has one answer instead of starting from zeros.
+pub(crate) fn apply_definition_defaults(tune: &mut Tune, definition: &Definition) {
     let extensions = &definition.extensions;
 
-    for (name, values) in extensions.raw_default_arrays.iter() {
-        apply_cells(tune, name, values.iter().map(|value| Some(*value)));
-    }
     for (name, values) in extensions.default_arrays.iter() {
         let Some(spec) = tune.layout().variable(name).cloned() else {
             continue;
         };
         apply_cells(
             tune,
-            name,
-            values.iter().map(|user| {
-                // A user default outside the storage type is kept as written
-                // by the definition; only the conversion decides the raw form.
-                spec.to_raw(*user).ok().map(|conversion| conversion.raw)
-            }),
+            &spec,
+            values
+                .iter()
+                .map(|user| spec.to_raw(*user).ok().map(|conversion| conversion.raw)),
         );
+    }
+
+    // `rawValue` wins over `defaultValue`, the same precedence the layout uses
+    // for a scalar default.
+    for (name, values) in extensions.raw_default_arrays.iter() {
+        let Some(spec) = tune.layout().variable(name).cloned() else {
+            continue;
+        };
+        apply_cells(tune, &spec, values.iter().map(|raw| Some(*raw)));
     }
 }
 
-/// Writes one raw value per index, skipping cells that do not exist.
-fn apply_cells(tune: &mut Tune, name: &str, values: impl Iterator<Item = Option<f64>>) {
+/// Writes one raw value per index, inside the declared range.
+///
+/// Indices only grow, so the first cell the tune does not have ends the list:
+/// a definition default with more values than the array is a definition
+/// problem, and the rest cannot be placed anyway.
+fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item = Option<f64>>) {
     for (index, value) in values.enumerate() {
         let Some(value) = value else { continue };
-        let _ = tune.set_raw_at(name, index, value);
+
+        let raw = clamp_raw(spec, value);
+        if let Err(error) = tune.set_image_raw(&spec.name, index, raw) {
+            tracing::debug!(
+                name = %spec.name,
+                index,
+                %error,
+                "an array default named no cell"
+            );
+            return;
+        }
     }
 }
 
@@ -360,10 +378,10 @@ fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
 
 /// One raw value pulled inside the declared range and the storage type.
 ///
-/// The range is pulled in to the decimals the file carries first: a minimum of
-/// `0.4761904` written with three digits reads back as `0.476`, which is below
-/// the minimum again. Rounding the bound to the file's own step keeps the
-/// written text inside the range it came from.
+/// The declared bounds are first pulled in to the decimals the file writes:
+/// a minimum of `7.25` written with one decimal reads back as `7.2`, below the
+/// minimum again. Rounding each bound to the file's own step, without leaving
+/// the declared range, keeps the written text inside it.
 fn clamp_raw(spec: &VariableSpec, raw: f64) -> f64 {
     let (storage_low, storage_high) = storage_range(spec.data_type);
     let Some(user) = spec.to_user(raw).ok() else {
@@ -378,12 +396,12 @@ fn clamp_raw(spec: &VariableSpec, raw: f64) -> f64 {
     );
 
     let step = 10f64.powi(-i32::from(spec.digits.max(1)));
-    let low = (declared_low / step).ceil() * step;
-    let high = (declared_high / step).floor() * step;
+    let low = ((declared_low / step - 1e-9).ceil() * step).max(declared_low);
+    let high = ((declared_high / step + 1e-9).floor() * step).min(declared_high);
     let user = if low <= high {
         user.clamp(low, high)
     } else {
-        user
+        user.clamp(declared_low, declared_high)
     };
 
     let raw = spec.to_raw(user).map_or(raw, |conversion| conversion.raw);
@@ -406,7 +424,7 @@ fn is_list(definition: &Definition, name: &str) -> bool {
                 .map(|variable| &variable.shape)
         });
 
-    matches!(shape, Some(oxtuner_ini::Shape::List(_)))
+    matches!(shape, Some(Shape::List(_)))
 }
 
 impl Msq {
@@ -424,11 +442,12 @@ impl Msq {
     /// written is left out and the open that follows reports it as missing.
     ///
     /// This is crate-private: project creation is the only caller.
+    ///
     /// # Errors
     ///
     /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
-    /// page the definition does not declare, and [`MsqError::Encoding`] when a
-    /// written value cannot be represented in ISO-8859-1.
+    /// page the definition does not declare, and [`MsqError::Encoding`] when
+    /// a written value cannot be represented in ISO-8859-1.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
@@ -443,7 +462,7 @@ impl Msq {
         };
         let layout = TuneLayout::build_with_context(definition, &mut defaults);
         let mut tune = Tune::new(Arc::new(layout));
-        apply_array_defaults(&mut tune, definition);
+        apply_definition_defaults(&mut tune, definition);
         let layout = Arc::clone(tune.layout());
 
         let mut pc_entries: Vec<Element> = Vec::new();

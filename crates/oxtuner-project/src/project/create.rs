@@ -638,7 +638,13 @@ fn rollback(root: &Path, written: &[PathBuf]) {
         written = ?written,
         "removing the folder a failed creation wrote"
     );
-    let _ = fs::remove_dir_all(root);
+    if let Err(error) = fs::remove_dir_all(root) {
+        tracing::warn!(
+            root = %root.display(),
+            %error,
+            "the failed creation left its folder behind"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -679,6 +685,40 @@ mod tests {
                 Err(ProjectError::InvalidName { .. })
             ),
             "a name over the cap must be refused"
+        );
+    }
+
+    #[test]
+    fn a_display_choice_the_file_only_tests_is_recorded() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if LAMBDA
+wideband = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+        let definition =
+            oxtuner_ini::parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(
+            chosen_flags(&definition, &["LAMBDA".to_owned()]),
+            vec!["LAMBDA".to_owned()],
+            "the wizard offers display choices the file only tests with #if"
+        );
+        assert_eq!(
+            chosen_flags(&definition, &["LAMBDA".to_owned(), "lambda".to_owned()]),
+            vec!["LAMBDA".to_owned()],
+            "a name is recorded once"
+        );
+        assert!(
+            chosen_flags(&definition, &["undeclared".to_owned()]).is_empty(),
+            "a name nothing declares is not recorded"
         );
     }
 

@@ -90,9 +90,9 @@ impl Coverage {
 /// `[ConstantsExtensions]` / `[ConstantExtensions]` metadata.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Extensions {
-    /// `defaultValue` entries.
+    /// Scalar `defaultValue` entries.
     pub defaults: Ordered<Number>,
-    /// `rawValue` entries (defaults in unscaled units).
+    /// Scalar `rawValue` entries (defaults in unscaled units).
     pub raw_defaults: Ordered<Number>,
     /// `defaultValue` entries that name one value per array cell.
     ///

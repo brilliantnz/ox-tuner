@@ -159,6 +159,10 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     }
 
     let mut tune = Tune::new(Arc::clone(&layout));
+    // An array default the definition declares per cell is not in the layout,
+    // so a tune that omits the array would otherwise open on zeros and then
+    // save those zeros over the declared values.
+    crate::msq::apply_definition_defaults(&mut tune, definition);
 
     for entry in msq.entries() {
         if entry.is_nameless() {
@@ -600,7 +604,9 @@ fn load_entry(
             for (index, token) in tokens.iter().enumerate() {
                 let user = token
                     .parse::<f64>()
-                    .map_err(|_| format!("`{token}` is not a number"))?;
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| format!("`{token}` is not a finite number"))?;
 
                 // A file value outside the declared range is clamped the way
                 // `TunerStudio` loads one, and reported once per variable.
@@ -621,7 +627,7 @@ fn load_entry(
                 if written_raw != Some(conversion.raw) {
                     clamped.get_or_insert((user, low, high));
                 }
-                if conversion.is_out_of_range() {
+                if conversion.is_out_of_range() && clamped.is_none() {
                     report.warn(
                         IssueKind::ValueOutOfRange,
                         format!(
@@ -787,7 +793,8 @@ fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, Fi
 /// # Errors
 ///
 /// Returns [`FileValueError`] when text is too long or outside ISO-8859-1, a
-/// bit label is outside ISO-8859-1, or the shape and stored values disagree.
+/// bit label is outside ISO-8859-1, a bit field with no option list holds a
+/// fractional value, or the shape and stored values disagree.
 #[expect(
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
