@@ -841,6 +841,15 @@ fn default_raw(
         return spec.clamp_raw(conversion.raw);
     }
 
+    // No declared default. Zero is right for almost every variable, and it is
+    // only worth the full clamp when zero itself falls outside the declared
+    // range or the storage type.
+    let zero_in_range = 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
+        && 0.0 <= spec.maximum.unwrap_or(f64::INFINITY);
+    if zero_in_range {
+        return 0.0;
+    }
+
     spec.clamp_raw(0.0)
 }
 
