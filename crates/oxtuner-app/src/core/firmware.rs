@@ -795,6 +795,9 @@ mod tests {
     /// firmware text.
     const NMEA: &str = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
 
+    /// A signature the registry models but no source serves yet.
+    const FOME: &str = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
+
     #[test]
     fn a_probe_answer_is_served_unsupported_or_noise() {
         assert!(matches!(classify(NMEA), Verdict::Noise));
@@ -808,8 +811,7 @@ mod tests {
         };
         assert_eq!(resolved.id.family(), oxtuner_registry::Family::Speeduino);
 
-        let Verdict::Unserved(_) = classify("rusEFI (FOME) .2026.06.03.proteus_h7.3416487136")
-        else {
+        let Verdict::Unserved(_) = classify(FOME) else {
             panic!("a modeled family without a source is unsupported");
         };
     }
@@ -945,7 +947,7 @@ mod tests {
     #[gpui_kit::test]
     fn an_unserved_ecu_stops_the_scan_and_asks_for_the_ini(cx: &mut gpui_kit::TestAppContext) {
         let core = start_core(cx);
-        let signature = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
+        let signature = FOME;
 
         // Answer the first attempt the scan sends, so the verdict runs through
         // the path a real probe takes, not a hand-built status.
@@ -1006,7 +1008,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn an_unserved_detection_keeps_the_upload_hint(cx: &mut gpui_kit::TestAppContext) {
-        let signature = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
+        let signature = FOME;
 
         cx.update(|cx| {
             CoreService::install_without_core(cx);
