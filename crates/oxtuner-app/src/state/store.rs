@@ -30,7 +30,25 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T
 
 /// Writes JSON atomically: create parent directories, write a temp file, flush
 /// it, then rename it over the target.
+///
+/// The rename is the only step that touches the target, and it either replaces
+/// it or fails with the previous file still in place. Nothing removes the old
+/// file first: on Windows a removal followed by a failed rename would leave no
+/// file at all, and `std::fs::rename` already replaces an existing file on both
+/// platforms.
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    // The tested unit is `write_json_using`; keep this wrapper a pure forwarder
+    // so a platform step cannot hide above the seam the test drives.
+    write_json_using(path, value, |temp, target| fs::rename(temp, target))
+}
+
+/// The body of [`write_json`], with the replace step as a seam so a test can
+/// make it fail while a real file sits at the target.
+fn write_json_using<T: Serialize>(
+    path: &Path,
+    value: &T,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -43,20 +61,12 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()>
         file.sync_all()?;
         drop(file);
 
-        // `rename` replaces an existing file atomically on Unix. Windows refuses
-        // to replace through `std::fs::rename`, so remove the target first; the
-        // previous version is still recoverable from the temp file if that
-        // removal succeeds and the rename then fails.
-        #[cfg(windows)]
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-
-        fs::rename(&temp, path)
+        replace(&temp, path)
     })();
 
     // A failed write must not litter the config directory with temp files. The
-    // unique name means the next write will not reuse (and truncate) this one.
+    // unique name means the next write will not reuse (and truncate) this one,
+    // and the target still holds whatever it held before the attempt.
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
@@ -195,6 +205,47 @@ mod tests {
         assert!(!path.exists());
         assert!(backup.exists());
         assert!(backup.to_string_lossy().contains("invalid-"));
+    }
+
+    #[test]
+    fn a_failed_replace_leaves_the_previous_file_untouched() {
+        let dir = TempDir::new("replace-failure");
+        let path = dir.join("settings.json");
+        write_json(
+            &path,
+            &Sample {
+                name: "old".into(),
+                count: 1,
+            },
+        )
+        .expect("first write");
+
+        let error = write_json_using(
+            &path,
+            &Sample {
+                name: "new".into(),
+                count: 2,
+            },
+            |_, _| Err(io::Error::other("the target is held by another process")),
+        );
+        assert!(error.is_err(), "the replace was refused");
+
+        let kept = read_json::<Sample>(&path).expect("read").expect("present");
+        assert_eq!(
+            kept.name, "old",
+            "a refused replace must leave the previous file whole"
+        );
+
+        let leftovers: Vec<_> = fs::read_dir(&dir.0)
+            .expect("read the directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "settings.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the temp file is cleaned up: {leftovers:?}"
+        );
     }
 
     #[test]
