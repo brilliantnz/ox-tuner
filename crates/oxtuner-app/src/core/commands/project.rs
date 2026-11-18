@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui_kit::{App, PathPromptOptions};
-use oxtuner_core::FailureCode;
+use oxtuner_core::{CreateRequest, FailureCode};
 use rust_i18n::t;
 
 use super::{handle_or_report, report_failure, send};
@@ -33,32 +33,7 @@ pub(crate) fn open_project(path: &Path, cx: &mut App) {
         .begin_pending_project(path);
 
     match handle.open_project(path) {
-        Ok(op) => {
-            cx.global_mut::<CoreService>()
-                .status
-                .pending_project_sent(op);
-
-            let pending_path = path.to_path_buf();
-            cx.spawn(async move |cx| {
-                cx.background_executor().timer(PROJECT_OPEN_TIMEOUT).await;
-                let expired = cx.update(|cx| {
-                    cx.global_mut::<CoreService>()
-                        .status
-                        .expire_pending_project(op)
-                });
-                if expired {
-                    tracing::warn!(
-                        %op,
-                        path = %pending_path.display(),
-                        "the project open did not answer; the opening state was cleared"
-                    );
-                    cx.update(crate::app::window::notify_main);
-                }
-            })
-            .detach();
-
-            cx.refresh_windows();
-        }
+        Ok(op) => track_pending_project(op, path, cx),
         Err(error) => {
             tracing::warn!(%error, path = %path.display(), "the core refused the project");
             cx.global_mut::<CoreService>()
@@ -67,6 +42,78 @@ pub(crate) fn open_project(path: &Path, cx: &mut App) {
             report_failure(cx, FailureCode::ProjectRejected, error.to_string());
         }
     }
+}
+
+/// Asks the core to read a definition without opening or creating anything.
+///
+/// The new-project wizard calls this when the user picks the `.ini`; the answer
+/// is `DefinitionInspected` or `Failed`, and the configuration step renders the
+/// setting groups it carries.
+pub(crate) fn inspect_definition(path: &Path, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::DefinitionRejected) else {
+        return;
+    };
+
+    if let Err(error) = handle.inspect_definition(path.to_path_buf()) {
+        tracing::warn!(%error, path = %path.display(), "the core refused the definition");
+        report_failure(cx, FailureCode::DefinitionRejected, error.to_string());
+    }
+}
+
+/// Asks the core to create a project folder and open it.
+///
+/// Creation writes the scaffold on the core thread, so the wizard shows the
+/// same splash an open does, worded for creating. The answer arrives as
+/// `ProjectOpened` or `Failed`, exactly like an open.
+pub(crate) fn create_project(request: CreateRequest, cx: &mut App) {
+    let Some(handle) = handle_or_report(cx, FailureCode::ProjectRejected) else {
+        return;
+    };
+
+    let root = request.root();
+    cx.global_mut::<CoreService>()
+        .status
+        .begin_pending_creation(&root);
+
+    match handle.create_project(request) {
+        Ok(op) => track_pending_project(op, &root, cx),
+        Err(error) => {
+            tracing::warn!(%error, path = %root.display(), "the core refused the create");
+            cx.global_mut::<CoreService>()
+                .status
+                .cancel_pending_project();
+            report_failure(cx, FailureCode::ProjectRejected, error.to_string());
+        }
+    }
+}
+
+/// Records the op that will answer a pending project, and expires the state if
+/// no answer arrives.
+fn track_pending_project(op: oxtuner_core::OpId, path: &Path, cx: &mut App) {
+    cx.global_mut::<CoreService>()
+        .status
+        .pending_project_sent(op);
+
+    let pending_path = path.to_path_buf();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(PROJECT_OPEN_TIMEOUT).await;
+        let expired = cx.update(|cx| {
+            cx.global_mut::<CoreService>()
+                .status
+                .expire_pending_project(op)
+        });
+        if expired {
+            tracing::warn!(
+                %op,
+                path = %pending_path.display(),
+                "the project did not answer; the pending state was cleared"
+            );
+            cx.update(crate::app::window::notify_main);
+        }
+    })
+    .detach();
+
+    cx.refresh_windows();
 }
 
 /// Re-checks that the open project's folder still exists.

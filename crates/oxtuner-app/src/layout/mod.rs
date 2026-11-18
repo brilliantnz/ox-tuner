@@ -295,8 +295,12 @@ impl AppLayout {
 /// underneath. The window chrome stays visible: the title bar names the folder
 /// and the status bar says what is happening, while their controls are
 /// disabled until the open finishes.
-fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement {
+fn render_opening_splash(pending: &crate::core::PendingProject, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
+    let title = match pending.kind {
+        crate::core::PendingProjectKind::Open => t!("app.editor.opening_project"),
+        crate::core::PendingProjectKind::Create => t!("app.editor.creating_project"),
+    };
 
     v_flex()
         .id("opening-project-splash")
@@ -319,26 +323,21 @@ fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement 
                         .loading(true)
                         .with_size(px(160.))
                         .color(cx.theme().primary)
-                        .accessibility_label(t!("app.editor.opening_project"))
+                        .accessibility_label(title.clone())
                         .child(
                             Icon::new(IconName::Cpu)
                                 .with_size(px(40.))
                                 .text_color(muted),
                         ),
                 )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t!("app.editor.opening_project")),
-                )
+                .child(div().text_lg().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
                     div()
                         .max_w_full()
                         .truncate()
                         .text_sm()
                         .text_color(muted)
-                        .child(name.clone()),
+                        .child(pending.name.clone()),
                 )
                 .child(
                     div()
@@ -366,10 +365,7 @@ impl Render for AppLayout {
         let primary_sidebar_visible = layout.primary_sidebar_visible;
         let secondary_sidebar_visible = layout.secondary_sidebar_visible;
         let bottom_panel_visible = layout.bottom_panel_visible;
-        let pending = crate::core::CoreService::status(cx)
-            .pending_project
-            .as_ref()
-            .map(|pending| pending.name.clone());
+        let pending = crate::core::CoreService::status(cx).pending_project.clone();
 
         v_flex()
             .size_full()
@@ -485,8 +481,8 @@ impl Render for AppLayout {
                                 ),
                             ),
                     )
-                    .when_some(pending.as_ref(), |this, name| {
-                        this.child(render_opening_splash(name, cx))
+                    .when_some(pending.as_ref(), |this, pending| {
+                        this.child(render_opening_splash(pending, cx))
                     }),
             )
             .child(StatusBarView)
@@ -615,7 +611,7 @@ mod tests {
         WindowBounds, WindowOptions, div, size,
     };
 
-    use crate::core::PendingProject;
+    use crate::core::{PendingProject, PendingProjectKind};
 
     struct Host {
         pending: PendingProject,
@@ -626,7 +622,7 @@ mod tests {
             div()
                 .relative()
                 .size_full()
-                .child(render_opening_splash(&self.pending.name, cx))
+                .child(render_opening_splash(&self.pending, cx))
         }
     }
 
@@ -636,6 +632,7 @@ mod tests {
             let pending = PendingProject {
                 path: std::path::PathBuf::from("/projects/roadster"),
                 name: "roadster".into(),
+                kind: PendingProjectKind::Open,
                 op: None,
             };
             let host = cx.new(|_| Host { pending });

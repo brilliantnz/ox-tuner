@@ -333,6 +333,23 @@ fn unloading_clears_every_field() {
 }
 
 #[test]
+fn creating_marks_the_folder_pending_with_its_own_kind() {
+    let mut status = CoreStatus::default();
+
+    status.begin_pending_creation(Path::new("/projects/roadster"));
+    let pending = status.pending_project.as_ref().expect("pending");
+    assert_eq!(pending.kind, PendingProjectKind::Create);
+    assert_eq!(pending.name.as_str(), "roadster");
+
+    // An open afterwards replaces it, and the splash word follows the kind.
+    status.begin_pending_project(Path::new("/projects/other"));
+    assert_eq!(
+        status.pending_project.as_ref().map(|pending| pending.kind),
+        Some(PendingProjectKind::Open)
+    );
+}
+
+#[test]
 fn opening_marks_the_folder_pending_until_its_own_answer_arrives() {
     let mut status = CoreStatus::default();
 

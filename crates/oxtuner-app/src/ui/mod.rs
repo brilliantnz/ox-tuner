@@ -7,6 +7,7 @@
 use gpui_kit::{App, MouseButton, MouseDownEvent, Window};
 
 pub(crate) mod constant;
+pub(crate) mod new_project;
 
 /// Releases window focus when a left press lands on the background.
 ///

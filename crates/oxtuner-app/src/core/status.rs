@@ -2,14 +2,19 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use gpui_kit::SharedString;
 use oxtuner_core::{
     BurnReport, ConnectionTest, ConnectionView, DefinitionView, DialogView, Failure, FailureCode,
-    ImportReport, JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView, ReadReport,
-    RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot, TableView, TuneStatus,
-    WriteReport,
+    FirmwareProbe, ImportReport, JournalEntry, MenuNode, OpId, PortChoice, PortView, ProjectView,
+    ReadReport, RevertReport, SaveReport, SessionLogReport, SessionLogSnapshot, TableView,
+    TuneStatus, WriteReport,
 };
+use oxtuner_registry::FirmwareId;
 
 /// What the views show about the core. Small and `Clone`: rendering reads it
 /// every frame.
@@ -81,6 +86,24 @@ pub(crate) struct CoreStatus {
     pub(crate) testing: Option<String>,
     /// The last signature test.
     pub(crate) test: Option<ConnectionTest>,
+    /// The last inspected definition, with the file it came from.
+    pub(crate) inspected: Option<(PathBuf, oxtuner_core::DefinitionPreview)>,
+    /// The firmware scan in progress, if any.
+    pub(crate) firmware_scan: Option<FirmwareScan>,
+    /// The ECU the last completed scan found.
+    pub(crate) detected_firmware: Option<DetectedFirmware>,
+    /// A definition download waiting for the user's consent.
+    pub(crate) definition_download: Option<DefinitionDownload>,
+    /// Why detection or the registry lookup failed.
+    pub(crate) firmware_error: Option<String>,
+    /// Whether a definition download is running on the background executor.
+    pub(crate) downloading_definition: bool,
+    /// Byte counts of the in-flight definition download, if any.
+    ///
+    /// Shared with the background fetch, which writes while the UI reads once
+    /// per progress tick. `total` stays zero until the response headers
+    /// arrive; while it is zero the bar stays indeterminate.
+    pub(crate) download_progress: Option<Arc<DownloadProgress>>,
     /// The connection request that is still being answered.
     pub(crate) pending_connect: Option<PortChoice>,
     /// Whether the global write switch is on.
@@ -114,7 +137,7 @@ pub(crate) struct CoreStatus {
     pub(crate) menu_revision: u64,
 }
 
-/// A project open the UI is waiting for.
+/// A project open or creation the UI is waiting for.
 ///
 /// The op id correlates the completion event: a slow answer to an earlier
 /// request must not clear the loading state of a newer request. `None` only
@@ -125,10 +148,21 @@ pub(crate) struct PendingProject {
     pub(crate) path: PathBuf,
     /// Folder name for the title bar and the opening splash, resolved once.
     pub(crate) name: SharedString,
+    /// Whether the folder is being read or built.
+    pub(crate) kind: PendingProjectKind,
     /// The core operation that will answer this request, once accepted.
     ///
     /// Stored as the raw id only for equality; the UI never inspects it.
     pub(crate) op: Option<u64>,
+}
+
+/// What the pending project state is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingProjectKind {
+    /// An existing folder is being read.
+    Open,
+    /// A new folder is being written.
+    Create,
 }
 
 /// The journal file and its newest entries.
@@ -160,9 +194,19 @@ impl CoreStatus {
 
     /// Marks a folder as being opened, before the command is sent.
     pub(crate) fn begin_pending_project(&mut self, path: &Path) {
+        self.begin_pending(path, PendingProjectKind::Open);
+    }
+
+    /// Marks a folder as being created, before the command is sent.
+    pub(crate) fn begin_pending_creation(&mut self, path: &Path) {
+        self.begin_pending(path, PendingProjectKind::Create);
+    }
+
+    fn begin_pending(&mut self, path: &Path, kind: PendingProjectKind) {
         self.pending_project = Some(PendingProject {
             path: path.to_owned(),
             name: crate::project::display_name(path).into(),
+            kind,
             op: None,
         });
     }
@@ -221,8 +265,82 @@ impl CoreStatus {
         waiting
     }
 }
+/// One probe attempt: a port, a baud rate and a family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeAttempt {
+    pub(crate) port: String,
+    pub(crate) baud: u32,
+    pub(crate) probe: FirmwareProbe,
+}
+
+/// A scan across the ports, one probe at a time.
+#[derive(Debug, Clone)]
+pub(crate) struct FirmwareScan {
+    pub(crate) attempts: Vec<ProbeAttempt>,
+    /// Index of the attempt in flight.
+    pub(crate) next: usize,
+    /// The command that is waiting for an answer.
+    pub(crate) op: Option<OpId>,
+}
+
+/// The ECU a scan found.
+#[derive(Debug, Clone)]
+pub(crate) struct DetectedFirmware {
+    pub(crate) port: String,
+    pub(crate) baud: u32,
+    pub(crate) signature: String,
+    /// The definition downloaded or cached for this signature.
+    pub(crate) definition: Option<PathBuf>,
+}
+
+/// A definition the registry can serve, waiting for consent.
+#[derive(Debug, Clone)]
+pub(crate) struct DefinitionDownload {
+    pub(crate) signature: String,
+    pub(crate) url: String,
+    pub(crate) id: FirmwareId,
+}
+
+/// Byte counts of an in-flight definition download.
+///
+/// The background fetch writes both counters; the dialog reads them once per
+/// progress tick. `total` stays zero until the response headers arrive.
+#[derive(Debug, Default)]
+pub(crate) struct DownloadProgress {
+    pub(crate) done: AtomicU64,
+    pub(crate) total: AtomicU64,
+}
+
+impl DownloadProgress {
+    /// Fraction completed, or `None` while the total is still unknown.
+    pub(crate) fn fraction(&self) -> Option<f32> {
+        let total = self.total.load(Ordering::Relaxed);
+        if total == 0 {
+            return None;
+        }
+
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::as_conversions,
+            reason = "byte counts far below 2^53 keep every bit in f64; the bar only needs the f32 ratio"
+        )]
+        let ratio = self.done.load(Ordering::Relaxed) as f64 / total as f64;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::as_conversions,
+            reason = "a 0.0..=1.0 ratio always fits in f32; the bar clamps out-of-range values itself"
+        )]
+        let ratio = ratio as f32;
+        Some(ratio)
+    }
+}
+
 pub(super) enum Update {
     Loaded(DefinitionView),
+    Inspected {
+        path: PathBuf,
+        preview: oxtuner_core::DefinitionPreview,
+    },
     Tested(ConnectionView),
     /// A project opened; boxed because its summary is much larger than the
     /// other updates.
@@ -277,6 +395,9 @@ impl CoreStatus {
     )]
     pub(super) fn apply(&mut self, update: Update) {
         match update {
+            Update::Inspected { path, preview } => {
+                self.inspected = Some((path, preview));
+            }
             Update::Loaded(summary) => {
                 self.definition = Some(summary);
                 self.project = None;

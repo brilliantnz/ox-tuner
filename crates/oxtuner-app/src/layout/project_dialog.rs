@@ -41,28 +41,46 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         let danger = cx.theme().danger;
 
         let current = match status.project.as_ref() {
-            Some(project) => v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(project::display_name(&project.root)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(project.root.display().to_string()),
-                )
-                .when(project.read_only, |this| {
-                    this.child(
+            Some(project) => {
+                let root = project.root.clone();
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(project::display_name(&project.root)),
+                            )
+                            .child(
+                                Button::new("project-show-in-folder")
+                                    .label(t!("app.project.show_in_folder"))
+                                    .icon(IconName::FolderOpen)
+                                    .ghost()
+                                    .on_click(move |_, _, _| {
+                                        crate::platform::reveal::show_in_folder(&root);
+                                    }),
+                            ),
+                    )
+                    .child(
                         div()
                             .text_xs()
-                            .text_color(danger)
-                            .child(t!("app.project.read_only")),
+                            .text_color(muted)
+                            .child(project.root.display().to_string()),
                     )
-                }),
+                    .when(project.read_only, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(t!("app.project.read_only")),
+                        )
+                    })
+            }
             None => v_flex().child(
                 div()
                     .text_sm()
@@ -147,10 +165,21 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                             }),
                     )
                     .child(
+                        Button::new("project-new")
+                            .label(t!("app.project.new_project"))
+                            .primary()
+                            .on_click(|_, window, cx| {
+                                // The wizard replaces this dialog: close first,
+                                // then open after the click dispatch finishes.
+                                window.close_dialog(cx);
+                                crate::app::with_main_window(cx, crate::ui::new_project::show);
+                            }),
+                    )
+                    .child(
                         Button::new("project-choose-folder")
                             .icon(IconName::FolderOpen)
                             .label(t!("app.project.open_folder"))
-                            .primary()
+                            .outline()
                             .on_click(|_, window, cx| {
                                 project::choose(cx);
                                 window.close_dialog(cx);

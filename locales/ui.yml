@@ -61,13 +61,15 @@ app:
     settings:
       en: Settings…
     open_project_folder:
-      en: Open Project Folder…
+      en: Open Project Folder
     manage_projects:
       en: Projects…
     close_project:
       en: Close Project
     open_definition:
-      en: Open ECU Definition…
+      en: Open ECU Definition
+    new_project:
+      en: New Project
     save_tune:
       en: Save Tune
     connect:
@@ -599,6 +601,8 @@ app:
       en: Help topics open in a later milestone.
     opening_project:
       en: Opening project…
+    creating_project:
+      en: Creating project…
     opening_hint:
       en: Reading the definition and tune. The editor appears as soon as they are ready.
     read_only:
@@ -644,9 +648,9 @@ app:
     open_settings:
       en: Open settings
     open_project:
-      en: Open project folder
+      en: Open Project Folder
     manage_projects:
-      en: Open projects dialog
+      en: Open Projects Dialog
     close_project:
       en: Close project
     save_tune:
@@ -761,6 +765,10 @@ app:
       en: No recent projects yet — open a folder to start the list.
     open_folder:
       en: Open folder…
+    new_project:
+      en: New project
+    show_in_folder:
+      en: Show
     close_project:
       en: Close project
     read_only:
@@ -769,6 +777,135 @@ app:
       en: The last project reopens at startup (Settings › Project).
     auto_reopen_off:
       en: Startup stays clean; reopen from here or Settings › Project.
+  new_project:
+    title:
+      en: New Project
+    name_field_label:
+      en: Project name
+    folder_field_label:
+      en: Save in
+    choose_folder:
+      en: Choose…
+    detect_firmware_label:
+      en: Firmware
+    detect_firmware_button:
+      en: Detect ECU firmware
+    detect_firmware_hint:
+      en: The scan tries the common serial rates on every port. Nothing is written.
+    scanning_firmware:
+      en: 'Scanning port %{port} @ %{baud}…'
+    scan_no_ports:
+      en: No serial port to scan.
+    scan_core_stopped:
+      en: The core is not running.
+    scan_probe_refused:
+      en: 'The probe could not be sent: %{message}'
+    scan_no_answer:
+      en: No ECU answered the firmware probes.
+    firmware_detected:
+      en: 'ECU reports %{signature} on %{port} @ %{baud} baud.'
+    definition_tested:
+      en: 'ECU reports %{signature} on %{port}.'
+    downloading_definition:
+      en: Downloading the definition…
+    downloaded_of_total:
+      en: '%{downloaded} of %{total}'
+    downloaded_bytes:
+      en: '%{downloaded} downloaded'
+    download_failed:
+      en: 'The definition could not be downloaded: %{message}'
+    download_prompt:
+      en: 'A definition for %{signature} is available from %{host}. Download it?'
+    skip:
+      en: Skip
+    download:
+      en: Download
+    definition_source:
+      en: Definition source
+    definition_auto:
+      en: Auto
+    definition_manual:
+      en: Upload
+    port:
+      en: Port
+    definition_label:
+      en: Definition
+    inspecting:
+      en: Reading the definition…
+    inspect_failed:
+      en: 'The definition could not be read: %{message}'
+    configuration:
+      en: Configuration settings
+    configuration_hint:
+      en: These choices are written into this project's tune and properties.
+    lambda_display:
+      en: Lambda Display
+    lambda:
+      en: Lambda
+    afr:
+      en: AFR
+    temperature_display:
+      en: Temperature Display
+    celsius:
+      en: Celsius
+    fahrenheit:
+      en: Fahrenheit
+    configuration_waiting:
+      en: Choose a definition first.
+    default_suffix:
+      en: ' (Default)'
+    activated:
+      en: Activated
+    deactivated:
+      en: Deactivated
+    connection:
+      en: Connection settings
+    connection_type:
+      en: Connection type
+    baud:
+      en: Baud rate
+    review_connection:
+      en: Connection
+    no_connection:
+      en: No port selected
+    review_port_mismatch:
+      en: The definition was detected on a different port; its signature will be verified on first connect.
+    definition_not_ini:
+      en: '“%{name}” is not a .ini file.'
+    definition_none:
+      en: No definition chosen yet
+    definition_drop_title:
+      en: Drop your .ini definition or click here
+    definition_drop_hint:
+      en: only .ini files are accepted
+    choose_definition:
+      en: Choose…
+    review_name:
+      en: Name
+    review_folder:
+      en: Folder
+    review_definition:
+      en: Definition
+    create:
+      en: Create project
+    retry:
+      en: Try again
+    creating:
+      en: Writing the project folder…
+    failed:
+      en: 'The project was not created: %{message}'
+    created:
+      en: The project was created and is open.
+    show_in_folder:
+      en: Show in folder
+    back:
+      en: Back
+    next:
+      en: Next
+    cancel:
+      en: Cancel
+    done:
+      en: Done
   realtime:
     title:
       en: Realtime

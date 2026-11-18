@@ -1,0 +1,210 @@
+//! The wizard's inputs, shared by every step.
+//!
+//! The steps render from this state and the footer mutates it; the bodies own
+//! only presentation.
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui_kit::component::select::SelectState;
+use gpui_kit::{App, Entity, Subscription};
+use oxtuner_core::DEFAULT_BAUD_RATE;
+
+use crate::platform::paths::AppPaths;
+
+/// The name a fresh project starts with.
+pub(super) const DEFAULT_NAME: &str = "MyProject";
+
+/// Where the wizard is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Step {
+    Name,
+    Definition,
+    Configuration,
+    Connection,
+    Review,
+}
+
+/// Where the definition comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum DefinitionMode {
+    /// The scan probes the ECU and the registry supplies the file.
+    #[default]
+    Auto,
+    /// The user uploads a file by hand.
+    Manual,
+}
+
+/// The definition the step offers for `mode`.
+///
+/// Auto reads the detection's answer; Manual reads the picked file. Each mode
+/// owns its source, so toggling never leaks the other side's state into the
+/// step, the review, or Create.
+pub(super) fn effective_definition(
+    mode: DefinitionMode,
+    picked: Option<PathBuf>,
+    detected: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match mode {
+        DefinitionMode::Auto => detected,
+        DefinitionMode::Manual => picked,
+    }
+}
+
+/// One setting group's picker.
+///
+/// `values` maps a `Select` row to the option name creation stores; `None` is
+/// a boolean group left off.
+pub(super) struct GroupSelect {
+    pub(super) name: String,
+    pub(super) values: Vec<Option<String>>,
+    pub(super) state: Entity<SelectState<Vec<String>>>,
+}
+
+/// The wizard's inputs, shared by the render pass and every button handler.
+pub(super) struct Wizard {
+    pub(super) step: Step,
+    /// Whether the definition is detected or uploaded.
+    pub(super) definition_mode: DefinitionMode,
+    /// The folder projects are created inside.
+    pub(super) parent: PathBuf,
+    pub(super) definition: Option<PathBuf>,
+    /// Why the last picked file was refused, if it was not a definition.
+    pub(super) definition_error: Option<String>,
+    /// Why the name or the target was refused, when it was.
+    pub(super) name_error: Option<String>,
+    /// One picker per displayed group, built when a preview arrives.
+    pub(super) group_selects: Vec<GroupSelect>,
+    /// Chosen option per setting group; `None` is a boolean group left off.
+    pub(super) choices: std::collections::BTreeMap<String, Option<String>>,
+    /// The definition whose preview filled `choices`.
+    pub(super) preview_path: Option<PathBuf>,
+    /// The groups the dialog shows: the definition's own, plus the display
+    /// choices the application owns but the project records.
+    pub(super) display_groups: Vec<oxtuner_core::SettingGroupView>,
+    /// Failure serial captured when the inspect was sent.
+    pub(super) inspect_serial: u64,
+    /// The folder a create is building, once Create was pressed.
+    pub(super) target: Option<PathBuf>,
+    /// The failure serial seen when Create was pressed, so a failure already on
+    /// screen is never mistaken for this create's answer.
+    pub(super) failure_serial: u64,
+    /// The port names the connection picker was built from.
+    pub(super) connection_ports: Vec<String>,
+    /// The connection port picker, built once the ports arrive.
+    pub(super) port_select: Option<Entity<SelectState<Vec<String>>>>,
+    /// The baud picker; the baud list never changes, so it is built once.
+    pub(super) baud_select: Option<Entity<SelectState<Vec<String>>>>,
+    /// The connection type picker; its two options never change either.
+    pub(super) connection_type_select: Option<Entity<SelectState<Vec<String>>>>,
+    /// The port the picker was last synced to as its default.
+    ///
+    /// A selection that differs from this is the user's own choice and is
+    /// never overwritten by a later detection or rescan.
+    pub(super) connection_auto_port: Option<String>,
+    /// The baud the picker was last synced to as its default.
+    pub(super) connection_auto_baud: u32,
+    /// The name and path field subscriptions, kept so the dialog can
+    /// unsubscribe them on close instead of leaking a handler per open.
+    pub(super) name_subscription: Option<Subscription>,
+    pub(super) path_subscription: Option<Subscription>,
+    /// What the Test button last launched, if anything.
+    ///
+    /// A test answer is only shown while it still matches this: changing the
+    /// pickers afterwards hides the stale result instead of attributing it to
+    /// the new selection.
+    pub(super) tested: Option<TestedSelection>,
+}
+
+/// The connection a Test click ran against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TestedSelection {
+    pub(super) kind: ConnectionType,
+    pub(super) port: Option<String>,
+    pub(super) baud: u32,
+}
+
+impl Wizard {
+    pub(super) fn new(cx: &App) -> Self {
+        Self {
+            step: Step::Name,
+            definition_mode: DefinitionMode::Auto,
+            parent: AppPaths::get(cx).projects_dir().to_path_buf(),
+            definition: None,
+            definition_error: None,
+            name_error: None,
+            group_selects: Vec::new(),
+            choices: std::collections::BTreeMap::new(),
+            preview_path: None,
+            display_groups: Vec::new(),
+            inspect_serial: 0,
+            target: None,
+            failure_serial: 0,
+            connection_ports: Vec::new(),
+            port_select: None,
+            baud_select: None,
+            connection_type_select: None,
+            connection_auto_port: None,
+            connection_auto_baud: DEFAULT_BAUD_RATE,
+            name_subscription: None,
+            path_subscription: None,
+            tested: None,
+        }
+    }
+}
+
+/// How the project talks to the ECU.
+///
+/// A select today, so tomorrow's transports (`TCP`, `WiFi`, `Bluetooth`) slot
+/// in as options without restructuring the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum ConnectionType {
+    /// A serial device, USB included.
+    #[default]
+    Serial,
+    /// The built-in simulator.
+    Simulator,
+}
+
+pub(super) type SharedWizard = Rc<RefCell<Wizard>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_reads_the_detection_and_ignores_the_picked_file() {
+        let picked = Some(PathBuf::from("/tmp/manual.ini"));
+        let detected = Some(PathBuf::from("/tmp/auto.ini"));
+
+        assert_eq!(
+            effective_definition(DefinitionMode::Auto, picked, detected.clone()),
+            detected
+        );
+        assert_eq!(
+            effective_definition(DefinitionMode::Auto, None, detected.clone()),
+            detected
+        );
+        assert_eq!(effective_definition(DefinitionMode::Auto, None, None), None);
+    }
+
+    #[test]
+    fn manual_reads_the_picked_file_and_ignores_the_detection() {
+        let picked = Some(PathBuf::from("/tmp/manual.ini"));
+        let detected = Some(PathBuf::from("/tmp/auto.ini"));
+
+        assert_eq!(
+            effective_definition(DefinitionMode::Manual, picked.clone(), detected),
+            picked
+        );
+        assert_eq!(
+            effective_definition(DefinitionMode::Manual, picked.clone(), None),
+            picked
+        );
+        assert_eq!(
+            effective_definition(DefinitionMode::Manual, None, None),
+            None
+        );
+    }
+}

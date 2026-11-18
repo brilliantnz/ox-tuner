@@ -57,6 +57,9 @@ pub fn init(cx: &mut App) {
         // The folder picker, for the tuner who knows the path.
         project::choose(cx);
     });
+    cx.on_action(|_: &actions::NewProject, cx| {
+        with_main_window(cx, crate::ui::new_project::show);
+    });
     cx.on_action(|_: &actions::ManageProjects, cx| {
         // The Projects dialog, for everything else about a project.
         cx.defer(|cx| {
@@ -147,7 +150,10 @@ pub fn init(cx: &mut App) {
 }
 
 /// Runs `open` against the main window, after the current action dispatch.
-fn with_main_window(cx: &mut App, open: fn(&mut Window, &mut App)) {
+///
+/// Deferred so a dialog that is closing first has released the window's modal
+/// slot: only one dialog may be open at a time.
+pub(crate) fn with_main_window(cx: &mut App, open: fn(&mut Window, &mut App)) {
     cx.defer(move |cx| {
         if let Some(window) = window::main(cx) {
             window.update(cx, |_, window, cx| open(window, cx)).ok();

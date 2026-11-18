@@ -18,6 +18,9 @@ const MILLIS_PER_SECOND: u32 = 1_000;
 /// cause; this one guarantees the link the UI offers can be followed.
 fn log_outcome(event: &Event, op: Option<OpId>) {
     match event {
+        // A probe miss is a scan step; the core already logs it at debug and
+        // the scan reports once when every attempt is spent.
+        Event::Failed { failure, .. } if failure.code == FailureCode::FirmwareNotDetected => {}
         Event::Failed { failure, .. } => {
             // `message` is tracing's own field; the failure text goes in
             // `detail` so the record keeps its event message and the field.
@@ -97,10 +100,34 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         return;
     }
 
+    // Firmware probing is a scan: a reply moves to the registry, a miss moves
+    // to the next attempt. It never becomes a connection test result.
+    if let Event::FirmwareProbed {
+        op,
+        port,
+        baud,
+        probe,
+        signature,
+        ..
+    } = &event
+    {
+        crate::core::firmware::probed(*op, port.clone(), *baud, *probe, signature, cx);
+        return;
+    }
+    if let Event::Failed { op, failure, .. } = &event
+        && failure.code == FailureCode::FirmwareNotDetected
+        && crate::core::firmware::missed(*op, cx)
+    {
+        return;
+    }
+
     let (update, remember) = match event {
         Event::DefinitionLoaded { view, .. } => {
             tracing::info!(signature = %view.signature, "definition loaded");
             (Update::Loaded(view), None)
+        }
+        Event::DefinitionInspected { path, preview, .. } => {
+            (Update::Inspected { path, preview }, None)
         }
         Event::ProjectOpened { view, .. } => {
             tracing::info!(

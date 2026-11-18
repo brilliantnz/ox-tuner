@@ -19,6 +19,7 @@ gpui_kit::actions!(
         ShowAll,
         OpenDefinition,
         OpenProject,
+        NewProject,
         ManageProjects,
         CloseProject,
         SaveTune,
