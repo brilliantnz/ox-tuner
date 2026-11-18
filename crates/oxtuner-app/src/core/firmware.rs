@@ -943,6 +943,68 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn an_unserved_ecu_stops_the_scan_and_asks_for_the_ini(cx: &mut gpui_kit::TestAppContext) {
+        let core = start_core(cx);
+        let signature = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
+
+        // Answer the first attempt the scan sends, so the verdict runs through
+        // the path a real probe takes, not a hand-built status.
+        let op = cx.update(|cx| {
+            cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
+                attempts: attempts_for(&["/dev/ecu".to_owned()]),
+                next: 0,
+                op: None,
+            });
+            send_current(cx);
+
+            cx.global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .and_then(|scan| scan.op)
+                .expect("the first attempt was sent")
+        });
+
+        cx.update(|cx| {
+            probed(
+                op,
+                "/dev/ecu".to_owned(),
+                Some(115_200),
+                LinkMode::Envelope,
+                FirmwareProbe::Rusefi,
+                signature,
+                cx,
+            );
+        });
+
+        cx.update(|cx| {
+            let status = &cx.global::<CoreService>().status;
+            assert!(status.firmware_scan.is_none(), "a real ECU ends the scan");
+            assert_eq!(
+                status.firmware_error.clone(),
+                Some(unsupported_message(signature))
+            );
+
+            let detected = status
+                .detected_firmware
+                .as_ref()
+                .expect("the ECU is remembered");
+            assert_eq!(detected.port, "/dev/ecu");
+            assert_eq!(detected.signature, signature);
+            assert!(
+                detected.definition.is_none(),
+                "no definition exists for this firmware"
+            );
+            assert!(
+                status.definition_download.is_none(),
+                "the registry has nothing to offer"
+            );
+        });
+
+        core.join();
+    }
+
+    #[gpui_kit::test]
     fn an_unserved_detection_keeps_the_upload_hint(cx: &mut gpui_kit::TestAppContext) {
         let signature = "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136";
 
@@ -957,8 +1019,9 @@ mod tests {
                 definition: None,
             });
 
-            // Auto → Manual → Auto re-offers the definition the detection
-            // never had; the guidance must survive that round trip.
+            // `inspect_detected` is what returning to Auto runs: the detection
+            // never had a definition, so re-offering it must land on the same
+            // upload hint rather than the registry's internal text.
             inspect_detected(cx);
         });
 
