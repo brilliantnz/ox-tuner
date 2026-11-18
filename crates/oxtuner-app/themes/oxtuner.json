@@ -3,7 +3,7 @@
   "schema_version": 1,
   "name": "OxTuner",
   "author": "OxTuner",
-  "_note": "Editor keys are written twice (dotted and underscored) because gpui-kit reads dotted names with the tree-sitter highlighter and underscored names with the stub highlighter; unknown keys are ignored, so both stay.",
+  "_note": "Editor keys are written twice (dotted and underscored) because gpui-kit reads dotted names with the tree-sitter highlighter and underscored names with the stub highlighter; unknown keys are ignored, so both stay. mono_font.family is intentionally absent: gpui-kit falls back to Menlo, Consolas or DejaVu Sans Mono per platform, and naming one family would break the other two.",
   "themes": [
     {
       "is_default": true,
@@ -14,6 +14,7 @@
       "mono_font.size": 13,
       "radius": 6,
       "radius.lg": 8,
+      "window.radius": 0,
       "shadow": true,
       "colors": {
         "accent.background": "#313233",
@@ -84,6 +85,7 @@
         "list.even.background": "#202122",
         "list.head.background": "#202122",
         "list.hover.background": "#FFFFFF14",
+        "list.highlight.foreground": "#48A0C7",
         "muted.background": "#242526",
         "muted.foreground": "#8C8C8C",
         "overlay": "#00000066",
@@ -240,6 +242,7 @@
       "mono_font.size": 13,
       "radius": 6,
       "radius.lg": 8,
+      "window.radius": 0,
       "shadow": true,
       "colors": {
         "accent.background": "#EAEAEA",
@@ -310,6 +313,7 @@
         "list.even.background": "#FAFAFD",
         "list.head.background": "#FAFAFD",
         "list.hover.background": "#00000014",
+        "list.highlight.foreground": "#0069CC",
         "muted.background": "#EAEAEA",
         "muted.foreground": "#606060",
         "overlay": "#00000040",

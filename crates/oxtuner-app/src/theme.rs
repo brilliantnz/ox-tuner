@@ -424,6 +424,45 @@ mod tests {
         }
     }
 
+    /// A token the crate knows but the bundle omits silently takes the crate
+    /// default, which is how a theme drifts after an upgrade.
+    #[test]
+    fn every_theme_token_is_defined_in_the_bundled_set() {
+        use gpui_kit::component::theme::ThemeConfigColors;
+
+        // The crate's own token set, not this theme's keys: a token added by an
+        // upgrade is missing here even though the parsed theme has no gap.
+        let known = serde_json::to_value(ThemeConfigColors::default())
+            .expect("the crate's tokens must serialize");
+        let known = known
+            .as_object()
+            .expect("the crate's tokens must be an object");
+        assert!(
+            known.len() >= 140,
+            "the crate must serialize its full token set, found {}",
+            known.len()
+        );
+
+        let raw: serde_json::Value =
+            serde_json::from_str(BUNDLED).expect("bundled theme set must parse");
+        for theme in raw["themes"].as_array().expect("themes must be an array") {
+            let name = theme["name"].as_str().expect("theme name");
+            let colors = theme["colors"]
+                .as_object()
+                .expect("theme colors must be an object");
+
+            let missing: Vec<&String> = known
+                .keys()
+                .filter(|key| !colors.contains_key(*key))
+                .collect();
+
+            assert!(
+                missing.is_empty(),
+                "{name} is missing theme tokens the crate knows: {missing:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_bundled_color_key_is_a_theme_token() {
         let set = bundled_set();
