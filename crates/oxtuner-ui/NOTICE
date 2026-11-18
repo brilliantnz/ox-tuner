@@ -1,9 +1,17 @@
 oxtuner-ui vendors the dock skin and the tab bar from gpui-component.
 
-  Source: gpui-component 0.9.0 (https://github.com/longbridge/gpui-kit)
+  Source: gpui-component 0.9.0 (https://github.com/longbridge/gpui-kit),
+          with the 0.9.1 icon-only tab width fix (#3792) ported into
+          src/tabs/tab.rs
   Files:  src/dock/{mod,panel,tab_panel,dock,invalid_panel}.rs
           src/tabs/{mod,tab,tab_bar}.rs
   License: Apache License 2.0, see LICENSE-APACHE beside this file.
+
+The vendored code was reviewed against gpui-component 0.10.0 when the
+dependency moved (18 Nov 2026). The 0.9.1 icon-width fix was ported. The
+0.10.0 right-to-left layout, roving tab keyboard navigation and collapsed-dock
+extent changes were not taken: the app is left-to-right, the vendored tab strip
+has no focus model, and the bottom panel is app-owned rather than a dock.
 
 The files were adapted to this crate: imports point at the `gpui_kit`
 re-exports instead of the gpui-component crate root, the crate's own module

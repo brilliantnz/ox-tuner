@@ -32,8 +32,8 @@ repository = "https://github.com/brilliantnz/ox-tuner"
 # Third-party crates used by more than one member. A member that needs extra
 # features says so locally; the version lives here, once.
 criterion = "0.8.2"
-crossfire = "3.1.22"
-gpui-kit = "=0.9.0"
+crossfire = "3.1.23"
+gpui-kit = "=0.10.0"
 postcard = "1.1.3"
 proptest = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }

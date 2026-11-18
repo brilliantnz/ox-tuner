@@ -1,4 +1,5 @@
-// Vendored from gpui-component 0.9.0 (Apache-2.0). See NOTICE in this crate.
+// Vendored from gpui-component 0.9.0, with the 0.9.1 icon-width fix ported
+// (Apache-2.0). See NOTICE in this crate.
 
 use std::{rc::Rc, time::Duration};
 
@@ -964,8 +965,11 @@ impl RenderOnce for Tab {
                 None => this.flex_shrink_0(),
             })
             .map(|this| match self.icon {
+                // `flex_1()` above zeroes the basis, so `w` alone collapses the
+                // box to the icon; `min_w` holds the width it asks for.
                 Some(icon) => this
                     .w(inner_height * 1.25)
+                    .min_w(inner_height * 1.25)
                     .child(icon.map(|this| match self.size {
                         Size::XSmall => this.size_2p5(),
                         Size::Small => this.size_3p5(),
