@@ -109,11 +109,9 @@ pub(crate) fn start_scan(cx: &mut App) {
 /// whether the answer still belongs to a live detection.
 fn clear_detection(status: &mut CoreStatus) {
     status.firmware_scan = None;
-    status.definition_download = None;
     status.detected_firmware = None;
-    status.downloading_definition = false;
-    status.download_progress = None;
     status.download_declined = None;
+    status.clear_download();
 }
 
 /// The framings a scan tries, in order.
@@ -257,10 +255,8 @@ pub(crate) fn reset_detection(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
     status.detected_firmware = None;
     status.firmware_error = None;
-    status.definition_download = None;
     status.inspected = None;
-    status.downloading_definition = false;
-    status.download_progress = None;
+    status.clear_download();
     status.test = None;
     status.testing = None;
     status.inspect_serial = status.failure_serial;
@@ -511,15 +507,12 @@ pub(crate) fn download(cx: &mut App) {
 
             match result {
                 Ok(path) => {
-                    let status = &mut cx.global_mut::<CoreService>().status;
-                    status.downloading_definition = false;
-                    status.download_progress = None;
+                    cx.global_mut::<CoreService>().status.clear_download();
                     finish(&path, cx);
                 }
                 Err(error) => {
                     let status = &mut cx.global_mut::<CoreService>().status;
-                    status.downloading_definition = false;
-                    status.download_progress = None;
+                    status.clear_download();
                     status.firmware_error = Some(
                         t!(
                             "app.new_project.download_failed",
@@ -592,9 +585,7 @@ pub(crate) fn inspect_detected(cx: &mut App) {
 /// still offers the download the detection found.
 pub(crate) fn drop_download(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
-    status.definition_download = None;
-    status.downloading_definition = false;
-    status.download_progress = None;
+    status.clear_download();
     cx.refresh_windows();
 }
 
@@ -606,8 +597,7 @@ pub(crate) fn skip_download(cx: &mut App) {
         // screen; leaving Auto and coming back must not ask again.
         status.download_declined = Some(prompt.signature);
     }
-    status.downloading_definition = false;
-    status.download_progress = None;
+    status.clear_download();
     cx.refresh_windows();
 }
 

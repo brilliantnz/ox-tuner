@@ -70,7 +70,7 @@ pub(super) fn definition_body(
         .child(mode_tabs(model, locked));
 
     body = match mode {
-        DefinitionMode::Auto => body.child(auto_detect_section(model, status, cx, creating)),
+        DefinitionMode::Auto => body.child(auto_detect_section(model, status, cx, locked)),
         DefinitionMode::Manual => body.child(manual_upload_section(
             model,
             definition,
@@ -174,7 +174,7 @@ fn set_definition_mode(model: &SharedWizard, mode: DefinitionMode, cx: &mut App)
 ///
 /// A scan of several ports can take a while with every other control disabled,
 /// so the running state always offers a way out.
-fn detect_controls(status: &crate::core::CoreStatus, creating: bool) -> AnyElement {
+fn detect_controls(status: &crate::core::CoreStatus, locked: bool) -> AnyElement {
     h_flex()
         .gap_2()
         .child(
@@ -182,7 +182,7 @@ fn detect_controls(status: &crate::core::CoreStatus, creating: bool) -> AnyEleme
                 .label(t!("app.new_project.detect_firmware_button"))
                 .icon(IconName::Cpu)
                 .outline()
-                .disabled(creating || status.firmware_scan.is_some() || status.connection.is_some())
+                .disabled(locked || status.firmware_scan.is_some() || status.connection.is_some())
                 .on_click(|_, _, cx| firmware::start_scan(cx)),
         )
         .when(status.firmware_scan.is_some(), |row| {
@@ -201,7 +201,7 @@ fn auto_detect_section(
     model: &SharedWizard,
     status: &crate::core::CoreStatus,
     cx: &App,
-    creating: bool,
+    locked: bool,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
@@ -212,7 +212,7 @@ fn auto_detect_section(
             .child(t!("app.new_project.detect_firmware_hint")),
     );
 
-    body = body.child(detect_controls(status, creating));
+    body = body.child(detect_controls(status, locked));
 
     if status.connection.is_some() {
         body = body.child(
@@ -272,7 +272,7 @@ fn auto_detect_section(
                             Button::new("new-project-skip-download")
                                 .label(t!("app.new_project.skip"))
                                 .outline()
-                                .disabled(creating)
+                                .disabled(locked)
                                 .on_click(move |_, _, cx| {
                                     // Skipping means the file comes by hand:
                                     // move to the manual tab instead of
@@ -286,7 +286,7 @@ fn auto_detect_section(
                             Button::new("new-project-download-definition")
                                 .label(t!("app.new_project.download"))
                                 .primary()
-                                .disabled(creating)
+                                .disabled(locked)
                                 .on_click(|_, _, cx| firmware::download(cx)),
                         ),
                 ),

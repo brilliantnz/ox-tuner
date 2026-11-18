@@ -204,6 +204,15 @@ pub(crate) struct TraceSaved {
 }
 
 impl CoreStatus {
+    /// Clears the pending prompt, the running fetch and its progress.
+    ///
+    /// The decline is a user decision, not download state, so it stays.
+    pub(crate) fn clear_download(&mut self) {
+        self.definition_download = None;
+        self.downloading_definition = false;
+        self.download_progress = None;
+    }
+
     /// The definition to name, whether it came from a project or on its own.
     pub(crate) fn definition(&self) -> Option<&DefinitionView> {
         self.project
