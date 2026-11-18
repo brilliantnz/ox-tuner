@@ -834,15 +834,15 @@ mod tests {
 
     /// Installs a core for the scan to send through, and the paths it reads.
     fn start_core(cx: &mut gpui_kit::TestAppContext) -> oxtuner_core::CoreThread {
-        // A stamp as well as the pid: plain `cargo test` runs every test in one
-        // process, and a future test that seeds a cache file here must not read
-        // what another one wrote.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
-        let root =
-            std::env::temp_dir().join(format!("oxtuner-probe-scan-{}-{stamp}", std::process::id()));
+        // A counter as well as the pid: plain `cargo test` runs every test in
+        // one process, and a future test that seeds a cache file here must not
+        // read what another one wrote.
+        static NEXT_ROOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oxtuner-probe-scan-{}-{serial}",
+            std::process::id()
+        ));
 
         cx.update(|cx| {
             cx.set_global(crate::platform::paths::AppPaths {
@@ -1006,7 +1006,7 @@ mod tests {
                 op,
                 "/dev/noise".to_owned(),
                 Some(115_200),
-                LinkMode::Legacy,
+                LinkMode::Envelope,
                 FirmwareProbe::Speeduino,
                 NMEA,
                 cx,
