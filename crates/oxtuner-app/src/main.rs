@@ -95,6 +95,10 @@ fn main() {
         // instead of asking the platform again.
         AppPaths::install(cx, paths);
 
+        // The projects folder is the default the New Project dialog starts in,
+        // so it exists from the first launch, not after the first project.
+        AppPaths::get(cx).ensure_projects_dir();
+
         // The headless core: one thread that owns the open project (definition
         // and tune) and the ECU session. Started before the first window so a
         // view can never render core state that has nowhere to come from.

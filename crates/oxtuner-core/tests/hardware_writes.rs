@@ -15,7 +15,7 @@
 //! `/dev/cu.usbmodem21201` and can be set with `OX_TUNER_SERIAL_PORT`.
 //!
 //! The cell under test is written back to its original value and burned again,
-//! so the ECU keeps the tune it had before the test. The project's `.ox-tuner`
+//! so the ECU keeps the tune it had before the test. The project's `.oxtuner`
 //! sidecar keeps the journal and snapshots as evidence.
 //!
 //! Run bench tests with `--test-threads=1`: two sessions on one tty interleave

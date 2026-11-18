@@ -15,6 +15,9 @@ constant|injectionMode|Bits|U08|page=1|addr=Some(68)|shape=[0:1]|units=|scale=|t
 constant|gpio|Bits|U08|page=1|addr=Some(69)|shape=[0:7]|units=|scale=|translate=
 constant|veTable|Array|U16|page=1|addr=Some(196)|shape=[16x16]|units=%|scale=0.1|translate=0
 pc_variables|3
+pc_variable|gearCountArray|Array|S08|[10]|units=Gear|scale=1|translate=0|min=-1|max=8|digits=0|flags=ConstantFlags { no_msq_save: true, controller_priority: true }
+pc_variable|tsCanId|Bits|U08|[0:3]|units=|scale=|translate=|min=|max=|digits=|flags=ConstantFlags { no_msq_save: false, controller_priority: false }
+pc_variable|liveBaro|Scalar|F32|scalar|units=|scale=|translate=|min=|max=|digits=|flags=ConstantFlags { no_msq_save: false, controller_priority: false }
 channels|4
 channel|rpm|U16@0|units=RPM
 channel|crank|bits1(11..11)@852|units=

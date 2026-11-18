@@ -29,9 +29,10 @@ pub use realtime::RealtimeSpec;
 use pages::{PageCommands, build_pages};
 use realtime::{Realtime, build_realtime};
 
-use crate::behavior::{CrcReply, EcuBehavior, Match, PageSwitch, ReplyCode};
+use crate::behavior::{CrcReply, EcuBehavior, Match, MsCompatibleBehavior, PageSwitch, ReplyCode};
 use crate::error::ProtocolError;
 use crate::frame::{Frame, FrameError};
+use crate::probe::ProbeSpec;
 
 /// How the bytes are framed on the wire.
 #[expect(
@@ -164,11 +165,11 @@ fn unsupported_text_crc(page: u8) -> ProtocolError {
     ))
 }
 
-/// The MS-compatible protocol for one definition.
+/// The MS-compatible protocol for one definition, or for one probe.
 pub struct MsProtocol {
     behavior_id: &'static str,
     variables: HashMap<String, u8>,
-    signature_command: Option<CommandTemplate>,
+    signature_request: Option<Vec<u8>>,
     handshake: Vec<Vec<u8>>,
     pages: Vec<PageCommands>,
     blocking_factor: usize,
@@ -182,6 +183,102 @@ pub struct MsProtocol {
     link: LinkMode,
     reply_code: ReplyCode,
     last_page: Option<u8>,
+}
+
+/// The fields a protocol is assembled from.
+///
+/// Two shapes feed it: a full session derived from a definition, and a probe
+/// that knows only a query byte and how the reply is shaped. They meet here so
+/// the conversations themselves have one implementation.
+struct Parts {
+    behavior_id: &'static str,
+    variables: HashMap<String, u8>,
+    signature_request: Option<Vec<u8>>,
+    handshake: Vec<Vec<u8>>,
+    pages: Vec<PageCommands>,
+    blocking_factor: usize,
+    inter_write_delay: Option<Duration>,
+    write_blocks: bool,
+    block_read_timeout: Duration,
+    page_activation_delay: Duration,
+    port_open_delay: Duration,
+    wire_order: WireOrder,
+    realtime: Option<Realtime>,
+    link: LinkMode,
+    reply_code: ReplyCode,
+}
+
+impl Default for Parts {
+    /// The protocol defaults, so neither construction path states them twice.
+    fn default() -> Self {
+        Self {
+            behavior_id: MsCompatibleBehavior.id(),
+            variables: HashMap::new(),
+            signature_request: None,
+            handshake: Vec::new(),
+            pages: Vec::new(),
+            blocking_factor: FALLBACK_BLOCKING_FACTOR,
+            inter_write_delay: None,
+            write_blocks: false,
+            block_read_timeout: Duration::from_secs(2),
+            page_activation_delay: Duration::ZERO,
+            port_open_delay: Duration::ZERO,
+            wire_order: WireOrder::LittleEndian,
+            realtime: None,
+            link: LinkMode::Legacy,
+            reply_code: ReplyCode::Leading,
+        }
+    }
+}
+
+impl Parts {
+    /// What a probe starts from: a query, a link and a reply shape.
+    ///
+    /// A probe has no INI to state `delayAfterPortOpen`, but opening an Arduino
+    /// resets it into the bootloader, so the settle is protocol knowledge here.
+    fn probe(spec: &ProbeSpec) -> Self {
+        Self {
+            behavior_id: spec.behavior_id(),
+            signature_request: Some(spec.query.to_vec()),
+            link: spec.link,
+            reply_code: spec.behavior.as_dyn().reply_code(),
+            port_open_delay: spec.settle,
+            ..Self::default()
+        }
+    }
+}
+
+/// Encodes one command template with the definition's variables and wire order.
+fn encode_command(
+    variables: &HashMap<String, u8>,
+    wire_order: WireOrder,
+    command: &CommandTemplate,
+    page: u16,
+    offset: u16,
+    count: u16,
+    values: &[u8],
+) -> Result<Vec<u8>, ProtocolError> {
+    command
+        .encode(
+            &CommandArguments {
+                page,
+                offset,
+                count,
+                values,
+                wire_order,
+            },
+            &|name| variables.get(&name.to_ascii_lowercase()).copied(),
+        )
+        .map_err(ProtocolError::Encoding)
+}
+
+/// The wire order a definition asks for.
+fn wire_order(definition: &Definition) -> WireOrder {
+    if definition.comms.force_big_endian_protocol {
+        WireOrder::BigEndian
+    } else {
+        WireOrder::LittleEndian
+    }
 }
 
 fn build_handshake(
@@ -251,13 +348,22 @@ impl MsProtocol {
         let handshake = build_handshake(definition, behavior, &variables)?;
         let realtime = build_realtime(definition)?;
 
-        Ok(Self {
+        // The query is encoded once here instead of on every signature read, so
+        // a probe and a session reach the wire through the same field.
+        let order = wire_order(definition);
+        let signature_request = match definition.query_command.as_ref() {
+            Some(command) if !command.is_empty() => {
+                Some(encode_command(&variables, order, command, 0, 0, 0, &[])?)
+            }
+            _ => None,
+        };
+
+        let defaults = Parts::default();
+
+        Ok(Self::from_parts(Parts {
             behavior_id: behavior.id(),
             variables,
-            signature_command: definition
-                .query_command
-                .clone()
-                .filter(|command| !command.is_empty()),
+            signature_request,
             handshake,
             pages,
             blocking_factor: definition
@@ -265,7 +371,7 @@ impl MsProtocol {
                 .blocking_factor
                 .and_then(|factor| usize::try_from(factor).ok())
                 .filter(|factor| *factor > 0)
-                .unwrap_or(FALLBACK_BLOCKING_FACTOR)
+                .unwrap_or(defaults.blocking_factor)
                 // A chunk must fit the 16-bit count field, so an oversized
                 // definition is clamped instead of failing every read.
                 .min(usize::from(u16::MAX)),
@@ -277,31 +383,58 @@ impl MsProtocol {
             block_read_timeout: definition
                 .comms
                 .block_read_timeout_ms
-                .map_or(Duration::from_secs(2), |milliseconds| {
+                .map_or(defaults.block_read_timeout, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             page_activation_delay: definition
                 .comms
                 .page_activation_delay_ms
-                .map_or(Duration::ZERO, |milliseconds| {
+                .map_or(defaults.page_activation_delay, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
             port_open_delay: definition
                 .comms
                 .delay_after_port_open_ms
-                .map_or(Duration::ZERO, |milliseconds| {
+                .map_or(defaults.port_open_delay, |milliseconds| {
                     Duration::from_millis(u64::from(milliseconds))
                 }),
-            wire_order: if definition.comms.force_big_endian_protocol {
-                WireOrder::BigEndian
-            } else {
-                WireOrder::LittleEndian
-            },
+            wire_order: order,
             realtime,
             link: default_link(definition),
-            reply_code: behavior.reply_code(definition),
+            reply_code: behavior.reply_code(),
+        }))
+    }
+
+    /// Builds the protocol a signature probe needs, with no definition.
+    ///
+    /// The probe carries the query byte and the reply shape itself, so this
+    /// path reads and writes nothing from an INI. It has no pages and no
+    /// realtime block: asking the ECU which firmware it runs is the whole job.
+    #[must_use]
+    pub fn for_probe(spec: &ProbeSpec) -> Self {
+        Self::from_parts(Parts::probe(spec))
+    }
+
+    /// Assembles the fields a conversation runs on.
+    fn from_parts(parts: Parts) -> Self {
+        Self {
+            behavior_id: parts.behavior_id,
+            variables: parts.variables,
+            signature_request: parts.signature_request,
+            handshake: parts.handshake,
+            pages: parts.pages,
+            blocking_factor: parts.blocking_factor,
+            inter_write_delay: parts.inter_write_delay,
+            write_blocks: parts.write_blocks,
+            block_read_timeout: parts.block_read_timeout,
+            page_activation_delay: parts.page_activation_delay,
+            port_open_delay: parts.port_open_delay,
+            wire_order: parts.wire_order,
+            realtime: parts.realtime,
+            link: parts.link,
+            reply_code: parts.reply_code,
             last_page: None,
-        })
+        }
     }
 
     /// The behavior's stable id, for logs and the connection summary.
@@ -320,6 +453,12 @@ impl MsProtocol {
     /// The framing in use.
     pub fn link_mode(&self) -> LinkMode {
         self.link
+    }
+
+    /// How a framed reply is shaped.
+    #[cfg(test)]
+    pub(crate) fn reply_code(&self) -> ReplyCode {
+        self.reply_code
     }
 
     /// The pages the definition declares, in definition order.
@@ -556,35 +695,74 @@ impl MsProtocol {
         count: u16,
         values: &[u8],
     ) -> Result<Vec<u8>, ProtocolError> {
-        command
-            .encode(
-                &CommandArguments {
-                    page,
-                    offset,
-                    count,
-                    values,
-                    wire_order: self.wire_order,
-                },
-                &|name| self.variables.get(&name.to_ascii_lowercase()).copied(),
-            )
-            .map_err(ProtocolError::Encoding)
+        encode_command(
+            &self.variables,
+            self.wire_order,
+            command,
+            page,
+            offset,
+            count,
+            values,
+        )
     }
 
     /// Sends one framed request and returns the validated reply payload.
-    fn converse(
-        &mut self,
+    fn converse(&self, io: &mut dyn Transport, request: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        Self::converse_with(io, request, self.block_read_timeout)
+    }
+
+    /// Sends one framed request and reads its reply within `timeout`.
+    fn converse_with(
         io: &mut dyn Transport,
         request: &[u8],
+        timeout: Duration,
     ) -> Result<Vec<u8>, ProtocolError> {
         let framed = Frame::encode(request)?;
         io.write_all(&framed)?;
-        self.framed_reply(io)
+        Self::framed_reply_with(io, timeout)
     }
 
-    /// Reads one complete framed reply.
+    /// Reads one complete framed reply, giving each read its own timeout.
+    ///
+    /// Only a raw controller action uses this; a page, burn, CRC or realtime
+    /// conversation runs through `converse` and shares one deadline instead.
     pub(super) fn framed_reply(&self, io: &mut dyn Transport) -> Result<Vec<u8>, ProtocolError> {
+        Self::read_frame(io, self.block_read_timeout)
+    }
+
+    /// Reads one complete framed reply within `timeout`.
+    ///
+    /// The header and the payload share one deadline, so a probe's short
+    /// timeout bounds the whole reply.
+    fn framed_reply_with(
+        io: &mut dyn Transport,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        Self::read_framed(
+            io,
+            ReplyDeadline::Shared {
+                timeout,
+                end: std::time::Instant::now() + timeout,
+            },
+        )
+    }
+
+    /// Reads one complete framed reply, giving each read its own timeout.
+    fn read_frame(io: &mut dyn Transport, timeout: Duration) -> Result<Vec<u8>, ProtocolError> {
+        Self::read_framed(io, ReplyDeadline::PerRead(timeout))
+    }
+
+    /// Reads one complete framed reply under `deadline`.
+    fn read_framed(
+        io: &mut dyn Transport,
+        deadline: ReplyDeadline,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let first = match deadline {
+            ReplyDeadline::Shared { timeout, .. } | ReplyDeadline::PerRead(timeout) => timeout,
+        };
         let mut header = [0u8; 2];
-        io.read_exact_timeout(&mut header, self.block_read_timeout)?;
+        io.read_exact_timeout(&mut header, first)?;
+
         let length = Frame::length(header);
         // Reject a corrupt length before allocating or waiting for bytes that
         // cannot belong to a valid reply.
@@ -595,12 +773,25 @@ impl MsProtocol {
             }
             .into());
         }
-        let mut rest = vec![0u8; length + 4];
-        io.read_exact_timeout(&mut rest, self.block_read_timeout)?;
 
-        let mut bytes = Vec::with_capacity(length + 6);
+        let mut rest = vec![0u8; length + 4];
+        let second = match deadline {
+            ReplyDeadline::Shared { end, .. } => {
+                end.saturating_duration_since(std::time::Instant::now())
+            }
+            ReplyDeadline::PerRead(timeout) => timeout,
+        };
+        io.read_exact_timeout(&mut rest, second)?;
+
+        Self::assemble(header, &rest)
+    }
+
+    /// Parses a header and payload that were already read into a payload.
+    fn assemble(header: [u8; 2], rest: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+        let mut bytes = Vec::with_capacity(header.len() + rest.len());
         bytes.extend_from_slice(&header);
-        bytes.extend_from_slice(&rest);
+        bytes.extend_from_slice(rest);
+
         let reply = Frame::parse(&bytes)?;
         Ok(reply.payload)
     }
@@ -660,27 +851,50 @@ impl MsProtocol {
     }
 }
 
-impl Protocol for MsProtocol {
-    fn signature(&mut self, io: &mut dyn Transport) -> Result<String, ProtocolError> {
-        let command = self.signature_command.as_ref().ok_or_else(|| {
+/// How a framed read budgets its two reads.
+///
+/// The length guard and the assembly stay in one place; only the second
+/// read's budget differs, so a fix to the guard cannot land in one twin
+/// and miss the other.
+#[derive(Debug, Clone, Copy)]
+enum ReplyDeadline {
+    /// One deadline shared by the header and the payload: the header reads
+    /// with the full timeout, the payload with what is left of it.
+    Shared {
+        timeout: Duration,
+        end: std::time::Instant,
+    },
+    /// Each read gets the full timeout.
+    PerRead(Duration),
+}
+
+impl MsProtocol {
+    /// Reads the signature with a caller-chosen reply timeout.
+    ///
+    /// A port probe uses a short one so a silent port costs little; a session
+    /// keeps the protocol's own timeout through [`Protocol::signature`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] when the request has no signature command, the
+    /// transport fails, or the reply carries no signature.
+    pub fn signature_with_timeout(
+        &mut self,
+        io: &mut dyn Transport,
+        timeout: Duration,
+    ) -> Result<String, ProtocolError> {
+        let request = self.signature_request.as_deref().ok_or_else(|| {
             ProtocolError::Unsupported(
                 "the definition has no queryCommand, so the signature cannot be read".to_owned(),
             )
         })?;
-        let request = self.encode(command, 0, 0, 0, &[])?;
         io.flush_input();
 
         let reply = match self.link {
             LinkMode::Legacy => {
-                io.write_all(&request)?;
+                io.write_all(request)?;
                 let mut reply = Vec::new();
-                let outcome = io.read_until(
-                    &mut reply,
-                    SIGNATURE_MAX,
-                    0,
-                    SIGNATURE_QUIET,
-                    SIGNATURE_TIMEOUT,
-                );
+                let outcome = io.read_until(&mut reply, SIGNATURE_MAX, 0, SIGNATURE_QUIET, timeout);
                 match outcome {
                     Ok(()) => reply,
                     Err(TransportError::Timeout { got: 0, .. }) => {
@@ -693,18 +907,20 @@ impl Protocol for MsProtocol {
                 }
             }
             LinkMode::Envelope => {
-                let payload = self.converse(io, &request)?;
+                let payload = Self::converse_with(io, request, timeout)?;
                 // Padding before the text (NULs and line breaks) is not a
                 // refusal: some firmware sends a line ending before the
                 // signature. What follows the padding either starts the
-                // signature or is a return code.
+                // signature or, on a family that leads with one, a return code.
                 let start = payload
                     .iter()
                     .position(|byte| *byte != 0 && !byte.is_ascii_whitespace())
                     .unwrap_or(payload.len());
                 let payload = &payload[start..];
-                match payload.split_first() {
-                    Some((&code, _)) if !code.is_ascii_graphic() && code != b' ' => {
+                match (self.reply_code, payload.split_first()) {
+                    (ReplyCode::Leading, Some((&code, _)))
+                        if !code.is_ascii_graphic() && code != b' ' =>
+                    {
                         return Err(ProtocolError::ReturnCode {
                             code,
                             operation: "signature",
@@ -734,6 +950,12 @@ impl Protocol for MsProtocol {
             ));
         }
         Ok(signature)
+    }
+}
+
+impl Protocol for MsProtocol {
+    fn signature(&mut self, io: &mut dyn Transport) -> Result<String, ProtocolError> {
+        self.signature_with_timeout(io, SIGNATURE_TIMEOUT)
     }
 
     fn read_page(

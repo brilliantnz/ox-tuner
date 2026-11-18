@@ -26,6 +26,13 @@ pub struct SettingsContext {
     declared: BTreeMap<String, bool>,
     /// Every flag the file asked about in an `#if`, lowercased.
     tested: BTreeSet<String>,
+    /// The declared spelling of every flag seen, keyed by lowercase name.
+    ///
+    /// Matching stays case-insensitive, but what the context hands back for
+    /// writing keeps the definition's own spelling: a settings snapshot that
+    /// reads `CELSIUS` must write `CELSIUS` back, not `celsius`. The first
+    /// spelling seen wins.
+    spelling: BTreeMap<String, String>,
 }
 
 impl SettingsContext {
@@ -48,29 +55,39 @@ impl SettingsContext {
         mut self,
         overrides: impl IntoIterator<Item = (impl Into<String>, bool)>,
     ) -> Self {
-        self.overrides = overrides
-            .into_iter()
-            .map(|(name, value)| (name.into().to_ascii_lowercase(), value))
-            .collect();
+        for (name, value) in overrides {
+            let name: String = name.into();
+            self.set_override(&name, value);
+        }
         self
     }
 
     /// Records an explicit choice.
     pub fn set_override(&mut self, name: impl AsRef<str>, active: bool) {
-        self.overrides
-            .insert(name.as_ref().to_ascii_lowercase(), active);
+        let name = name.as_ref().trim_ascii();
+        self.spelling
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| name.to_owned());
+        self.overrides.insert(name.to_ascii_lowercase(), active);
     }
 
     /// Records what the INI declared. Later declarations win, matching the
     /// "last directive read" behaviour of the dialect.
     pub(crate) fn declare(&mut self, name: &str, active: bool) {
-        self.declared
-            .insert(name.trim_ascii().to_ascii_lowercase(), active);
+        let trimmed = name.trim_ascii();
+        self.spelling
+            .entry(trimmed.to_ascii_lowercase())
+            .or_insert_with(|| trimmed.to_owned());
+        self.declared.insert(trimmed.to_ascii_lowercase(), active);
     }
 
     /// Records that the file asked whether a flag was set.
     pub(crate) fn note_tested(&mut self, name: &str) {
-        self.tested.insert(name.trim_ascii().to_ascii_lowercase());
+        let trimmed = name.trim_ascii();
+        self.spelling
+            .entry(trimmed.to_ascii_lowercase())
+            .or_insert_with(|| trimmed.to_owned());
+        self.tested.insert(trimmed.to_ascii_lowercase());
     }
 
     /// Resolves one flag through the precedence order.
@@ -88,7 +105,7 @@ impl SettingsContext {
         &self.tested
     }
 
-    /// Every flag that is active in this parse.
+    /// Every flag that is active in this parse, in the definition's spelling.
     ///
     /// Resolution goes through [`Self::is_active`], so an override can veto an
     /// active `#set` declaration — the same precedence the parser applied when
@@ -99,7 +116,12 @@ impl SettingsContext {
             .keys()
             .chain(self.overrides.keys())
             .filter(|name| self.is_active(name))
-            .cloned()
+            .map(|name| {
+                self.spelling
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone())
+            })
             .collect()
     }
 }
@@ -153,6 +175,17 @@ mod tests {
         context.declare("lambda", false);
         context.set_override("lambda", true);
         assert!(context.active_flags().contains("lambda"));
+    }
+
+    #[test]
+    fn active_flags_keep_the_definition_spelling() {
+        let mut context = SettingsContext::new();
+        context.declare("CELSIUS", true);
+        context.set_override("pressure_bar", true);
+
+        assert!(context.active_flags().contains("CELSIUS"));
+        assert!(context.active_flags().contains("pressure_bar"));
+        assert!(!context.active_flags().contains("celsius"));
     }
 
     #[test]

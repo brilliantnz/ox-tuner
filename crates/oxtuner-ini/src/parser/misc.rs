@@ -28,10 +28,17 @@ pub(crate) fn parse_extensions(
         match key.to_ascii_lowercase().as_str() {
             "defaultvalue" | "defaults" => {
                 if let Some(rest) = rest {
-                    definition
-                        .extensions
-                        .defaults
-                        .insert(&name, Number::parse(&rest));
+                    match number_list(&rest) {
+                        Some(values) => {
+                            definition.extensions.default_arrays.insert(&name, values);
+                        }
+                        None => {
+                            definition
+                                .extensions
+                                .defaults
+                                .insert(&name, Number::parse(&rest));
+                        }
+                    }
                     section.understand(*line);
                 } else {
                     section.warn(
@@ -43,10 +50,20 @@ pub(crate) fn parse_extensions(
             }
             "rawvalue" => {
                 if let Some(rest) = rest {
-                    definition
-                        .extensions
-                        .raw_defaults
-                        .insert(&name, Number::parse(&rest));
+                    match number_list(&rest) {
+                        Some(values) => {
+                            definition
+                                .extensions
+                                .raw_default_arrays
+                                .insert(&name, values);
+                        }
+                        None => {
+                            definition
+                                .extensions
+                                .raw_defaults
+                                .insert(&name, Number::parse(&rest));
+                        }
+                    }
                     section.understand(*line);
                 }
             }
@@ -120,6 +137,21 @@ fn split_reference(value: &str) -> (String, Option<String>) {
         ),
         _ => (value.trim_ascii().to_owned(), None),
     }
+}
+
+/// A space-separated default list, when the value is one.
+///
+/// `defaultValue` and `rawValue` name a scalar value for most entries and one
+/// value per array cell for the rest (`injAng, 355 355 355 355`). Only the
+/// second form is a list; a single token stays a [`Number`] so an expression
+/// keeps its own parse.
+fn number_list(value: &str) -> Option<Vec<f64>> {
+    let values: Vec<f64> = value
+        .split_ascii_whitespace()
+        .map(crate::fields::parse_f64)
+        .collect::<Option<_>>()?;
+
+    (values.len() > 1).then_some(values)
 }
 
 fn is_true(value: &str) -> bool {

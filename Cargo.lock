@@ -5202,6 +5202,7 @@ dependencies = [
  "gpui-kit",
  "oxtuner-core",
  "oxtuner-log",
+ "oxtuner-registry",
  "oxtuner-sim",
  "oxtuner-ui",
  "rust-i18n",
@@ -5240,10 +5241,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxtuner-encoding"
+version = "0.0.0"
+
+[[package]]
 name = "oxtuner-ini"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "postcard",
  "proptest",
  "serde",
@@ -5268,11 +5274,13 @@ name = "oxtuner-project"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "oxtuner-ini",
  "oxtuner-tune",
  "postcard",
  "proptest",
  "serde",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "tracing",
@@ -5292,6 +5300,7 @@ dependencies = [
 name = "oxtuner-registry"
 version = "0.0.0"
 dependencies = [
+ "oxtuner-protocol",
  "proptest",
  "reqwest",
  "serde",
@@ -5326,6 +5335,7 @@ name = "oxtuner-tune"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "oxtuner-encoding",
  "oxtuner-ini",
  "proptest",
 ]

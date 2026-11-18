@@ -88,4 +88,95 @@ proptest! {
             }
         }
     }
+
+    /// A generated label list keeps its text and its indexes. The generator
+    /// stays inside what a quoted INI value can carry (no `"` or `,`), but it
+    /// includes `=` and parentheses, the characters this parser used to split
+    /// on by mistake.
+    #[test]
+    fn generated_bit_labels_keep_their_text(
+        labels in prop::collection::vec("[A-Za-z][A-Za-z0-9 ()<>=!]{0,10}", 1..=8)
+    ) {
+        let mut text = String::from(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#define opts = ",
+        );
+        for (index, label) in labels.iter().enumerate() {
+            if index > 0 {
+                text.push_str(", ");
+            }
+            text.push('"');
+            text.push_str(label);
+            text.push('"');
+        }
+        text.push_str("\nfield = bits, U08, 0, [0:7], $opts\n");
+
+        let definition = parse(&text).expect("the generated definition parses");
+        let options = &definition
+            .constant("field")
+            .expect("the field parses")
+            .options;
+
+        prop_assert_eq!(options.len(), labels.len());
+        for (index, label) in labels.iter().enumerate() {
+            prop_assert_eq!(&options[index].label, label);
+            prop_assert_eq!(options[index].value, u32::try_from(index).expect("index fits"));
+        }
+    }
+
+    /// The presentation attributes of a PC variable keep their positions, the
+    /// same way a constant's do. A dropped scale turns `-1.5` into `-2.0` on
+    /// the next save.
+    #[test]
+    fn generated_pc_variable_attributes_keep_their_positions(
+        scale in any::<f64>().prop_filter("finite", |value| value.is_finite()),
+        translate in any::<f64>().prop_filter("finite", |value| value.is_finite()),
+        minimum in any::<f64>().prop_filter("finite", |value| value.is_finite()),
+        maximum in any::<f64>().prop_filter("finite", |value| value.is_finite()),
+        digits in 0u8..6,
+    ) {
+        let text = format!(
+            "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+             v = scalar, U16, \"u\", {scale}, {translate}, {minimum}, {maximum}, {digits}\n"
+        );
+
+        let definition = parse(&text).expect("the generated definition parses");
+        let variable = definition.pc_variables.get("v").expect("the variable parses");
+
+        let literal = |number: &Option<oxtuner_ini::Number>| {
+            number.as_ref().and_then(oxtuner_ini::Number::literal)
+        };
+        prop_assert_eq!(literal(&variable.scale), Some(scale));
+        prop_assert_eq!(literal(&variable.translate), Some(translate));
+        prop_assert_eq!(literal(&variable.minimum), Some(minimum));
+        prop_assert_eq!(literal(&variable.maximum), Some(maximum));
+        prop_assert_eq!(literal(&variable.digits), Some(f64::from(digits)));
+    }
+
+    /// Arbitrary option-list text never panics, including quotes and periods:
+    /// the separator scan walks bytes and must stay inside the field.
+    #[test]
+    fn arbitrary_option_text_never_panics(field in "[^\n]{0,200}") {
+        let text = format!(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
+             page = 1\nf = bits, U08, 0, [0:2], {field}\n"
+        );
+
+        let _ = parse(&text);
+    }
+
+    /// Arbitrary `[PcVariables]` text never panics: the shape and attribute
+    /// split runs on user text, including a missing or extra offset.
+    #[test]
+    fn arbitrary_pc_variable_text_never_panics(
+        class in prop::sample::select(vec!["array", "scalar", "bits", "string", "oddArray"]),
+        rest in "[^\n]{0,140}",
+    ) {
+        // Pinning the class keeps the input past the `unknown-class` guard, so
+        // the shape split, the offset decision and the attribute split run.
+        let text = format!(
+            "[MegaTune]\nsignature = \"x\"\n[PcVariables]\nv = {class}, U08, {rest}\n"
+        );
+
+        let _ = parse(&text);
+    }
 }

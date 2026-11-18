@@ -19,7 +19,7 @@ use rust_i18n::t;
 
 use super::actions::{
     About, AdoptEcuTune, BurnToFlash, CloseProject, ConnectEcu, DisconnectEcu, EnableWrites, Hide,
-    HideOthers, ImportTune, ManageProjects, OpenDefinition, OpenHomepage, OpenProject,
+    HideOthers, ImportTune, ManageProjects, NewProject, OpenDefinition, OpenHomepage, OpenProject,
     OpenSnapshots, Quit, RevertTune, SaveSessionTrace, SaveTune, Settings, ShowAll, ShowDisclaimer,
     ToggleBottomPanel, TogglePrimarySidebar, ToggleSecondarySidebar, WriteJournal, WriteToRam,
 };
@@ -130,6 +130,7 @@ fn app_items() -> Vec<MenuItem> {
 fn file_items() -> Vec<MenuItem> {
     let mut items = vec![
         MenuItem::action(t!("app.menu.manage_projects"), ManageProjects),
+        MenuItem::action(t!("app.menu.new_project"), NewProject),
         MenuItem::action(t!("app.menu.open_project_folder"), OpenProject),
         MenuItem::action(t!("app.menu.open_definition"), OpenDefinition),
         MenuItem::separator(),

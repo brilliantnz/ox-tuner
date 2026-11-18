@@ -392,15 +392,24 @@ fn apply_extension_flags(definition: &mut Definition) {
     // The lists live beside the constants, not inside them: destructuring
     // borrows each field once, so the sets are read in place instead of being
     // cloned (`readOnly` can name every constant in the file).
+    //
+    // The same lists also name PC variables, so both collections are walked.
     let Definition {
         extensions,
         constants,
+        pc_variables,
         ..
     } = definition;
 
     for (name, constant) in constants.iter_mut() {
         if extensions.is_read_only(name) || extensions.is_controller_priority(name) {
             constant.flags.controller_priority = true;
+        }
+    }
+
+    for (name, variable) in pc_variables.iter_mut() {
+        if extensions.is_read_only(name) || extensions.is_controller_priority(name) {
+            variable.flags.controller_priority = true;
         }
     }
 }
@@ -560,6 +569,225 @@ mod tests {
         assert_eq!(definition.pages.len(), 1);
         assert_eq!(definition.constants.len(), 1);
         assert_eq!(definition.constant("x").map(|c| c.page), Some(1));
+    }
+
+    #[test]
+    fn a_quoted_bit_option_keeps_the_equals_signs_in_its_label() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 288\n\
+                    page = 1\n\
+                    #define comparator_def = \"== (equal)\",  \"!= (different)\",  \
+                    \">= (greater/equal)\"\n\
+                    compare = bits, U08, 82, [0:2], $comparator_def\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let labels: Vec<&str> = definition
+            .constant("compare")
+            .expect("the constant parses")
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            ["== (equal)", "!= (different)", ">= (greater/equal)"],
+            "an `=` inside a quoted label is part of the label, not an index"
+        );
+    }
+
+    #[test]
+    fn a_label_list_separated_by_periods_keeps_its_option_indexes() {
+        // The reference Speeduino definition writes the first three labels of
+        // `secondarySerialProtocol` as
+        // `"Generic (Fixed List)". "Generic (ini File)". "CAN"`.
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
+                    page = 1\n\
+                    serial = bits, U08, 0, [3:6], \"Generic (Fixed List)\"\
+                    . \"Generic (ini File)\". \"CAN\", \"msDroid\"\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let options: Vec<(&str, u32)> = definition
+            .constant("serial")
+            .expect("the constant parses")
+            .options
+            .iter()
+            .map(|option| (option.label.as_str(), option.value))
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("Generic (Fixed List)", 0),
+                ("Generic (ini File)", 1),
+                ("CAN", 2),
+                ("msDroid", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scaled_pc_variable_keeps_its_numeric_attributes() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    wueAFR = array, S16, [10], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("wueAFR")
+            .expect("the variable parses");
+        let literal =
+            |number: &Option<crate::Number>| number.as_ref().and_then(crate::Number::literal);
+        assert_eq!(literal(&variable.scale), Some(0.1));
+        assert_eq!(literal(&variable.translate), Some(0.0));
+        assert_eq!(literal(&variable.minimum), Some(-4.0));
+        assert_eq!(literal(&variable.maximum), Some(4.0));
+        assert_eq!(literal(&variable.digits), Some(1.0));
+    }
+
+    #[test]
+    fn a_pc_scalar_with_an_offset_keeps_its_units() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = scalar, U16, 2, \"u\", 1.0, 0.0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("v")
+            .expect("the variable parses");
+        assert_eq!(variable.units.literal(), Some("u"));
+        assert_eq!(
+            variable.scale.as_ref().and_then(crate::Number::literal),
+            Some(1.0)
+        );
+        assert!(
+            !definition
+                .diagnostics
+                .iter()
+                .any(|issue| issue.code == "pc-offset-guess"),
+            "an unambiguous offset needs no warning"
+        );
+    }
+
+    #[test]
+    fn a_pc_bits_variable_with_an_offset_keeps_its_options() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = bits, U08, 2, [0:1], \"Off\", \"On\"\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("v")
+            .expect("the variable parses");
+        assert!(matches!(
+            variable.shape,
+            crate::Shape::Bits {
+                low: 0,
+                high: 1,
+                ..
+            }
+        ));
+        assert_eq!(variable.options.len(), 2);
+    }
+
+    #[test]
+    fn two_numeric_fields_before_the_units_warn_about_the_offset_guess() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    v = scalar, U16, 2, 7, 1.0, 0.0\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .diagnostics
+                .iter()
+                .any(|issue| issue.code == "pc-offset-guess"),
+            "an ambiguous entry is reported instead of guessed in silence"
+        );
+    }
+
+    #[test]
+    fn the_extension_lists_reach_pc_variables_too() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    gearCount = scalar, U08, 0, \"\", 1.0, 0.0\n\
+                    bias = scalar, U08, 1, \"\", 1.0, 0.0\n\
+                    [ConstantsExtensions]\n\
+                    readOnly = gearcount\n\
+                    controllerPriority = BIAS\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert!(
+            definition
+                .pc_variables
+                .get("gearCount")
+                .is_some_and(|variable| variable.flags.controller_priority),
+            "readOnly names a PC variable in another case"
+        );
+        assert!(
+            definition
+                .pc_variables
+                .get("bias")
+                .is_some_and(|variable| variable.flags.controller_priority),
+            "controllerPriority names a PC variable"
+        );
+    }
+
+    #[test]
+    fn a_storage_keyword_after_a_bit_list_is_a_flag_not_an_option() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\n\
+                    page = 1\n\
+                    field = bits, U08, 0, [0:2], \"Off\", \"On\", noMsqSave\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let field = definition.constant("field").expect("the constant parses");
+        assert_eq!(field.options.len(), 2, "the keyword is not an option");
+        assert!(field.flags.no_msq_save);
+    }
+
+    #[test]
+    fn a_storage_keyword_on_a_pc_variable_is_a_flag() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\n\
+                    bits_value = bits, U08, [0:1], \"Off\", \"On\", noMsqSave\n\
+                    alias = string, ASCII, 8, noMsqSave\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let bits_value = definition
+            .pc_variables
+            .get("bits_value")
+            .expect("the bits variable parses");
+        assert_eq!(bits_value.options.len(), 2, "the keyword is not an option");
+        assert!(bits_value.flags.no_msq_save);
+
+        let alias = definition
+            .pc_variables
+            .get("alias")
+            .expect("the string variable parses");
+        assert!(alias.flags.no_msq_save);
+    }
+
+    #[test]
+    fn a_string_pc_variable_keeps_its_length() {
+        let text = "[MegaTune]\nsignature = \"x\"\n[PcVariables]\nAlias = string, ASCII, 20\n";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let variable = definition
+            .pc_variables
+            .get("Alias")
+            .expect("the variable parses");
+        assert_eq!(
+            variable.shape,
+            crate::Shape::Text {
+                length: crate::Dimension::Fixed(20),
+                columns: None,
+            },
+            "a string PC variable is text, not a scalar to parse as a number"
+        );
     }
 
     #[test]

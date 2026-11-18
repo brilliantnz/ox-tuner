@@ -66,10 +66,11 @@ mod error;
 mod frame;
 mod ms;
 mod pattern;
+mod probe;
 
 pub use behavior::{
-    BehaviorKind, BurnPlan, Crc, Crc32Variant, CrcReply, EcuBehavior, Match, MsCompatibleBehavior,
-    PageSwitch, ReplyCode, SpeeduinoBehavior,
+    BehaviorKind, BurnPlan, Crc, Crc32Variant, CrcReply, EcuBehavior, FomeBehavior, Match,
+    MsCompatibleBehavior, PageSwitch, ReplyCode, RusefiBehavior, SpeeduinoBehavior,
 };
 pub use crc32::crc32;
 pub use error::ProtocolError;
@@ -77,3 +78,7 @@ pub use frame::{Frame, FrameDecoder, FrameError};
 pub use ms::{LinkMode, MsProtocol, PageSpec, Protocol, RawCommandReport, RealtimeSpec};
 pub use oxtuner_ini::WireOrder;
 pub use pattern::{CommandPattern, PatternMatch, page_identifier};
+pub use probe::{
+    COMMON_PROBE_BAUD_RATES, DEFAULT_BAUD_RATE, PICKABLE_BAUD_RATES, PROBE_PORT_SETTLE, PROBES,
+    ProbeSpec, RUSEFI, SPEEDUINO,
+};

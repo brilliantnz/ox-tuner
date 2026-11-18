@@ -229,12 +229,12 @@ pub(super) fn connect(
 
     let link = port.clone();
     let effective_framing = framing.unwrap_or_else(|| default_framing(definition));
-    let plan = IoPlan {
-        definition: Box::new(definition.clone()),
+    let plan = IoPlan::definition(
+        Box::new(definition.clone()),
         behavior,
-        link_mode: framing,
-        link: link.clone(),
-    };
+        framing,
+        link.clone(),
+    );
 
     match IoThread::start(&plan) {
         Ok((thread, replies)) => {
@@ -248,7 +248,9 @@ pub(super) fn connect(
                 standalone,
             );
             connection.connection.probe = probe;
-            if let Err(error) = connection.request(op, PendingKind::Connect, IoOp::Signature) {
+            if let Err(error) =
+                connection.request(op, PendingKind::Connect, IoOp::Signature { timeout: None })
+            {
                 tracing::warn!(%op, %error, "the signature query could not be queued");
                 report.failures += 1;
                 send(
@@ -463,6 +465,22 @@ pub(super) fn on_reply(
                     view: summary,
                 },
             );
+            // A connect that answered is the one worth reopening next time;
+            // remembering it in the project keeps each project on its own ECU.
+            // A reconnect to the same port has nothing to persist, so the state
+            // file is left alone.
+            if let Session::Project(project) = session
+                && let Some(saved) = &live.connection.saved_connection
+                && {
+                    let connection = &project.state().connection;
+                    connection.last_port.as_deref() != Some(saved.port.as_str())
+                        || connection.baud_override != Some(saved.baud)
+                }
+                && let Err(error) =
+                    project.set_connection(Some(saved.port.clone()), Some(saved.baud))
+            {
+                tracing::warn!(%error, "the project device could not be persisted");
+            }
             true
         }
         (PendingKind::Connect, IoOutcome::Failed(failure)) => {

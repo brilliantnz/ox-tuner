@@ -134,6 +134,56 @@ fn msq_bytes() -> Vec<u8> {
     body.into_bytes()
 }
 
+/// A project whose definition and tune carry scaled PC variables, the shape a
+/// real project uses for its AFR bins.
+fn pc_variables_project() -> tempfile::TempDir {
+    const VARIABLES: usize = 100;
+
+    let mut ini = String::from(
+        "\
+[MegaTune]
+signature = \"bench 1\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+reqFuel = scalar, U16, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+
+[PcVariables]
+",
+    );
+
+    let mut body = String::from(
+        "<msq><versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"bench 1\"/><page>",
+    );
+
+    for index in 0..VARIABLES {
+        let _ = writeln!(
+            ini,
+            "bins_{index} = array, S16, [10], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1"
+        );
+        let _ = write!(
+            body,
+            "<pcVariable cols=\"1\" digits=\"1\" name=\"bins_{index}\" rows=\"10\">\
+             -1.5 -1.2 -1.0 -0.8 -0.6 -0.4 -0.2 -0.1 0.0 0.1</pcVariable>"
+        );
+    }
+
+    body.push_str(
+        "</page><page number=\"0\" size=\"288\"><constant name=\"reqFuel\">10.0</constant></page></msq>",
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = dir.path().join("projectCfg");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(config.join("mainController.ini"), ini).expect("ini");
+    std::fs::write(dir.path().join("CurrentTune.msq"), body).expect("msq");
+
+    dir
+}
+
 /// A synthetic project folder: `projectCfg/mainController.ini` + `CurrentTune.msq`.
 fn project_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -175,6 +225,17 @@ fn bench_project_open(criterion: &mut Criterion) {
 
     criterion.bench_function("project_open_synthetic", |bencher| {
         bencher.iter(|| black_box(Project::open(black_box(dir.path())).expect("opens")));
+    });
+}
+
+/// Scaled PC variables: their presentation attributes are resolved and their
+/// values loaded, the path the AFR-bin fix changed.
+fn bench_project_open_pc_variables(criterion: &mut Criterion) {
+    let dir = pc_variables_project();
+
+    criterion.bench_function("project_open_scaled_pc_variables", |bencher| {
+        bencher
+            .iter(|| black_box(Project::open(black_box(dir.path())).expect("the project opens")));
     });
 }
 
@@ -253,6 +314,7 @@ criterion_group!(
     bench_project_open,
     bench_project_open_reference,
     bench_project_open_reference_warm,
+    bench_project_open_pc_variables,
     bench_project_save_noop
 );
 criterion_main!(benches);

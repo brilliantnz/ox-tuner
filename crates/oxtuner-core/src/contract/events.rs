@@ -3,14 +3,16 @@
 use std::path::PathBuf;
 
 use oxtuner_datalog::SessionLogReport;
+use oxtuner_protocol::LinkMode;
 use oxtuner_tune::TuneStatus;
 
 use crate::menu::MenuNode;
 
+use super::project::DefinitionPreview;
 use super::{
-    BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, ImportReport,
-    JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason, RevertReport, SaveReport,
-    TableView, WriteReport,
+    BurnReport, ConnectionView, ControllerActionReport, DefinitionView, DialogView, FirmwareProbe,
+    ImportReport, JournalEntry, OpId, PortView, ProjectView, ReadReport, RejectReason,
+    RevertReport, SaveReport, TableView, WriteReport,
 };
 
 /// A reply from the core.
@@ -27,6 +29,15 @@ pub enum Event {
         /// What the definition contains.
         view: DefinitionView,
     },
+    /// A definition was inspected for the new-project wizard.
+    DefinitionInspected {
+        /// The command this answers.
+        op: OpId,
+        /// The definition that was read.
+        path: PathBuf,
+        /// The signature and setting groups the wizard renders.
+        preview: DefinitionPreview,
+    },
     /// A project is open and owned by the core: definition, tune images and the
     /// load gate's findings.
     ProjectOpened {
@@ -41,6 +52,16 @@ pub enum Event {
         op: OpId,
         /// What the save rewrote.
         outcome: SaveReport,
+    },
+    /// The project's panel layout was stored, or there was no project to
+    /// store it for.
+    ProjectLayoutSaved {
+        /// The command this answers.
+        op: OpId,
+        /// Whether the layout reached the state file. A layout is a
+        /// convenience next to the tune, so a failed write is reported here
+        /// instead of failing the session.
+        stored: bool,
     },
     /// A table was read from the open project.
     TableRead {
@@ -93,7 +114,12 @@ pub enum Event {
         /// The evaluated navigation tree.
         menu: Vec<MenuNode>,
     },
-    /// The serial ports the connect dialog can offer.
+    /// The serial ports the core last sampled, on explicit request.
+    ///
+    /// The core also pushes this snapshot on its own whenever it changes (see
+    /// [`Self::PortsChanged`]), so this command is the on-demand resync: the
+    /// Refresh button, or a check right before a scan that must not miss a
+    /// freshly plugged device.
     PortsListed {
         /// The command this answers.
         op: OpId,
@@ -102,14 +128,16 @@ pub enum Event {
     },
     /// The set of serial ports changed while the core was idle.
     ///
-    /// Sent only when the list actually differs from the last one published, so a
-    /// steady machine produces no traffic. The same snapshot answers
-    /// [`super::Command::ListPorts`].
+    /// Sent whenever the sampled list differs from the last one published,
+    /// including the first sample when it found ports: a view that opens later
+    /// renders the last published list and never has to ask for the initial
+    /// one. A steady machine produces no traffic. The same snapshot answers
+    /// [`super::CoreCommand::ListPorts`].
     PortsChanged {
         /// The ports as they are now.
         ports: Vec<PortView>,
     },
-    /// A [`super::Command::TestConnection`] read a signature.
+    /// A [`super::CoreCommand::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
     /// and read-only rule, without a session or a page read.
@@ -118,6 +146,26 @@ pub enum Event {
         op: OpId,
         /// What the test found.
         view: ConnectionView,
+    },
+    /// A [`super::CoreCommand::ProbeFirmware`] read a signature without a
+    /// definition.
+    ///
+    /// There is no verdict here because there is nothing to compare against:
+    /// the signature is the first question, and the registry answers the next
+    /// one.
+    FirmwareProbed {
+        /// The command this answers.
+        op: OpId,
+        /// The port the answer came from.
+        port: String,
+        /// The baud rate that answered, when the port was a serial device.
+        baud: Option<u32>,
+        /// The framing the probe used.
+        framing: LinkMode,
+        /// The family probe that answered.
+        probe: FirmwareProbe,
+        /// The signature text the ECU sent.
+        signature: String,
     },
     /// The ECU answered and the session is up.
     Connected {
@@ -273,8 +321,11 @@ impl Event {
     pub fn op(&self) -> Option<OpId> {
         match self {
             Self::DefinitionLoaded { op, .. }
+            | Self::DefinitionInspected { op, .. }
+            | Self::FirmwareProbed { op, .. }
             | Self::ProjectOpened { op, .. }
             | Self::TuneSaved { op, .. }
+            | Self::ProjectLayoutSaved { op, .. }
             | Self::TableRead { op, .. }
             | Self::TableEdited { op, .. }
             | Self::DialogRead { op, .. }
@@ -357,6 +408,8 @@ pub enum FailureCode {
     ConnectFailed,
     /// The signature test could not run (no definition, port busy, no answer).
     TestFailed,
+    /// A firmware probe reached no signature on the port it tried.
+    FirmwareNotDetected,
     /// There is no connection to act on.
     NotConnected,
     /// A page read failed. The ECU image is left untouched.
@@ -416,6 +469,7 @@ impl FailureCode {
             Self::ControllerActionFailed => "controller-command-failed",
             Self::ConnectFailed => "connect-failed",
             Self::TestFailed => "test-failed",
+            Self::FirmwareNotDetected => "firmware-not-detected",
             Self::NotConnected => "not-connected",
             Self::ReadFailed => "read-failed",
             Self::AdoptRefused => "adopt-refused",

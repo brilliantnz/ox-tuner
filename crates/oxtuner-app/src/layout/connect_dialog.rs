@@ -28,14 +28,13 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, ElementId, FontWeight, IntoElement as _, ParentElement as _,
     Styled as _, Window, div, px,
 };
-use oxtuner_core::{ConnectionView, FailureCode, LinkMode, PortChoice, PortView, SignatureVerdict};
+use oxtuner_core::{
+    ConnectionState, ConnectionTest, ConnectionView, DEFAULT_BAUD_RATE, FailureCode, LinkMode,
+    PICKABLE_BAUD_RATES, PortChoice, PortView, SignatureVerdict,
+};
 
-use crate::core::{self, CoreService, TestResult};
+use crate::core::{self, CoreService};
 use crate::i18n::t;
-use crate::settings::preferences::{AppSettings, ConnectionSettings};
-
-/// The baud rates the dialog offers.
-const BAUDS: [u32; 6] = [9_600, 57_600, 115_200, 230_400, 500_000, 1_000_000];
 
 /// Where the bytes go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +75,7 @@ struct DialogModel {
 }
 
 impl DialogModel {
-    fn new(connection: ConnectionSettings) -> Self {
+    fn new(connection: ConnectionState) -> Self {
         Self {
             mode: Mode::Serial,
             selected_port: connection.last_port,
@@ -104,25 +103,37 @@ impl DialogModel {
     }
 }
 
-/// Opens the connect dialog and starts a port scan.
+/// Opens the connect dialog.
 #[expect(
     clippy::too_many_lines,
     reason = "the connect dialog builds its mode, port, test and status sections in one place"
 )]
 pub(crate) fn show(window: &mut Window, cx: &mut App) {
-    let defaults = cx.global::<AppSettings>().connection().clone();
-    let last_port = defaults.last_port.clone();
-    let model = Rc::new(RefCell::new(DialogModel::new(defaults.clone())));
-    core::refresh_ports(cx);
-
+    // The connection is per project: each project remembers the ECU it talks to.
+    let connection = CoreService::status(cx)
+        .project
+        .as_ref()
+        .map(|project| project.connection.clone())
+        .unwrap_or_default();
+    let last_port = connection.last_port.clone();
     // The pickers own their selection; the dialog reads it each frame.
-    let baud_index = defaults
+    let baud_index = connection
         .baud_override
-        .and_then(|baud| BAUDS.iter().position(|rate| *rate == baud))
-        .unwrap_or(2);
+        .and_then(|baud| PICKABLE_BAUD_RATES.iter().position(|rate| *rate == baud))
+        .unwrap_or_else(|| {
+            PICKABLE_BAUD_RATES
+                .iter()
+                .position(|rate| *rate == DEFAULT_BAUD_RATE)
+                .unwrap_or(0)
+        });
+    let model = Rc::new(RefCell::new(DialogModel::new(connection)));
+
     let baud_state = cx.new(|cx| {
         SelectState::new(
-            BAUDS.iter().map(u32::to_string).collect::<Vec<_>>(),
+            PICKABLE_BAUD_RATES
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>(),
             Some(IndexPath::new(baud_index)),
             window,
             cx,
@@ -143,8 +154,11 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
 
     crate::app::dialog::open(window, cx, move |dialog, _, cx| {
         let status = CoreService::status(cx);
-        let ports = status.ports.clone();
-        let scanning = status.scanning;
+        // The ports the core last published; empty until its first sample
+        // arrives, so the dialog tells still-looking apart from no-ports.
+        let published = core::ports(cx);
+        let ports: Vec<PortView> = published.map_or_else(Vec::new, <[_]>::to_vec);
+        let primed = published.is_some();
         let testing = status.testing.clone();
         let test = status.test.clone();
         let connection = status.connection.clone();
@@ -162,8 +176,8 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         let baud = baud_state
             .read(cx)
             .selected_index(cx)
-            .and_then(|index| BAUDS.get(index.row).copied())
-            .unwrap_or(115_200);
+            .and_then(|index| PICKABLE_BAUD_RATES.get(index.row).copied())
+            .unwrap_or(DEFAULT_BAUD_RATE);
         let framing = match framing_state
             .read(cx)
             .selected_index(cx)
@@ -177,6 +191,13 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             let model = model.borrow();
             (model.mode, model.port_choice(&ports, baud))
         };
+        // The remembered connection is a hint, never a constraint: when the port is
+        // not on this machine the dialog says so instead of silently picking
+        // another ECU's port.
+        let port_hint = last_port.as_ref().map(|last| {
+            let present = ports.iter().any(|port| port.name == *last);
+            (last.clone(), present)
+        });
 
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
@@ -250,10 +271,10 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                 })
                 .collect();
 
-            let empty = if scanning {
-                t!("app.connect.scanning").to_string()
-            } else {
+            let empty = if primed {
                 t!("app.connect.no_ports").to_string()
+            } else {
+                t!("app.connect.scanning").to_string()
             };
 
             v_flex()
@@ -303,12 +324,16 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                                 .children(rows),
                         ),
                 )
-                .when_some(last_port.clone(), |this, last| {
+                .when_some(port_hint, |this, (last, present)| {
                     this.child(
                         div()
                             .text_xs()
-                            .text_color(muted)
-                            .child(t!("app.connect.last_port", port = last)),
+                            .text_color(if present { muted } else { danger })
+                            .child(if present {
+                                t!("app.connect.project_port", port = last)
+                            } else {
+                                t!("app.connect.project_port_missing", port = last)
+                            }),
                     )
                 })
                 .into_any_element()
@@ -377,8 +402,18 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             cx,
             connection.as_ref(),
             link_lost.as_deref(),
-            testing.as_deref(),
-            test.as_ref(),
+            testing.as_ref().map(|testing| testing.port.as_str()),
+            // A test answers for the picker state at click time; a changed
+            // picker hides the stale answer instead of attributing it to the
+            // new selection.
+            test.as_ref().filter(|test| {
+                chosen.as_ref().is_some_and(|choice| match choice {
+                    PortChoice::Serial { port, baud } => {
+                        test.port == *port && test.baud == Some(*baud)
+                    }
+                    PortChoice::Custom(link) => test.port == link.label() && test.baud.is_none(),
+                })
+            }),
             connecting.as_deref(),
             muted,
             danger,
@@ -386,10 +421,9 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         );
 
         let test_button = Button::new("connect-test")
-            .label(if testing.is_some() {
-                t!("app.connect.testing")
-            } else {
-                t!("app.connect.test")
+            .label(match testing.as_ref() {
+                Some(testing) => t!("app.connect.testing", port = testing.port.clone()),
+                None => t!("app.connect.test"),
             })
             .icon(IconName::Search)
             .outline()
@@ -524,7 +558,7 @@ fn session_status(
     connection: Option<&ConnectionView>,
     link_lost: Option<&str>,
     testing: Option<&str>,
-    test: Option<&TestResult>,
+    test: Option<&ConnectionTest>,
     connecting: Option<&str>,
     muted: gpui_kit::Hsla,
     danger: gpui_kit::Hsla,

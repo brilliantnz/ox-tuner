@@ -10,7 +10,8 @@ mod tune;
 pub(crate) use edits::{edit_axis, edit_scalar, edit_table, read_dialog, read_table};
 pub(crate) use log::{start_log, stop_log};
 pub(crate) use project::{
-    choose_definition, close_project, open_project, refresh_project_availability, save_tune,
+    choose_definition, close_project, create_project, inspect_definition, open_project,
+    refresh_project_availability, save_project_layout, save_tune,
 };
 pub(crate) use session::{
     adopt_ecu_tune, connect, connect_to_simulator, disconnect, read_all, refresh_ports,
@@ -81,6 +82,10 @@ pub(crate) fn report_failure(cx: &mut App, code: FailureCode, message: String) {
     let status = &mut cx.global_mut::<CoreService>().status;
     status.failure_serial = status.failure_serial.wrapping_add(1);
     status.failure = Some(Failure { code, message });
+    if code == FailureCode::DefinitionRejected {
+        // The send was refused, so no answer is coming for it.
+        status.inspect_pending = None;
+    }
     cx.refresh_windows();
 }
 

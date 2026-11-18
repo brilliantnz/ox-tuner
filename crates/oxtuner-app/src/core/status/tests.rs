@@ -4,6 +4,7 @@
 )]
 
 use super::*;
+use oxtuner_core::ConnectionState;
 
 fn summary() -> DefinitionView {
     DefinitionView {
@@ -46,6 +47,8 @@ fn project() -> ProjectView {
         loaded: 817,
         skipped: 0,
         warnings: Vec::new(),
+        layout: oxtuner_core::ProjectLayout::default(),
+        connection: ConnectionState::default(),
     }
 }
 
@@ -156,7 +159,7 @@ fn a_project_and_a_definition_are_mutually_exclusive() {
     let mut status = CoreStatus::default();
     status.apply(Update::Loaded(summary()));
 
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     assert!(status.project.is_some());
     assert!(
@@ -169,7 +172,7 @@ fn a_project_and_a_definition_are_mutually_exclusive() {
 #[test]
 fn a_save_is_shown_until_the_next_failure() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     status.apply(Update::Saved(SaveReport {
         path: std::path::PathBuf::from("/projects/roadster/CurrentTune.msq"),
@@ -190,7 +193,7 @@ fn a_save_is_shown_until_the_next_failure() {
 #[test]
 fn a_failure_keeps_the_project_that_is_still_open() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
 
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
 
@@ -316,9 +319,19 @@ fn a_bad_import_is_not_halted() {
 }
 
 #[test]
-fn unloading_clears_every_field() {
-    let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+fn unloading_drops_the_project_but_keeps_machine_state() {
+    let mut status = CoreStatus {
+        ports: vec![PortView {
+            name: "/dev/cu.usbmodem".to_owned(),
+            label: "/dev/cu.usbmodem".to_owned(),
+            vid: None,
+            pid: None,
+            serial: None,
+        }],
+        ports_revision: 3,
+        ..CoreStatus::default()
+    };
+    status.apply(Update::Opened(Box::new(project())));
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));
 
     status.apply(Update::Unloaded);
@@ -327,6 +340,33 @@ fn unloading_clears_every_field() {
     assert!(status.definition.is_none());
     assert!(status.last_save.is_none());
     assert!(status.failure.is_none());
+    assert_eq!(status.ports_revision, 3);
+    assert_eq!(
+        status
+            .ports
+            .iter()
+            .map(|port| port.name.as_str())
+            .collect::<Vec<_>>(),
+        ["/dev/cu.usbmodem"],
+        "the sampled port list is machine state, not project state"
+    );
+}
+
+#[test]
+fn creating_marks_the_folder_pending_with_its_own_kind() {
+    let mut status = CoreStatus::default();
+
+    status.begin_pending_creation(Path::new("/projects/roadster"));
+    let pending = status.pending_project.as_ref().expect("pending");
+    assert_eq!(pending.kind, PendingProjectKind::Create);
+    assert_eq!(pending.name.as_str(), "roadster");
+
+    // An open afterwards replaces it, and the splash word follows the kind.
+    status.begin_pending_project(Path::new("/projects/other"));
+    assert_eq!(
+        status.pending_project.as_ref().map(|pending| pending.kind),
+        Some(PendingProjectKind::Open)
+    );
 }
 
 #[test]
@@ -358,7 +398,7 @@ fn opening_marks_the_folder_pending_until_its_own_answer_arrives() {
         Some(7)
     );
 
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
     assert!(
         status.finish_pending_project_at(Some(7)),
         "the request's own answer ends the loading state"
@@ -407,7 +447,7 @@ fn a_refused_command_cancels_the_loading_state() {
 #[test]
 fn a_failed_open_clears_the_loading_state_but_keeps_the_old_project() {
     let mut status = CoreStatus::default();
-    status.apply(Update::Opened(project()));
+    status.apply(Update::Opened(Box::new(project())));
     status.begin_pending_project(Path::new("/projects/other"));
     status.pending_project.as_mut().unwrap().op = Some(9);
     status.apply(Update::Failed(failure(FailureCode::ProjectRejected)));

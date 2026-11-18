@@ -10,6 +10,7 @@ use crate::definition_cache::{DefinitionCache, DefinitionSource, IncludeRecorder
 use crate::flags;
 use crate::load::{self};
 use crate::msq::Msq;
+use crate::sidecar::ProjectState;
 
 use super::{
     CONFIG_DIR, MAIN_DEFINITION, PC_VALUES_FILE, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE,
@@ -44,6 +45,14 @@ impl Project {
     ) -> Result<Self, ProjectError> {
         let root = root.as_ref();
         let _span = tracing::info_span!("project_open", root = %root.display()).entered();
+
+        let result = Self::open_folder(root, cache_dir);
+        log_open(&result);
+        result
+    }
+
+    /// The body of [`Self::open_with_cache`], split out so one place logs it.
+    fn open_folder(root: &Path, cache_dir: Option<&Path>) -> Result<Self, ProjectError> {
         let mut phase = Instant::now();
 
         if !root.join(CONFIG_DIR).is_dir() {
@@ -126,6 +135,13 @@ impl Project {
             "project open phases"
         );
 
+        let (mut state, state_writable) = read_state(root);
+        state.set_definition(
+            super::sidecar_definition_path(root, &definition_path),
+            crate::hash::hex(&definition_digest),
+            definition.signature.clone(),
+        );
+
         Ok(Self {
             root: root.to_owned(),
             definition_path,
@@ -137,6 +153,8 @@ impl Project {
             msq,
             images,
             report: loaded.report,
+            state,
+            state_writable,
             in_folder: true,
         })
     }
@@ -167,6 +185,19 @@ impl Project {
         let tune_path = tune_path.as_ref();
         let definition_path = definition_path.as_ref();
         let _span = tracing::info_span!("project_open", root = %tune_path.display()).entered();
+
+        let result = Self::open_tune_file(tune_path, definition_path, cache_dir);
+        log_open(&result);
+        result
+    }
+
+    /// The body of [`Self::open_standalone_with_cache`], split out so one place
+    /// logs it.
+    fn open_tune_file(
+        tune_path: &Path,
+        definition_path: &Path,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, ProjectError> {
         let mut phase = Instant::now();
 
         let definition_bytes = {
@@ -220,6 +251,15 @@ impl Project {
             "project open phases"
         );
 
+        // Standalone state is memory-only: a bare tune file neither sprouts a
+        // sidecar beside it nor adopts the neighbor folder's one.
+        let mut state = ProjectState::default();
+        state.set_definition(
+            super::sidecar_definition_path(&root, definition_path),
+            crate::hash::hex(&definition_digest),
+            definition.signature.clone(),
+        );
+
         Ok(Self {
             root,
             definition_path: definition_path.to_owned(),
@@ -231,8 +271,25 @@ impl Project {
             msq,
             images,
             report: loaded.report,
+            state,
+            state_writable: false,
             in_folder: false,
         })
+    }
+}
+
+/// Logs the outcome of an open once, with a stable kind for the failure.
+fn log_open(result: &Result<Project, ProjectError>) {
+    match result {
+        Ok(project) => tracing::debug!(
+            root = %project.root().display(),
+            signature = %project.definition().signature,
+            pages = project.definition().pages.len(),
+            constants = project.definition().constants.len(),
+            read_only = project.is_read_only(),
+            "project opened"
+        ),
+        Err(error) => tracing::warn!(error_kind = error.kind(), %error, "project open failed"),
     }
 }
 
@@ -398,6 +455,35 @@ fn snapshot_settings(msq: &Msq, project: &[(String, bool)]) -> SettingsContext {
     overrides.extend(settings_overrides(&msq.settings()));
 
     SettingsContext::new().with_overrides(overrides)
+}
+
+/// Reads the project's persisted state, falling back to a default that starts
+/// fresh when the sidecar is missing or unreadable.
+///
+/// A corrupt sidecar is a debug line, not an open failure: the tune is
+/// calibration data, the state file is a convenience, and the next write
+/// heals it. A sidecar from a newer build also starts fresh, but the project
+/// remembers not to overwrite it.
+fn read_state(root: &Path) -> (ProjectState, bool) {
+    match ProjectState::read(root) {
+        Ok(state) => (state.unwrap_or_default(), true),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "the project state needs a newer build and stays untouched"
+            );
+            (ProjectState::default(), false)
+        }
+        Err(error) => {
+            tracing::debug!(
+                root = %root.display(),
+                %error,
+                "the project state could not be read and starts fresh"
+            );
+            (ProjectState::default(), true)
+        }
+    }
 }
 
 /// The optional files a project keeps beside its definition.

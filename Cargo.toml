@@ -15,6 +15,7 @@ members = [
   "crates/oxtuner-protocol",
   "crates/oxtuner-registry",
   "crates/oxtuner-sim",
+  "crates/oxtuner-encoding",
   "crates/oxtuner-transport",
   "crates/oxtuner-tune",
   "crates/oxtuner-ui",
@@ -57,6 +58,7 @@ oxtuner-project = { path = "./crates/oxtuner-project" }
 oxtuner-protocol = { path = "./crates/oxtuner-protocol" }
 oxtuner-registry = { path = "./crates/oxtuner-registry" }
 oxtuner-sim = { path = "./crates/oxtuner-sim" }
+oxtuner-encoding = { path = "./crates/oxtuner-encoding" }
 oxtuner-transport = { path = "./crates/oxtuner-transport" }
 oxtuner-tune = { path = "./crates/oxtuner-tune" }
 oxtuner-ui = { path = "./crates/oxtuner-ui" }

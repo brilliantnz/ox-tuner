@@ -268,6 +268,49 @@ mod tests {
     }
 
     #[test]
+    fn the_ids_match_the_protocol_behaviors_in_select_order() {
+        use oxtuner_protocol::{BehaviorKind, FomeBehavior, RusefiBehavior, SpeeduinoBehavior};
+
+        // One explicit pair per family that both crates claim. The registry
+        // resolves downloads and the protocol runs the wire; the strings are
+        // the only thing they share, so the pair is pinned here instead of
+        // living in a comment.
+        let pairs = [
+            (
+                BehaviorKind::Speeduino(SpeeduinoBehavior),
+                Family::Speeduino,
+            ),
+            (BehaviorKind::Fome(FomeBehavior), Family::Fome),
+            (BehaviorKind::Rusefi(RusefiBehavior), Family::Rusefi),
+        ];
+
+        for (behavior, family) in pairs {
+            assert_eq!(
+                behavior.as_dyn().id(),
+                family.id(),
+                "{behavior:?} and {family:?} must file one family under one name"
+            );
+        }
+
+        // The order matters on both sides: a board that keeps a `speeduino`
+        // signature stays Speeduino, and FOME is claimed before rusEFI.
+        for signature in [
+            "speeduino fome 202401",
+            "rusEFI (FOME) .2026.06.03.proteus_h7.3416487136",
+            "rusEFI master.2024.02.02.alphax-4chan.1293678056",
+        ] {
+            assert_eq!(
+                family_of(signature).id(),
+                BehaviorKind::for_signature(signature)
+                    .expect("the protocol claims it")
+                    .as_dyn()
+                    .id(),
+                "{signature:?} classifies differently in each crate"
+            );
+        }
+    }
+
+    #[test]
     fn the_ids_are_stable_lowercase_keys() {
         for family in [
             Family::Speeduino,

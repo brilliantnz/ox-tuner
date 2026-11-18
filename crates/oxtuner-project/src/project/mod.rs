@@ -9,7 +9,7 @@
 //! restructured (ADR-0007), and the only writes inside the project are:
 //!
 //! - `CurrentTune.msq` — and only the constants whose values changed;
-//! - `.ox-tuner/provenance` — which INI was used, by hash and signature.
+//! - `.oxtuner/project.json` — which INI was used, plus the project's device and UI state.
 //!
 //! A caller may additionally pass a cache directory; the parsed definition is
 //! then memoized there, never inside the project (ADR-0026).
@@ -29,7 +29,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use oxtuner_ini::{Definition, IniError, SettingsContext};
 use oxtuner_tune::{TuneError, TuneImages};
@@ -38,6 +38,7 @@ use crate::check::LoadReport;
 use crate::definition_cache::DefinitionSource;
 use crate::load::FileValueError;
 use crate::msq::{Msq, MsqError};
+use crate::sidecar::ProjectState;
 
 /// The tune file inside a project.
 pub const TUNE_FILE: &str = "CurrentTune.msq";
@@ -89,6 +90,35 @@ pub enum ProjectError {
         /// The expected path.
         path: PathBuf,
     },
+    /// The project name is not usable as a folder name.
+    InvalidName {
+        /// The name that was rejected.
+        name: String,
+        /// Why the name was rejected.
+        reason: &'static str,
+    },
+    /// The target path is already taken, by a folder or by a file.
+    TargetExists {
+        /// The path that was inspected.
+        path: PathBuf,
+    },
+    /// The definition's signature differs from the ECU's.
+    SignatureMismatch {
+        /// The signature the ECU reported.
+        expected: String,
+        /// The signature the definition declares.
+        found: String,
+    },
+    /// The chosen definition is not a `.ini` file.
+    DefinitionNotIni {
+        /// The path that was picked.
+        path: PathBuf,
+    },
+    /// The definition pulls in `#include` files that creation cannot copy.
+    DefinitionNeedsIncludes {
+        /// The include names the definition asked for.
+        names: Vec<String>,
+    },
     /// A file could not be read or written.
     Io {
         /// The file involved.
@@ -103,6 +133,11 @@ pub enum ProjectError {
     /// The tune opened read-only; the reasons are the blockers.
     ReadOnly {
         /// Why saving is refused.
+        reasons: Vec<String>,
+    },
+    /// Creation wrote a tune the definition refuses to load writable.
+    ScaffoldRejected {
+        /// The blockers the created project opened with.
         reasons: Vec<String>,
     },
     /// A value cannot be represented in a `.msq`.
@@ -152,17 +187,70 @@ impl fmt::Display for ProjectError {
                     path.display()
                 )
             }
+            Self::InvalidName { name, reason } => {
+                write!(formatter, "invalid project name `{name}`: {reason}")
+            }
+            Self::TargetExists { path } => write!(
+                formatter,
+                "{} already exists, choose another name or folder",
+                path.display()
+            ),
+            Self::SignatureMismatch { expected, found } => write!(
+                formatter,
+                "the ECU reports `{expected}`, the definition declares `{found}`"
+            ),
+            Self::DefinitionNotIni { path } => {
+                write!(formatter, "{} is not a .ini definition", path.display())
+            }
+            Self::DefinitionNeedsIncludes { names } => write!(
+                formatter,
+                "the definition includes {}; copy the whole definition folder instead",
+                names.join(", ")
+            ),
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::Msq(error) => write!(formatter, "{error}"),
             Self::Ini(error) => write!(formatter, "the definition could not be parsed: {error}"),
             Self::ReadOnly { reasons } => {
                 write!(formatter, "the tune is read-only: {}", reasons.join("; "))
             }
+            Self::ScaffoldRejected { reasons } => write!(
+                formatter,
+                "the definition and the tune creation wrote for it disagree: {}",
+                reasons.join("; ")
+            ),
             Self::Unrepresentable { name, source } => write!(formatter, "{name}: {source}"),
             Self::Tune(error) => write!(formatter, "{error}"),
             Self::Sidecar { path, source } => {
                 write!(formatter, "cannot write {}: {source}", path.display())
             }
+        }
+    }
+}
+
+impl ProjectError {
+    /// A stable code for logs, diagnostics and a future notification policy.
+    ///
+    /// Never contains user data, so it is safe to group or filter on.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NotAProject { .. } => "not-a-project",
+            Self::MissingDefinition { .. } => "missing-definition",
+            Self::AmbiguousDefinition { .. } => "ambiguous-definition",
+            Self::MissingTune { .. } => "missing-tune",
+            Self::InvalidName { .. } => "invalid-name",
+            Self::TargetExists { .. } => "target-exists",
+            Self::SignatureMismatch { .. } => "signature-mismatch",
+            Self::DefinitionNotIni { .. } => "definition-not-ini",
+            Self::DefinitionNeedsIncludes { .. } => "definition-needs-includes",
+            Self::Io { .. } => "io",
+            Self::Msq(_) => "msq",
+            Self::Ini(_) => "ini",
+            Self::ReadOnly { .. } => "read-only",
+            Self::ScaffoldRejected { .. } => "scaffold-rejected",
+            Self::Unrepresentable { .. } => "unrepresentable",
+            Self::Tune(_) => "tune",
+            Self::Sidecar { .. } => "sidecar",
         }
     }
 }
@@ -179,7 +267,13 @@ impl std::error::Error for ProjectError {
             | Self::MissingDefinition { .. }
             | Self::AmbiguousDefinition { .. }
             | Self::MissingTune { .. }
-            | Self::ReadOnly { .. } => None,
+            | Self::InvalidName { .. }
+            | Self::TargetExists { .. }
+            | Self::SignatureMismatch { .. }
+            | Self::DefinitionNotIni { .. }
+            | Self::DefinitionNeedsIncludes { .. }
+            | Self::ReadOnly { .. }
+            | Self::ScaffoldRejected { .. } => None,
         }
     }
 }
@@ -220,15 +314,35 @@ pub struct Project {
     msq: Msq,
     images: TuneImages,
     report: LoadReport,
+    state: ProjectState,
+    /// Whether the state file may be written back.
+    ///
+    /// A sidecar from a newer build reads as the default but is never
+    /// overwritten, so a downgrade cannot destroy it.
+    state_writable: bool,
     in_folder: bool,
 }
 
 mod access;
+mod create;
 mod detect;
 mod open;
 mod save;
 
+pub use create::{
+    ConnectionSeed, CreateRequest, accepts_definition, ensure_target_free, split_destination,
+    validate_project_name,
+};
 pub(crate) use open::read_include;
+
+/// The definition path as stored in the sidecar: relative to the project root.
+fn sidecar_definition_path(root: &Path, definition: &Path) -> String {
+    definition
+        .strip_prefix(root)
+        .unwrap_or(definition)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
 
 #[cfg(test)]
 mod tests;

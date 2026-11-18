@@ -1,0 +1,17 @@
+[package]
+name = "oxtuner-encoding"
+description = "ISO-8859-1 boundaries for the TunerStudio formats: decode, encode, escapes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The library holds no `#[bench]` functions; without this, `cargo bench` also
+# builds and runs an empty harness for it.
+[lib]
+bench = false
+
+[lints]
+workspace = true

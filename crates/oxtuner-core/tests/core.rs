@@ -12,6 +12,8 @@ use oxtuner_core::{
     DefinitionCommand, DefinitionView, Event, OpId, start,
 };
 
+mod support;
+
 /// How long a test waits for an event before failing. Generous: CI machines are
 /// slow, and a passing run never waits anywhere near this.
 const WAIT: Duration = Duration::from_secs(10);
@@ -74,7 +76,9 @@ impl Harness {
     }
 
     fn next(&self) -> Event {
-        self.events.recv_timeout(WAIT).expect("an event arrives")
+        // The core pushes its port snapshot on its own, so a command's answer
+        // is read past those publications.
+        support::recv_non_port(&self.events, WAIT).expect("an event arrives")
     }
 
     /// Collects events until `Stopped`, which is always the last one.
@@ -141,7 +145,11 @@ fn the_settings_snapshot_decides_the_protocol_commands() {
     let event = core.next();
 
     assert_eq!(event.op(), Some(op));
-    assert_eq!(summary_of(&event).active_flags, vec!["comms_compat"]);
+    assert_eq!(
+        summary_of(&event).active_flags,
+        vec!["COMMS_COMPAT"],
+        "the snapshot keeps the definition's spelling for the file"
+    );
 
     core.thread.join();
 }

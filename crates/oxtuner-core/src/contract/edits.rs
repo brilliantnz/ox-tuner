@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// What a successful [`super::Command::SaveTune`] wrote.
+/// What a successful [`super::CoreCommand::SaveTune`] wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveReport {
     /// The tune file that was rewritten.
@@ -94,7 +94,7 @@ pub struct ImportReport {
 ///
 /// A write or burn writes a `begin` entry before touching the ECU and a `result`
 /// entry when it finishes, so a crash leaves evidence of the attempt. Entries are
-/// JSON lines in `.ox-tuner/write-journal.log`, capped by rotation.
+/// JSON lines in `.oxtuner/write-journal.log`, capped by rotation.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {

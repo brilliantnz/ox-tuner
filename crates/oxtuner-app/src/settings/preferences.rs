@@ -213,18 +213,17 @@ pub(crate) struct ProjectSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ConnectionSettings {
-    pub(crate) last_port: Option<String>,
-    pub(crate) baud_override: Option<u32>,
+    /// Realtime refresh rate, in hertz.
+    ///
+    /// The connection a project uses is per project
+    /// (`.oxtuner/project.json`), so this is the only connection preference
+    /// that belongs to the whole installation.
     pub(crate) poll_rate_hz: u32,
 }
 
 impl Default for ConnectionSettings {
     fn default() -> Self {
-        Self {
-            last_port: None,
-            baud_override: None,
-            poll_rate_hz: 20,
-        }
+        Self { poll_rate_hz: 20 }
     }
 }
 
@@ -331,9 +330,9 @@ impl AppSettings {
         self.settings.logging.verbose
     }
 
-    /// The connection preferences the dialog starts from.
-    pub(crate) fn connection(&self) -> &ConnectionSettings {
-        &self.settings.connection
+    /// The realtime poll rate the user configured, in hertz.
+    pub(crate) fn global_poll_rate_hz(cx: &App) -> u32 {
+        cx.global::<Self>().settings.connection.poll_rate_hz
     }
 
     /// Mutates the document and writes it back immediately.
@@ -472,6 +471,7 @@ mod tests {
             config_dir: directory.clone(),
             cache_dir: directory.join("cache"),
             logs_dir: directory.join("logs"),
+            projects_dir: directory.join("projects"),
         };
         fs::write(paths.settings_file(), b"{ this is not json").expect("write malformed settings");
 
@@ -497,11 +497,7 @@ mod tests {
                 language: DEFAULT_LANGUAGE.to_string(),
                 table_header_wash_for_ranges: true,
             },
-            connection: ConnectionSettings {
-                last_port: Some("/dev/tty.usbmodem1101".into()),
-                baud_override: Some(115_200),
-                poll_rate_hz: 30,
-            },
+            connection: ConnectionSettings { poll_rate_hz: 30 },
             safety: SafetySettings {
                 disclaimer_accepted: true,
                 writes_enabled: true,

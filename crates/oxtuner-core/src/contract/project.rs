@@ -6,6 +6,135 @@ use crate::menu::MenuNode;
 
 use super::{FrontPageGauge, GaugeTemplate, IndicatorSpec};
 
+/// A definition the new-project wizard inspected, before anything was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionPreview {
+    /// Firmware signature, trimmed.
+    pub signature: String,
+    /// Flags the definition asks about in an `#if`, sorted.
+    pub tested_flags: Vec<String>,
+    /// The setting groups the definition declares, in declaration order.
+    pub groups: Vec<SettingGroupView>,
+}
+
+impl DefinitionPreview {
+    /// The groups the new-project wizard shows.
+    ///
+    /// The definition's own `[SettingGroups]` come first-class. The display
+    /// choices the reference application keeps in its own configuration are
+    /// owned by the application too, so a definition never declares them; they
+    /// are offered only when it tests the matching flag (`#if LAMBDA`,
+    /// `#if CELSIUS`), and only when the definition has no group of its own
+    /// for that choice.
+    ///
+    /// The labels are the canonical English text; the UI localizes them by
+    /// group and option name. The rule lives here so the configuration step,
+    /// the review and creation cannot drift apart.
+    #[must_use]
+    pub fn groups_with_display_choices(&self) -> Vec<SettingGroupView> {
+        let tests = |flag: &str| {
+            self.tested_flags
+                .iter()
+                .any(|tested| tested.eq_ignore_ascii_case(flag))
+        };
+        let option = |name: &str, label: &str| SettingOptionView {
+            name: name.to_owned(),
+            label: label.to_owned(),
+        };
+
+        // A definition can declare these choices itself (`lambdaSensor`, a
+        // `CELSIUS` option, …). Its labels win: the application row exists
+        // only when the file has no such group.
+        let declared = |name: &str, option_name: &str| {
+            self.groups.iter().any(|group| {
+                group.name.eq_ignore_ascii_case(name)
+                    || group
+                        .options
+                        .iter()
+                        .any(|option| option.name.eq_ignore_ascii_case(option_name))
+            })
+        };
+
+        let mut groups = Vec::new();
+        if tests("lambda") && !declared("lambdaSensor", "LAMBDA") {
+            groups.push(SettingGroupView {
+                name: "lambda_display".to_owned(),
+                label: "Lambda display".to_owned(),
+                options: vec![option("DEFAULT", "AFR"), option("LAMBDA", "Lambda")],
+                default: Some("DEFAULT".to_owned()),
+                default_active: false,
+            });
+        }
+        if tests("celsius") && !declared("temperature", "CELSIUS") {
+            groups.push(SettingGroupView {
+                name: "temperature_display".to_owned(),
+                label: "Temperature display".to_owned(),
+                options: vec![
+                    option("DEFAULT", "Fahrenheit"),
+                    option("CELSIUS", "Celsius"),
+                ],
+                default: Some("DEFAULT".to_owned()),
+                default_active: false,
+            });
+        }
+
+        groups.extend(self.groups.iter().cloned());
+        groups
+    }
+}
+
+/// One `[SettingGroups]` entry as the wizard shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingGroupView {
+    /// Group id the `.msq` snapshot records.
+    pub name: String,
+    /// Display name.
+    pub label: String,
+    /// Options in declaration order. Empty for a boolean group.
+    pub options: Vec<SettingOptionView>,
+    /// The option selected when the user makes no choice. `None` for a
+    /// boolean group, whose default is [`Self::default_active`].
+    pub default: Option<String>,
+    /// Whether a boolean group's flag is active by default.
+    pub default_active: bool,
+}
+
+/// One option of a [`SettingGroupView`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingOptionView {
+    /// Flag name the definition's `#if` tests, and what creation stores.
+    pub name: String,
+    /// Display name.
+    pub label: String,
+}
+
+impl DefinitionPreview {
+    pub(crate) fn of(preview: &oxtuner_project::DefinitionPreview) -> Self {
+        Self {
+            signature: preview.signature.clone(),
+            tested_flags: preview.tested_flags.clone(),
+            groups: preview
+                .groups
+                .iter()
+                .map(|group| SettingGroupView {
+                    name: group.name.clone(),
+                    label: group.label.clone(),
+                    options: group
+                        .options
+                        .iter()
+                        .map(|option| SettingOptionView {
+                            name: option.name.clone(),
+                            label: option.label.clone(),
+                        })
+                        .collect(),
+                    default: group.default.clone(),
+                    default_active: group.default_active,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One hidden-dialog hotkey from `[KeyActions]`, as the UI lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyActionInfo {
@@ -156,10 +285,14 @@ pub struct ProjectView {
     pub skipped: usize,
     /// Non-fatal findings, ready for the output panel.
     pub warnings: Vec<String>,
+    /// The panel layout this project was last read with.
+    pub layout: oxtuner_project::ProjectLayout,
+    /// The connection this project last used, when state has it.
+    pub connection: oxtuner_project::ConnectionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// One serial port the connect dialog can offer.
+/// One serial port present on the machine.
 ///
 /// Every field takes part in the row comparison, so a different device on the
 /// same path reads as a change.
@@ -236,6 +369,44 @@ pub struct ConnectionView {
     pub realtime_block: Option<u16>,
 }
 
+/// The outcome of a signature test against one port.
+///
+/// A test proves a port, a baud and a framing without opening a session, so it
+/// is also what a new project checks a definition against.
+///
+/// The port is kept beside the summary on purpose: on failure the summary is
+/// gone and the port is the only thing the dialog can still show. On success
+/// it always equals the summary's own port. The baud is kept for the same
+/// reason: a result only describes the rate it ran at, so a dialog that
+/// changed the picker afterwards must not keep showing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionTest {
+    /// The port the test ran against.
+    pub port: String,
+    /// The rate it ran at, when the choice named one.
+    pub baud: Option<u32>,
+    /// The summary, or the failure message.
+    pub outcome: Result<ConnectionView, String>,
+}
+
+impl ConnectionTest {
+    /// The signature a create should verify, when this test ran on `port`.
+    ///
+    /// A test against another port says nothing about the ECU a project will
+    /// talk to, so its signature is ignored rather than carried over.
+    #[must_use]
+    pub fn signature_for(&self, port: Option<&str>) -> Option<String> {
+        if port != Some(self.port.as_str()) {
+            return None;
+        }
+
+        match &self.outcome {
+            Ok(view) => Some(view.signature.trim().to_owned()),
+            Err(_) => None,
+        }
+    }
+}
+
 /// One cell the ECU and the working image disagree about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictReport {
@@ -266,4 +437,53 @@ pub struct ReadReport {
     pub signature_verified: bool,
     /// Cells that differ from the working image after a re-read.
     pub conflicts: Vec<ConflictReport>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tested(port: &str, signature: &str) -> ConnectionTest {
+        ConnectionTest {
+            port: port.to_owned(),
+            baud: Some(115_200),
+            outcome: Ok(ConnectionView {
+                port: port.to_owned(),
+                custom: false,
+                signature: signature.to_owned(),
+                definition_signature: signature.to_owned(),
+                verdict: SignatureVerdict::Match,
+                read_only: false,
+                read_only_reason: None,
+                writes_enabled: false,
+                behavior: "test".to_owned(),
+                framing: "legacy",
+                pages: 1,
+                realtime_block: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_signature_counts_only_when_the_check_ran_on_this_port() {
+        let result = tested("/dev/ttyACM0", "speeduino 202501");
+
+        assert_eq!(
+            result.signature_for(Some("/dev/ttyACM0")).as_deref(),
+            Some("speeduino 202501")
+        );
+        assert_eq!(result.signature_for(Some("/dev/ttyACM1")), None);
+        assert_eq!(result.signature_for(None), None);
+    }
+
+    #[test]
+    fn a_failed_check_contributes_no_signature() {
+        let failed = ConnectionTest {
+            port: "/dev/ttyACM0".to_owned(),
+            baud: Some(115_200),
+            outcome: Err("no answer".to_owned()),
+        };
+
+        assert_eq!(failed.signature_for(Some("/dev/ttyACM0")), None);
+    }
 }

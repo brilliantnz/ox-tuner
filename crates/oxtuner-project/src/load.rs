@@ -107,6 +107,18 @@ impl fmt::Display for FileValueError {
 
 impl std::error::Error for FileValueError {}
 
+impl FileValueError {
+    /// The variable the value belongs to, or the page for a page-level error.
+    pub fn name(&self) -> String {
+        match self {
+            Self::NoLabel { name, .. }
+            | Self::WrongElementCount { name, .. }
+            | Self::Text { name, .. }
+            | Self::Label { name, .. } => name.clone(),
+        }
+    }
+}
+
 /// Loads every value the definition and the file agree about.
 pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     let mut report = crate::check::check(msq, definition);
@@ -122,7 +134,12 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     //   over those values, so a scale like `{fuelLoadRes}` needs one level of
     //   recursion, not just the raw file values.
     let values = collect_file_values(msq, definition);
-    let resolver = Resolver::new(definition, &values.scalars, &values.arrays);
+    let resolver = Resolver::new(
+        definition,
+        &values.constants,
+        &values.pc_values,
+        &values.arrays,
+    );
     let mut context = ExprContext {
         resolver: &resolver,
     };
@@ -142,6 +159,10 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     }
 
     let mut tune = Tune::new(Arc::clone(&layout));
+    // An array default the definition declares per cell is not in the layout,
+    // so a tune that omits the array would otherwise open on zeros and then
+    // save those zeros over the declared values.
+    crate::msq::apply_definition_defaults(&mut tune, definition);
 
     for entry in msq.entries() {
         if entry.is_nameless() {
@@ -178,8 +199,12 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
 /// The values a `.msq` carries, in user units, keyed by lowercased name.
 #[derive(Debug, Default)]
 struct FileValues {
-    /// Single numeric values and bit fields.
-    scalars: HashMap<String, f64>,
+    /// Definition constants and bit fields, which shadow nothing.
+    constants: HashMap<String, f64>,
+    /// `[PcVariables]` settings, which a computed channel of the same name
+    /// shadows: the channel describes what the value means, the file only
+    /// holds the controller's copy of it.
+    pc_values: HashMap<String, f64>,
     /// Arrays with more than one element, for `arrayValue`.
     arrays: HashMap<String, Vec<f64>>,
 }
@@ -234,9 +259,23 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
 
         let text = unquote(&entry.value);
 
+        // Only a PcVariable the definition lists is a controller setting. A
+        // constant keeps its old precedence, and so does a name the
+        // definition does not list at all: neither can be the file's copy of
+        // a computed channel.
+        let is_pc = definition
+            .pc_variables
+            .get_ignore_case(&entry.name)
+            .is_some();
+        let map = if is_pc {
+            &mut values.pc_values
+        } else {
+            &mut values.constants
+        };
+
         if let Ok(value) = text.trim().parse::<f64>() {
             // A scalar number, or a bit field written as a bare number.
-            values.scalars.insert(key, value);
+            map.insert(key, value);
 
             continue;
         }
@@ -245,7 +284,7 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
             Some(constant) => Some(&constant.options),
             None => definition
                 .pc_variables
-                .get(&entry.name)
+                .get_ignore_case(&entry.name)
                 .map(|variable| &variable.options),
         };
 
@@ -254,7 +293,7 @@ fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
 
             if let Some(option) = options.iter().find(|option| option.label.trim() == trimmed) {
                 let raw = f64::from(option.value);
-                values.scalars.insert(key, raw);
+                map.insert(key, raw);
             }
         }
     }
@@ -287,7 +326,10 @@ fn lower_key<'a>(name: &'a str, buffer: &'a mut String) -> &'a str {
 /// Files values plus the definition's computed channels, resolved on demand.
 struct Resolver<'a> {
     definition: &'a Definition,
-    base: &'a HashMap<String, f64>,
+    /// Constants and bit fields, which shadow nothing.
+    constants: &'a HashMap<String, f64>,
+    /// Controller settings, which a computed channel of the same name shadows.
+    pc_values: &'a HashMap<String, f64>,
     /// File arrays, keyed by lowercased name, for `arrayValue`.
     arrays: &'a HashMap<String, Vec<f64>>,
     /// The channels currently being resolved, outermost first.
@@ -299,24 +341,33 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn new(
         definition: &'a Definition,
-        base: &'a HashMap<String, f64>,
+        constants: &'a HashMap<String, f64>,
+        pc_values: &'a HashMap<String, f64>,
         arrays: &'a HashMap<String, Vec<f64>>,
     ) -> Self {
         Self {
             definition,
-            base,
+            constants,
+            pc_values,
             arrays,
             stack: std::cell::RefCell::new(Vec::new()),
             too_deep: std::cell::RefCell::new(None),
         }
     }
 
-    /// Resolves one identifier: a file value first, then a computed channel.
+    /// Resolves one identifier: a constant first, then a computed channel,
+    /// then a controller setting.
+    ///
+    /// A `[PcVariables]` scalar that shares a name with an `[OutputChannels]`
+    /// channel is the controller's copy of a computed value (Speeduino's
+    /// `fuelLoadMax` is 255 in the file while the channel computes 511), so
+    /// the channel wins and the file value only answers when no channel
+    /// claims the name.
     fn resolve(&self, name: &str) -> Option<f64> {
         let mut lowered = String::new();
         let key = lower_key(name, &mut lowered);
 
-        if let Some(value) = self.base.get(key) {
+        if let Some(value) = self.constants.get(key) {
             return Some(*value);
         }
 
@@ -351,7 +402,9 @@ impl<'a> Resolver<'a> {
 
         self.stack.borrow_mut().pop();
 
-        value
+        // A controller setting answers only when no computed channel claims
+        // the name: it is the ECU's copy of a value the definition derives.
+        value.or_else(|| self.pc_values.get(key).copied())
     }
 
     fn take_too_deep(&self) -> Option<String> {
@@ -536,69 +589,126 @@ fn load_entry(
             tune.set_raw_at(&spec.name, 0, raw)
                 .map_err(|error| error.to_string())
         }
-        EntryShape::Scalar | EntryShape::Array { .. } => {
-            let tokens = entry.tokens();
-            let expected = spec.element_count();
-            if tokens.len() != expected {
-                return Err(format!(
-                    "the file has {} values, the definition declares {expected}",
-                    tokens.len()
-                ));
-            }
-
-            let mut clamped: Option<(f64, f64, f64)> = None;
-
-            for (index, token) in tokens.iter().enumerate() {
-                let user = token
-                    .parse::<f64>()
-                    .map_err(|_| format!("`{token}` is not a number"))?;
-
-                // A file value outside the declared range is clamped the way
-                // `TunerStudio` loads one, and reported once per variable.
-                let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
-                let high = spec.maximum.unwrap_or(f64::INFINITY);
-                let (low, high) = (low.min(high), low.max(high));
-                let user = if user < low || user > high {
-                    clamped.get_or_insert((user, low, high));
-                    user.clamp(low, high)
-                } else {
-                    user
-                };
-
-                let conversion = spec.to_raw(user).map_err(|error| error.to_string())?;
-                if conversion.is_out_of_range() {
-                    report.warn(
-                        IssueKind::ValueOutOfRange,
-                        format!(
-                            "`{}` = {user} cannot be stored in the declared type; it was kept, not clamped",
-                            spec.name
-                        ),
-                    );
-                }
-                tune.set_raw_at(&spec.name, index, conversion.raw)
-                    .map_err(|error| error.to_string())?;
-            }
-
-            if let Some((found, low, high)) = clamped {
-                let range = match (low.is_finite(), high.is_finite()) {
-                    (true, true) => format!("{low}..{high}"),
-                    (true, false) => format!("the declared minimum {low}"),
-                    (false, true) => format!("the declared maximum {high}"),
-                    (false, false) => "its declared range".to_owned(),
-                };
-
-                report.warn(
-                    IssueKind::ValueClamped,
-                    format!(
-                        "`{}` = {found} is outside {range}; it was clamped",
-                        spec.name
-                    ),
-                );
-            }
-
-            Ok(())
-        }
+        EntryShape::Scalar | EntryShape::Array { .. } => load_numbers(tune, spec, entry, report),
     }
+}
+
+/// Loads a scalar or array value: parse, convert, then write.
+///
+/// Every token is parsed and converted before any cell is written, so a bad
+/// value halfway through a list leaves the variable entirely at its default.
+fn load_numbers(
+    tune: &mut Tune,
+    spec: &VariableSpec,
+    entry: &Entry,
+    report: &mut LoadReport,
+) -> Result<(), String> {
+    let tokens = entry.tokens();
+    let expected = spec.element_count();
+    if tokens.len() != expected {
+        return Err(format!(
+            "the file has {} values, the definition declares {expected}",
+            tokens.len()
+        ));
+    }
+
+    // Parse every token before converting or writing any cell: a bad value
+    // halfway through a list must leave the variable at its default, not half
+    // from the file.
+    let mut users = Vec::with_capacity(tokens.len());
+    for (index, token) in tokens.iter().enumerate() {
+        let user = match token.parse::<f64>() {
+            Ok(value) if value.is_finite() => value,
+            Ok(_) => return Err(format!("`{token}` at {index} is not a finite number")),
+            Err(_) => return Err(format!("`{token}` at {index} is not a number")),
+        };
+        users.push(user);
+    }
+
+    let mut clamped: Option<(f64, f64, f64)> = None;
+    let mut clamped_overflow = false;
+    let mut out_of_storage: Option<(usize, f64)> = None;
+    let mut raws = Vec::with_capacity(users.len());
+
+    for (index, user) in users.into_iter().enumerate() {
+        // A file value outside the declared range is clamped the way
+        // `TunerStudio` loads one, and reported once per variable. The writer
+        // is what rounds a bound to the written step, so a file this build
+        // wrote reopens without a clamp.
+        let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
+        let high = spec.maximum.unwrap_or(f64::INFINITY);
+        let (low, high) = (low.min(high), low.max(high));
+        let clamped_user = user.clamp(low, high);
+        let conversion = spec
+            .to_raw(clamped_user)
+            .map_err(|error| error.to_string())?;
+
+        // Only a clamp that changes the stored value is reported. A text that
+        // rounds below a bound but converts back to the same raw value changed
+        // nothing.
+        let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
+        let cell_clamped = written_raw != Some(conversion.raw);
+        if cell_clamped {
+            clamped.get_or_insert((user, low, high));
+            clamped_overflow |= conversion.raw_out_of_range;
+        } else if conversion.is_out_of_range() {
+            out_of_storage.get_or_insert((index, clamped_user));
+        }
+
+        if !conversion.raw.is_finite() {
+            return Err(format!(
+                "`{}`[{index}] = {user} has no finite raw value",
+                spec.name
+            ));
+        }
+        raws.push(conversion.raw);
+    }
+
+    // Every cell converted before any is written, so a refused value leaves
+    // the variable entirely at its default.
+    for (index, raw) in raws.into_iter().enumerate() {
+        tune.set_raw_at(&spec.name, index, raw)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some((index, value)) = out_of_storage {
+        let cell = if matches!(spec.shape, EntryShape::Array { .. }) {
+            format!("`{}`[{index}]", spec.name)
+        } else {
+            format!("`{}`", spec.name)
+        };
+        report.warn(
+            IssueKind::ValueOutOfRange,
+            format!(
+                "{cell} = {value} does not fit the declared storage type; the value is kept as \
+                 written"
+            ),
+        );
+    }
+
+    if let Some((found, low, high)) = clamped {
+        let range = match (low.is_finite(), high.is_finite()) {
+            (true, true) => format!("{low}..{high}"),
+            (true, false) => format!("the declared minimum {low}"),
+            (false, true) => format!("the declared maximum {high}"),
+            (false, false) => "its declared range".to_owned(),
+        };
+
+        report.warn(
+            IssueKind::ValueClamped,
+            format!(
+                "`{}` = {found} is outside {range}; it was clamped{}",
+                spec.name,
+                if clamped_overflow {
+                    ", and the clamped value does not fit the declared storage type"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+
+    Ok(())
 }
 
 /// The bit value a label stands for.
@@ -614,10 +724,20 @@ fn label_to_raw(
     entry: &Entry,
 ) -> Result<f64, String> {
     let written = entry.value.trim();
+    // `TunerStudio` writes the chosen label back with the separator that
+    // followed it in the definition (`"Generic (Fixed List)".`), so a quoted
+    // label may carry one trailing period. A label that ends in a period of its
+    // own keeps it: there the quote is still the last character.
+    let written = written
+        .strip_suffix('.')
+        .filter(|stripped| stripped.ends_with('"'))
+        .unwrap_or(written);
+
     let text = unquote(written);
 
     if !is_quoted(written)
         && let Ok(number) = text.trim().parse::<f64>()
+        && number.is_finite()
     {
         return Ok(number);
     }
@@ -630,16 +750,42 @@ fn label_to_raw(
         },
     };
 
+    // A bit field without labels is a raw value; the file quotes it (`"0"`).
+    if options.is_empty() {
+        return text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                format!(
+                    "`{text}` is not a finite number, and the definition labels none of its bits"
+                )
+            });
+    }
+
     options
         .iter()
         .find(|option| option.label.trim() == text.trim())
+        .or_else(|| {
+            // A writer that split the label list on commas only stored the
+            // whole first field, several labels joined by the separator
+            // (`Generic (Fixed List)". "Generic (ini File)". "CAN`). That
+            // field always starts at the first option, so selecting the option
+            // whose label it starts with is right; a later chunk would not be
+            // stored by any writer seen so far.
+            options.iter().find(|option| {
+                let label = option.label.trim();
+
+                !label.is_empty()
+                    && text
+                        .trim()
+                        .strip_prefix(label)
+                        .is_some_and(|rest| rest.starts_with("\"."))
+            })
+        })
         .map(|option| f64::from(option.value))
         .ok_or_else(|| format!("`{text}` is not one of the definition's labels"))
-}
-
-/// The first character that has no ISO-8859-1 byte.
-fn first_non_latin1(text: &str) -> Option<char> {
-    text.chars().find(|character| u32::from(*character) > 0xFF)
 }
 
 /// Why a character cannot be written into a `.msq` string.
@@ -663,6 +809,39 @@ fn unquote(value: &str) -> String {
     }
 }
 
+/// Formats a text value, quoting it when a bare write would not read back.
+fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, FileValueError> {
+    if text.chars().count() > len {
+        return Err(FileValueError::Text {
+            name: spec.name.clone(),
+            reason: format!(
+                "the text is {} characters, the definition allows {len}",
+                text.chars().count()
+            ),
+        });
+    }
+    if let Some(character) = oxtuner_encoding::first_non_latin1(text) {
+        return Err(FileValueError::Text {
+            name: spec.name.clone(),
+            reason: not_latin1_reason(character),
+        });
+    }
+
+    // A string value is the element's text, not a quoted token:
+    // `TunerStudio` writes `<pcVariable name="alias">Aux0</pcVariable>`.
+    // Reading still accepts quotes, so a file written by a tool that quotes the
+    // value keeps working. The reverse holds too: a value the reader would trim
+    // or mistake for a quoted token is written quoted, so it reads back exactly
+    // as it was saved.
+    let needs_quotes = text != text.trim() || is_quoted(text);
+
+    Ok(if needs_quotes {
+        format!("\"{text}\"")
+    } else {
+        text.to_owned()
+    })
+}
+
 /// Formats a variable's stored values as the text a `.msq` carries.
 ///
 /// A `.msq` declares ISO-8859-1 and stores text as bytes, so a character with
@@ -670,9 +849,9 @@ fn unquote(value: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`FileValueError`] when text is too long, quoted or outside
-/// ISO-8859-1, a bit label is outside ISO-8859-1 or has no label for its value,
-/// or the shape and stored values disagree.
+/// Returns [`FileValueError`] when text is too long or outside ISO-8859-1, a
+/// bit label is outside ISO-8859-1, a bit field with no option list holds a
+/// fractional value, or the shape and stored values disagree.
 #[expect(
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
@@ -683,30 +862,7 @@ pub fn format_values(
     values: &Values,
 ) -> Result<String, FileValueError> {
     match (&spec.shape, values) {
-        (EntryShape::Text { len }, Values::Text(text)) => {
-            if text.chars().count() > *len {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: format!(
-                        "the text is {} characters, the definition allows {len}",
-                        text.chars().count()
-                    ),
-                });
-            }
-            if text.contains('"') {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: "a quote cannot be represented in a .msq string".to_owned(),
-                });
-            }
-            if let Some(character) = first_non_latin1(text) {
-                return Err(FileValueError::Text {
-                    name: spec.name.clone(),
-                    reason: not_latin1_reason(character),
-                });
-            }
-            Ok(format!("\"{text}\""))
-        }
+        (EntryShape::Text { len }, Values::Text(text)) => format_text(spec, text, *len),
         (EntryShape::Bits { .. }, Values::Numbers(numbers)) => {
             let raw = numbers.first().copied().unwrap_or(0.0);
             let options = definition
@@ -715,7 +871,7 @@ pub fn format_values(
                 .or_else(|| {
                     definition
                         .pc_variables
-                        .get(&spec.name)
+                        .get_ignore_case(&spec.name)
                         .map(|variable| &variable.options)
                 });
             let label = options.and_then(|options| {
@@ -726,7 +882,7 @@ pub fn format_values(
             });
             match label {
                 Some(label) => {
-                    if let Some(character) = first_non_latin1(label) {
+                    if let Some(character) = oxtuner_encoding::first_non_latin1(label) {
                         return Err(FileValueError::Label {
                             name: spec.name.clone(),
                             raw,
@@ -735,10 +891,22 @@ pub fn format_values(
                     }
                     Ok(format!("\"{label}\""))
                 }
-                None => Err(FileValueError::NoLabel {
-                    name: spec.name.clone(),
-                    raw,
-                }),
+                // A bits field with no option list is a count-up list: the
+                // value is its own label, and the file carries it quoted.
+                None if options.is_some_and(|options| options.is_empty()) => {
+                    if raw.fract() != 0.0 {
+                        return Err(FileValueError::NoLabel {
+                            name: spec.name.clone(),
+                            raw,
+                        });
+                    }
+                    Ok(format!("\"{raw:.0}\""))
+                }
+                // A bits field whose option list misses the value is written
+                // as the raw number: the reader takes a number wherever it
+                // takes a label, so an incomplete option list cannot drop the
+                // value.
+                None => Ok(raw.to_string()),
             }
         }
         (shape, Values::Numbers(numbers)) => {
@@ -908,6 +1076,56 @@ fuelLoadRes = { ((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500 }
         assert_eq!(loaded.tune.scalar_raw("algorithm").unwrap(), 1.0);
         // TPS selects the 0.5 scale, so user `20` is raw `40`.
         assert_eq!(loaded.tune.raw_at("fuelLoadBins", 0).unwrap(), 40.0);
+    }
+
+    #[test]
+    fn a_computed_channel_shadows_a_pc_variable_of_the_same_name() {
+        // A controller setting can share a name with the channel that
+        // describes it. The channel wins: with `algorithm = "MAP"` the max
+        // is 511, not the 255 the file carries for the ECU's own copy.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+algorithm = bits, U08, 0, [0:2], "MAP", "TPS", "MAF"
+
+[PcVariables]
+fuelLoadMax = scalar, U16, 0, "", 1, 0, 0, 1000, 0
+
+[OutputChannels]
+fuelLoadMax = { (algorithm == 0 || algorithm == 2) ? 511 : 100.0 }
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("definition parses");
+        let msq = Msq::parse(
+            r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="algorithm">"MAP"</constant>
+    </page>
+    <page>
+        <pcVariable name="fuelLoadMax">255</pcVariable>
+    </page>
+</msq>"#
+                .as_bytes(),
+        )
+        .expect("msq parses");
+        let values = collect_file_values(&msq, &definition);
+        let resolver = Resolver::new(
+            &definition,
+            &values.constants,
+            &values.pc_values,
+            &values.arrays,
+        );
+
+        assert_eq!(values.pc_values.get("fuelloadmax"), Some(&255.0));
+        assert_eq!(resolver.resolve("fuelLoadMax"), Some(511.0));
     }
 
     const DEEP_DEFINITION: &str = r#"
@@ -1160,6 +1378,274 @@ viaIndex = array, U08, 8, [3], "", { alpha[1] }, 0, 0, 255, 0
         PARSED.get_or_init(|| {
             parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses")
         })
+    }
+
+    #[test]
+    fn a_string_value_is_the_element_text_not_a_quoted_token() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+note = string, ASCII, 8
+"#;
+        const PLAIN: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">Aux0</constant>
+    </page>
+</msq>"#;
+        const QUOTED: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">"Aux0"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+
+        for source in [PLAIN, QUOTED] {
+            let loaded = load(&Msq::parse(source.as_bytes()).unwrap(), &definition);
+            assert_eq!(loaded.tune.text("note").unwrap(), "Aux0", "the text loads");
+
+            let spec = loaded
+                .layout
+                .variables()
+                .iter()
+                .find(|spec| spec.name == "note")
+                .expect("the variable is in the layout");
+            let values = loaded.tune.value("note").expect("the value loaded");
+            let text = format_values(spec, &definition, values).expect("the value formats");
+            assert_eq!(
+                text, "Aux0",
+                "a string is the element text, not a quoted token"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_less_bit_field_saves_the_count_up_value() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+unused = bits, U08, 0, [0:2]
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="unused">"1"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let mut loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+        assert_eq!(loaded.tune.raw_at("unused", 0).unwrap(), 1.0);
+
+        loaded.tune.set_raw_at("unused", 0, 2.0).unwrap();
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "unused")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("unused").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+
+        assert_eq!(
+            text, "\"2\"",
+            "a count-up list writes the number the field holds"
+        );
+    }
+
+    #[test]
+    fn a_merged_label_field_selects_its_first_option() {
+        // A writer that split the definition's label list on commas only
+        // stores the whole first field, which is several labels joined by the
+        // period separator. It is still the first option.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+serial = bits, U08, 0, [0:3], "Generic (Fixed List)". "Generic (ini File)". "CAN", "msDroid"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="serial">"Generic (Fixed List)". "Generic (ini File)". "CAN"</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| issue.kind != crate::check::IssueKind::ValueSkipped),
+            "{:?}",
+            loaded.report.warnings
+        );
+        assert_eq!(loaded.tune.raw_at("serial", 0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_label_that_ends_in_a_period_is_not_trimmed() {
+        // Only `"label".` carries the separator's period; a comma-separated
+        // label with a period of its own keeps it.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+place = bits, U08, 0, [0:2], "St.", "Ave"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="place">"St."</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .all(|issue| issue.kind != crate::check::IssueKind::ValueSkipped),
+            "{:?}",
+            loaded.report.warnings
+        );
+        assert_eq!(loaded.tune.raw_at("place", 0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_string_value_keeps_xml_syntax_out_of_the_text() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+note = string, ASCII, 16
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="note">A&amp;B&lt;C"D</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert_eq!(loaded.tune.text("note").unwrap(), "A&B<C\"D");
+
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "note")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("note").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+        assert_eq!(text, "A&B<C\"D", "the writer escapes XML, not the value");
+    }
+
+    #[test]
+    fn a_scaled_pc_variable_keeps_its_fractional_values_through_a_save() {
+        // `[PcVariables]` carries the same scale, limits and digits as a
+        // constant. Dropping them rounds `-1.5` to `-2.0` on the next save.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[PcVariables]
+wueAFR = array, S16, [3], "AFR", 0.1, 0.0, -4.0, 4.0, 1
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <pcVariable cols="1" digits="1" name="wueAFR" rows="3" units="AFR">-1.5 -1.2 0.0</pcVariable>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        let spec = loaded
+            .layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "wueAFR")
+            .expect("the variable is in the layout");
+        let values = loaded.tune.value("wueAFR").expect("the value loaded");
+        let text = format_values(spec, &definition, values).expect("the value formats");
+
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        assert_eq!(tokens, ["-1.5", "-1.2", "0.0"]);
+    }
+
+    #[test]
+    fn a_bit_field_without_labels_and_one_with_period_separated_labels_load() {
+        // The shapes a project created by `TunerStudio` carries: a `bits`
+        // entry with no option list (the file quotes the raw value), and the
+        // `".` separator the reference Speeduino definition uses for
+        // `secondarySerialProtocol`, whose chosen label comes back as
+        // `"Generic (Fixed List)".`.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+unused = bits, U08, 0, [0:2]
+serial = bits, U08, 1, [3:6], "Generic (Fixed List)". "Generic (ini File)". "CAN"
+"#;
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="unused">"1"</constant>
+        <constant name="serial">"Generic (Fixed List)".</constant>
+    </page>
+</msq>"#;
+
+        let definition = parse_str(DEFINITION, &SettingsContext::new()).expect("definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        let skipped: Vec<&str> = loaded
+            .report
+            .warnings
+            .iter()
+            .filter(|issue| issue.kind == crate::check::IssueKind::ValueSkipped)
+            .map(|issue| issue.message.as_str())
+            .collect();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(loaded.tune.raw_at("unused", 0).unwrap(), 1.0);
+        assert_eq!(loaded.tune.raw_at("serial", 0).unwrap(), 0.0);
     }
 
     fn loaded() -> LoadedTune {

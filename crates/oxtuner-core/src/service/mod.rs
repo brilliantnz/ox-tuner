@@ -71,7 +71,7 @@ pub struct CoreConfig {
     /// enabled it in the settings and the app passed that choice in.
     pub writes_enabled: bool,
     /// Where a standalone definition's write journal and logs live. A project
-    /// always uses its own `.ox-tuner/` sidecar.
+    /// always uses its own `.oxtuner/` sidecar.
     pub journal_dir: Option<PathBuf>,
     /// Where parsed definitions are cached. `None` disables the cache, which is
     /// what tests and tools get unless they ask for it; the application passes
@@ -150,7 +150,11 @@ pub struct CoreReport {
     pub projects_opened: u64,
     /// Tune files saved successfully.
     pub tune_saves: u64,
-    /// Commands that failed (a rejected definition, project or save).
+    /// Commands that failed, so the shutdown report shows how much went wrong.
+    ///
+    /// A silent probe counts too: a scan that finds no ECU reports one miss
+    /// per attempt, so a miss-heavy shutdown is an empty bench, not a broken
+    /// core.
     pub failures: u64,
     /// Connections opened.
     pub connects: u64,
@@ -520,8 +524,10 @@ fn run(
             != connection_revision;
         let first_frame = !had_frame && latest.get().is_some();
 
-        // Sampled here rather than on its own thread: a change is published only
-        // when the list actually differs, and the first sample is a baseline.
+        // Sampled here rather than on its own thread: the list is published only
+        // when it differs from the last one published, including the first
+        // sample when it found ports, so a view that opens later renders the
+        // last published list without asking first.
         if ports.due() {
             if let Some(updated) = ports.sample() {
                 tracing::debug!(ports = updated.len(), "serial ports changed");
@@ -859,6 +865,13 @@ struct CommandTxn {
     journal: Journal,
 }
 
+/// A serial connection a project should reopen next time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SavedConnection {
+    port: String,
+    baud: u32,
+}
+
 /// The transport and handshake state of one live session.
 #[expect(
     clippy::struct_excessive_bools,
@@ -868,6 +881,11 @@ struct EcuConnection {
     thread: IoThread,
     replies: Rx<spsc::Array<IoReply>>,
     link_label: String,
+    /// What to remember in the project's state once the handshake succeeds.
+    ///
+    /// Only a serial link names a connection a later session can reopen; a
+    /// custom link belongs to the application and is never persisted.
+    saved_connection: Option<SavedConnection>,
     custom_link: bool,
     definition_signature: String,
     behavior: String,
@@ -953,6 +971,13 @@ impl Live {
                 thread,
                 replies,
                 link_label: link.label(),
+                saved_connection: match link {
+                    PortChoice::Serial { port, baud } => Some(SavedConnection {
+                        port: port.clone(),
+                        baud: *baud,
+                    }),
+                    PortChoice::Custom(_) => None,
+                },
                 custom_link: !link.is_serial(),
                 definition_signature: definition.signature.clone(),
                 behavior: behavior.as_dyn().id().to_owned(),
@@ -1179,6 +1204,7 @@ mod dispatch;
 mod ecu;
 mod log;
 mod ports;
+mod probe;
 mod transfer;
 mod tune;
 

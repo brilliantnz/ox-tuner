@@ -91,15 +91,17 @@ mod view;
 
 pub use contract::{
     AxisEdit, AxisKind, AxisView, BurnReport, CellEdit, ConflictReport, ConflictResolution,
-    ConnectionView, ControllerActionReport, CoreCommand, CurveAxes, DefinitionCommand,
-    DefinitionView, DialogAction, DialogEmbed, DialogField, DialogFieldKind, DialogFieldTone,
-    DialogHelpLink, DialogPreset, DialogPresetAssignment, DialogPresetOption, DialogSelectOption,
-    DialogUnmodeledRow, DialogView, DialogWidget, DialogWidgetKind, EcuCommand, Event, Failure,
-    FailureCode, FrontPageGauge, GateState, GaugeTemplate, ImportReport, IndicatorSpec,
-    JournalCommand, JournalEntry, KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ,
-    MIN_POLL_HZ, OpId, PortView, ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier,
-    ReferenceTableLimit, ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport,
-    SafetyCommand, SaveReport, SignatureVerdict, TableView, TuneCommand, WriteReport,
+    ConnectionTest, ConnectionView, ControllerActionReport, CoreCommand, CurveAxes,
+    DefinitionCommand, DefinitionPreview, DefinitionView, DialogAction, DialogEmbed, DialogField,
+    DialogFieldKind, DialogFieldTone, DialogHelpLink, DialogPreset, DialogPresetAssignment,
+    DialogPresetOption, DialogSelectOption, DialogUnmodeledRow, DialogView, DialogWidget,
+    DialogWidgetKind, EcuCommand, Event, Failure, FailureCode, FirmwareProbe, FrontPageGauge,
+    GateState, GaugeTemplate, ImportReport, IndicatorSpec, JournalCommand, JournalEntry,
+    KeyActionInfo, LifecycleCommand, LogCommand, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortView,
+    ProjectCommand, ProjectView, ReadReport, ReferenceTableIdentifier, ReferenceTableLimit,
+    ReferenceTableSolution, ReferenceTableView, RejectReason, RevertReport, SafetyCommand,
+    SaveReport, SettingGroupView, SettingOptionView, SignatureVerdict, TableView, TuneCommand,
+    WriteReport,
 };
 pub use handle::{BlockingEventStream, CoreHandle, EventStream};
 pub use history::{
@@ -109,6 +111,7 @@ pub use history::{
 pub use link::{CustomLink, PortChoice};
 pub use menu::{MenuDetail, MenuNode, MenuNodeKind};
 pub use oxtuner_datalog::{LogColumn, LogStatus, SessionLogReport, SessionLogSnapshot};
+pub use oxtuner_protocol::{COMMON_PROBE_BAUD_RATES, DEFAULT_BAUD_RATE, PICKABLE_BAUD_RATES};
 pub use realtime::{
     BlockingFrameWatch, FrameWatch, IndicatorReading, LatestFrame, LiveValue, RealtimeDecoder,
     RealtimeFrame,
@@ -125,9 +128,18 @@ pub use oxtuner_ini::{Definition, SettingsContext};
 pub use oxtuner_tune::{CellState, TuneStatus};
 
 /// Re-exported so a caller can pick the connection's framing without taking a
-/// dependency on `oxtuner-protocol`.
-pub use oxtuner_protocol::LinkMode;
+/// dependency on `oxtuner-protocol`. `ProbeSpec` stays for the protocol-level
+/// details; a [`CustomLink`] implementation only ever names [`FirmwareProbe`].
+pub use oxtuner_protocol::{LinkMode, ProbeSpec};
 
 /// Re-exported so a [`CustomLink`] implementation can name the transport it
 /// returns.
 pub use oxtuner_transport::Transport;
+
+/// Re-exported so callers can build [`ProjectCommand::Create`] and name the
+/// project's panel layout without adding a dependency on
+/// `oxtuner-project` themselves.
+pub use oxtuner_project::{
+    ConnectionSeed, ConnectionState, CreateRequest, ProjectLayout, SIDECAR_DIR, accepts_definition,
+    ensure_target_free, split_destination, validate_project_name,
+};

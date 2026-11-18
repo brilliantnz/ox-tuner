@@ -3,7 +3,7 @@ use oxtuner_tune::TuneDiff;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
-use crate::sidecar::Provenance;
+use crate::sidecar::{ProjectLayout, ProjectState};
 
 use super::{Project, ProjectError, SaveOutcome};
 
@@ -85,25 +85,21 @@ impl Project {
         self.msq = document;
 
         if self.in_folder {
-            let relative = self
-                .definition_path
-                .strip_prefix(&self.root)
-                .unwrap_or(&self.definition_path);
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            let provenance = Provenance {
-                definition: relative,
-                definition_sha256: self.definition_digest.clone(),
-                signature: self.definition.signature.clone(),
-            };
-            provenance
-                .write(&self.root)
-                .map_err(|source| ProjectError::Sidecar {
-                    path: self.root.join(crate::sidecar::SIDECAR_DIR),
-                    source,
-                })?;
+            self.state.set_definition(
+                super::sidecar_definition_path(&self.root, &self.definition_path),
+                self.definition_digest.clone(),
+                self.definition.signature.clone(),
+            );
+            self.persist_state()?;
         }
 
         self.images.commit_baseline();
+        tracing::debug!(
+            path = %self.tune_path.display(),
+            cells,
+            variables = written.len(),
+            "tune saved"
+        );
 
         Ok(SaveOutcome {
             path: self.tune_path.clone(),
@@ -152,21 +148,68 @@ impl Project {
         document.save().map_err(ProjectError::Msq)
     }
 
-    /// The sidecar provenance recorded for this project, when any.
-    pub fn provenance(&self) -> Option<Provenance> {
+    /// The project's persisted state: definition reference, connection and UI.
+    pub fn state(&self) -> &ProjectState {
+        &self.state
+    }
+
+    /// Remembers which connection the project uses and persists it.
+    ///
+    /// Only the connection section changes; the definition reference and the UI
+    /// layout the file already holds are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::Sidecar`] when the state file cannot be
+    /// written. A standalone tune keeps the connection in memory only, and a
+    /// sidecar from a newer build is left untouched.
+    pub fn set_connection(
+        &mut self,
+        port: Option<String>,
+        baud: Option<u32>,
+    ) -> Result<(), ProjectError> {
+        self.state.connection.last_port = port;
+        self.state.connection.baud_override = baud;
+        self.persist_state()
+    }
+
+    /// Replaces the project's panel layout and persists it.
+    ///
+    /// The layout is per project on purpose: the same tune opens with the
+    /// tables and panels the reader arranged for it, whatever another project
+    /// last looked like.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError::Sidecar`] when the state file cannot be
+    /// written. A standalone tune keeps the layout in memory only.
+    pub fn set_layout(&mut self, layout: ProjectLayout) -> Result<(), ProjectError> {
+        self.state.layout = layout;
+        self.persist_state()
+    }
+
+    /// Writes the state file, unless there is nowhere or nothing to write.
+    ///
+    /// A standalone tune keeps its state in memory, and a sidecar from a
+    /// newer build stays untouched; both are an `Ok` with a debug line, not
+    /// an error, because the state is a convenience next to the tune.
+    fn persist_state(&self) -> Result<(), ProjectError> {
         if !self.in_folder {
-            return None;
+            return Ok(());
         }
-        match Provenance::read(&self.root) {
-            Ok(provenance) => provenance,
-            Err(error) => {
-                tracing::debug!(
-                    root = %self.root.display(),
-                    %error,
-                    "the provenance sidecar could not be read"
-                );
-                None
-            }
+        if !self.state_writable {
+            tracing::debug!(
+                root = %self.root.display(),
+                "the project state needs a newer build and stays untouched"
+            );
+            return Ok(());
         }
+        self.state
+            .write(&self.root)
+            .map(|_| ())
+            .map_err(|source| ProjectError::Sidecar {
+                path: self.root.join(crate::sidecar::SIDECAR_DIR),
+                source,
+            })
     }
 }

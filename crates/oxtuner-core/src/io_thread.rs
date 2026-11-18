@@ -30,6 +30,7 @@ use oxtuner_transport::{
     PortInfo, RecordingTransport, SerialSettings, SerialTransport, Transport, TransportError, ports,
 };
 
+use crate::contract::FirmwareProbe;
 use crate::link::PortChoice;
 use crate::service::CoreError;
 
@@ -58,21 +59,74 @@ const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Everything the I/O thread needs to build its side.
 pub(crate) struct IoPlan {
-    /// The definition the protocol encodes with; owned by the thread.
-    pub(crate) definition: Box<Definition>,
-    /// The behavior selected for it.
-    pub(crate) behavior: BehaviorKind,
-    /// The framing override (`None` uses the definition's own).
+    /// What the protocol is built from.
+    pub(crate) source: ProtocolSource,
+    /// The framing override (`None` uses the source's own).
     pub(crate) link_mode: Option<LinkMode>,
     /// Where the bytes go.
     pub(crate) link: PortChoice,
+}
+
+/// What a session's protocol is built from.
+///
+/// A session derives everything from the definition the user opened. A probe
+/// has no definition to derive from, so it carries the three facts it needs
+/// itself. Both end up in one [`MsProtocol`], so the conversations have a
+/// single implementation.
+pub(crate) enum ProtocolSource {
+    /// A full session, from the loaded definition and the family it selected.
+    Definition {
+        /// The definition the protocol encodes with; owned by the thread.
+        definition: Box<Definition>,
+        /// The behavior selected for it.
+        behavior: BehaviorKind,
+    },
+    /// A signature probe, with no definition in hand.
+    ///
+    /// The family it asks, in the core's own vocabulary; the spec it needs is
+    /// one method call away.
+    Probe(FirmwareProbe),
+}
+
+impl IoPlan {
+    /// A plan for a full session.
+    pub(crate) fn definition(
+        definition: Box<Definition>,
+        behavior: BehaviorKind,
+        link_mode: Option<LinkMode>,
+        link: PortChoice,
+    ) -> Self {
+        Self {
+            source: ProtocolSource::Definition {
+                definition,
+                behavior,
+            },
+            link_mode,
+            link,
+        }
+    }
+
+    /// A plan for a signature probe.
+    pub(crate) fn probe(probe: FirmwareProbe, framing: LinkMode, link: PortChoice) -> Self {
+        Self {
+            source: ProtocolSource::Probe(probe),
+            link_mode: Some(framing),
+            link,
+        }
+    }
 }
 
 /// One request for the wire.
 #[derive(Debug)]
 pub(crate) enum IoOp {
     /// Read the firmware signature.
-    Signature,
+    Signature {
+        /// How long to wait for the answer; `None` uses the protocol's own.
+        ///
+        /// A port probe passes a short one, where a silent port must cost
+        /// little.
+        timeout: Option<Duration>,
+    },
     /// Read a list of whole pages, in order.
     ReadPages { pages: Vec<u8> },
     /// Read every declared page.
@@ -269,7 +323,7 @@ impl Drop for IoThread {
     }
 }
 
-/// Lists serial ports for the connect dialog.
+/// Snapshots the serial ports present on the machine.
 pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
     ports()
 }
@@ -281,18 +335,45 @@ pub(crate) fn list_ports() -> Result<Vec<PortInfo>, TransportError> {
 /// so this module never names a simulator or a replay reader (ADR-0022).
 fn build(plan: &IoPlan) -> Result<(RecordingTransport, MsProtocol), CoreError> {
     let label = plan.link.label();
-    let transport: Box<dyn Transport> = match &plan.link {
-        PortChoice::Serial { port, baud } => Box::new(SerialTransport::new(
+
+    // Opening a link asks the source for what it knows: a session hands over
+    // its definition, a probe hands over its spec. A serial device needs
+    // neither.
+    let transport: Box<dyn Transport> = match (&plan.link, &plan.source) {
+        (PortChoice::Serial { port, baud }, _) => Box::new(SerialTransport::new(
             SerialSettings::new(port.clone()).with_baud(*baud),
         )),
-        PortChoice::Custom(link) => link.open(&plan.definition).map_err(CoreError::Connect)?,
+        (PortChoice::Custom(link), ProtocolSource::Definition { definition, .. }) => {
+            link.open(definition).map_err(CoreError::Connect)?
+        }
+        (PortChoice::Custom(link), ProtocolSource::Probe(probe)) => {
+            let framing = plan.link_mode.unwrap_or(LinkMode::Legacy);
+            link.open_for_probe(probe, framing)
+                .map_err(CoreError::Connect)?
+        }
     };
+
     let mut recorder = RecordingTransport::new(transport);
-    recorder.note(format!("definition: {}", plan.definition.signature));
     recorder.note(format!("link: {label}"));
 
-    let mut protocol = MsProtocol::new(&plan.definition, plan.behavior.as_dyn())
-        .map_err(|error| CoreError::Connect(error.to_string()))?;
+    let mut protocol = match &plan.source {
+        ProtocolSource::Definition {
+            definition,
+            behavior,
+        } => {
+            recorder.note(format!("definition: {}", definition.signature));
+
+            MsProtocol::new(definition, behavior.as_dyn())
+                .map_err(|error| CoreError::Connect(error.to_string()))?
+        }
+        ProtocolSource::Probe(probe) => {
+            let spec = probe.spec();
+            recorder.note(format!("probe: {}", spec.behavior_id()));
+
+            MsProtocol::for_probe(&spec)
+        }
+    };
+
     if let Some(link) = plan.link_mode {
         protocol = protocol.with_link_mode(link);
     }
@@ -466,10 +547,17 @@ fn execute(
             transport.close();
             (IoOutcome::Closed, true)
         }
-        IoOp::Signature => match protocol.signature(transport) {
-            Ok(signature) => (IoOutcome::Signature { signature }, false),
-            Err(error) => (failure(&error), false),
-        },
+        IoOp::Signature { timeout } => {
+            let read = match timeout {
+                Some(timeout) => protocol.signature_with_timeout(transport, timeout),
+                None => protocol.signature(transport),
+            };
+
+            match read {
+                Ok(signature) => (IoOutcome::Signature { signature }, false),
+                Err(error) => (failure(&error), false),
+            }
+        }
         IoOp::ReadPages { pages } => {
             let mut read = Vec::with_capacity(pages.len());
             for page in pages {
@@ -697,14 +785,16 @@ reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
     fn the_io_thread_answers_a_signature_query() {
         let definition = definition();
         let behavior = BehaviorKind::select(&definition).expect("a family");
-        let plan = IoPlan {
-            definition: Box::new(definition),
+        let plan = IoPlan::definition(
+            Box::new(definition),
             behavior,
-            link_mode: None,
-            link: PortChoice::custom(TestSim(SimConfig::default())),
-        };
+            None,
+            PortChoice::custom(TestSim(SimConfig::default())),
+        );
         let (thread, replies) = IoThread::start(&plan).expect("starts");
-        thread.submit(1, IoOp::Signature).expect("queued");
+        thread
+            .submit(1, IoOp::Signature { timeout: None })
+            .expect("queued");
 
         let reply = replies
             .recv_timeout(Duration::from_secs(2))

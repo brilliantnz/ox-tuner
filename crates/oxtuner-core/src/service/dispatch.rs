@@ -3,9 +3,12 @@
     reason = "the service modules are one implementation split across files"
 )]
 
+use crate::contract::DefinitionPreview;
+
 use super::ecu::*;
 use super::log::*;
 use super::ports::PortsWatch;
+use super::probe::probe_firmware;
 use super::transfer::*;
 use super::tune::*;
 use super::*;
@@ -42,25 +45,33 @@ pub(super) fn handle(
             Outcome::Stop
         }
         CommandRequest::ListPorts => {
-            // Answer from the snapshot so a dialog cannot see a list that
-            // disagrees with the last change the core published. The first
-            // command still has to wait for the first sample.
-            if !ports.is_primed()
-                && let Err(error) = ports.refresh()
-            {
-                tracing::warn!(%op, %error, "serial ports could not be listed");
-                report.failures += 1;
-                send(
-                    events,
-                    Event::Failed {
-                        op,
-                        failure: Failure {
-                            code: FailureCode::ConnectFailed,
-                            message: error.to_string(),
+            // The command is the on-demand resync, so it samples now and
+            // answers from the snapshot it just published: a view never sees a
+            // list that disagrees with the last change the core pushed.
+            match ports.refresh() {
+                Ok(changed) => {
+                    // The on-demand sample is a real sample: a change it saw
+                    // first is pushed like any other, and the timer restarts.
+                    ports.polled();
+                    if let Some(changed) = changed {
+                        send(events, Event::PortsChanged { ports: changed });
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%op, %error, "serial ports could not be listed");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::ConnectFailed,
+                                message: error.to_string(),
+                            },
                         },
-                    },
-                );
-                return Outcome::Continue;
+                    );
+                    return Outcome::Continue;
+                }
             }
 
             let summary = ports.snapshot().to_vec();
@@ -77,6 +88,11 @@ pub(super) fn handle(
         CommandRequest::TestConnection { port, framing } => {
             connect(op, session, live, events, report, &port, framing, true)
         }
+        CommandRequest::ProbeFirmware {
+            port,
+            framing,
+            probe,
+        } => probe_firmware(op, &port, probe, framing, live.is_some(), events, report),
         CommandRequest::Disconnect => {
             let Some(connection) = live.as_mut() else {
                 send(
@@ -527,6 +543,50 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
+        CommandRequest::InspectDefinition { path } => {
+            // Reading and parsing a user's definition is project I/O, so it
+            // stays on the core thread. Nothing is installed: the wizard only
+            // needs the signature and the setting groups until Create.
+            let _span = tracing::debug_span!(
+                "core_inspect_definition",
+                %op,
+                path = %path.display()
+            )
+            .entered();
+
+            match oxtuner_project::inspect_definition(&path) {
+                Ok(preview) => send(
+                    events,
+                    Event::DefinitionInspected {
+                        op,
+                        path,
+                        preview: DefinitionPreview::of(&preview),
+                    },
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        %op,
+                        path = %path.display(),
+                        error_kind = error.kind(),
+                        %error,
+                        "definition rejected"
+                    );
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::DefinitionRejected,
+                                message: error.to_string(),
+                            },
+                        },
+                    );
+                }
+            }
+
+            Outcome::Continue
+        }
         CommandRequest::OpenProject { path } => {
             // Reading and parsing happen here, on the core thread: the UI must
             // never wait on a project's INI and `.msq`.
@@ -534,52 +594,84 @@ pub(super) fn handle(
                 tracing::debug_span!("core_open_project", %op, path = %path.display()).entered();
             match Project::open_with_cache(&path, definition_cache_dir) {
                 Ok(project) => {
-                    let cache_hit = project.definition_source() == DefinitionSource::Cache;
-                    // The old session's frame belongs to another definition and
-                    // must be gone before the new menu is evaluated.
-                    teardown(
-                        live,
+                    let cache = if project.definition_source() == DefinitionSource::Cache {
+                        CacheSource::Hit
+                    } else {
+                        CacheSource::Fresh
+                    };
+
+                    adopt_project(
+                        project,
+                        op,
+                        cache,
                         session,
+                        live,
                         safety,
                         journal_dir,
-                        latest,
                         events,
+                        latest,
                         history,
                         log,
+                        report,
+                        last_menu,
                     );
-                    let summary = ProjectView::from_project(&project, latest.get().as_deref());
-                    tracing::info!(
-                        %op,
-                        root = %summary.root.display(),
-                        signature = %summary.definition.signature,
-                        loaded = summary.loaded,
-                        skipped = summary.skipped,
-                        warnings = summary.warnings.len(),
-                        read_only = summary.read_only,
-                        cache_hit,
-                        "project opened"
-                    );
-                    configure_history(history, project.definition());
-                    *session = Session::Project(Box::new(project));
-                    last_menu.clone_from(&summary.definition.menu);
-                    report.projects_opened += 1;
-                    send(events, Event::ProjectOpened { op, view: summary });
                 }
                 Err(error) => {
-                    tracing::warn!(%op, path = %path.display(), %error, "project rejected");
-                    report.failures += 1;
-                    send(
-                        events,
-                        Event::Failed {
-                            op,
-                            failure: Failure {
-                                code: FailureCode::ProjectRejected,
-                                message: error.to_string(),
-                            },
-                        },
-                    );
+                    reject_project(&path, &error, op, report, events);
                 }
             }
+            Outcome::Continue
+        }
+        CommandRequest::CreateProject { request } => {
+            // The definition parse and the scaffold write belong on the core
+            // thread, never on the UI thread.
+            let root = request.root();
+            let _span =
+                tracing::debug_span!("core_create_project", %op, path = %root.display()).entered();
+            match Project::create(&request) {
+                Ok(project) => {
+                    adopt_project(
+                        project,
+                        op,
+                        CacheSource::Fresh,
+                        session,
+                        live,
+                        safety,
+                        journal_dir,
+                        events,
+                        latest,
+                        history,
+                        log,
+                        report,
+                        last_menu,
+                    );
+                }
+                Err(error) => {
+                    reject_project(&root, &error, op, report, events);
+                }
+            }
+            Outcome::Continue
+        }
+        CommandRequest::SetProjectLayout { layout } => {
+            let mut stored = false;
+
+            if let Session::Project(project) = session {
+                match project.set_layout(layout) {
+                    Ok(()) => stored = true,
+                    Err(error) => {
+                        // The layout is a convenience next to the tune, so a
+                        // write failure is logged and never fails the session.
+                        tracing::warn!(
+                            %op,
+                            error_kind = error.kind(),
+                            %error,
+                            "the project layout could not be persisted"
+                        );
+                    }
+                }
+            }
+
+            send(events, Event::ProjectLayoutSaved { op, stored });
             Outcome::Continue
         }
         CommandRequest::SaveTune => {
@@ -605,7 +697,12 @@ pub(super) fn handle(
                         );
                     }
                     Err(error) => {
-                        tracing::warn!(%op, %error, "tune save failed");
+                        tracing::warn!(
+                            %op,
+                            error_kind = error.kind(),
+                            %error,
+                            "tune save failed"
+                        );
                         report.failures += 1;
                         send(
                             events,
@@ -1019,6 +1116,149 @@ pub(super) fn handle(
             Outcome::Continue
         }
     }
+}
+
+/// Where a project's definition came from, for the open log line.
+#[derive(Debug, Clone, Copy)]
+enum CacheSource {
+    /// Read from the project's own `projectCfg/` copy.
+    Fresh,
+    /// Reused from the shared definition cache.
+    Hit,
+}
+
+impl CacheSource {
+    fn is_hit(self) -> bool {
+        matches!(self, Self::Hit)
+    }
+}
+
+/// Makes a freshly opened or created project the live session.
+///
+/// The old session's frame belongs to another definition and must be gone
+/// before the new menu is evaluated.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the install path mirrors the dispatcher's queue fields"
+)]
+fn adopt_project(
+    project: Project,
+    op: OpId,
+    cache: CacheSource,
+    session: &mut Session,
+    live: &mut Option<Live>,
+    safety: &mut Safety,
+    journal_dir: Option<&std::path::Path>,
+    events: &EventTx,
+    latest: &LatestFrame,
+    history: &ChartHistory,
+    log: &LogStatus,
+    report: &mut CoreReport,
+    last_menu: &mut Vec<MenuNode>,
+) {
+    teardown(
+        live,
+        session,
+        safety,
+        journal_dir,
+        latest,
+        events,
+        history,
+        log,
+    );
+
+    let summary = ProjectView::from_project(&project, latest.get().as_deref());
+    tracing::info!(
+        %op,
+        root = %summary.root.display(),
+        signature = %summary.definition.signature,
+        loaded = summary.loaded,
+        skipped = summary.skipped,
+        warnings = summary.warnings.len(),
+        read_only = summary.read_only,
+        cache_hit = cache.is_hit(),
+        "project opened"
+    );
+
+    log_load_report(op, project.report());
+    configure_history(history, project.definition());
+    *session = Session::Project(Box::new(project));
+    last_menu.clone_from(&summary.definition.menu);
+    report.projects_opened += 1;
+    send(events, Event::ProjectOpened { op, view: summary });
+}
+
+/// Logs every load finding, so the summary line is not the only trace.
+///
+/// The summary counts say how much was wrong. These lines say what, and each
+/// carries a stable issue code for the diagnostics panel and a future
+/// notification policy.
+fn log_load_report(op: OpId, report: &oxtuner_project::LoadReport) {
+    for blocker in &report.blockers {
+        tracing::warn!(
+            %op,
+            issue_kind = blocker.kind.code(),
+            message = %blocker.message,
+            "project load blocker"
+        );
+    }
+
+    for warning in &report.warnings {
+        tracing::warn!(
+            %op,
+            issue_kind = warning.kind.code(),
+            message = %warning.message,
+            "project load warning"
+        );
+    }
+
+    // The warnings above preview long lists. Log the full ones so a skipped
+    // value can be named from the log alone.
+    if !report.orphan_values.is_empty() {
+        tracing::warn!(
+            %op,
+            count = report.orphan_values.len(),
+            names = %report.orphan_values.join(", "),
+            "tune values have no definition entry and were kept untouched"
+        );
+    }
+
+    if !report.missing_values.is_empty() {
+        tracing::warn!(
+            %op,
+            count = report.missing_values.len(),
+            names = %report.missing_values.join(", "),
+            "definition values have no entry in the tune; their defaults are used"
+        );
+    }
+}
+
+/// Reports a project that could not be opened or created.
+fn reject_project(
+    path: &std::path::Path,
+    error: &oxtuner_project::ProjectError,
+    op: OpId,
+    report: &mut CoreReport,
+    events: &EventTx,
+) {
+    tracing::warn!(
+        %op,
+        path = %path.display(),
+        error_kind = error.kind(),
+        %error,
+        "project rejected"
+    );
+    report.failures += 1;
+    send(
+        events,
+        Event::Failed {
+            op,
+            failure: Failure {
+                code: FailureCode::ProjectRejected,
+                message: error.to_string(),
+            },
+        },
+    );
 }
 
 pub(super) fn refuse(

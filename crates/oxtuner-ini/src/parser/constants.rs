@@ -609,29 +609,9 @@ fn parse_entry_attributes(
 
     match class {
         ConstantClass::Bits => {
-            let Some(raw_shape) = context.fields.get(context.index) else {
-                section.warn(
-                    "missing-shape",
-                    format!("`{}` has no bit range", context.key),
-                    context.line,
-                );
-                return None;
-            };
-            context.index += 1;
-            let Some(shape) = parse_bit_shape(raw_shape) else {
-                section.warn(
-                    "bad-bit-range",
-                    format!("`{}` has bit range {raw_shape:?}", context.key),
-                    context.line,
-                );
-                return None;
-            };
+            let (shape, options) = parse_bit_attributes(context, option_tables, section)?;
             attributes.shape = shape;
-            attributes.options = option_tables.table(
-                shared_define(context.raw_fields, context.index),
-                context.fields,
-                context.index,
-            );
+            attributes.options = options;
         }
         ConstantClass::Array | ConstantClass::OddArray => {
             let Some(raw_shape) = context.fields.get(context.index) else {
@@ -744,6 +724,9 @@ fn split_numbers<'a>(
     (units, numbers)
 }
 
+/// Loose on purpose: `[Constants]` always writes an offset, so any bare token
+/// there is one. `[PcVariables]` declares none, so its stricter
+/// [`is_offset_field`] decides whether a field is an offset or a unit.
 fn looks_like_offset(field: &str) -> bool {
     let field = field.trim_ascii();
     !field.starts_with('"') && !field.starts_with('[') && !field.starts_with('{')
@@ -820,9 +803,59 @@ fn parse_string_shape<'a>(fields: impl IntoIterator<Item = &'a str>) -> (Shape, 
         .next()
         .and_then(parse_dimension)
         .unwrap_or(Dimension::Fixed(0));
-    let columns = fields.next().and_then(parse_dimension);
+    // A storage keyword after the length belongs to the entry, not to the
+    // optional display-column count.
+    let columns = fields
+        .next()
+        .filter(|field| !is_keyword(field))
+        .and_then(parse_dimension);
     let used = 1 + usize::from(columns.is_some());
     (Shape::Text { length, columns }, used)
+}
+
+/// Reads the bit range, storage keywords and option table of a `bits` entry.
+fn parse_bit_attributes(
+    context: &mut AttributeContext<'_, '_>,
+    option_tables: &mut OptionTables,
+    section: &mut SectionParser,
+) -> Option<(Shape, Arc<[BitOption]>)> {
+    let Some(raw_shape) = context.fields.get(context.index) else {
+        section.warn(
+            "missing-shape",
+            format!("`{}` has no bit range", context.key),
+            context.line,
+        );
+        return None;
+    };
+    context.index += 1;
+    let Some(shape) = parse_bit_shape(raw_shape) else {
+        section.warn(
+            "bad-bit-range",
+            format!("`{}` has bit range {raw_shape:?}", context.key),
+            context.line,
+        );
+        return None;
+    };
+    apply_keyword_fields(
+        context.fields.iter().skip(context.index),
+        &mut context.flags,
+    );
+    let options = option_tables.table(
+        shared_define(context.raw_fields, context.index),
+        context.fields,
+        context.index,
+    );
+
+    Some((shape, options))
+}
+
+/// Collects the storage keywords written after a label list or a shape.
+fn apply_keyword_fields<'a>(fields: impl IntoIterator<Item = &'a str>, flags: &mut ConstantFlags) {
+    for field in fields {
+        if is_keyword(field) {
+            apply_keyword(flags, field);
+        }
+    }
 }
 
 fn is_keyword(field: &str) -> bool {
@@ -874,20 +907,24 @@ impl OptionTables {
 /// The define a bit-option list consists of, when it is exactly one `$name`
 /// field — the case worth sharing.
 ///
-/// `index` is where the option list starts in the expanded fields; the raw
-/// fields before it expand one-to-one for every entry this applies to, so
-/// `raw.len() == index + 1` means the list is the expansion of the last field
-/// and nothing else.
+/// `index` is where the option list starts in the expanded fields. The fields
+/// before it expand one-to-one for every entry this applies to, so a `$name` at
+/// that position that is followed by nothing but storage keywords means the
+/// list is the expansion of that field.
 fn shared_define(raw_fields: &[&str], index: usize) -> Option<String> {
-    if raw_fields.len() != index.checked_add(1)? {
-        return None;
-    }
     let name = raw_fields
-        .last()?
+        .get(index)?
         .trim_ascii()
         .strip_prefix('$')?
         .trim_ascii();
-    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_ascii_lowercase())
+    // A storage keyword after the list still leaves it shareable; any other
+    // trailing field means the list is part of a longer entry.
+    let only_keywords_after = raw_fields
+        .get(index + 1..)
+        .is_none_or(|tail| tail.iter().all(|field| is_keyword(field)));
+
+    (!name.is_empty() && !name.contains(char::is_whitespace) && only_keywords_after)
+        .then(|| name.to_ascii_lowercase())
 }
 
 fn parse_bit_options<'a>(fields: impl IntoIterator<Item = &'a str>) -> Arc<[BitOption]> {
@@ -895,27 +932,136 @@ fn parse_bit_options<'a>(fields: impl IntoIterator<Item = &'a str>) -> Arc<[BitO
     let mut next_value: u32 = 0;
 
     for field in fields {
-        let field = field.trim_ascii();
-        if field.is_empty() {
-            continue;
+        // The period separator is rare (one reference entry), so the common
+        // field keeps its single borrowed slice and no temporary list.
+        if field.contains("\".") {
+            for part in split_option_field(field) {
+                push_bit_option(&mut options, &mut next_value, part);
+            }
+        } else {
+            push_bit_option(&mut options, &mut next_value, field);
         }
-        let (value, label) = match field.split_once('=') {
-            Some((value, label)) => (
-                value.trim_ascii().parse::<u32>().ok(),
-                crate::fields::unquote(label).to_owned(),
-            ),
-            None => (None, crate::fields::unquote(field).to_owned()),
-        };
-        let assigned = value.unwrap_or(next_value);
-        next_value = assigned.saturating_add(1);
-        options.push(BitOption {
-            value: assigned,
-            hidden: label.eq_ignore_ascii_case("INVALID"),
-            label,
-        });
     }
 
     options.into()
+}
+
+/// Appends one option field, trimmed, with its index or explicit value.
+fn push_bit_option(options: &mut Vec<BitOption>, next_value: &mut u32, field: &str) {
+    let field = field.trim_ascii();
+    // A storage keyword after the label list belongs to the entry, not to the
+    // list: without this it would become an option labelled `noMsqSave`.
+    if field.is_empty() || is_keyword(field) {
+        return;
+    }
+
+    // An explicit value is written `3="Three"`: only a numeric left side is an
+    // assignment. A quoted label such as `"== (equal)"` contains `=` characters
+    // of its own, and the whole field is the label.
+    let (value, label) = match field.split_once('=') {
+        Some((value, label)) => match value.trim_ascii().parse::<u32>() {
+            Ok(number) => (Some(number), crate::fields::unquote(label).to_owned()),
+            Err(_) => (None, crate::fields::unquote(field).to_owned()),
+        },
+        None => (None, crate::fields::unquote(field).to_owned()),
+    };
+    let assigned = value.unwrap_or(*next_value);
+    *next_value = assigned.saturating_add(1);
+    options.push(BitOption {
+        value: assigned,
+        hidden: label.eq_ignore_ascii_case("INVALID"),
+        label,
+    });
+}
+
+/// Splits one option field at a `.` that follows a closing quote.
+///
+/// The dialect separates labels with commas. The reference Speeduino definition
+/// writes the first three of `secondarySerialProtocol` as
+/// `"Generic (Fixed List)". "Generic (ini File)". "CAN"`, a typo
+/// `TunerStudio` accepts, and it writes the chosen label back with that
+/// trailing period. Honouring `".` as a separator keeps the option indexes
+/// aligned with the vendor file instead of folding three labels into one.
+fn split_option_field(field: &str) -> Vec<&str> {
+    let bytes = field.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+
+    for index in 0..bytes.len().saturating_sub(1) {
+        if bytes[index] == b'"' && bytes[index + 1] == b'.' {
+            parts.push(&field[start..=index]);
+            start = index + 2;
+        }
+    }
+
+    parts.push(&field[start..]);
+    parts
+}
+
+/// Where a PC variable's shape starts.
+///
+/// The dialect declares no offset for `[PcVariables]` ("the same as Constants,
+/// except there is no offset"), but a file may still write one the way
+/// `[Constants]` does. A bare number where a `scalar` has its units is that
+/// offset; for a `bits` or `array` entry the shape is the bracket field, so a
+/// field before it is an offset.
+fn pc_shape_index(
+    class: ConstantClass,
+    fields: &Fields<'_>,
+    section: &mut SectionParser,
+    key: &str,
+    line: u32,
+) -> usize {
+    // An offset is a number or `nextOffset`/`lastOffset`; anything else is the
+    // units or the shape, and a mis-typed entry keeps its positions so the
+    // parser can warn about the token instead of silently eating it.
+    let has_offset = class != ConstantClass::String && fields.get(2).is_some_and(is_offset_field);
+
+    if class == ConstantClass::Scalar && has_offset && fields.get(3).is_some_and(is_offset_field) {
+        section.warn(
+            "pc-offset-guess",
+            format!(
+                "`{key}` has two numeric fields where the units belong; the first is taken as an \
+                 offset"
+            ),
+            line,
+        );
+    }
+
+    2 + usize::from(has_offset)
+}
+
+/// Whether a field is an offset the way `[Constants]` writes one.
+fn is_offset_field(field: &str) -> bool {
+    let field = field.trim_ascii();
+    let lowered = field.to_ascii_lowercase();
+    lowered == "nextoffset" || lowered == "lastoffset" || crate::fields::parse_u32(field).is_some()
+}
+
+/// The shape a PC variable declares, and how many fields it used.
+///
+/// `[PcVariables]` writes the same shapes as `[Constants]`: a `bits` or `array`
+/// entry carries one shape field, and a `string` entry carries its length and
+/// optional column count (`string, ASCII, 20`).
+fn parse_pc_shape(class: ConstantClass, fields: &Fields<'_>, index: usize) -> (Shape, usize) {
+    match class {
+        ConstantClass::Bits => (
+            fields
+                .get(index)
+                .and_then(parse_bit_shape)
+                .unwrap_or(Shape::Scalar),
+            1,
+        ),
+        ConstantClass::Array | ConstantClass::OddArray => (
+            fields
+                .get(index)
+                .and_then(parse_array_shape)
+                .unwrap_or(Shape::Scalar),
+            1,
+        ),
+        ConstantClass::String => parse_string_shape(fields.iter().skip(index)),
+        ConstantClass::Scalar => (Shape::Scalar, 0),
+    }
 }
 
 /// `[PcVariables]`: the same syntax as constants, without an offset.
@@ -925,6 +1071,8 @@ pub(crate) fn parse_pc_variables(
     lines: &[(u32, &str)],
     expander: &Expander<'_>,
 ) {
+    let mut option_tables = OptionTables::default();
+
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
@@ -952,7 +1100,13 @@ pub(crate) fn parse_pc_variables(
                 data_type: DataType::F32,
                 shape: Shape::Scalar,
                 units: Text::Literal(String::new()),
+                scale: None,
+                translate: None,
+                minimum: None,
+                maximum: None,
+                digits: None,
                 options: Arc::from([]),
+                flags: ConstantFlags::default(),
                 channel_value_on_connect: is_connect.then(|| channel.clone()),
                 continuous_channel_value: (!is_connect).then_some(channel),
                 line: *line,
@@ -983,32 +1137,30 @@ pub(crate) fn parse_pc_variables(
             continue;
         };
 
-        let mut index = 2usize;
-        let shape = match class {
-            ConstantClass::Bits => {
-                let shape = fields.get(index).and_then(parse_bit_shape);
-                index += 1;
-                shape.unwrap_or(Shape::Scalar)
-            }
-            ConstantClass::Array | ConstantClass::OddArray => {
-                let shape = fields.get(index).and_then(parse_array_shape);
-                index += 1;
-                shape.unwrap_or(Shape::Scalar)
-            }
-            _ => Shape::Scalar,
-        };
+        let mut index = pc_shape_index(class, &fields, section, key, *line);
+        let (shape, used) = parse_pc_shape(class, &fields, index);
+        index += used;
+
+        // A PC variable carries the same presentation attributes as a
+        // `[Constants]` entry, without an offset: `array, S08, [10], "unit",
+        // scale, translate, min, max, digits`. A string or a `bits` entry has
+        // no numbers, so its storage keywords are collected here; the option
+        // parser skips them.
+        let mut flags = ConstantFlags::default();
+        if matches!(class, ConstantClass::Bits | ConstantClass::String) {
+            apply_keyword_fields(fields.iter().skip(index), &mut flags);
+        }
 
         let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
-            parse_bit_options(fields.iter().skip(index))
+            option_tables.table(shared_define(&raw_fields, index), &fields, index)
         } else {
             Arc::from([])
         };
-        let units = if class == ConstantClass::Bits {
-            Text::Literal(String::new())
+
+        let (units, numbers) = if class == ConstantClass::Bits || class == ConstantClass::String {
+            (Text::Literal(String::new()), Vec::new())
         } else {
-            fields
-                .get(index)
-                .map_or(Text::Literal(String::new()), Text::parse)
+            split_numbers(fields.iter().skip(index), &mut flags, key, *line, section)
         };
 
         let variable = PcVariable {
@@ -1017,7 +1169,13 @@ pub(crate) fn parse_pc_variables(
             data_type,
             shape,
             units,
+            scale: numbers.first().cloned(),
+            translate: numbers.get(1).cloned(),
+            minimum: numbers.get(2).cloned(),
+            maximum: numbers.get(3).cloned(),
+            digits: numbers.get(4).cloned(),
             options,
+            flags,
             channel_value_on_connect: None,
             continuous_channel_value: None,
             line: *line,

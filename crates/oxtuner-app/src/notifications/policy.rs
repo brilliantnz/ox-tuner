@@ -20,6 +20,10 @@ use crate::i18n::t;
 /// `link_was_lost` is the state before the event was folded, so a reconnect is
 /// only announced when the link had visibly gone away first. A reconnect after
 /// a hidden retry is diagnostic detail, not news.
+///
+/// A firmware probe that found nothing is not news either. The scan tries many
+/// port, baud and family combinations, so a miss is a routine step: the wizard
+/// that started it reports once, inline, when every attempt is spent.
 pub(crate) fn for_event(event: &Event, link_was_lost: Option<&str>) -> Option<NotificationDraft> {
     match event {
         Event::ProjectOpened { view, .. } if view.read_only => {
@@ -75,7 +79,9 @@ pub(crate) fn for_event(event: &Event, link_was_lost: Option<&str>) -> Option<No
             )
             .key(NotificationKey::op(op.get())),
         ),
-        Event::Failed { op, failure } => Some(failed(*op, failure)),
+        Event::Failed { op, failure } if failure_is_news(failure.code) => {
+            Some(failed(*op, failure))
+        }
         Event::Rejected { op, .. } => Some(
             NotificationDraft::new(
                 NotificationSeverity::Warning,
@@ -87,6 +93,11 @@ pub(crate) fn for_event(event: &Event, link_was_lost: Option<&str>) -> Option<No
         ),
         _ => None,
     }
+}
+
+/// Whether a failure is the user's business the moment it arrives.
+fn failure_is_news(code: FailureCode) -> bool {
+    code != FailureCode::FirmwareNotDetected
 }
 
 fn read_only(reason: Option<&str>) -> NotificationDraft {
@@ -188,6 +199,13 @@ mod tests {
             failure_severity(FailureCode::WriteRefused),
             NotificationSeverity::Error
         );
+    }
+
+    #[test]
+    fn a_probe_miss_is_a_scan_step_not_a_notification() {
+        assert!(!failure_is_news(FailureCode::FirmwareNotDetected));
+        assert!(failure_is_news(FailureCode::TestFailed));
+        assert!(failure_is_news(FailureCode::ConnectFailed));
     }
 
     #[test]

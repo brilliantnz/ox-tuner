@@ -1,9 +1,11 @@
 //! The event boundary: failure records, the status fold and its follow-up commands.
 
 use gpui_kit::App;
-use oxtuner_core::{Event, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
+use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
+use rust_i18n::t;
 
 use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
+use super::firmware;
 use super::service::CoreService;
 use super::status::{JournalView, TraceSaved, Update};
 
@@ -18,6 +20,9 @@ const MILLIS_PER_SECOND: u32 = 1_000;
 /// cause; this one guarantees the link the UI offers can be followed.
 fn log_outcome(event: &Event, op: Option<OpId>) {
     match event {
+        // A probe miss is a scan step; the core already logs it at debug and
+        // the scan reports once when every attempt is spent.
+        Event::Failed { failure, .. } if failure.code == FailureCode::FirmwareNotDetected => {}
         Event::Failed { failure, .. } => {
             // `message` is tracing's own field; the failure text goes in
             // `detail` so the record keeps its event message and the field.
@@ -65,6 +70,13 @@ fn log_outcome(event: &Event, op: Option<OpId>) {
 )]
 pub(super) fn apply(event: Event, cx: &mut App) {
     let event_op = event.op();
+    // A rejection answers without an update: the pending project must still
+    // end, or the splash survives until the expiry. The reason is kept beside
+    // the flag for the fold below.
+    let rejected_reason = match &event {
+        Event::Rejected { reason, .. } => Some(*reason),
+        _ => None,
+    };
 
     // Every failure and rejection gets one record with the op field that
     // Diagnostics filters on. The core logs its own technical detail, but not
@@ -78,34 +90,94 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     let link_was_lost = cx.global::<CoreService>().status.link_lost.clone();
     crate::notifications::publish_event(&event, link_was_lost.as_deref(), cx);
 
-    // The port list is stored for the dialog, which stays open while it scans:
-    // closing and reopening would lose the user's selection and scroll. The core
-    // publishes the same snapshot on a change, so both paths land here.
-    // A change carries a fresh list, but only the answer to the scan ends the
-    // scan: a change that arrives mid-scan must not hide the dialog's state for
-    // the rest of the round trip.
+    // The port list is the core's pushed state, not one dialog's scan: the
+    // on-demand answer and the pushed change fold into the same snapshot, and
+    // every fold bumps the revision, so a view tells "no ports" apart from
+    // "no sample yet". Monotonic on purpose: two dialogs asking at once cannot
+    // undo each other's state the way a shared busy flag could.
     let ports = match &event {
-        Event::PortsListed { ports, .. } => Some((ports, true)),
-        Event::PortsChanged { ports } => Some((ports, false)),
+        Event::PortsListed { ports, .. } | Event::PortsChanged { ports } => Some(ports),
         _ => None,
     };
 
-    if let Some((ports, answered)) = ports {
+    if let Some(ports) = ports {
         let service = cx.global_mut::<CoreService>();
         service.status.ports.clone_from(ports);
+        service.status.ports_revision = service.status.ports_revision.saturating_add(1);
 
-        if answered {
-            service.status.scanning = false;
-        }
+        // A Detect press that arrived before the first sample asked for that
+        // sample instead of scanning; now it can.
+        let scan_now = std::mem::take(&mut service.status.scan_after_ports);
 
         cx.refresh_windows();
+        if scan_now {
+            crate::core::firmware::start_scan(cx);
+        }
         return;
+    }
+
+    // Firmware probing is a scan: a reply moves to the registry, a miss moves
+    // to the next attempt. It never becomes a connection test result, and a
+    // miss that belongs to no scan is not a visible failure either.
+    if let Event::FirmwareProbed {
+        op,
+        port,
+        baud,
+        framing,
+        probe,
+        signature,
+        ..
+    } = &event
+    {
+        crate::core::firmware::probed(*op, port.clone(), *baud, *framing, *probe, signature, cx);
+        return;
+    }
+    if let Event::Failed { op, failure, .. } = &event {
+        // Only a refusal from the core keeps its own sentence; a silent port
+        // gets the localized summary.
+        let miss = if failure.code == FailureCode::ConnectFailed {
+            firmware::Miss::Refused(&failure.message)
+        } else {
+            firmware::Miss::Silent
+        };
+        if firmware::missed(*op, miss, cx) {
+            return;
+        }
+    }
+
+    // A rejection (the core drained the queue on shutdown) still answers the
+    // attempt in flight, so the scan cannot keep waiting for it.
+    if let Event::Rejected { op, .. } = &event
+        && firmware::missed(*op, firmware::Miss::Stopped, cx)
+    {
+        return;
+    }
+
+    // The core stopped: nothing will answer the probe that is waiting.
+    if matches!(event, Event::Stopped) {
+        crate::core::firmware::fail_scan(cx, t!("app.new_project.scan_core_stopped").as_ref());
+    }
+
+    // A probe miss that belongs to no scan is a scan step, never news.
+    if let Event::Failed { failure, .. } = &event
+        && failure.code == FailureCode::FirmwareNotDetected
+    {
+        return;
+    }
+
+    // A rejected layout must not be remembered as stored: the next change
+    // sends it again, and a refused write is not a silent success.
+    if let Event::ProjectLayoutSaved { stored: false, .. } = &event {
+        crate::state::session::forget_sent_layout();
     }
 
     let (update, remember) = match event {
         Event::DefinitionLoaded { view, .. } => {
             tracing::info!(signature = %view.signature, "definition loaded");
             (Update::Loaded(view), None)
+        }
+        Event::DefinitionInspected { path, preview, .. } => {
+            (Update::Inspected { path, preview }, None)
         }
         Event::ProjectOpened { view, .. } => {
             tracing::info!(
@@ -117,7 +189,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             // Remember the folder only after the core opened it: the recent
             // list must not gain paths that turned out not to be projects.
             let root = view.root.clone();
-            (Update::Opened(view), Some(root))
+            (Update::Opened(Box::new(view)), Some(root))
         }
         Event::TuneSaved { outcome, .. } => {
             tracing::info!(
@@ -198,7 +270,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         } => (Update::Log { running, report }, None),
         Event::DefinitionUnloaded { .. } => (Update::Unloaded, None),
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
-        Event::PortsListed { .. }
+        // No view reads a probe result yet, so the core log carries the answer.
+        Event::FirmwareProbed { .. }
+        | Event::ProjectLayoutSaved { .. }
+        | Event::PortsListed { .. }
         | Event::PortsChanged { .. }
         | Event::Rejected { .. }
         | Event::Stopped => (Update::Nothing, None),
@@ -237,9 +312,19 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     };
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
-    let finishes_open = matches!(&update, Update::Opened(_) | Update::Failed(_));
-    // Remember the port that worked, so the next dialog opens on it.
-    let persist_port = match &update {
+    // Every accepted command answers exactly once — opened, failed or
+    // rejected — and a rejection carries no update, so it arrives as its own
+    // flag instead of matching an update arm.
+    let finishes_open = finishes_open(&update, rejected_reason.is_some());
+    // A project carries its own panel layout; standalone tunes keep the
+    // installation's.
+    let project_layout = match &update {
+        Update::Opened(view) if view.in_project => Some(view.layout.clone()),
+        _ => None,
+    };
+    // The core persisted this connection into the project state; mirror it in the
+    // open view so a dialog opened in the same session starts from it too.
+    let confirmed_connection = match &update {
         Update::Connected(connection) if !connection.custom => {
             let baud = cx
                 .global::<CoreService>()
@@ -257,10 +342,16 @@ pub(super) fn apply(event: Event, cx: &mut App) {
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
-        if finishes_open {
-            cx.global_mut::<CoreService>()
-                .status
-                .finish_pending_project(event_op);
+        if let Some(layout) = project_layout {
+            crate::state::session::AppState::update_global(cx, |state| {
+                state.layout.apply_project_layout(&layout);
+            });
+        }
+        if let Some((port, baud)) = confirmed_connection
+            && let Some(project) = cx.global_mut::<CoreService>().status.project.as_mut()
+        {
+            project.connection.last_port = Some(port);
+            project.connection.baud_override = baud;
         }
         if let Some(path) = import_consent {
             cx.global_mut::<CoreService>().status.import_consent = Some(path);
@@ -272,12 +363,30 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         cx.refresh_windows();
     }
 
-    if let Some((port, baud)) = persist_port {
-        crate::settings::preferences::AppSettings::update(cx, |settings| {
-            settings.connection.last_port = Some(port);
-            settings.connection.baud_override = baud;
-        });
+    // Every accepted command answers exactly once — opened, failed or
+    // rejected — so the pending project ends on every answer type. A
+    // rejection carries no update, which is why this sits outside the fold
+    // above instead of beside the other `finishes_open` arm. The splash
+    // clears and the screen repaints here; a rejection that ended a pending
+    // project also leaves its reason as the project failure, or the wizard
+    // would return to a review with no message.
+    if finishes_open {
+        let status = &mut cx.global_mut::<CoreService>().status;
+        let had_pending = status.pending_project.is_some();
+        status.finish_pending_project(event_op);
+        if had_pending
+            && status.pending_project.is_none()
+            && let Some(reason) = rejected_reason
+        {
+            status.failure = Some(Failure {
+                code: FailureCode::ProjectRejected,
+                message: reason.as_str().to_owned(),
+            });
+            status.failure_serial = status.failure_serial.wrapping_add(1);
+        }
+        cx.refresh_windows();
     }
+
     if auto_connect {
         connect_to_simulator(cx);
     }
@@ -288,13 +397,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         read_all(cx);
     }
     if poll {
-        // The connection settings hold the user's poll rate; the core clamps it
-        // to the same range.
-        let hz = cx
-            .global::<crate::settings::preferences::AppSettings>()
-            .settings()
-            .connection
-            .poll_rate_hz
+        // The user's poll rate lives in the global connection settings; the
+        // core clamps it to the same range.
+        let hz = crate::settings::preferences::AppSettings::global_poll_rate_hz(cx)
             .clamp(MIN_POLL_HZ, MAX_POLL_HZ);
         start_realtime(MILLIS_PER_SECOND / hz, cx);
     }
@@ -322,5 +427,28 @@ pub(super) fn apply(event: Event, cx: &mut App) {
                     .ok();
             }
         });
+    }
+}
+
+/// Whether the answer ends the pending project.
+///
+/// Every accepted command answers exactly once — opened, failed or rejected —
+/// and a rejection carries no update, so it arrives as its own flag instead
+/// of matching an update arm.
+fn finishes_open(update: &Update, rejected: bool) -> bool {
+    matches!(update, Update::Opened(_) | Update::Failed(_)) || rejected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rejection_ends_the_pending_project() {
+        assert!(
+            finishes_open(&Update::Nothing, true),
+            "a rejection without an update still answers the request"
+        );
+        assert!(!finishes_open(&Update::Nothing, false));
     }
 }

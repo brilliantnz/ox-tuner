@@ -24,6 +24,8 @@ use oxtuner_core::{
 };
 use oxtuner_ini::{SettingsContext, parse_bytes};
 
+mod support;
+
 const WAIT: Duration = Duration::from_secs(60);
 
 fn locate(env: &str, fallback: &str) -> Option<PathBuf> {
@@ -88,7 +90,9 @@ impl Harness {
         self.handle
             .load_definition("speeduino.ini", bytes)
             .expect("the load is queued");
-        let event = self.events.recv_timeout(WAIT).expect("an event arrives");
+        // The core pushes its port snapshot on its own, so the answer is read
+        // past those publications.
+        let event = support::recv_non_port(&self.events, WAIT).expect("an event arrives");
 
         let Event::DefinitionLoaded { view: summary, .. } = event else {
             panic!("expected a definition load, got {event:?}");
@@ -137,7 +141,9 @@ impl RealProject {
         let events = parts.events.into_blocking();
         parts.handle.open_project(&dir).expect("the open is queued");
 
-        let event = events.recv_timeout(WAIT).expect("an event arrives");
+        // The core pushes its port snapshot on its own, so the answer is read
+        // past those publications.
+        let event = support::recv_non_port(&events, WAIT).expect("an event arrives");
         let Event::ProjectOpened { view: summary, .. } = event else {
             panic!("expected a project open, got {event:?}");
         };
@@ -157,7 +163,9 @@ impl RealProject {
 
     fn read_dialog(&self, name: &str) -> DialogView {
         self.handle.read_dialog(name).expect("the read is queued");
-        let event = self.events.recv_timeout(WAIT).expect("an event arrives");
+        // The core pushes its port snapshot on its own, so the answer is read
+        // past those publications.
+        let event = support::recv_non_port(&self.events, WAIT).expect("an event arrives");
 
         let Event::DialogRead { dialog, .. } = event else {
             panic!("expected a dialog read, got {event:?}");

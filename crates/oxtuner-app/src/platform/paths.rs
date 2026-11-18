@@ -45,18 +45,34 @@ pub(crate) struct PlatformDirs {
     pub(crate) data_local_base: PathBuf,
     pub(crate) cache_base: PathBuf,
     pub(crate) home: PathBuf,
+    /// The user's Documents folder, when the platform reports one.
+    ///
+    /// `None` on a Linux desktop without XDG user directories configured;
+    /// [`Self::documents`] then answers `home/Documents`, which is where that
+    /// desktop would put it.
+    pub(crate) documents: Option<PathBuf>,
 }
 
 impl PlatformDirs {
     /// Reads the current machine's base directories.
     pub(crate) fn discover() -> Option<Self> {
         let base = directories::BaseDirs::new()?;
+        let documents = directories::UserDirs::new()
+            .and_then(|dirs| dirs.document_dir().map(Path::to_path_buf));
         Some(Self {
             config_base: base.config_dir().to_path_buf(),
             data_local_base: base.data_local_dir().to_path_buf(),
             cache_base: base.cache_dir().to_path_buf(),
             home: base.home_dir().to_path_buf(),
+            documents,
         })
+    }
+
+    /// The Documents folder, with the conventional location as the fallback.
+    pub(crate) fn documents(&self) -> PathBuf {
+        self.documents
+            .clone()
+            .unwrap_or_else(|| self.home.join("Documents"))
     }
 }
 
@@ -70,6 +86,7 @@ pub struct AppPaths {
     pub(crate) config_dir: PathBuf,
     pub(crate) cache_dir: PathBuf,
     pub(crate) logs_dir: PathBuf,
+    pub(crate) projects_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -77,13 +94,15 @@ impl AppPaths {
     ///
     /// If the platform cannot report a home directory, fall back to a relative
     /// directory rather than panicking: an app that cannot find a place for its
-    /// settings should still start.
+    /// settings should still start. The projects folder is relative too, and the
+    /// new-project dialog shows it, so the user can point it somewhere real.
     pub fn discover() -> Self {
         PlatformDirs::discover().map_or_else(
             || Self {
                 config_dir: PathBuf::from(".oxtuner"),
                 cache_dir: PathBuf::from(".oxtuner/cache"),
                 logs_dir: PathBuf::from(".oxtuner/logs"),
+                projects_dir: PathBuf::from("OxTunerProjects"),
             },
             |dirs| Self::resolve(Platform::current(), &dirs),
         )
@@ -95,23 +114,55 @@ impl AppPaths {
     /// and Logs. Windows uses `OxTuner` under Roaming (settings), Local (cache
     /// and logs). Linux follows the XDG convention: lowercase `oxtuner` under
     /// `~/.config`, `~/.cache` and `~/.local/state`.
+    ///
+    /// New projects default to `Documents/OxTunerProjects` on every platform:
+    /// the folder is user data that people back up and copy between machines,
+    /// so it lives where their other documents do.
     pub(crate) fn resolve(platform: Platform, dirs: &PlatformDirs) -> Self {
+        let projects_dir = dirs.documents().join("OxTunerProjects");
         match platform {
             Platform::Macos => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
                 cache_dir: dirs.cache_base.join("OxTuner"),
                 logs_dir: dirs.home.join("Library/Logs/OxTuner"),
+                projects_dir,
             },
             Platform::Windows => Self {
                 config_dir: dirs.config_base.join("OxTuner"),
                 cache_dir: dirs.data_local_base.join("OxTuner").join("cache"),
                 logs_dir: dirs.data_local_base.join("OxTuner").join("logs"),
+                projects_dir,
             },
             Platform::Linux => Self {
                 config_dir: dirs.config_base.join("oxtuner"),
                 cache_dir: dirs.cache_base.join("oxtuner"),
                 logs_dir: dirs.home.join(".local/state/oxtuner/logs"),
+                projects_dir,
             },
+        }
+    }
+
+    /// The folder the new-project dialog starts in.
+    ///
+    /// A default, never a constraint: the dialog lets the user save a project
+    /// anywhere and does not remember a different folder between runs.
+    pub fn projects_dir(&self) -> &Path {
+        &self.projects_dir
+    }
+
+    /// Creates the projects folder, once per launch.
+    ///
+    /// The folder is the default the new-project dialog starts in, so it
+    /// exists from the first launch instead of appearing only after the first
+    /// project is written. A failure is a warning, never a crash: the dialog
+    /// lets the user pick another folder anyway.
+    pub fn ensure_projects_dir(&self) {
+        if let Err(error) = std::fs::create_dir_all(&self.projects_dir) {
+            tracing::warn!(
+                %error,
+                path = %self.projects_dir.display(),
+                "the projects folder could not be created"
+            );
         }
     }
 
@@ -139,11 +190,6 @@ impl AppPaths {
     /// else. Parsed definitions keep living next to it in `definitions/`.
     pub fn registry_dir(&self) -> PathBuf {
         self.cache_dir.join("registry")
-    }
-
-    /// Cached definition listings and `.ini` downloads.
-    pub fn registry_definition_dir(&self) -> PathBuf {
-        self.registry_dir().join("definition")
     }
 
     /// Cached firmware listings and images. No flasher reads them yet.
@@ -203,6 +249,62 @@ impl gpui_kit::Global for AppPaths {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A fresh temporary root, so a test never touches the user's folders.
+    fn temp_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+
+        std::env::temp_dir().join(format!("oxtuner-{name}-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn the_projects_folder_is_created_on_the_first_launch() {
+        let root = temp_root("paths-test");
+        let paths = AppPaths {
+            config_dir: root.join("config"),
+            cache_dir: root.join("cache"),
+            logs_dir: root.join("logs"),
+            projects_dir: root.join("OxTunerProjects"),
+        };
+
+        paths.ensure_projects_dir();
+
+        assert!(
+            paths.projects_dir.is_dir(),
+            "the projects folder should exist"
+        );
+
+        // A second launch finds it already there and stays quiet about it.
+        paths.ensure_projects_dir();
+        assert!(paths.projects_dir.is_dir());
+    }
+
+    #[test]
+    fn a_missing_projects_folder_is_a_warning_not_a_crash() {
+        let paths = AppPaths {
+            config_dir: PathBuf::from("config"),
+            cache_dir: PathBuf::from("cache"),
+            logs_dir: PathBuf::from("logs"),
+            // A file where the folder should be makes every create fail.
+            projects_dir: {
+                let root = temp_root("paths-blocked-test");
+                std::fs::create_dir_all(&root).expect("create temp root");
+                std::fs::write(root.join("OxTunerProjects"), b"").expect("write the blocker");
+                root.join("OxTunerProjects")
+            },
+        };
+
+        paths.ensure_projects_dir();
+
+        assert!(
+            paths.projects_dir.is_file(),
+            "the blocker should still be there"
+        );
+    }
 
     fn dirs(config: &str, local: &str, cache: &str, home: &str) -> PlatformDirs {
         PlatformDirs {
@@ -210,6 +312,16 @@ mod tests {
             data_local_base: PathBuf::from(local),
             cache_base: PathBuf::from(cache),
             home: PathBuf::from(home),
+            documents: Some(PathBuf::from(home).join("Documents")),
+        }
+    }
+
+    /// The same bases as [`dirs`], with no Documents folder reported: a Linux
+    /// desktop without XDG user directories.
+    fn dirs_without_documents(config: &str, local: &str, cache: &str, home: &str) -> PlatformDirs {
+        PlatformDirs {
+            documents: None,
+            ..dirs(config, local, cache, home)
         }
     }
 
@@ -251,6 +363,10 @@ mod tests {
             paths.themes_dir(),
             PathBuf::from("/Users/me/Library/Application Support/OxTuner/themes")
         );
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/Users/me/Documents/OxTunerProjects")
+        );
     }
 
     #[test]
@@ -279,6 +395,12 @@ mod tests {
                 .join("OxTuner")
                 .join("logs")
         );
+        assert_eq!(
+            paths.projects_dir(),
+            PathBuf::from(r"C:\Users\me")
+                .join("Documents")
+                .join("OxTunerProjects")
+        );
     }
 
     #[test]
@@ -296,6 +418,43 @@ mod tests {
         assert_eq!(
             paths.logs_dir,
             PathBuf::from("/home/me/.local/state/oxtuner/logs")
+        );
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/home/me/Documents/OxTunerProjects")
+        );
+    }
+
+    #[test]
+    fn a_missing_documents_folder_falls_back_to_home_documents() {
+        let dirs = dirs_without_documents(
+            "/home/me/.config",
+            "/home/me/.local/share",
+            "/home/me/.cache",
+            "/home/me",
+        );
+        let paths = AppPaths::resolve(Platform::Linux, &dirs);
+
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/home/me/Documents/OxTunerProjects")
+        );
+    }
+
+    #[test]
+    fn a_reported_documents_folder_wins_over_the_fallback() {
+        let mut dirs = dirs(
+            "/home/me/.config",
+            "/home/me/.local/share",
+            "/home/me/.cache",
+            "/home/me",
+        );
+        dirs.documents = Some(PathBuf::from("/mnt/data/Docs"));
+        let paths = AppPaths::resolve(Platform::Linux, &dirs);
+
+        assert_eq!(
+            paths.projects_dir(),
+            Path::new("/mnt/data/Docs/OxTunerProjects")
         );
     }
 
@@ -332,20 +491,12 @@ mod tests {
         for paths in [&macos, &windows, &linux] {
             assert_eq!(paths.registry_dir(), paths.cache_dir.join("registry"));
             assert_eq!(
-                paths.registry_definition_dir(),
-                paths.cache_dir.join("registry/definition")
-            );
-            assert_eq!(
                 paths.registry_firmware_dir(),
                 paths.cache_dir.join("registry/firmware")
             );
             assert_ne!(paths.registry_dir(), paths.definition_cache_dir());
         }
 
-        assert_eq!(
-            macos.registry_definition_dir(),
-            PathBuf::from("/Users/me/Library/Caches/OxTuner/registry/definition")
-        );
         assert_eq!(
             linux.registry_firmware_dir(),
             PathBuf::from("/home/me/.cache/oxtuner/registry/firmware")

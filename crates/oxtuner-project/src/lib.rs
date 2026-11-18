@@ -16,7 +16,7 @@
 //! # Guarantees
 //!
 //! - **In place.** Nothing is copied or restructured; inside the project,
-//!   writes are confined to `CurrentTune.msq` and the `.ox-tuner/` sidecar
+//!   writes are confined to `CurrentTune.msq` and the `.oxtuner/` sidecar
 //!   (ADR-0007). The optional definition cache is written only under the
 //!   caller-supplied cache directory (ADR-0026).
 //! - **Cached, never owned.** A caller may pass a cache directory
@@ -56,9 +56,9 @@
 mod atomic;
 pub mod check;
 mod definition_cache;
-pub mod encoding;
 mod flags;
 pub mod hash;
+pub mod inspect;
 pub mod load;
 pub mod msq;
 pub mod project;
@@ -67,11 +67,19 @@ pub mod xml;
 
 pub use check::{IssueKind, LoadIssue, LoadReport, check};
 pub use definition_cache::{CACHE_FORMAT_VERSION, DefinitionSource};
-pub use encoding::EncodeError;
+pub use inspect::{
+    DefinitionPreview, SettingGroupPreview, SettingOptionPreview, inspect_definition,
+};
 pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};
+pub use oxtuner_encoding::Latin1Error as EncodeError;
 pub use project::{
-    CONFIG_DIR, MAIN_DEFINITION, Project, ProjectError, ProjectKind, SaveOutcome, TUNE_FILE,
+    CONFIG_DIR, ConnectionSeed, CreateRequest, MAIN_DEFINITION, Project, ProjectError, ProjectKind,
+    SaveOutcome, TUNE_FILE, accepts_definition, ensure_target_free, split_destination,
+    validate_project_name,
 };
-pub use sidecar::{PROVENANCE_FILE, Provenance, SIDECAR_DIR};
+pub use sidecar::{
+    ConnectionState, DefinitionRef, ProjectLayout, ProjectState, SIDECAR_DIR, STATE_FILE,
+    STATE_SCHEMA_VERSION,
+};
 pub use xml::{Attr, Document, Element, Node, XmlError, XmlErrorKind};

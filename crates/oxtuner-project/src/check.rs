@@ -59,7 +59,7 @@ pub enum IssueKind {
     Definition,
     /// A value could not be loaded (bad text, wrong element count, …).
     ValueSkipped,
-    /// A value was stored but lies outside the declared range.
+    /// A value was stored but does not fit the declared storage type.
     ValueOutOfRange,
     /// A file value outside the declared range was clamped on load.
     ValueClamped,
@@ -68,6 +68,34 @@ pub enum IssueKind {
 }
 
 impl IssueKind {
+    /// A stable code for logs and a future notification policy.
+    ///
+    /// Never contains user data, so it is safe to group or filter on.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingVersionInfo => "missing-version-info",
+            Self::SignatureMismatch => "signature-mismatch",
+            Self::PageCountMismatch => "page-count-mismatch",
+            Self::InvalidPageNumber => "invalid-page-number",
+            Self::DuplicatePage => "duplicate-page",
+            Self::MissingPage => "missing-page",
+            Self::UnknownPage => "unknown-page",
+            Self::PageSizeMismatch => "page-size-mismatch",
+            Self::MissingPageSize => "missing-page-size",
+            Self::PcPageCount => "pc-page-count",
+            Self::ShapeMismatch => "shape-mismatch",
+            Self::OrphanValue => "orphan-value",
+            Self::MissingValue => "missing-value",
+            Self::NamelessEntry => "nameless-entry",
+            Self::Definition => "definition",
+            Self::ValueSkipped => "value-skipped",
+            Self::ValueOutOfRange => "value-out-of-range",
+            Self::ValueClamped => "value-clamped",
+            Self::PageDataMismatch => "page-data-mismatch",
+        }
+    }
+
     /// Whether the problem prevents saving.
     pub const fn is_blocker(self) -> bool {
         matches!(
@@ -101,6 +129,10 @@ impl fmt::Display for LoadIssue {
 }
 
 /// The result of checking a tune against its definition.
+///
+/// Non-exhaustive: a new finding list is additive, and every field has a
+/// default, so a caller reads the fields it needs and ignores the rest.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadReport {
     /// Problems that force read-only mode.
@@ -111,6 +143,18 @@ pub struct LoadReport {
     pub loaded: usize,
     /// Values left at their definition default.
     pub skipped: usize,
+    /// Names of values the definition does not declare, in file order.
+    ///
+    /// These are the part of [`Self::skipped`] that carries no
+    /// [`IssueKind::ValueSkipped`] warning of its own: the check layer reports
+    /// them once, with a short preview. The full list is kept here so a log or
+    /// a diagnostics view can name every one instead of only counting them.
+    pub orphan_values: Vec<String>,
+    /// Names of definition entries the tune has no value for, sorted.
+    ///
+    /// The check layer warns about them once, with a short preview; this is the
+    /// full list, for the same reason as [`Self::orphan_values`].
+    pub missing_values: Vec<String>,
 }
 
 impl LoadReport {
@@ -329,9 +373,36 @@ fn check_pages(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     }
 }
 
+/// The definition entries the tune has no value for, sorted.
+///
+/// Constants and PC variables marked `noMsqSave` are never written, so their
+/// absence is not a missing value. Names are matched case-insensitively, the
+/// way a lookup by name works.
+fn missing_entries<'a>(definition: &'a Definition, seen: &BTreeSet<String>) -> Vec<&'a str> {
+    let mut missing: Vec<&str> = definition
+        .constants
+        .iter()
+        .filter(|(_, constant)| !constant.flags.no_msq_save)
+        .map(|(name, _)| name)
+        .chain(
+            definition
+                .pc_variables
+                .iter()
+                .filter(|(_, variable)| !variable.flags.no_msq_save)
+                .map(|(name, _)| name),
+        )
+        .filter(|name| !seen.contains(&name.to_ascii_lowercase()))
+        .collect();
+
+    missing.sort_unstable();
+    missing
+}
+
 fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     let entries = msq.entries();
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    // Case-folded, because a lookup by name is case-insensitive: an entry that
+    // loaded under another case must not be reported missing as well.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut orphans: Vec<&str> = Vec::new();
     let mut nameless = 0usize;
 
@@ -340,10 +411,10 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
             nameless += 1;
             continue;
         }
-        seen.insert(entry.name.as_str());
+        seen.insert(entry.name.to_ascii_lowercase());
 
         let constant = definition.constant(&entry.name);
-        let pc_variable = definition.pc_variables.get(&entry.name);
+        let pc_variable = definition.pc_variables.get_ignore_case(&entry.name);
         if constant.is_none() && pc_variable.is_none() {
             orphans.push(entry.name.as_str());
             continue;
@@ -407,6 +478,7 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         );
     }
     if !orphans.is_empty() {
+        report.orphan_values = orphans.iter().map(|name| (*name).to_owned()).collect();
         report.warn(
             IssueKind::OrphanValue,
             format!(
@@ -417,16 +489,9 @@ fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
         );
     }
 
-    let mut missing: Vec<&str> = definition
-        .constants
-        .iter()
-        .filter(|(_, constant)| !constant.flags.no_msq_save)
-        .map(|(name, _)| name)
-        .chain(definition.pc_variables.iter().map(|(name, _)| name))
-        .filter(|name| !seen.contains(*name))
-        .collect();
-    missing.sort_unstable();
+    let missing = missing_entries(definition, &seen);
     if !missing.is_empty() {
+        report.missing_values = missing.iter().map(|name| (*name).to_owned()).collect();
         report.warn(
             IssueKind::MissingValue,
             format!(
@@ -674,6 +739,17 @@ pc = scalar, U08, 0, "", 1, 0, 0, 255, 0
             .find(|issue| issue.kind == IssueKind::OrphanValue)
             .expect("orphan warning");
         assert!(orphan.message.contains("gone"));
+    }
+
+    #[test]
+    fn issue_kinds_carry_stable_codes_for_logs() {
+        assert_eq!(
+            IssueKind::SignatureMismatch.code(),
+            "signature-mismatch",
+            "a blocker keeps its code when the message changes"
+        );
+        assert_eq!(IssueKind::OrphanValue.code(), "orphan-value");
+        assert_eq!(IssueKind::ValueSkipped.code(), "value-skipped");
     }
 
     #[test]

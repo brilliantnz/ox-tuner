@@ -192,6 +192,8 @@ impl ProjectView {
                 .iter()
                 .map(|issue| issue.message.clone())
                 .collect(),
+            connection: project.state().connection.clone(),
+            layout: project.state().layout.clone(),
         }
     }
 }

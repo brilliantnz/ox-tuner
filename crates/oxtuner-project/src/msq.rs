@@ -19,13 +19,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
-use oxtuner_ini::SettingsContext;
-use oxtuner_tune::MsqPage;
+use oxtuner_ini::expr::EvalContext;
+use oxtuner_ini::{ChannelKind, Definition, SettingsContext, Shape};
+use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec};
 
-use crate::encoding::{self, EncodeError};
 use crate::flags;
+use crate::load;
 use crate::xml::{Document, Element, Node, XmlError};
+use oxtuner_encoding::Latin1Error as EncodeError;
 
 /// A `.msq` page address: the unnumbered PC page, or a numbered calibration page.
 #[expect(
@@ -170,6 +173,11 @@ pub enum MsqError {
         /// The entry name.
         name: String,
     },
+    /// A scaffold found a page with no INI counterpart.
+    UnknownPage {
+        /// The page number with no definition page.
+        page: u16,
+    },
 }
 
 impl fmt::Display for MsqError {
@@ -183,6 +191,12 @@ impl fmt::Display for MsqError {
             Self::EntryNotFound { page, name } => {
                 write!(formatter, "`{name}` does not exist on {page}")
             }
+            Self::UnknownPage { page } => {
+                write!(
+                    formatter,
+                    "the definition declares no page for the values found on page {page}"
+                )
+            }
         }
     }
 }
@@ -192,7 +206,9 @@ impl std::error::Error for MsqError {
         match self {
             Self::Xml(error) => Some(error),
             Self::Encoding(error) => Some(error),
-            Self::RootIsNotMsq { .. } | Self::EntryNotFound { .. } => None,
+            Self::RootIsNotMsq { .. } | Self::EntryNotFound { .. } | Self::UnknownPage { .. } => {
+                None
+            }
         }
     }
 }
@@ -209,7 +225,300 @@ impl From<EncodeError> for MsqError {
     }
 }
 
+/// The file format a scaffolded tune declares, matching the observed writer.
+const SCAFFOLD_FILE_FORMAT: &str = "5.0";
+/// The namespace observed on tunes the reference writer produces.
+const SCAFFOLD_NAMESPACE: &str = "http://www.msefi.com/:msq";
+
+/// How deep a default may chain through other defaults and computed channels.
+const MAX_DEFAULT_DEPTH: usize = 16;
+
+/// The definition's declared defaults, as values a scaffold can evaluate.
+///
+/// A scaffold has no tune values yet, so the only thing a presentation
+/// attribute can name is another default from `[ConstantsExtensions]` or a
+/// computed channel the definition derives from those defaults.
+/// `rawValue` wins over `defaultValue`, matching how the layout picks a
+/// variable's own default. A chain that runs away is cut off rather than
+/// recursed into.
+struct DefaultValues<'a> {
+    definition: &'a Definition,
+    depth: usize,
+}
+
+impl DefaultValues<'_> {
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_DEFAULT_DEPTH {
+            return false;
+        }
+        self.depth += 1;
+
+        true
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+impl EvalContext for DefaultValues<'_> {
+    fn value(&mut self, name: &str) -> Option<f64> {
+        let definition = self.definition;
+
+        if let Some(number) = definition
+            .extensions
+            .raw_defaults
+            .get_ignore_case(name)
+            .or_else(|| definition.extensions.defaults.get_ignore_case(name))
+        {
+            if let Some(literal) = number.literal() {
+                return Some(literal);
+            }
+            if !self.enter() {
+                return None;
+            }
+            let value = number.evaluate_with(self);
+            self.leave();
+
+            return value;
+        }
+
+        let Some(channel) = definition.channel(name) else {
+            // A declared variable with no `defaultValue` starts at zero, the
+            // same fallback the layout uses for its own default. An unknown
+            // name stays unresolved.
+            let declared = definition.constant(name).is_some()
+                || definition.pc_variables.get_ignore_case(name).is_some();
+
+            return declared.then_some(0.0);
+        };
+        let ChannelKind::Computed(expression) = &channel.kind else {
+            return None;
+        };
+        if !self.enter() {
+            return None;
+        }
+        let value = expression.evaluate_with(self);
+        self.leave();
+
+        value
+    }
+}
+
+/// Writes the definition's per-cell array defaults into a tune.
+///
+/// The layout resolves a scalar default on its own, but the dialect writes an
+/// array default as one value per cell, which `Number` cannot hold. Creation
+/// and the open path both call this, so a definition's declared array default
+/// has one answer instead of starting from zeros.
+pub(crate) fn apply_definition_defaults(tune: &mut Tune, definition: &Definition) {
+    let extensions = &definition.extensions;
+
+    for (name, values) in extensions.default_arrays.iter() {
+        let Some(spec) = tune.layout().variable(name).cloned() else {
+            continue;
+        };
+        apply_cells(
+            tune,
+            &spec,
+            values
+                .iter()
+                .map(|user| spec.to_raw(*user).ok().map(|conversion| conversion.raw)),
+        );
+    }
+
+    // `rawValue` wins over `defaultValue`, the same precedence the layout uses
+    // for a scalar default.
+    for (name, values) in extensions.raw_default_arrays.iter() {
+        let Some(spec) = tune.layout().variable(name).cloned() else {
+            continue;
+        };
+        apply_cells(tune, &spec, values.iter().map(|raw| Some(*raw)));
+    }
+}
+
+/// Writes one raw value per index, inside the declared range.
+///
+/// Indices only grow, so the first cell the tune does not have ends the list:
+/// a definition default with more values than the array is a definition
+/// problem, and the rest cannot be placed anyway.
+fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item = Option<f64>>) {
+    for (index, value) in values.enumerate() {
+        let Some(value) = value else { continue };
+
+        let raw = spec.clamp_raw(value);
+        if let Err(error) = tune.set_image_raw(&spec.name, index, raw) {
+            tracing::debug!(
+                name = %spec.name,
+                index,
+                %error,
+                "an array default named no cell"
+            );
+            return;
+        }
+    }
+}
+
+/// The values a scaffold writes for one variable.
+///
+/// A default outside the declared range or the storage type would come back
+/// different from the tune's first open, so it is written inside both. The
+/// value on disk then equals the value the loader reads, which is what makes a
+/// created project exactly an opened one.
+fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
+    match values {
+        Values::Numbers(numbers) => {
+            Values::Numbers(numbers.iter().map(|raw| spec.clamp_raw(*raw)).collect())
+        }
+        Values::Text(text) => Values::Text(text.clone()),
+    }
+}
+
+/// Whether the definition declares `name` as a one-dimensional list.
+///
+/// The flattened shape cannot tell a `[N]` list from a `[Nx1]` table: both are
+/// one column of N rows in the tune. Only a list is written as `cols="1"`.
+fn is_list(definition: &Definition, name: &str) -> bool {
+    let shape = definition
+        .constant(name)
+        .map(|constant| &constant.shape)
+        .or_else(|| {
+            definition
+                .pc_variables
+                .get_ignore_case(name)
+                .map(|variable| &variable.shape)
+        });
+
+    matches!(shape, Some(Shape::List(_)))
+}
+
 impl Msq {
+    /// Builds a new tune document with every value at its definition default.
+    ///
+    /// The document mirrors what the reference writer produces: an unnumbered
+    /// PC page first, one numbered page per definition page carrying the
+    /// definition's page sizes, and a `<settings>` snapshot of the active
+    /// flags. Variables the definition marks `noMsqSave` are left out, the
+    /// same rule the save path applies.
+    ///
+    /// Presentation attributes are evaluated against the definition's declared
+    /// defaults, so an expression such as `{fuelLoadMax}` or `{0.1/stoich}`
+    /// resolves before the value is written. A value that still cannot be
+    /// written is left out and the open that follows reports it as missing.
+    ///
+    /// This is crate-private: project creation is the only caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
+    /// page the definition does not declare, and [`MsqError::Encoding`] when
+    /// a written value cannot be represented in ISO-8859-1.
+    pub(crate) fn scaffold(
+        definition: &Definition,
+        settings: &SettingsContext,
+    ) -> Result<Self, MsqError> {
+        // A scaffold has no values yet, so presentation attributes are
+        // resolved against the definition's own defaults. Without that, every
+        // attribute written as an expression (`{fuelLoadMax}`, `{0.1/stoich}`)
+        // would stay unresolved and drop its variable from the new tune.
+        let mut defaults = DefaultValues {
+            definition,
+            depth: 0,
+        };
+        let layout = TuneLayout::build_with_context(definition, &mut defaults);
+        let mut tune = Tune::new(Arc::new(layout));
+        apply_definition_defaults(&mut tune, definition);
+        let layout = Arc::clone(tune.layout());
+
+        let mut pc_entries: Vec<Element> = Vec::new();
+        let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
+        for spec in layout.variables() {
+            if spec.no_msq_save {
+                continue;
+            }
+            let Some(values) = tune.value(&spec.name) else {
+                continue;
+            };
+            if values.is_empty() {
+                continue;
+            }
+            let values = clamp_values(spec, values);
+            let text = match load::format_values(spec, definition, &values) {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::debug!(
+                        name = %spec.name,
+                        %error,
+                        "the scaffold left this value out"
+                    );
+                    continue;
+                }
+            };
+
+            let tag = match spec.ini_page() {
+                Some(_) => EntryKind::Constant,
+                None => EntryKind::PcVariable,
+            };
+            let element = entry_element(spec, is_list(definition, &spec.name), tag, &text);
+
+            match spec.ini_page() {
+                Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
+                None => pc_entries.push(element),
+            }
+        }
+
+        let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
+        push_child(
+            &mut root.children,
+            1,
+            Element::self_closing("bibliography", &[("author", "Ox Tuner")]),
+        );
+        push_child(&mut root.children, 1, version_element(definition));
+
+        let pc_page = if pc_entries.is_empty() {
+            Element::self_closing("page", &[])
+        } else {
+            page_element(None, None, pc_entries)
+        };
+        push_child(&mut root.children, 1, pc_page);
+
+        for page in &definition.pages {
+            let Some(ini) = IniPage::new(page.number) else {
+                continue;
+            };
+            let number = ini.to_msq().get();
+            let entries = pages.remove(&number).unwrap_or_default();
+            let size = page.size.to_string();
+            let numbered = if entries.is_empty() {
+                Element::self_closing("page", &[("number", &number.to_string()), ("size", &size)])
+            } else {
+                page_element(Some(&number.to_string()), Some(&size), entries)
+            };
+            push_child(&mut root.children, 1, numbered);
+        }
+
+        if let Some(leftover) = pages.keys().next() {
+            return Err(MsqError::UnknownPage { page: *leftover });
+        }
+
+        push_child(&mut root.children, 1, settings_element(settings));
+        push_child(
+            &mut root.children,
+            1,
+            Element::self_closing("userComments", &[]),
+        );
+
+        let document = Document {
+            declaration: Some("xml version=\"1.0\" encoding=\"ISO-8859-1\"".to_owned()),
+            nodes: vec![
+                Node::Text("\n".to_owned()),
+                Node::Element(root),
+                Node::Text("\n".to_owned()),
+            ],
+        };
+        Ok(Self { document })
+    }
+
     /// Parses `.msq` bytes (ISO-8859-1) into the document model.
     ///
     /// # Errors
@@ -217,7 +526,7 @@ impl Msq {
     /// Returns [`MsqError`] when the XML is malformed or the root is not
     /// `<msq>`.
     pub fn parse(bytes: &[u8]) -> Result<Self, MsqError> {
-        let source = encoding::decode(bytes);
+        let source = oxtuner_encoding::decode_latin1(bytes);
         let document = Document::parse(&source)?;
         let root = document.root().ok_or_else(|| MsqError::RootIsNotMsq {
             found: String::new(),
@@ -237,7 +546,7 @@ impl Msq {
     /// Returns [`MsqError::Encoding`] when the text has a character outside
     /// ISO-8859-1.
     pub fn save(&self) -> Result<Vec<u8>, MsqError> {
-        Ok(encoding::encode(&self.document.serialize())?)
+        Ok(oxtuner_encoding::encode_latin1(&self.document.serialize())?)
     }
 
     /// The parsed document, for callers that need raw access (tests, tools).
@@ -460,7 +769,12 @@ impl Msq {
         let missing: Vec<String> = settings
             .active_flags()
             .into_iter()
-            .filter(|flag| tested.contains(flag) && !present.contains(flag))
+            .filter(|flag| {
+                // `tested` and `present` are lowercase match keys; the flag
+                // itself keeps the definition's spelling for the file.
+                let key = flag.to_ascii_lowercase();
+                tested.contains(&key) && !present.contains(&key)
+            })
             .collect();
         let appended = !missing.is_empty();
         if appended {
@@ -612,6 +926,97 @@ impl Msq {
         page_element.children.push(Node::Text("\n    ".to_owned()));
         Ok(())
     }
+}
+
+/// A `<constant>` or `<pcVariable>` element for one formatted value.
+///
+/// Arrays carry their `cols`/`rows` shape, the same attributes the reference
+/// writer stores; scalars and labels need only their name.
+fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str) -> Element {
+    let cols_text;
+    let rows_text;
+    let mut attrs: Vec<(&str, &str)> = vec![("name", spec.name.as_str())];
+    if let EntryShape::Array { cols, rows } = spec.shape {
+        // A one-dimensional list is written as one column of N rows, the way
+        // the reference writer stores it. A `[Nx1]` table keeps its declared
+        // shape: only the definition's own `[N]` form is a list.
+        let (cols, rows) = if is_list && rows == 1 && cols > 1 {
+            (1, cols)
+        } else {
+            (cols, rows)
+        };
+        cols_text = cols.to_string();
+        rows_text = rows.to_string();
+        attrs.push(("cols", cols_text.as_str()));
+        attrs.push(("rows", rows_text.as_str()));
+    }
+
+    let mut element = Element::new(kind.element(), &attrs);
+    element.set_text(text);
+    element
+}
+
+/// A `<page>` element with its entries, indented one level deeper.
+fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>) -> Element {
+    let mut attrs: Vec<(&str, &str)> = Vec::new();
+    if let Some(number) = number {
+        attrs.push(("number", number));
+    }
+    if let Some(size) = size {
+        attrs.push(("size", size));
+    }
+
+    let mut page = Element::new("page", &attrs);
+    for entry in entries {
+        push_child(&mut page.children, 2, entry);
+    }
+    page.children.push(Node::Text("\n    ".to_owned()));
+    page
+}
+
+/// The `<versionInfo>` header for a scaffolded tune.
+///
+/// `firmwareInfo` carries the signature: the INI's `versionInfo` key is the
+/// interrogate command (Speeduino answers `"S"` with the signature), not
+/// firmware text, so only the signature describes the firmware.
+fn version_element(definition: &Definition) -> Element {
+    let pages = definition.pages.len().to_string();
+    Element::self_closing(
+        "versionInfo",
+        &[
+            ("fileFormat", SCAFFOLD_FILE_FORMAT),
+            ("firmwareInfo", definition.signature.as_str()),
+            ("nPages", &pages),
+            ("signature", definition.signature.as_str()),
+        ],
+    )
+}
+
+/// The `<settings>` snapshot for the active flags.
+fn settings_element(settings: &SettingsContext) -> Element {
+    let active = settings.active_flags();
+    if active.is_empty() {
+        return Element::self_closing("settings", &[]);
+    }
+
+    let mut element = Element::self_closing("settings", &[]);
+    element.open();
+    for flag in active {
+        let flag = flag.as_str();
+        push_child(
+            &mut element.children,
+            2,
+            Element::self_closing("setting", &[("name", flag), ("value", flag)]),
+        );
+    }
+    element.children.push(Node::Text("\n    ".to_owned()));
+    element
+}
+
+/// Appends an indented child element to a parent's children.
+fn push_child(children: &mut Vec<Node>, depth: usize, element: Element) {
+    children.push(Node::Text(format!("\n{}", "    ".repeat(depth))));
+    children.push(Node::Element(element));
 }
 
 fn attribute_usize(element: &Element, name: &str) -> Option<usize> {
@@ -901,6 +1306,64 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_emits_a_document_that_checks_clean() {
+        let definition = scaffold_definition();
+        let settings = SettingsContext::new();
+        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+
+        let info = msq.version_info().expect("the header is present");
+        assert_eq!(info.file_format, "5.0");
+        assert_eq!(info.signature, "speeduino 202501");
+        assert_eq!(info.firmware_info, "speeduino 202501");
+        assert_eq!(info.n_pages, Some(2));
+        assert_eq!(msq.pages().len(), 2);
+        assert_eq!(msq.pc_page_count(), 1);
+
+        let report = crate::check(&msq, &definition);
+        assert!(!report.is_read_only(), "{:?}", report.blockers);
+
+        let entries = msq.entries();
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        for name in ["rpmhigh", "reqFuel", "aeMode", "note", "table", "b"] {
+            assert!(names.contains(&name), "{name} is scaffolded");
+        }
+
+        let table = entries
+            .iter()
+            .find(|entry| entry.name == "table")
+            .expect("the array is present");
+        assert_eq!((table.cols, table.rows), (Some(2), Some(2)));
+
+        // The document survives a save and re-parse.
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        assert_eq!(reparsed.version_info().expect("the header survives"), info);
+    }
+
+    fn scaffold_definition() -> Definition {
+        let text = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 128, 288
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
+note = string, ASCII, 8
+table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+page = 2
+b = scalar, U08, 0, "", 1, 0, 0, 255, 0
+
+[PcVariables]
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+"#;
+        oxtuner_ini::parse_str_with_includes(text, &SettingsContext::new(), &|_: &str| None)
+            .expect("the fixture parses")
+    }
+
+    #[test]
     fn latin1_bytes_survive_the_round_trip() {
         let source: &[u8] =
             b"<msq>\n  <bibliography author=\"Jos\xe9\"/>\n  <versionInfo signature=\"s\"/>\n</msq>";
@@ -964,7 +1427,7 @@ mod tests {
             .expect("settings update");
 
         let saved = String::from_utf8(msq.save().unwrap()).unwrap();
-        assert!(saved.contains("<setting name=\"celsius\""), "{saved}");
+        assert!(saved.contains("<setting name=\"CELSIUS\""), "{saved}");
         assert!(!saved.contains("<settings/>"), "{saved}");
     }
 

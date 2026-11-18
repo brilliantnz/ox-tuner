@@ -243,6 +243,11 @@ pub fn apply_shortcuts(cx: &mut App) {
 }
 
 /// The bindings [`SHORTCUTS`] describes, for this platform.
+///
+/// Escape is not a binding. A binding with no context is the *deepest* match in
+/// GPUI, so it would run before a popup's or an editor's own Escape handling and
+/// steal the key. The layout root releases focus from its key handler instead,
+/// after every focused control that wants Escape has stopped the event.
 pub(super) fn key_bindings(cx: &App) -> Vec<KeyBinding> {
     SHORTCUTS
         .iter()
@@ -384,5 +389,17 @@ mod tests {
         assert_eq!(key_caps(""), Vec::<SharedString>::new());
         assert_eq!(key_text(""), "");
         assert_ne!(key_text("cmd-b"), "");
+    }
+
+    /// Escape releases focus from the layout root and stays out of the Settings
+    /// page, which only lists commands.
+    #[test]
+    fn escape_is_not_listed_as_a_shortcut() {
+        assert!(
+            SHORTCUTS
+                .iter()
+                .all(|shortcut| shortcut.mac != "escape" && shortcut.other != "escape"),
+            "Escape is a focused-control key, not a listed shortcut"
+        );
     }
 }

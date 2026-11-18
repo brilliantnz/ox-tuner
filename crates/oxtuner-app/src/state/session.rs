@@ -18,13 +18,20 @@ use std::{
 };
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, point, px, size};
+use oxtuner_core::ProjectLayout;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::store;
+use crate::core::CoreService;
 use crate::platform::paths::AppPaths;
 
-/// Bump when the on-disk shape changes in a way that needs migration.
+/// The on-disk shape this build writes.
+///
+/// The app is unreleased, so a shape change deletes the stale file and lets it
+/// be written again; schema versions and migrations arrive with the first
+/// release. The number exists so a file from a newer build is refused instead
+/// of half-read.
 pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 
 /// How long to wait after the last layout/window change before writing.
@@ -35,16 +42,12 @@ pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 /// crash with at most this much lost.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
-pub(crate) const DEFAULT_PRIMARY_WIDTH: f32 = 240.;
-pub(crate) const DEFAULT_SECONDARY_WIDTH: f32 = 280.;
-pub(crate) const DEFAULT_BOTTOM_HEIGHT: f32 = 180.;
-
 /// Width limits of the primary (navigation) sidebar.
-pub(crate) const PRIMARY_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
+pub(crate) const PRIMARY_SIDEBAR_WIDTH_RANGE: std::ops::Range<f32> = 180.0..420.0;
 /// Width limits of the secondary (inspector) sidebar.
-pub(crate) const SECONDARY_WIDTH_RANGE: std::ops::Range<f32> = 200.0..480.0;
+pub(crate) const SECONDARY_SIDEBAR_WIDTH_RANGE: std::ops::Range<f32> = 200.0..480.0;
 /// Height limits of the bottom panel.
-pub(crate) const BOTTOM_HEIGHT_RANGE: std::ops::Range<f32> = 180.0..480.0;
+pub(crate) const BOTTOM_PANEL_HEIGHT_RANGE: std::ops::Range<f32> = 180.0..480.0;
 
 /// How close a frame must be to a display's usable area to *record* a maximize.
 ///
@@ -270,26 +273,31 @@ impl WindowRect {
     reason = "each panel visibility is an independent layout fact"
 )]
 pub(crate) struct LayoutState {
-    pub(crate) primary_width: f32,
-    pub(crate) secondary_width: f32,
-    pub(crate) bottom_height: f32,
+    pub(crate) primary_sidebar_width: f32,
+    pub(crate) secondary_sidebar_width: f32,
+    pub(crate) bottom_panel_height: f32,
     /// Whether the navigation sidebar is open.
     #[serde(default = "default_true")]
-    pub(crate) primary_visible: bool,
+    pub(crate) primary_sidebar_visible: bool,
     /// Whether the inspector sidebar is open.
     #[serde(default = "default_true")]
-    pub(crate) secondary_visible: bool,
+    pub(crate) secondary_sidebar_visible: bool,
     /// Whether the output panel is open. Missing in older files, where it did
     /// not exist; `serde(default)` on a struct field would use `false`, so the
     /// default is named explicitly.
     #[serde(default = "default_true")]
-    pub(crate) bottom_visible: bool,
+    pub(crate) bottom_panel_visible: bool,
     /// Whether the table grid draws its Y axis downward: low bins at the top.
     ///
     /// The default draws it upward like a chart, so the low bin is at the
-    /// bottom and the column header sits under the table, the way `TunerStudio`
-    /// opens a table.
-    #[serde(default)]
+    /// bottom and the column header sits under the table, the way a
+    /// reference editor opens a table.
+    ///
+    /// This one is **not** stored in `state.json`: how a table is drawn belongs
+    /// to the project whose table it is, so it lives in the project's own
+    /// `project.json` and is echoed here only while that project is open. A
+    /// standalone definition has no state file, so it starts from the default.
+    #[serde(skip)]
     pub(crate) table_low_at_top: bool,
 }
 
@@ -300,28 +308,62 @@ const fn default_true() -> bool {
 impl Default for LayoutState {
     fn default() -> Self {
         Self {
-            primary_width: DEFAULT_PRIMARY_WIDTH,
-            secondary_width: DEFAULT_SECONDARY_WIDTH,
-            bottom_height: DEFAULT_BOTTOM_HEIGHT,
-            primary_visible: true,
-            secondary_visible: true,
-            bottom_visible: true,
+            primary_sidebar_width: ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+            secondary_sidebar_width: ProjectLayout::DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+            bottom_panel_height: ProjectLayout::DEFAULT_BOTTOM_PANEL_HEIGHT,
+            primary_sidebar_visible: true,
+            secondary_sidebar_visible: true,
+            bottom_panel_visible: true,
             table_low_at_top: false,
         }
     }
 }
 
 impl LayoutState {
-    pub(crate) fn primary(&self) -> Pixels {
-        px(clamp(self.primary_width, PRIMARY_WIDTH_RANGE))
+    pub(crate) fn primary_sidebar(&self) -> Pixels {
+        px(clamp(
+            self.primary_sidebar_width,
+            PRIMARY_SIDEBAR_WIDTH_RANGE,
+        ))
     }
 
-    pub(crate) fn secondary(&self) -> Pixels {
-        px(clamp(self.secondary_width, SECONDARY_WIDTH_RANGE))
+    pub(crate) fn secondary_sidebar(&self) -> Pixels {
+        px(clamp(
+            self.secondary_sidebar_width,
+            SECONDARY_SIDEBAR_WIDTH_RANGE,
+        ))
     }
 
-    pub(crate) fn bottom(&self) -> Pixels {
-        px(clamp(self.bottom_height, BOTTOM_HEIGHT_RANGE))
+    pub(crate) fn bottom_panel(&self) -> Pixels {
+        px(clamp(self.bottom_panel_height, BOTTOM_PANEL_HEIGHT_RANGE))
+    }
+
+    /// The project state this layout is stored as.
+    pub(crate) fn to_project_layout(&self) -> ProjectLayout {
+        ProjectLayout {
+            primary_sidebar_width: self.primary_sidebar_width,
+            secondary_sidebar_width: self.secondary_sidebar_width,
+            bottom_panel_height: self.bottom_panel_height,
+            primary_sidebar_visible: self.primary_sidebar_visible,
+            secondary_sidebar_visible: self.secondary_sidebar_visible,
+            bottom_panel_visible: self.bottom_panel_visible,
+            table_low_at_top: self.table_low_at_top,
+        }
+    }
+
+    /// Takes the panel layout a project stored.
+    ///
+    /// The stored numbers are used as they are: [`Self::primary_sidebar`] and
+    /// the other readers clamp them, so a file edited by hand cannot open a
+    /// panel at an unusable size.
+    pub(crate) fn apply_project_layout(&mut self, layout: &ProjectLayout) {
+        self.primary_sidebar_width = layout.primary_sidebar_width;
+        self.secondary_sidebar_width = layout.secondary_sidebar_width;
+        self.bottom_panel_height = layout.bottom_panel_height;
+        self.primary_sidebar_visible = layout.primary_sidebar_visible;
+        self.secondary_sidebar_visible = layout.secondary_sidebar_visible;
+        self.bottom_panel_visible = layout.bottom_panel_visible;
+        self.table_low_at_top = layout.table_low_at_top;
     }
 
     /// Records the width the outer group reports for its first panel: the
@@ -329,25 +371,25 @@ impl LayoutState {
     ///
     /// Short slices are ignored rather than indexed: the group reports whatever
     /// panels it currently holds, and a panel can be hidden.
-    pub(crate) fn apply_primary(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_primary_sidebar(&mut self, sizes: &[Pixels]) {
         if let Some(width) = sizes.first() {
-            self.primary_width = width.as_f32();
+            self.primary_sidebar_width = width.as_f32();
         }
     }
 
     /// Records the width the panel group reports for its second panel: the
     /// secondary sidebar.
-    pub(crate) fn apply_secondary(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_secondary_sidebar(&mut self, sizes: &[Pixels]) {
         if let Some(width) = sizes.get(1) {
-            self.secondary_width = width.as_f32();
+            self.secondary_sidebar_width = width.as_f32();
         }
     }
 
     /// Records the height the editor group reports for its second panel: the
     /// bottom panel.
-    pub(crate) fn apply_bottom(&mut self, sizes: &[Pixels]) {
+    pub(crate) fn apply_bottom_panel(&mut self, sizes: &[Pixels]) {
         if let Some(height) = sizes.get(1) {
-            self.bottom_height = height.as_f32();
+            self.bottom_panel_height = height.as_f32();
         }
     }
 }
@@ -546,6 +588,20 @@ thread_local! {
     static SAVE_GENERATION: Cell<u64> = const { Cell::new(0) };
     /// Whether a debounce task is already waiting to write.
     static SAVE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// The last layout sent to the core, keyed by project. Core conversations
+    /// are strictly sequential, so a layout that did not move must not occupy
+    /// the loop a drag never touched — only a change earns a command.
+    static SENT_LAYOUT: std::cell::RefCell<Option<(PathBuf, ProjectLayout)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the layout recorded as sent, so the next change writes it again.
+///
+/// The core answers [`oxtuner_core::Event::ProjectLayoutSaved`] with whether
+/// the layout reached the file. A refusal must not stay in the record, or the
+/// next identical layout would look stored and never be retried.
+pub(crate) fn forget_sent_layout() {
+    SENT_LAYOUT.with(|last| *last.borrow_mut() = None);
 }
 
 /// Schedules a debounced state write.
@@ -573,10 +629,15 @@ pub(crate) fn schedule_save(cx: &mut App) {
             // The snapshot is taken on the UI thread so the document stays
             // coherent. The flush and rename then run on the background
             // executor: `sync_all` can stall on a busy disk, and the UI thread
-            // has no business waiting for it.
-            let (path, data) = cx.update(|cx| {
+            // has no business waiting for it. The layout also belongs to the
+            // open project, so it is captured with the same snapshot.
+            let (path, data, project_snapshot) = cx.update(|cx| {
                 let global = cx.global::<AppState>();
-                (global.path.clone(), global.data.clone())
+                let project_snapshot = CoreService::status(cx)
+                    .project
+                    .as_ref()
+                    .map(|project| (project.root.clone(), global.data.layout.to_project_layout()));
+                (global.path.clone(), global.data.clone(), project_snapshot)
             });
             let (path, result) = cx
                 .background_executor()
@@ -591,6 +652,30 @@ pub(crate) fn schedule_save(cx: &mut App) {
                     path = %path.display(),
                     "could not save application state"
                 );
+            }
+            if let Some((root, layout)) = project_snapshot {
+                // The snapshot was taken up to a debounce interval ago: a
+                // project switch in that window would write project A's
+                // layout into B's state file. Only the open project's own
+                // root may receive it.
+                let fresh = SENT_LAYOUT
+                    .with(|last| last.borrow().as_ref() != Some(&(root.clone(), layout.clone())));
+                if fresh {
+                    let accepted = cx.update(|cx| {
+                        let still_open = CoreService::status(cx)
+                            .project
+                            .as_ref()
+                            .is_some_and(|project| project.root == root);
+                        still_open && crate::core::save_project_layout(cx, layout.clone())
+                    });
+
+                    // Recorded only after the send was accepted, so a refused
+                    // command is retried on the next change instead of being
+                    // remembered as stored.
+                    if accepted {
+                        SENT_LAYOUT.with(|last| *last.borrow_mut() = Some((root, layout)));
+                    }
+                }
             }
 
             // Checked and cleared with no await in between, so a change that
@@ -611,6 +696,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn forget_sent_layout_clears_the_record() {
+        SENT_LAYOUT.with(|last| {
+            *last.borrow_mut() = Some((PathBuf::from("/project"), ProjectLayout::default()));
+        });
+
+        forget_sent_layout();
+
+        assert!(
+            SENT_LAYOUT.with(|last| last.borrow().is_none()),
+            "a layout the core did not store is offered again"
+        );
+    }
+
+    #[test]
     fn state_round_trips_through_json() {
         let data = AppStateData {
             schema_version: STATE_SCHEMA_VERSION,
@@ -624,12 +723,12 @@ mod tests {
                 maximized: false,
             },
             layout: LayoutState {
-                primary_width: 300.,
-                secondary_width: 320.,
-                bottom_height: 220.,
-                primary_visible: true,
-                secondary_visible: false,
-                bottom_visible: false,
+                primary_sidebar_width: 300.,
+                secondary_sidebar_width: 320.,
+                bottom_panel_height: 220.,
+                primary_sidebar_visible: true,
+                secondary_sidebar_visible: false,
+                bottom_panel_visible: false,
                 table_low_at_top: true,
             },
             last_project: Some(PathBuf::from("/projects/roadster")),
@@ -638,7 +737,53 @@ mod tests {
         let encoded = serde_json::to_string(&data).expect("serialize");
         let decoded: AppStateData = serde_json::from_str(&encoded).expect("deserialize");
 
-        assert_eq!(decoded, data);
+        // The table orientation is per project, so it is the one field the
+        // global file does not carry.
+        assert!(
+            !encoded.contains("table_low_at_top"),
+            "the table orientation is not global: {encoded}"
+        );
+        assert!(!decoded.layout.table_low_at_top);
+        assert_eq!(
+            AppStateData {
+                layout: LayoutState {
+                    table_low_at_top: false,
+                    ..data.layout
+                },
+                ..data
+            },
+            decoded
+        );
+    }
+
+    #[test]
+    fn the_state_file_names_the_layout_panels() {
+        let encoded = serde_json::to_string(&LayoutState::default()).expect("serialize");
+
+        for key in [
+            "\"primary_sidebar_width\"",
+            "\"secondary_sidebar_width\"",
+            "\"bottom_panel_height\"",
+            "\"primary_sidebar_visible\"",
+            "\"secondary_sidebar_visible\"",
+            "\"bottom_panel_visible\"",
+        ] {
+            assert!(encoded.contains(key), "{key} is written: {encoded}");
+        }
+        for key in [
+            "\"primary_width\"",
+            "\"secondary_width\"",
+            "\"bottom_height\"",
+            "\"primary_visible\"",
+            "\"secondary_visible\"",
+            "\"bottom_visible\"",
+            "\"table_low_at_top\"",
+        ] {
+            assert!(
+                !encoded.contains(key),
+                "{key} must not be written: {encoded}"
+            );
+        }
     }
 
     #[test]
@@ -653,13 +798,19 @@ mod tests {
         assert_eq!(data.schema_version, STATE_SCHEMA_VERSION);
         assert!(data.window.maximized);
         assert_eq!(data.last_project, Some(PathBuf::from("/projects/roadster")));
-        assert_eq!(data.layout.primary_width, DEFAULT_PRIMARY_WIDTH);
-        assert_eq!(data.layout.secondary_width, DEFAULT_SECONDARY_WIDTH);
+        assert_eq!(
+            data.layout.primary_sidebar_width,
+            ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH
+        );
+        assert_eq!(
+            data.layout.secondary_sidebar_width,
+            ProjectLayout::DEFAULT_SECONDARY_SIDEBAR_WIDTH
+        );
         // Panels are open by default; a file that predates them must not open a
         // window with everything hidden.
-        assert!(data.layout.primary_visible);
-        assert!(data.layout.secondary_visible);
-        assert!(data.layout.bottom_visible);
+        assert!(data.layout.primary_sidebar_visible);
+        assert!(data.layout.secondary_sidebar_visible);
+        assert!(data.layout.bottom_panel_visible);
         assert!(
             !data.layout.table_low_at_top,
             "the chart orientation is the default for files that predate the toggle"
@@ -675,15 +826,21 @@ mod tests {
     #[test]
     fn layout_sizes_are_clamped_on_read() {
         let layout = LayoutState {
-            primary_width: 5.,
-            secondary_width: 10_000.,
-            bottom_height: 50.,
+            primary_sidebar_width: 5.,
+            secondary_sidebar_width: 10_000.,
+            bottom_panel_height: 50.,
             ..LayoutState::default()
         };
 
-        assert_eq!(layout.primary(), px(PRIMARY_WIDTH_RANGE.start));
-        assert_eq!(layout.secondary(), px(SECONDARY_WIDTH_RANGE.end));
-        assert_eq!(layout.bottom(), px(BOTTOM_HEIGHT_RANGE.start));
+        assert_eq!(
+            layout.primary_sidebar(),
+            px(PRIMARY_SIDEBAR_WIDTH_RANGE.start)
+        );
+        assert_eq!(
+            layout.secondary_sidebar(),
+            px(SECONDARY_SIDEBAR_WIDTH_RANGE.end)
+        );
+        assert_eq!(layout.bottom_panel(), px(BOTTOM_PANEL_HEIGHT_RANGE.start));
     }
 
     /// Dragging a layout handle is the one path that panicked in the field, so
@@ -692,29 +849,35 @@ mod tests {
     fn dragging_the_primary_handle_records_the_navigation_width() {
         let mut layout = LayoutState::default();
 
-        layout.apply_primary(&[px(260.), px(800.)]);
+        layout.apply_primary_sidebar(&[px(260.), px(800.)]);
 
-        assert_eq!(layout.primary_width, 260.);
+        assert_eq!(layout.primary_sidebar_width, 260.);
         // The editor absorbs the rest; it is never stored.
-        assert_eq!(layout.bottom_height, DEFAULT_BOTTOM_HEIGHT);
+        assert_eq!(
+            layout.bottom_panel_height,
+            ProjectLayout::DEFAULT_BOTTOM_PANEL_HEIGHT
+        );
     }
 
     #[test]
     fn dragging_the_secondary_handle_records_the_inspector_width() {
         let mut layout = LayoutState::default();
 
-        layout.apply_secondary(&[px(900.), px(320.)]);
+        layout.apply_secondary_sidebar(&[px(900.), px(320.)]);
 
-        assert_eq!(layout.secondary_width, 320.);
-        assert_eq!(layout.primary_width, DEFAULT_PRIMARY_WIDTH);
+        assert_eq!(layout.secondary_sidebar_width, 320.);
+        assert_eq!(
+            layout.primary_sidebar_width,
+            ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH
+        );
     }
 
     #[test]
     fn size_mapping_tolerates_an_empty_or_short_list() {
         let mut layout = LayoutState::default();
-        layout.apply_primary(&[]);
-        layout.apply_secondary(&[px(900.)]);
-        layout.apply_bottom(&[px(600.)]);
+        layout.apply_primary_sidebar(&[]);
+        layout.apply_secondary_sidebar(&[px(900.)]);
+        layout.apply_bottom_panel(&[px(600.)]);
         assert_eq!(layout, LayoutState::default());
     }
 
@@ -722,8 +885,8 @@ mod tests {
     fn dragging_the_bottom_handle_records_the_panel_height() {
         let mut layout = LayoutState::default();
 
-        layout.apply_bottom(&[px(600.), px(240.)]);
-        assert_eq!(layout.bottom_height, 240.);
+        layout.apply_bottom_panel(&[px(600.), px(240.)]);
+        assert_eq!(layout.bottom_panel_height, 240.);
     }
 
     /// The reference window helper cannot be built without a platform, so the
@@ -860,5 +1023,23 @@ mod tests {
         let global = AppState::with(data.clone());
 
         assert_eq!(global.data(), &data);
+    }
+
+    #[test]
+    fn a_layout_round_trips_through_the_project_state() {
+        let layout = LayoutState {
+            primary_sidebar_width: 300.,
+            secondary_sidebar_width: 260.,
+            bottom_panel_height: 240.,
+            primary_sidebar_visible: false,
+            secondary_sidebar_visible: true,
+            bottom_panel_visible: true,
+            table_low_at_top: true,
+        };
+
+        let mut restored = LayoutState::default();
+        restored.apply_project_layout(&layout.to_project_layout());
+
+        assert_eq!(restored, layout);
     }
 }

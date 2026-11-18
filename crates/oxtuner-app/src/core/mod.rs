@@ -23,19 +23,32 @@
 
 mod commands;
 mod event;
+pub(crate) mod firmware;
 mod service;
 mod status;
 
+use gpui_kit::App;
+use oxtuner_core::PortView;
+
 pub(crate) use commands::{
     acknowledge_write_failure, adopt_ecu_tune, burn_to_flash, choose_definition, choose_import,
-    close_project, connect, disconnect, edit_axis, edit_scalar, edit_table,
-    import_tune_with_consent, list_snapshots, open_project, read_dialog, read_journal, read_table,
-    refresh_ports, refresh_project_availability, report_failure, request_connect, request_shutdown,
-    resolve_conflicts, restore_snapshot, revert_target, revert_tune, run_controller_command,
-    save_trace, save_tune, set_writes_enabled, start_log, stop_log, test_connection, write_to_ram,
+    close_project, connect, create_project, disconnect, edit_axis, edit_scalar, edit_table,
+    import_tune_with_consent, inspect_definition, list_snapshots, open_project, read_dialog,
+    read_journal, read_table, refresh_ports, refresh_project_availability, report_failure,
+    request_connect, request_shutdown, resolve_conflicts, restore_snapshot, revert_target,
+    revert_tune, run_controller_command, save_project_layout, save_trace, save_tune,
+    set_writes_enabled, start_log, stop_log, test_connection, write_to_ram,
 };
 pub(crate) use service::CoreService;
 pub use service::start;
-#[cfg(test)]
-pub(crate) use status::PendingProject;
-pub(crate) use status::TestResult;
+pub(crate) use status::{CoreStatus, PendingProject, PendingProjectKind, TestingConnection};
+
+/// The port snapshot the core last published.
+///
+/// `None` until the core's first sample arrives; `Some`, possibly empty,
+/// after that. Views render `None` as still looking and `Some([])` as no
+/// ports, so an empty machine never reads as a broken scan.
+pub(crate) fn ports(cx: &App) -> Option<&[PortView]> {
+    let status = CoreService::status(cx);
+    (status.ports_revision > 0).then_some(status.ports.as_slice())
+}

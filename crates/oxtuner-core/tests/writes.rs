@@ -16,7 +16,7 @@ use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, JournalEntry,
     LatestFrame, OpId, ProjectView, start,
 };
-use oxtuner_project::TUNE_FILE;
+use oxtuner_project::{SIDECAR_DIR, TUNE_FILE};
 use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
 
 mod support;
@@ -107,11 +107,11 @@ impl TempDir {
     }
 
     fn journal(&self) -> PathBuf {
-        self.path.join(".ox-tuner/write-journal.log")
+        self.path.join(SIDECAR_DIR).join("write-journal.log")
     }
 
     fn snapshots(&self) -> PathBuf {
-        self.path.join(".ox-tuner/snapshots")
+        self.path.join(SIDECAR_DIR).join("snapshots")
     }
 }
 

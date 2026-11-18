@@ -19,6 +19,7 @@ harness = false
 
 [dependencies]
 oxtuner-ini.workspace = true
+oxtuner-encoding.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

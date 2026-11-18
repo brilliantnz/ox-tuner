@@ -3,6 +3,7 @@
 use std::{fmt, path::PathBuf};
 
 use oxtuner_ini::SettingsContext;
+use oxtuner_project::ProjectLayout;
 use oxtuner_protocol::LinkMode;
 
 use crate::link::PortChoice;
@@ -97,6 +98,11 @@ pub(crate) enum CommandRequest {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
+    /// Read a definition for the new-project wizard, without owning it.
+    InspectDefinition {
+        /// The definition file.
+        path: PathBuf,
+    },
     /// Open a `TunerStudio` project folder in place.
     ///
     /// The core reads the definition and the tune, owns both, and answers with
@@ -110,12 +116,31 @@ pub(crate) enum CommandRequest {
         /// The project folder (a directory containing `projectCfg/`).
         path: PathBuf,
     },
+    /// Create a project folder, then open it.
+    ///
+    /// Indexing, parsing and writing happen on the core thread. The reply is
+    /// [`super::Event::ProjectOpened`], or [`super::Event::Failed`] with
+    /// [`super::FailureCode::ProjectRejected`]; a failed create removes the
+    /// folder it made and leaves the previous session untouched.
+    CreateProject {
+        /// The definition bytes copied into `projectCfg/`.
+        request: oxtuner_project::CreateRequest,
+    },
     /// Write the open project's changed values back to its tune file.
     ///
     /// Only variables that differ from the baseline are touched, so an unedited
     /// tune stays byte-for-byte identical. A read-only session refuses with
     /// [`super::FailureCode::TuneSaveFailed`] and the read-only reasons.
     SaveTune,
+    /// Replace the open project's panel layout in its state file.
+    ///
+    /// Best effort: the layout is a convenience next to the tune, so a write
+    /// failure is logged. The reply is always
+    /// [`super::Event::ProjectLayoutSaved`], whether or not a project is open.
+    SetProjectLayout {
+        /// The layout to store.
+        layout: ProjectLayout,
+    },
     /// Read one table from the open project, shaped for the grid.
     ///
     /// `name` is the table id, its 3-D map id, its cell variable, or a curve
@@ -216,11 +241,27 @@ pub(crate) enum CommandRequest {
     /// The reply is [`super::Event::ConnectionTested`] with the same
     /// [`super::ConnectionView`] a real connection would report, or a failure with
     /// [`super::FailureCode::TestFailed`]. A live connection must be closed first.
+    ///
     TestConnection {
         /// Where the bytes go.
         port: PortChoice,
         /// Framing override, as for [`Self::Connect`].
         framing: Option<LinkMode>,
+    },
+    /// Ask one port for a firmware signature with a built-in probe.
+    ///
+    /// Unlike [`Self::TestConnection`], this needs no loaded definition: the
+    /// probe carries the query byte and the reply shape for its family. The
+    /// reply is [`super::Event::FirmwareProbed`], or
+    /// [`super::Event::Failed`] with [`super::FailureCode::FirmwareNotDetected`]
+    /// when the port stays silent.
+    ProbeFirmware {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing to send the query with.
+        framing: LinkMode,
+        /// Which family probe to send.
+        probe: FirmwareProbe,
     },
     /// Close the connection and release the port.
     Disconnect,
@@ -304,7 +345,7 @@ pub(crate) enum CommandRequest {
     /// imported. Snapshots carry the definition's signature, so no consent is
     /// needed for a first-party snapshot.
     RestoreSnapshot {
-        /// A `.msq` under `.ox-tuner/snapshots/`.
+        /// A `.msq` under `.oxtuner/snapshots/`.
         path: PathBuf,
     },
     /// List the project's snapshots, oldest first.
@@ -409,6 +450,16 @@ pub enum DefinitionCommand {
         /// Settings the `#if` branches resolve against.
         settings: SettingsContext,
     },
+    /// Read a definition without taking ownership of it.
+    ///
+    /// The new-project wizard needs the signature and the setting groups of a
+    /// file the user picked, and creates nothing until the review step. The
+    /// reply is [`super::Event::DefinitionInspected`], or
+    /// [`super::Event::Failed`] with [`super::FailureCode::DefinitionRejected`].
+    Inspect {
+        /// The definition file.
+        path: PathBuf,
+    },
     /// Drop the loaded definition and tune.
     Unload,
 }
@@ -425,8 +476,18 @@ pub enum ProjectCommand {
         /// The project folder.
         path: PathBuf,
     },
+    /// Create a project folder and open it.
+    Create {
+        /// Everything the core needs to scaffold and open the project.
+        request: oxtuner_project::CreateRequest,
+    },
     /// Write changed values back to the tune file.
     Save,
+    /// Replace the project's panel layout in its state file.
+    SetLayout {
+        /// The layout to store.
+        layout: ProjectLayout,
+    },
     /// List the project snapshots, oldest first.
     ListSnapshots,
 }
@@ -539,6 +600,15 @@ pub enum EcuCommand {
         /// Framing override.
         framing: Option<LinkMode>,
     },
+    /// Ask one port for a firmware signature with a built-in probe.
+    ProbeFirmware {
+        /// Where the bytes go.
+        port: PortChoice,
+        /// Framing to send the query with.
+        framing: LinkMode,
+        /// Which family probe to send.
+        probe: FirmwareProbe,
+    },
     /// Close the connection.
     Disconnect,
     /// Read every declared page.
@@ -635,9 +705,12 @@ impl CoreCommand {
         match self {
             Self::Lifecycle(LifecycleCommand::Shutdown) => "shutdown",
             Self::Definition(DefinitionCommand::Load { .. }) => "load-definition",
+            Self::Definition(DefinitionCommand::Inspect { .. }) => "inspect-definition",
             Self::Definition(DefinitionCommand::Unload) => "unload-definition",
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
+            Self::Project(ProjectCommand::Create { .. }) => "create-project",
             Self::Project(ProjectCommand::Save) => "save-tune",
+            Self::Project(ProjectCommand::SetLayout { .. }) => "set-project-layout",
             Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
             Self::Tune(TuneCommand::ReadTable { .. }) => "read-table",
             Self::Tune(TuneCommand::ReadDialog { .. }) => "read-dialog",
@@ -653,6 +726,7 @@ impl CoreCommand {
             Self::Tune(TuneCommand::ResolveConflicts { .. }) => "resolve-conflicts",
             Self::Ecu(EcuCommand::Connect { .. }) => "connect",
             Self::Ecu(EcuCommand::TestConnection { .. }) => "test-connection",
+            Self::Ecu(EcuCommand::ProbeFirmware { .. }) => "probe-firmware",
             Self::Ecu(EcuCommand::Disconnect) => "disconnect",
             Self::Ecu(EcuCommand::ReadAll) => "read-all",
             Self::Ecu(EcuCommand::StartRealtime { .. }) => "start-realtime",
@@ -684,9 +758,18 @@ impl From<CoreCommand> for CommandRequest {
                 bytes,
                 settings,
             },
+            CoreCommand::Definition(DefinitionCommand::Inspect { path }) => {
+                Self::InspectDefinition { path }
+            }
             CoreCommand::Definition(DefinitionCommand::Unload) => Self::UnloadDefinition,
             CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
+            CoreCommand::Project(ProjectCommand::Create { request }) => {
+                Self::CreateProject { request }
+            }
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
+            CoreCommand::Project(ProjectCommand::SetLayout { layout }) => {
+                Self::SetProjectLayout { layout }
+            }
             CoreCommand::Project(ProjectCommand::ListSnapshots) => Self::ListSnapshots,
             CoreCommand::Tune(TuneCommand::ReadTable { name }) => Self::ReadTable { name },
             CoreCommand::Tune(TuneCommand::ReadDialog { name }) => Self::ReadDialog { name },
@@ -726,6 +809,15 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Ecu(EcuCommand::TestConnection { port, framing }) => {
                 Self::TestConnection { port, framing }
             }
+            CoreCommand::Ecu(EcuCommand::ProbeFirmware {
+                port,
+                framing,
+                probe,
+            }) => Self::ProbeFirmware {
+                port,
+                framing,
+                probe,
+            },
             CoreCommand::Ecu(EcuCommand::Disconnect) => Self::Disconnect,
             CoreCommand::Ecu(EcuCommand::ReadAll) => Self::ReadAll,
             CoreCommand::Ecu(EcuCommand::StartRealtime { interval_ms }) => {
@@ -767,6 +859,39 @@ impl RejectReason {
         match self {
             Self::ShuttingDown => "shutting-down",
         }
+    }
+}
+
+/// A signature probe family, for [`EcuCommand::ProbeFirmware`].
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the shipped probe families are a closed set"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareProbe {
+    /// MegaSquirt-compatible boards, including Speeduino, answer `Q`.
+    Speeduino,
+    /// rusEFI and FOME answer `S`.
+    Rusefi,
+}
+
+impl FirmwareProbe {
+    /// Every probe a scan tries, in the order it tries them.
+    pub const ALL: [Self; 2] = [Self::Speeduino, Self::Rusefi];
+
+    /// The protocol probe this names.
+    #[must_use]
+    pub fn spec(self) -> oxtuner_protocol::ProbeSpec {
+        match self {
+            Self::Speeduino => oxtuner_protocol::SPEEDUINO,
+            Self::Rusefi => oxtuner_protocol::RUSEFI,
+        }
+    }
+
+    /// A stable lowercase key for logs and the detection result.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.spec().behavior_id()
     }
 }
 

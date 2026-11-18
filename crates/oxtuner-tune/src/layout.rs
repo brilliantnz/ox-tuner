@@ -525,6 +525,29 @@ impl TuneLayout {
             return;
         };
 
+        // A PC variable declares the same presentation attributes as a
+        // constant, so a scaled one keeps its user values instead of being
+        // rounded to whole numbers on save.
+        let attributes = Attributes::resolve(
+            variable.scale.as_ref(),
+            variable.translate.as_ref(),
+            variable.minimum.as_ref(),
+            variable.maximum.as_ref(),
+            variable.digits.as_ref(),
+            values,
+        );
+        if let Some(unresolved) = attributes.unresolved {
+            self.issues.push(LayoutIssue::new(
+                IssueSeverity::Warning,
+                LayoutIssueKind::UnresolvedAttribute,
+                Some(name),
+                format!(
+                    "presentation attribute `{unresolved}` is an expression this build could \
+                     not evaluate; values cannot be converted until it resolves"
+                ),
+            ));
+        }
+
         let spec = VariableSpec {
             name: name.to_owned(),
             owner: Owner::Pc,
@@ -533,13 +556,14 @@ impl TuneLayout {
             // PC variables live in the project file, not on a page.
             address: None,
             units: variable.units.literal().unwrap_or_default().to_owned(),
-            scale: Some(1.0),
-            translate: Some(0.0),
-            minimum: None,
-            maximum: None,
-            digits: 0,
-            controller_owned: false,
-            no_msq_save: false,
+            scale: attributes.scale,
+            translate: attributes.translate,
+            minimum: attributes.minimum,
+            maximum: attributes.maximum,
+            digits: attributes.digits,
+            controller_owned: variable.flags.controller_priority
+                || variable.class == ConstantClass::OddArray,
+            no_msq_save: variable.flags.no_msq_save,
             default_raw: 0.0,
         };
         let default_raw = default_raw(definition, name, &spec, values);
@@ -804,7 +828,7 @@ fn default_raw(
         .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
     {
-        return raw;
+        return spec.clamp_raw(raw);
     }
 
     if let Some(user) = definition
@@ -814,10 +838,27 @@ fn default_raw(
         .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {
-        return conversion.raw;
+        return spec.clamp_raw(conversion.raw);
     }
 
-    0.0
+    // No declared default. A raw zero is the right default only when it reads
+    // back as user zero inside the declared range: a translate offset moves it,
+    // and the fast path would return exactly the value the clamp exists to
+    // avoid. Zero is inside every storage type, so that half needs no check.
+    let zero_in_range = spec.translate == Some(0.0)
+        && 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
+        && 0.0 <= spec.maximum.unwrap_or(f64::INFINITY);
+    if zero_in_range {
+        debug_assert_eq!(
+            0.0,
+            spec.clamp_raw(0.0),
+            "the fast path must return what the clamp would"
+        );
+
+        return 0.0;
+    }
+
+    spec.clamp_raw(0.0)
 }
 
 #[cfg(test)]
@@ -894,6 +935,43 @@ table = array, U08, 0, {shape}, \"x\", 1, 0
     }
 
     #[test]
+    fn a_pc_variable_keeps_its_declared_attributes() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[PcVariables]
+bins = array, S16, [3], \"AFR\", 0.1, 0.0, -4.0, 4.0, 1
+view = oddArray, U08, [4], \"\", 1, 0, 0, 255, 0, noMsqSave
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        let bins = layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "bins")
+            .expect("the array is in the layout");
+        assert_eq!(bins.scale, Some(0.1));
+        assert_eq!(bins.translate, Some(0.0));
+        assert_eq!(bins.minimum, Some(-4.0));
+        assert_eq!(bins.maximum, Some(4.0));
+        assert_eq!(bins.digits, 1);
+
+        let view = layout
+            .variables()
+            .iter()
+            .find(|spec| spec.name == "view")
+            .expect("the odd array is in the layout");
+        assert!(view.controller_owned, "an oddArray view is read-only");
+        assert!(view.no_msq_save, "the entry declares noMsqSave");
+    }
+
+    #[test]
     fn an_oversized_pc_variable_shape_is_dropped() {
         let definition = parse_str(
             "\
@@ -947,6 +1025,63 @@ page = 1
 reqFuel = scalar, U08, 0, "", 1, 0, 0, 3, 0
 REQFUEL = scalar, U08, 1, "", 1, 0, 0, 3, 0
 "#;
+
+    #[test]
+    fn a_default_outside_the_written_step_is_pulled_inside() {
+        const BOUNDED: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+p = scalar, F32, 0, "", 0.145038, 0, 7.25, 101526, 0
+
+[ConstantsExtensions]
+defaultValue = p, 7.25
+"#;
+
+        let definition = parse_str(BOUNDED, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("p").expect("p");
+
+        // The writer carries at least one decimal, so a raw default that reads
+        // back as 7.25 exactly would still be written as 7.2, below the bound.
+        let written = spec.format_file(spec.default_raw).expect("written");
+        assert_eq!(
+            written, "7.3",
+            "an omitted default is written at the next representable value"
+        );
+    }
+
+    #[test]
+    fn an_undefaulted_value_with_an_offset_reads_like_the_clamp() {
+        const OFFSET: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+off = scalar, U08, 0, "", 1, -50, 0, 100, 0
+"#;
+
+        let definition = parse_str(OFFSET, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("off").expect("off");
+
+        assert_eq!(
+            spec.default_raw,
+            spec.clamp_raw(0.0),
+            "the fast path must return what the clamp would"
+        );
+        assert_eq!(
+            spec.default_raw, 50.0,
+            "raw 0 would read back as user -50, below the minimum"
+        );
+    }
 
     #[test]
     fn the_layout_index_is_case_insensitive_and_keeps_the_first_name() {

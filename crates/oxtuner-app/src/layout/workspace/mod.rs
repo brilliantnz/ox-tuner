@@ -31,8 +31,9 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    AnyWindowHandle, AppContext as _, Context, Entity, EntityId, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, px,
 };
 use oxtuner_core::{MenuNode, MenuNodeKind, SaveReport};
 use oxtuner_ui::dock::{
@@ -544,6 +545,9 @@ impl Render for Workspace {
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Background presses release focus; the helper blurs only when the
+            // press took focus nowhere.
+            .capture_any_mouse_down(crate::ui::release_focus_on_background())
             // A read-only tune is a property of the workspace, not of the tab
             // in front, so it stays visible whichever tab is showing.
             .when_some(read_only, |this, reason| {

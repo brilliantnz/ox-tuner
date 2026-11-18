@@ -41,7 +41,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div, px,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    px,
 };
 
 pub mod bottom_panel;
@@ -67,8 +68,8 @@ use crate::{
     i18n::t,
     settings::preferences::AppSettings,
     state::session::{
-        AppState, BOTTOM_HEIGHT_RANGE, PRIMARY_WIDTH_RANGE, SECONDARY_WIDTH_RANGE, capture_window,
-        schedule_save,
+        AppState, BOTTOM_PANEL_HEIGHT_RANGE, PRIMARY_SIDEBAR_WIDTH_RANGE,
+        SECONDARY_SIDEBAR_WIDTH_RANGE, capture_window, schedule_save,
     },
 };
 
@@ -216,9 +217,9 @@ impl AppLayout {
     fn render_panel_buttons(cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
         let layout = &cx.global::<AppState>().data().layout;
         let (primary, secondary, bottom) = (
-            layout.primary_visible,
-            layout.secondary_visible,
-            layout.bottom_visible,
+            layout.primary_sidebar_visible,
+            layout.secondary_sidebar_visible,
+            layout.bottom_panel_visible,
         );
         let pending = crate::core::CoreService::status(cx)
             .pending_project
@@ -295,8 +296,12 @@ impl AppLayout {
 /// underneath. The window chrome stays visible: the title bar names the folder
 /// and the status bar says what is happening, while their controls are
 /// disabled until the open finishes.
-fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement {
+fn render_opening_splash(pending: &crate::core::PendingProject, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
+    let title = match pending.kind {
+        crate::core::PendingProjectKind::Open => t!("app.editor.opening_project"),
+        crate::core::PendingProjectKind::Create => t!("app.editor.creating_project"),
+    };
 
     v_flex()
         .id("opening-project-splash")
@@ -319,26 +324,21 @@ fn render_opening_splash(name: &gpui_kit::SharedString, cx: &App) -> AnyElement 
                         .loading(true)
                         .with_size(px(160.))
                         .color(cx.theme().primary)
-                        .accessibility_label(t!("app.editor.opening_project"))
+                        .accessibility_label(title.clone())
                         .child(
                             Icon::new(IconName::Cpu)
                                 .with_size(px(40.))
                                 .text_color(muted),
                         ),
                 )
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t!("app.editor.opening_project")),
-                )
+                .child(div().text_lg().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
                     div()
                         .max_w_full()
                         .truncate()
                         .text_sm()
                         .text_color(muted)
-                        .child(name.clone()),
+                        .child(pending.name.clone()),
                 )
                 .child(
                     div()
@@ -358,19 +358,36 @@ impl Render for AppLayout {
     )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let layout = &cx.global::<AppState>().data().layout;
-        let (primary, secondary, bottom) = (layout.primary(), layout.secondary(), layout.bottom());
-        let primary_visible = layout.primary_visible;
-        let secondary_visible = layout.secondary_visible;
-        let bottom_visible = layout.bottom_visible;
-        let pending = crate::core::CoreService::status(cx)
-            .pending_project
-            .as_ref()
-            .map(|pending| pending.name.clone());
+        let (primary_sidebar, secondary_sidebar, bottom_panel) = (
+            layout.primary_sidebar(),
+            layout.secondary_sidebar(),
+            layout.bottom_panel(),
+        );
+        let primary_sidebar_visible = layout.primary_sidebar_visible;
+        let secondary_sidebar_visible = layout.secondary_sidebar_visible;
+        let bottom_panel_visible = layout.bottom_panel_visible;
+        let pending = crate::core::CoreService::status(cx).pending_project.clone();
 
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Background presses release focus; the helper blurs only when the
+            // press took focus nowhere.
+            .capture_any_mouse_down(crate::ui::release_focus_on_background())
+            // Escape releases focus. A focused control that handles Escape
+            // itself stops the event, so only an unconsumed Escape lands here.
+            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "escape"
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                {
+                    window.blur(cx);
+                    cx.stop_propagation();
+                }
+            }))
             // One bar across the whole window: menus, title, panel toggles and
             // the window controls. Both sidebars therefore start below it and
             // keep their own header rows, so the layout reads as one workspace
@@ -386,25 +403,25 @@ impl Render for AppLayout {
                             .on_resize(move |state, _, cx| {
                                 // Only a visible sidebar has a handle, and a hidden
                                 // one would report the editor's width instead.
-                                if !primary_visible {
+                                if !primary_sidebar_visible {
                                     return;
                                 }
                                 let sizes = state.read(cx).sizes().clone();
                                 AppState::update_global(cx, |data| {
-                                    data.layout.apply_primary(&sizes);
+                                    data.layout.apply_primary_sidebar(&sizes);
                                 });
                                 schedule_save(cx);
                             })
                             // Panels are left out while closed rather than hidden:
                             // a hidden panel still renders its resize handle, which
                             // would leave a stray divider on the window's edge.
-                            .when(primary_visible, |this| {
+                            .when(primary_sidebar_visible, |this| {
                                 this.child(
                                     resizable_panel()
-                                        .size(primary)
+                                        .size(primary_sidebar)
                                         .size_range(
-                                            px(PRIMARY_WIDTH_RANGE.start)
-                                                ..px(PRIMARY_WIDTH_RANGE.end),
+                                            px(PRIMARY_SIDEBAR_WIDTH_RANGE.start)
+                                                ..px(PRIMARY_SIDEBAR_WIDTH_RANGE.end),
                                         )
                                         .fixed()
                                         .child(PrimarySidebar::new(self.explorer.clone())),
@@ -414,12 +431,12 @@ impl Render for AppLayout {
                                 resizable_panel().child(
                                     h_resizable("layout-panels")
                                         .on_resize(move |state, _, cx| {
-                                            if !secondary_visible {
+                                            if !secondary_sidebar_visible {
                                                 return;
                                             }
                                             let sizes = state.read(cx).sizes().clone();
                                             AppState::update_global(cx, |data| {
-                                                data.layout.apply_secondary(&sizes);
+                                                data.layout.apply_secondary_sidebar(&sizes);
                                             });
                                             schedule_save(cx);
                                         })
@@ -427,12 +444,12 @@ impl Render for AppLayout {
                                             resizable_panel().child(
                                                 v_resizable("layout-editor")
                                                     .on_resize(move |state, _, cx| {
-                                                        if !bottom_visible {
+                                                        if !bottom_panel_visible {
                                                             return;
                                                         }
                                                         let sizes = state.read(cx).sizes().clone();
                                                         AppState::update_global(cx, |data| {
-                                                            data.layout.apply_bottom(&sizes);
+                                                            data.layout.apply_bottom_panel(&sizes);
                                                         });
                                                         schedule_save(cx);
                                                     })
@@ -442,14 +459,14 @@ impl Render for AppLayout {
                                                     )
                                                     // The editor keeps the space it
                                                     // has when the panel opens or
-                                                    .when(bottom_visible, |this| {
+                                                    .when(bottom_panel_visible, |this| {
                                                         this.child(
                                                             resizable_panel()
-                                                                .size(bottom)
+                                                                .size(bottom_panel)
                                                                 .size_range(
-                                                                    px(BOTTOM_HEIGHT_RANGE.start)
+                                                                    px(BOTTOM_PANEL_HEIGHT_RANGE.start)
                                                                         ..px(
-                                                                            BOTTOM_HEIGHT_RANGE.end
+                                                                            BOTTOM_PANEL_HEIGHT_RANGE.end
                                                                         ),
                                                                 )
                                                                 // A panel keeps the
@@ -463,13 +480,13 @@ impl Render for AppLayout {
                                                     }),
                                             ),
                                         )
-                                        .when(secondary_visible, |this| {
+                                        .when(secondary_sidebar_visible, |this| {
                                             this.child(
                                                 resizable_panel()
-                                                    .size(secondary)
+                                                    .size(secondary_sidebar)
                                                     .size_range(
-                                                        px(SECONDARY_WIDTH_RANGE.start)
-                                                            ..px(SECONDARY_WIDTH_RANGE.end),
+                                                        px(SECONDARY_SIDEBAR_WIDTH_RANGE.start)
+                                                            ..px(SECONDARY_SIDEBAR_WIDTH_RANGE.end),
                                                     )
                                                     .fixed()
                                                     .child(SecondarySidebar),
@@ -478,8 +495,8 @@ impl Render for AppLayout {
                                 ),
                             ),
                     )
-                    .when_some(pending.as_ref(), |this, name| {
-                        this.child(render_opening_splash(name, cx))
+                    .when_some(pending.as_ref(), |this, pending| {
+                        this.child(render_opening_splash(pending, cx))
                     }),
             )
             .child(StatusBarView)
@@ -532,21 +549,21 @@ pub fn open_main_window(cx: &mut App) {
 /// Shows or hides the navigation sidebar.
 pub fn toggle_primary_sidebar(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.primary_visible = !layout.primary_visible;
+        layout.primary_sidebar_visible = !layout.primary_sidebar_visible;
     });
 }
 
 /// Shows or hides the inspector sidebar.
 pub fn toggle_secondary_sidebar(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.secondary_visible = !layout.secondary_visible;
+        layout.secondary_sidebar_visible = !layout.secondary_sidebar_visible;
     });
 }
 
 /// Shows or hides the output panel.
 pub fn toggle_bottom_panel(cx: &mut App) {
     toggle_panel(cx, |layout| {
-        layout.bottom_visible = !layout.bottom_visible;
+        layout.bottom_panel_visible = !layout.bottom_panel_visible;
     });
 }
 
@@ -556,7 +573,7 @@ pub fn toggle_bottom_panel(cx: &mut App) {
 /// panel is forced visible first, because a notification can arrive while it
 /// was hidden; the filter and the tab then change in the same update.
 pub(crate) fn show_diagnostics(window: &mut Window, cx: &mut App, filter: Option<String>) {
-    AppState::update_global(cx, |data| data.layout.bottom_visible = true);
+    AppState::update_global(cx, |data| data.layout.bottom_panel_visible = true);
     schedule_save(cx);
 
     match app::window::main_view(cx) {
@@ -608,7 +625,7 @@ mod tests {
         WindowBounds, WindowOptions, div, size,
     };
 
-    use crate::core::PendingProject;
+    use crate::core::{PendingProject, PendingProjectKind};
 
     struct Host {
         pending: PendingProject,
@@ -619,7 +636,7 @@ mod tests {
             div()
                 .relative()
                 .size_full()
-                .child(render_opening_splash(&self.pending.name, cx))
+                .child(render_opening_splash(&self.pending, cx))
         }
     }
 
@@ -629,6 +646,7 @@ mod tests {
             let pending = PendingProject {
                 path: std::path::PathBuf::from("/projects/roadster"),
                 name: "roadster".into(),
+                kind: PendingProjectKind::Open,
                 op: None,
             };
             let host = cx.new(|_| Host { pending });

@@ -133,6 +133,132 @@ fn connecting_to_the_simulator_reports_the_signature() {
 }
 
 #[test]
+fn a_probe_reads_a_signature_without_a_loaded_definition() {
+    let harness = Harness::start();
+
+    // No definition is loaded: the probe carries the query and reply shape.
+    harness
+        .handle
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
+        .expect("queued");
+
+    let Event::FirmwareProbed {
+        probe,
+        signature,
+        baud,
+        ..
+    } = harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(probe, oxtuner_core::FirmwareProbe::Speeduino);
+    assert!(signature.starts_with("speeduino"), "{signature}");
+    assert_eq!(baud, None, "a custom link has no baud rate");
+
+    // A probe is not a session: a real connect still works afterwards.
+    harness.load();
+    harness.wait_loaded();
+    harness.connect(SimConfig::default());
+    let summary = harness.wait_connected();
+    assert_eq!(summary.signature, "speeduino 202501");
+
+    harness.thread.join();
+}
+
+#[test]
+fn a_probe_reads_an_enveloped_signature() {
+    let harness = Harness::start();
+
+    harness
+        .handle
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Envelope,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
+        .expect("queued");
+
+    let Event::FirmwareProbed {
+        framing, signature, ..
+    } = harness.wait(|event| matches!(event, Event::FirmwareProbed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(framing, oxtuner_core::LinkMode::Envelope);
+    assert!(signature.starts_with("speeduino"), "{signature}");
+
+    harness.thread.join();
+}
+
+#[test]
+fn a_probe_on_a_silent_link_reports_that_nothing_answered() {
+    let harness = Harness::start();
+
+    harness
+        .handle
+        .probe_firmware(
+            support::silent(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Speeduino,
+        )
+        .expect("queued");
+
+    let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(failure.code, FailureCode::FirmwareNotDetected);
+
+    let report = harness.thread.join();
+    assert_eq!(report.failures, 1, "a probe miss is a failed command");
+}
+
+#[test]
+fn a_probe_is_refused_while_a_session_is_live() {
+    let harness = Harness::start();
+    harness.load();
+    harness.wait_loaded();
+    harness.connect(SimConfig::default());
+    let _ = harness.wait_connected();
+
+    harness
+        .handle
+        .probe_firmware(
+            support::simulator(),
+            oxtuner_core::LinkMode::Legacy,
+            oxtuner_core::FirmwareProbe::Rusefi,
+        )
+        .expect("queued");
+
+    let Event::Failed { failure, .. } = harness.wait(|event| matches!(event, Event::Failed { .. }))
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(failure.code, FailureCode::ConnectFailed);
+    assert!(failure.message.contains("disconnect the ECU"));
+
+    let report = harness.thread.join();
+    assert_eq!(report.failures, 1, "a refused probe is a failed command");
+}
+
+#[test]
+fn the_core_probe_list_matches_the_protocol_registry() {
+    assert_eq!(
+        oxtuner_core::FirmwareProbe::ALL.map(oxtuner_core::FirmwareProbe::spec),
+        oxtuner_protocol::PROBES,
+        "the core's probe list and the protocol registry must match, in order"
+    );
+}
+
+#[test]
 fn connecting_without_a_definition_is_refused() {
     let harness = Harness::start();
 

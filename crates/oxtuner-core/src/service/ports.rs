@@ -4,6 +4,10 @@
 //! Sampling happens on the existing command loop rather than on a thread of its
 //! own: the deadline is one more reason to wake, and there is nothing to start,
 //! interrupt or join.
+//!
+//! The first sample is published like any other, so a view that opens later
+//! never has to ask for the initial list: it renders whatever was last
+//! published and treats "nothing published yet" as still looking.
 
 use std::time::{Duration, Instant};
 
@@ -60,14 +64,16 @@ impl PortsWatch {
     }
 
     /// Whether anything has been sampled yet.
+    #[cfg(test)]
     pub(crate) fn is_primed(&self) -> bool {
         self.primed
     }
 
     /// Re-reads the ports, reporting an enumeration failure to the caller.
     ///
-    /// Returns the new list when it differs from the last one, and `None` for the
-    /// first sample: the ports present at start-up are a baseline, not arrivals.
+    /// Returns the new list when it is the first sample or differs from the
+    /// last one published: a view that opens later renders the last published
+    /// list, so the baseline is published even when it found no ports.
     pub(crate) fn refresh(&mut self) -> Result<Option<Vec<PortView>>, TransportError> {
         self.refresh_with(crate::io_thread::list_ports)
     }
@@ -145,11 +151,11 @@ fn board_name(vid: u16, pid: u16) -> Option<&'static str> {
 
 /// Whether a sample is news.
 ///
-/// The first sample is a baseline: the ports present when the core starts are
-/// not arrivals, and reporting them would greet the user with one notification
-/// per built-in port.
+/// The first sample is always published, even when it is empty: a view that
+/// opens later renders the last published list, so "nothing published yet"
+/// must mean "not sampled", never "sampled and found nothing".
 fn should_publish(primed: bool, previous: &[PortView], next: &[PortView]) -> bool {
-    primed && previous != next
+    !primed || previous != next
 }
 
 #[cfg(test)]
@@ -167,14 +173,29 @@ mod tests {
     }
 
     #[test]
-    fn the_first_sample_publishes_nothing() {
-        assert!(!should_publish(false, &[], &[port("/dev/cu.first")]));
+    fn a_first_sample_with_ports_publishes_the_baseline() {
+        assert!(should_publish(false, &[], &[port("/dev/cu.first")]));
+    }
+
+    #[test]
+    fn a_first_sample_without_ports_publishes_the_empty_baseline() {
+        let empty: [PortView; 0] = [];
+        assert!(
+            should_publish(false, &empty, &empty),
+            "an empty first sample still tells the views that sampling happened"
+        );
     }
 
     #[test]
     fn an_unchanged_list_publishes_nothing() {
         let list = [port("/dev/cu.first")];
         assert!(!should_publish(true, &list, &list));
+    }
+
+    #[test]
+    fn an_empty_list_after_the_baseline_publishes_nothing() {
+        let empty: [PortView; 0] = [];
+        assert!(!should_publish(true, &empty, &empty));
     }
 
     #[test]
@@ -261,11 +282,12 @@ mod tests {
     }
 
     #[test]
-    fn the_second_sample_publishes_a_change_and_the_first_does_not() {
+    fn the_first_sample_publishes_the_baseline_and_a_change_after_it() {
         let mut watch = PortsWatch::new();
         let one = || Ok(vec![described(0x2341, 0x0042, None)]);
 
-        assert!(watch.refresh_with(one).expect("reads").is_none());
+        let baseline = watch.refresh_with(one).expect("reads").expect("baseline");
+        assert_eq!(baseline.len(), 1);
         assert_eq!(watch.snapshot().len(), 1);
 
         let two = || {
@@ -277,6 +299,20 @@ mod tests {
 
         let published = watch.refresh_with(two).expect("reads").expect("a change");
         assert_eq!(published.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_first_sample_publishes_the_empty_baseline() {
+        let mut watch = PortsWatch::new();
+        let none = || Ok(Vec::new());
+
+        let published = watch
+            .refresh_with(none)
+            .expect("reads")
+            .expect("the first sample is published even when it is empty");
+        assert!(published.is_empty(), "the baseline carries no ports");
+        assert!(watch.is_primed(), "an empty sample primes the watch");
+        assert_eq!(watch.snapshot().len(), 0);
     }
 
     fn named(name: &str, vid: u16, pid: u16) -> PortInfo {
@@ -302,7 +338,10 @@ mod tests {
             ])
         };
 
-        assert!(watch.refresh_with(first).expect("reads").is_none());
+        assert!(
+            watch.refresh_with(first).expect("reads").is_some(),
+            "the baseline is published"
+        );
         assert!(
             watch.refresh_with(reversed).expect("reads").is_none(),
             "a reordering is not a change"

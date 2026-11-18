@@ -11,10 +11,17 @@ pub(crate) fn connect_to_simulator(cx: &mut App) {
     connect(crate::link::simulator(), None, cx);
 }
 
-/// Asks for the port list, then opens the connect dialog when it arrives.
+/// Asks for the port list, then opens the connect dialog.
+///
+/// The dialog renders the core's pushed list; the request only hurries the
+/// first snapshot along when the core has not sampled yet.
 pub(crate) fn request_connect(cx: &mut App) {
-    // The dialog opens at once and stays open; its port list fills in when the
-    // scan answers, so a refresh never costs the user their selection.
+    // The first sample publishes even when it finds no ports, so a missing
+    // snapshot really does mean "not sampled yet": ask once, and the answer
+    // fills the dialog.
+    if crate::core::ports(cx).is_none() {
+        refresh_ports(cx);
+    }
     cx.defer(|cx| {
         if let Some(window) = crate::app::window::main(cx) {
             window
@@ -24,18 +31,19 @@ pub(crate) fn request_connect(cx: &mut App) {
                 .ok();
         }
     });
-    refresh_ports(cx);
 }
 
-/// Rescans the serial ports without touching the dialog.
+/// Asks the core for a fresh port snapshot without touching any dialog.
+///
+/// The core pushes the list on its own whenever it changes; this is the
+/// on-demand resync for the Refresh button and for checks right before a scan
+/// that must not miss a freshly plugged device.
 pub(crate) fn refresh_ports(cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::ConnectFailed) else {
         return;
     };
-    cx.global_mut::<CoreService>().status.scanning = true;
     if let Err(error) = handle.list_ports() {
         tracing::warn!(%error, "the core refused the port scan");
-        cx.global_mut::<CoreService>().status.scanning = false;
         report_failure(cx, FailureCode::ConnectFailed, error.to_string());
     }
 }
@@ -45,8 +53,17 @@ pub(crate) fn test_connection(port: PortChoice, framing: Option<LinkMode>, cx: &
     let Some(handle) = handle_or_report(cx, FailureCode::TestFailed) else {
         return;
     };
-    let label = port.label();
-    cx.global_mut::<CoreService>().status.testing = Some(label);
+    let testing = match &port {
+        PortChoice::Serial { port, baud } => crate::core::TestingConnection {
+            port: port.clone(),
+            baud: Some(*baud),
+        },
+        PortChoice::Custom(link) => crate::core::TestingConnection {
+            port: link.label().to_owned(),
+            baud: None,
+        },
+    };
+    cx.global_mut::<CoreService>().status.testing = Some(testing);
     if let Err(error) = handle.test_connection(port, framing) {
         tracing::warn!(%error, "the core refused the connection test");
         cx.global_mut::<CoreService>().status.testing = None;

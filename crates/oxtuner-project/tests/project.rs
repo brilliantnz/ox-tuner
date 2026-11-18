@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxtuner_project::hash::{hex, sha256};
-use oxtuner_project::{IssueKind, Project, ProjectError, TUNE_FILE};
+use oxtuner_project::{
+    ConnectionSeed, CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState,
+    TUNE_FILE,
+};
 
 const MAIN_DEFINITION: &str = r#"
 [MegaTune]
@@ -75,6 +78,44 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 </msq>
 "#;
 
+/// A single-page definition without includes, for standalone and creation tests.
+/// A definition with no includes, for tests that only need a scaffold.
+const CONNECTION_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
+const STANDALONE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+/// The tune matching the standalone definition.
+const STANDALONE_TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="tempUnits">1.0</constant>
+    </page>
+    <settings Comment="written by TunerStudio">
+        <setting name="CELSIUS" value="CELSIUS"/>
+    </settings>
+</msq>
+"#;
+
 /// A temporary directory that removes itself, even when a test fails.
 struct TempDir {
     path: PathBuf,
@@ -103,6 +144,12 @@ impl TempDir {
             fs::create_dir_all(parent).expect("fixture parent is creatable");
         }
         fs::write(path, contents).expect("fixture is writable");
+    }
+
+    /// Writes a definition into the sandbox and returns the path creation takes.
+    fn definition(&self, contents: &str) -> PathBuf {
+        self.write("definition.ini", contents);
+        self.path.join("definition.ini")
     }
 }
 
@@ -172,7 +219,7 @@ fn open_edit_save_reopen_round_trips_every_value_shape() {
     assert!(saved.contains("<futureThing mode=\"x\"><nested a=\"1\"/></futureThing>"));
     assert!(saved.contains("<bibliography author=\"TunerStudio\" tuneComment=\"fixture\"/>"));
     assert!(saved.contains("<constant name=\"aeMode\">\"Alpha-N\"</constant>"));
-    assert!(saved.contains("<constant name=\"note\">\"NEW\"</constant>"));
+    assert!(saved.contains("<constant name=\"note\">NEW</constant>"));
 
     let reopened = Project::open(dir.path()).expect("the saved project reopens");
     assert!(!reopened.is_read_only());
@@ -276,22 +323,58 @@ fn saving_without_edits_leaves_the_tune_byte_identical() {
 }
 
 #[test]
-fn a_save_records_provenance_inside_the_sidecar() {
-    let dir = project_dir("provenance");
+fn a_save_records_project_state_inside_the_sidecar() {
+    let dir = project_dir("state");
     let definition_bytes =
         fs::read(dir.path().join("projectCfg/mainController.ini")).expect("the INI is readable");
     let mut project = Project::open(dir.path()).expect("the project opens");
-    assert!(project.provenance().is_none());
+    assert_eq!(project.state().connection.last_port, None);
 
     project.save().expect("the project saves");
 
-    let provenance = project.provenance().expect("provenance was written");
-    assert_eq!(provenance.definition, "projectCfg/mainController.ini");
+    let state = project.state();
+    assert_eq!(state.definition.path, "projectCfg/mainController.ini");
+    assert_eq!(state.definition.sha256, hex(&sha256(&definition_bytes)));
+    assert_eq!(state.definition.signature, "speeduino 202501");
+
+    let reread = ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was written");
+    assert_eq!(&reread, state);
+}
+
+#[test]
+fn a_corrupt_sidecar_does_not_block_opening_and_heals_on_save() {
+    let dir = project_dir("corrupt-state");
+    dir.write(".oxtuner/project.json", "{ not json");
+
+    let mut project = Project::open(dir.path()).expect("the project still opens");
+    assert!(project.state().connection.last_port.is_none());
+    assert_eq!(project.state().definition.signature, "speeduino 202501");
+
+    project.save().expect("the save heals the file");
+
+    let healed = ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was rewritten");
+    assert_eq!(&healed, project.state());
+}
+
+#[test]
+fn the_device_section_survives_a_reopen() {
+    let dir = project_dir("device-state");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .set_connection(Some("/dev/ttyACM0".to_owned()), Some(115_200))
+        .expect("the device persists");
+    drop(project);
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
     assert_eq!(
-        provenance.definition_sha256,
-        hex(&sha256(&definition_bytes))
+        reopened.state().connection.last_port.as_deref(),
+        Some("/dev/ttyACM0")
     );
-    assert_eq!(provenance.signature, "speeduino 202501");
+    assert_eq!(reopened.state().connection.baud_override, Some(115_200));
 }
 
 #[test]
@@ -314,8 +397,8 @@ fn a_write_stays_inside_the_project_and_its_sidecar() {
         written,
         [
             "project",
-            "project/.ox-tuner",
-            "project/.ox-tuner/provenance",
+            "project/.oxtuner",
+            "project/.oxtuner/project.json",
             "project/CurrentTune.msq",
             "project/projectCfg",
             "project/projectCfg/mainController.ini",
@@ -474,29 +557,6 @@ fn an_entry_missing_from_the_tune_is_appended_on_save() {
 
 #[test]
 fn a_standalone_tune_uses_its_settings_snapshot_and_has_no_sidecar() {
-    const STANDALONE_DEFINITION: &str = r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 64
-page = 1
-#if CELSIUS
-tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
-#endif
-"#;
-    const STANDALONE_TUNE: &str = r#"<msq>
-    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
-    <page number="0" size="64">
-        <constant name="tempUnits">1.0</constant>
-    </page>
-    <settings Comment="written by TunerStudio">
-        <setting name="CELSIUS" value="CELSIUS"/>
-    </settings>
-</msq>
-"#;
-
     let dir = TempDir::new("standalone");
     dir.write("standalone.ini", STANDALONE_DEFINITION);
     dir.write("tune.msq", STANDALONE_TUNE);
@@ -509,13 +569,13 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
     assert!(project.settings().is_active("CELSIUS"));
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
     assert_close(project.tune().scalar_user("tempUnits").unwrap(), 1.0);
-    assert!(project.provenance().is_none());
+    assert!(project.state().connection.last_port.is_none());
 
     project.tune_mut().set_user("tempUnits", 4.0).unwrap();
     let outcome = project.save().expect("the edit saves");
     assert_eq!(outcome.variables, ["tempUnits"]);
-    assert!(project.provenance().is_none());
-    assert!(!dir.path().join(".ox-tuner").exists());
+    assert!(project.state().connection.last_port.is_none());
+    assert!(!dir.path().join(".oxtuner").exists());
 }
 
 #[test]
@@ -822,6 +882,75 @@ tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
 }
 
 #[test]
+fn a_hand_edited_state_file_is_applied_on_open() {
+    let dir = project_dir("state-hand-edited");
+    dir.write(
+        ".oxtuner/project.json",
+        r#"{
+            "schema_version": 1,
+            "connection": { "last_port": "/dev/ttyACM9", "baud_override": 57600 },
+            "layout": {
+                "primary_sidebar_width": 321.0,
+                "secondary_sidebar_width": 222.0,
+                "bottom_panel_height": 199.0,
+                "primary_sidebar_visible": false,
+                "secondary_sidebar_visible": true,
+                "bottom_panel_visible": false,
+                "table_low_at_top": true
+            }
+        }"#,
+    );
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert_eq!(
+        project.state().connection.last_port.as_deref(),
+        Some("/dev/ttyACM9")
+    );
+    assert_eq!(project.state().connection.baud_override, Some(57_600));
+    assert_eq!(project.state().layout.primary_sidebar_width, 321.0);
+    assert!(!project.state().layout.primary_sidebar_visible);
+    assert!(!project.state().layout.bottom_panel_visible);
+    assert!(project.state().layout.table_low_at_top);
+}
+
+#[test]
+fn the_tune_snapshot_beats_ecu_settings_on_a_duplicate() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#if CELSIUS
+tempUnits = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+    // The project file turns CELSIUS on, the tune snapshot turns it off.
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"/>
+    <settings>
+        <setting name="CELSIUS_OFF"/>
+    </settings>
+</msq>
+"#;
+
+    let dir = TempDir::new("settings-precedence");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write("projectCfg/project.properties", "ecuSettings=CELSIUS|\n");
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+    assert!(
+        !project.settings().is_active("CELSIUS"),
+        "the tune snapshot is the settings context and wins on a duplicate"
+    );
+}
+
+#[test]
 fn the_project_pc_values_win_over_the_tune_page() {
     const DEFINITION: &str = r#"
 [MegaTune]
@@ -991,12 +1120,14 @@ pageSize = 64
 page = 1
 a = scalar, U08, 0, "", 1, 0, 0, 255, 0
 mode = bits, U08, 1, [0:3], "ONE", "TWO"
+tag = string, ASCII, 8
 "#;
     const TUNE: &str = r#"<msq>
     <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
     <page number="0" size="64">
         <constant name="a">1.0</constant>
         <constant name="mode">"ONE"</constant>
+        <constant name="tag">Ok</constant>
     </page>
 </msq>
 "#;
@@ -1008,8 +1139,9 @@ mode = bits, U08, 1, [0:3], "ONE", "TWO"
 
     let mut project = Project::open(dir.path()).expect("the project opens");
     project.tune_mut().set_user("a", 5.0).unwrap();
-    // `a` is formatted first; a bit value with no option label fails after it.
-    project.tune_mut().set_raw_at("mode", 0, 99.0).unwrap();
+    // `a` is formatted first; the text fails after it, because ISO-8859-1 has
+    // no byte for this character.
+    project.tune_mut().set_text("tag", "🚗").unwrap();
 
     assert!(matches!(
         project.save(),
@@ -1037,4 +1169,1003 @@ fn copy_tree(from: &Path, to: &Path) {
             fs::copy(entry.path(), target).expect("file is copyable");
         }
     }
+}
+
+#[test]
+fn creating_a_project_scaffolds_the_reference_layout() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+
+[PcVariables]
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+"#;
+
+    let sandbox = TempDir::new("create");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: Some("speeduino 202501".to_owned()),
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let root = sandbox.path().join("Roadster");
+    assert!(root.join(TUNE_FILE).is_file());
+    assert!(root.join("projectCfg/mainController.ini").is_file());
+    for dir in ["dashboard", "TuneView"] {
+        assert!(root.join(dir).is_dir(), "{dir} is scaffolded");
+    }
+    assert!(root.join(".oxtuner/project.json").is_file());
+
+    let properties =
+        fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties exist");
+    assert!(properties.contains("projectName=Roadster"));
+    assert!(properties.contains("speeduino 202501"));
+    assert!(properties.contains("ecuConfigFile=mainController.ini"));
+    assert!(properties.contains("firmwareDescription=speeduino 202501"));
+    assert!(
+        properties.contains("ecuSettings=\n"),
+        "no group selected yet: {properties}"
+    );
+    assert!(
+        root.join("projectCfg/project.properties.bkup").is_file(),
+        "TunerStudio expects a backup copy beside the properties"
+    );
+    assert!(
+        !properties.contains("signature="),
+        "the TS key is firmwareDescription: {properties}"
+    );
+
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    assert_close(project.tune().scalar_user("reqFuel").unwrap(), 0.0);
+    assert_eq!(
+        project.state().definition.path,
+        "projectCfg/mainController.ini"
+    );
+    drop(project);
+
+    let reopened = Project::open(&root).expect("the created project reopens");
+    assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+}
+
+#[test]
+fn a_one_row_table_keeps_its_declared_shape() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-row-table");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "RowTable".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("a one-row table is a legal shape");
+
+    let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
+    assert!(
+        tune.contains(r#"name="rowWise" cols="4" rows="1""#),
+        "a declared [4x1] table keeps its shape: {tune}"
+    );
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+}
+
+#[test]
+fn a_created_tune_starts_from_the_declared_array_defaults() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+"#;
+
+    let sandbox = TempDir::new("create-array-defaults");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "ArrayDefaults".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(values.number(0), Some(10.0));
+    assert_eq!(values.number(1), Some(20.0));
+    assert_eq!(values.number(2), Some(30.0));
+}
+
+#[test]
+fn a_raw_array_default_wins_over_the_user_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+rawValue = axis, 1 2 3
+"#;
+
+    let sandbox = TempDir::new("create-raw-defaults");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "RawDefaults".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1), values.number(2)),
+        (Some(1.0), Some(2.0), Some(3.0)),
+        "rawValue wins over defaultValue, as it does for a scalar"
+    );
+}
+
+#[test]
+fn a_text_that_rounds_to_the_same_raw_is_not_reported_as_clamped() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+ego = scalar, U08, 0, "", 0.006802721088435375, 0, 0.4761904761904762, 1.7006802721088436, 3
+"#;
+    // The text carries three decimals, so it reads below the minimum; clamping
+    // it back inside lands on the same raw value the text already meant.
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="ego">0.476</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("rounded-clamp");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| issue.kind != IssueKind::ValueClamped),
+        "a clamp that changes no raw value is not news: {:?}",
+        project.report().warnings
+    );
+    assert_eq!(
+        project
+            .tune()
+            .value("ego")
+            .and_then(|values| values.number(0)),
+        Some(70.0)
+    );
+}
+
+#[test]
+fn an_array_the_file_omits_opens_on_its_declared_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [3], "", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+defaultValue = axis, 10 20 30
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64"/>
+</msq>
+"#;
+
+    let dir = TempDir::new("array-default-open");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1), values.number(2)),
+        (Some(10.0), Some(20.0), Some(30.0)),
+        "an omitted array starts from the definition's declared values"
+    );
+}
+
+#[test]
+fn a_minimum_between_two_written_decimals_keeps_the_text_inside() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+p = scalar, F32, 0, "", 0.145038, 0, 7.25, 101526, 0
+
+[ConstantsExtensions]
+defaultValue = p, 7.25
+"#;
+
+    let sandbox = TempDir::new("create-bound-rounding");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "BoundRounding".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let reopened = Project::open(project.root()).expect("the project reopens");
+    assert!(
+        reopened
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| issue.kind != IssueKind::ValueClamped),
+        "a minimum between two written decimals is written at the next one: {:?}",
+        reopened.report().warnings
+    );
+}
+
+#[test]
+fn an_unstorable_cell_is_reported_even_when_another_cell_is_clamped() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [2], "", 1, 0, 0, 1000, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="axis">-5.0 500.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("cell-warnings");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+    let kinds: Vec<IssueKind> = project
+        .report()
+        .warnings
+        .iter()
+        .map(|issue| issue.kind)
+        .collect();
+
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == IssueKind::ValueClamped)
+            .count(),
+        1,
+        "the negative cell is clamped to the minimum"
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == IssueKind::ValueOutOfRange)
+            .count(),
+        1,
+        "the 500 cell fits the range but not U08"
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("`axis`[1]")),
+        "the storage warning names the cell: {:?}",
+        project.report().warnings
+    );
+}
+
+#[test]
+fn a_later_cell_that_cannot_convert_leaves_every_cell_at_its_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+big = array, U08, 0, [2], "", 1e-9, 0, -1e308, 1e308, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="big">1 1e308</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("later-cell");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    assert_eq!(
+        project.tune().raw_at("big", 0).expect("cell 0"),
+        0.0,
+        "the first cell is not written before the second is refused"
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("`big`[1]")),
+        "the refusal names the cell: {:?}",
+        project.report().warnings
+    );
+}
+
+#[test]
+fn a_bad_token_in_an_array_keeps_every_cell_at_its_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="axis">1.0 nope</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("partial-array");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1)),
+        (Some(0.0), Some(0.0)),
+        "a bad token leaves no cell written from the file"
+    );
+    assert_eq!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .filter(|issue| issue.kind == IssueKind::ValueSkipped)
+            .count(),
+        1,
+        "the value is skipped once, not half-applied"
+    );
+}
+
+#[test]
+fn a_non_finite_value_is_skipped_and_keeps_the_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+p = scalar, U08, 0, "", 1, 0, 0, 255, 0
+mode = bits, U08, 1, [0:1], "Off", "On"
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="p">NaN</constant>
+        <constant name="mode">NaN</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("non-finite");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let skipped = project
+        .report()
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::ValueSkipped)
+        .count();
+    assert_eq!(skipped, 2, "scalar and bit values are both refused");
+    assert_eq!(
+        project
+            .tune()
+            .value("p")
+            .and_then(|values| values.number(0)),
+        Some(0.0),
+        "the scalar keeps the definition default"
+    );
+    assert_eq!(
+        project
+            .tune()
+            .value("mode")
+            .and_then(|values| values.number(0)),
+        Some(0.0),
+        "the bit field keeps the definition default"
+    );
+}
+
+#[test]
+fn a_rejected_scaffold_names_itself() {
+    let error = ProjectError::ScaffoldRejected {
+        reasons: vec!["`pageSize` disagrees".to_owned()],
+    };
+
+    assert_eq!(error.kind(), "scaffold-rejected");
+    assert!(
+        error.to_string().contains("`pageSize` disagrees"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_non_ascii_project_name_is_escaped_for_java_properties() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
+    let sandbox = TempDir::new("create-non-ascii");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Café".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    let bytes =
+        fs::read(project.root().join("projectCfg/project.properties")).expect("properties exist");
+    assert!(
+        bytes.is_ascii(),
+        "TunerStudio reads ISO-8859-1, so the file stays ASCII: {bytes:?}"
+    );
+    let text = String::from_utf8(bytes).expect("ASCII is UTF-8");
+    assert!(
+        text.contains("projectName=Caf\\u00E9"),
+        "an accented name is escaped, not encoded: {text}"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_a_folder_that_already_exists() {
+    let sandbox = TempDir::new("create-existing-folder");
+    let target = sandbox.path().join("Taken");
+    fs::create_dir_all(&target).expect("the target exists");
+    fs::write(target.join("existing.txt"), "x").expect("the target holds a file");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Taken".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetExists { .. })
+    ));
+    assert!(target.join("existing.txt").is_file());
+}
+
+#[test]
+fn creating_a_project_refuses_an_empty_folder_that_already_exists() {
+    // A folder that looks empty in a picker may hold a hidden file (Finder
+    // writes `.DS_Store` on open), so creation only writes into a folder it
+    // made itself.
+    let sandbox = TempDir::new("create-empty-folder");
+    let target = sandbox.path().join("Empty");
+    fs::create_dir_all(&target).expect("the target exists");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Empty".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetExists { .. })
+    ));
+    assert!(target.is_dir());
+    assert_eq!(
+        fs::read_dir(&target).expect("readable").count(),
+        0,
+        "the existing folder is left untouched"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_a_file_that_holds_the_name() {
+    let sandbox = TempDir::new("create-existing-file");
+    let target = sandbox.path().join("Taken");
+    fs::write(&target, "not a folder").expect("the file is writable");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Taken".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::TargetExists { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(&target).expect("the file is readable"),
+        "not a folder",
+        "the file is left untouched"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_an_unusable_name() {
+    let sandbox = TempDir::new("create-bad-name");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "../escape".to_owned(),
+        ini_path: sandbox.path().join("unused.ini"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::InvalidName { .. })
+    ));
+    assert!(sandbox.path().read_dir().unwrap().next().is_none());
+}
+
+#[test]
+fn creating_a_project_checks_the_detected_signature() {
+    let sandbox = TempDir::new("create-mismatch");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Mismatch".to_owned(),
+        ini_path: sandbox.definition("[MegaTune]\nsignature = \"speeduino 202501\"\n"),
+        expected_signature: Some("other 9999".to_owned()),
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::SignatureMismatch { .. })
+    ));
+    assert!(
+        !sandbox.path().join("Mismatch").exists(),
+        "a failed create leaves nothing behind"
+    );
+}
+
+#[test]
+fn creating_a_project_refuses_a_definition_that_is_not_ini() {
+    let sandbox = TempDir::new("create-not-ini");
+    sandbox.write("notes.txt", "not a definition");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Notes".to_owned(),
+        ini_path: sandbox.path().join("notes.txt"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::DefinitionNotIni { .. })
+    ));
+    assert!(!sandbox.path().join("Notes").exists());
+}
+
+#[test]
+fn creating_a_project_refuses_an_unreadable_definition() {
+    let sandbox = TempDir::new("create-bad-ini");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Broken".to_owned(),
+        ini_path: sandbox.definition("this is not an ini file\n"),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    assert!(matches!(
+        Project::create(&request),
+        Err(ProjectError::Ini(_))
+    ));
+    assert!(
+        !sandbox.path().join("Broken").exists(),
+        "a failed create leaves nothing behind"
+    );
+}
+
+#[test]
+fn a_newer_sidecar_is_left_untouched() {
+    let dir = project_dir("newer-state");
+    let before = r#"{"schema_version": 999, "connection": {"last_port": "/dev/ttyACM0"}}"#;
+    dir.write(".oxtuner/project.json", before);
+
+    let mut project = Project::open(dir.path()).expect("the project still opens");
+    assert!(project.state().connection.last_port.is_none());
+
+    project.save().expect("the save succeeds");
+    project
+        .set_connection(Some("/dev/ttyUSB0".to_owned()), None)
+        .expect("the device updates in memory");
+    assert_eq!(
+        project.state().connection.last_port.as_deref(),
+        Some("/dev/ttyUSB0")
+    );
+
+    let after = fs::read(dir.path().join(".oxtuner/project.json")).expect("the file is kept");
+    assert_eq!(
+        after,
+        before.as_bytes(),
+        "a newer sidecar is never overwritten"
+    );
+}
+
+#[test]
+fn a_standalone_tune_ignores_a_neighboring_sidecar() {
+    let dir = TempDir::new("standalone-neighbor");
+    dir.write("project/tune.msq", STANDALONE_TUNE);
+    dir.write("project/standalone.ini", STANDALONE_DEFINITION);
+    dir.write(
+        "project/.oxtuner/project.json",
+        r#"{"schema_version": 1, "connection": {"last_port": "/dev/ttyACM0"}}"#,
+    );
+
+    let project = Project::open_standalone(
+        dir.path().join("project/tune.msq"),
+        dir.path().join("project/standalone.ini"),
+    )
+    .expect("the tune opens");
+    assert!(project.state().connection.last_port.is_none());
+}
+
+#[test]
+fn creating_a_project_refuses_a_definition_with_includes() {
+    const INCLUDING: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+#include page2.ini
+"#;
+
+    let sandbox = TempDir::new("create-includes");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Includes".to_owned(),
+        ini_path: sandbox.definition(INCLUDING),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let error = Project::create(&request).expect_err("an include cannot be copied");
+    assert!(
+        matches!(&error, ProjectError::DefinitionNeedsIncludes { names } if names == &["page2.ini"]),
+        "{error}"
+    );
+    assert!(!sandbox.path().join("Includes").exists());
+}
+
+#[test]
+fn the_layout_section_is_per_project_and_survives_a_reopen() {
+    let dir = project_dir("ui-state");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(project.state().layout.primary_sidebar_visible);
+
+    let layout = ProjectLayout {
+        primary_sidebar_width: 300.0,
+        secondary_sidebar_width: 200.0,
+        bottom_panel_height: 260.0,
+        primary_sidebar_visible: false,
+        secondary_sidebar_visible: true,
+        bottom_panel_visible: false,
+        table_low_at_top: true,
+    };
+    project
+        .set_layout(layout.clone())
+        .expect("the layout persists");
+    drop(project);
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert_eq!(reopened.state().layout, layout);
+
+    let raw = std::fs::read_to_string(dir.path().join(".oxtuner/project.json"))
+        .expect("the state file is readable");
+    assert!(
+        raw.contains("\"layout\""),
+        "new writes use the layout key, not the old ui one"
+    );
+}
+
+/// Creating a project from the real Speeduino definition runs only on the
+/// owner's machine.
+///
+/// Set `OXTUNER_REFERENCE_DEFINITION` to the definition file and run
+/// `cargo test -p oxtuner-project -- --ignored`. The definition is read, never
+/// written, and the project goes to a temporary directory.
+#[test]
+#[ignore = "needs a local definition file (OXTUNER_REFERENCE_DEFINITION)"]
+fn a_project_created_from_the_reference_definition_opens_clean() {
+    let Ok(source) = std::env::var("OXTUNER_REFERENCE_DEFINITION") else {
+        return;
+    };
+    let bytes = fs::read(source).expect("the reference definition is readable");
+
+    let sandbox = TempDir::new("create-reference");
+    let reference = sandbox.path().join("reference.ini");
+    fs::write(&reference, &bytes).expect("the reference is copied to the sandbox");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Reference".to_owned(),
+        ini_path: reference,
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+    assert!(
+        !project.definition().pages.is_empty(),
+        "the definition declares at least one page"
+    );
+    assert!(
+        project.report().missing_values.is_empty(),
+        "a scaffold writes every variable the definition declares: {:?}",
+        project.report().missing_values
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .all(|issue| !issue.message.contains("presentation attribute")),
+        "every presentation attribute must resolve on a scaffolded tune: {:?}",
+        project.report().warnings
+    );
+
+    assert!(
+        project.report().warnings.iter().all(|issue| !matches!(
+            issue.kind,
+            IssueKind::ValueClamped | IssueKind::ValueOutOfRange
+        )),
+        "a scaffold writes values its own loader keeps unchanged: {:?}",
+        project.report().warnings
+    );
+
+    let tune = fs::read(project.tune_path()).expect("the scaffolded tune is readable");
+    drop(project);
+
+    let root = sandbox.path().join("Reference");
+    let mut reopened = Project::open(&root).expect("the created project reopens");
+    assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+    assert_eq!(
+        reopened
+            .snapshot_msq()
+            .expect("the working image serializes"),
+        tune,
+        "a created tune must read back as the file it was written from"
+    );
+
+    let outcome = reopened.save().expect("an unedited scaffold saves");
+    assert_eq!(outcome.cells, 0);
+    assert_eq!(
+        fs::read(reopened.tune_path()).expect("the tune is readable"),
+        tune,
+        "opening and saving a scaffold must not rewrite it"
+    );
+}
+
+#[test]
+fn a_chosen_setting_group_compiles_the_branch_and_is_recorded() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+
+[SettingGroups]
+settingGroup = pressure_units, "Pressure Display"
+settingOption = DEFAULT, "PSI"
+settingOption = pressure_bar, "BAR"
+"#;
+
+    let sandbox = TempDir::new("create-settings");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Bar".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: vec!["pressure_bar".to_owned()],
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert!(
+        project.settings().is_active("pressure_bar"),
+        "the chosen option is active for the definition"
+    );
+
+    let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
+    assert!(
+        tune.contains("pressure_bar"),
+        "the snapshot records the choice: {tune}"
+    );
+    assert!(
+        !tune.contains("DEFAULT"),
+        "the default option is not a flag: {tune}"
+    );
+
+    let properties = fs::read_to_string(project.root().join("projectCfg/project.properties"))
+        .expect("properties exist");
+    assert!(
+        properties.contains("ecuSettings=pressure_bar|"),
+        "TunerStudio reads the choice from there: {properties}"
+    );
+}
+
+#[test]
+fn creation_remembers_the_connection_the_wizard_picked() {
+    let sandbox = TempDir::new("create-connection");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_path: sandbox.definition(CONNECTION_DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: Some(ConnectionSeed {
+            port: "/dev/cu.test".to_owned(),
+            baud: 57_600,
+        }),
+        layout: ProjectLayout::default(),
+    };
+    Project::create(&request).expect("creation succeeds");
+
+    let root = sandbox.path().join("Roadster");
+    let reopened = Project::open(&root).expect("the project reopens");
+    assert_eq!(
+        reopened.state().connection.last_port.as_deref(),
+        Some("/dev/cu.test")
+    );
+    assert_eq!(reopened.state().connection.baud_override, Some(57_600));
+}
+
+#[test]
+fn creation_without_a_baud_keeps_the_definition_rate() {
+    let sandbox = TempDir::new("create-no-baud");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Roadster".to_owned(),
+        ini_path: sandbox.definition(CONNECTION_DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+
+    assert_eq!(project.state().connection.last_port, None);
+    assert_eq!(project.state().connection.baud_override, None);
 }

@@ -154,8 +154,20 @@ pub struct PcVariable {
     pub shape: Shape,
     /// Display units.
     pub units: Text,
+    /// User-value scale (`user = (raw + translate) × scale`).
+    pub scale: Option<Number>,
+    /// User-value translate.
+    pub translate: Option<Number>,
+    /// Minimum user value.
+    pub minimum: Option<Number>,
+    /// Maximum user value.
+    pub maximum: Option<Number>,
+    /// Decimal digits to display.
+    pub digits: Option<Number>,
     /// Option list for `bits` (the value of a bit PC variable is its index).
     pub options: Arc<[BitOption]>,
+    /// Storage modifiers written on the entry itself.
+    pub flags: ConstantFlags,
     /// Whether the value is a snapshot taken at connect time.
     pub channel_value_on_connect: Option<String>,
     /// Whether the value tracks a live channel.

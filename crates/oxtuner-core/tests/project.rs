@@ -15,7 +15,9 @@ use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId, ProjectView,
     SaveReport, start,
 };
-use oxtuner_project::TUNE_FILE;
+use oxtuner_project::{ConnectionSeed, CreateRequest, ProjectLayout, TUNE_FILE};
+
+mod support;
 
 /// How long a test waits for an event before failing.
 const WAIT: Duration = Duration::from_secs(10);
@@ -65,6 +67,45 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
         <setting name="CELSIUS" value="CELSIUS"/>
     </settings>
 </msq>
+"#;
+
+/// A single-page definition without `#include`, the only shape creation copies.
+const CREATE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 128
+page = 1
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
+/// Writes the create fixture's definition beside the sandbox and returns it.
+fn definition_path(directory: &Path) -> PathBuf {
+    let path = directory.join("create-definition.ini");
+    fs::write(&path, CREATE_DEFINITION).expect("the definition is writable");
+    path
+}
+
+/// A definition with one setting group, for the wizard's inspect command.
+const INSPECT_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = pressure_units, "Pressure Display"
+settingOption = DEFAULT, "PSI"
+settingOption = pressure_bar, "BAR"
+
+[Constants]
+nPages = 1
+pageSize = 128
+page = 1
+
+#if CELSIUS
+celsius_only = scalar, U08, 8, "", 1, 0, 0, 255, 0
+#endif
 "#;
 
 /// The same tune, written for another firmware.
@@ -145,7 +186,9 @@ impl Harness {
     }
 
     fn next(&self) -> Event {
-        self.events.recv_timeout(WAIT).expect("an event arrives")
+        // The core pushes its port snapshot on its own, so a command's answer
+        // is read past those publications.
+        support::recv_non_port(&self.events, WAIT).expect("an event arrives")
     }
 }
 
@@ -327,4 +370,221 @@ fn a_project_failure_is_not_a_dead_core() {
     let event = core.next();
     assert_eq!(event.op(), Some(op));
     assert!(matches!(event, Event::DefinitionLoaded { .. }));
+}
+
+#[test]
+fn creating_a_project_scaffolds_it_and_leaves_it_open() {
+    let dir = TempDir::new("create");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Roadster".to_owned(),
+            ini_path: definition_path(dir.path()),
+            expected_signature: Some("speeduino 202501".to_owned()),
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let summary = opened(&event);
+    let root = dir.path().join("Roadster");
+    assert_eq!(summary.root, root);
+    assert!(summary.in_project);
+    assert!(!summary.read_only, "{:?}", summary.read_only_reasons);
+    assert_eq!(summary.definition.signature, "speeduino 202501");
+    assert!(root.join(TUNE_FILE).is_file());
+    assert!(root.join("projectCfg/mainController.ini").is_file());
+    assert!(root.join(".oxtuner/project.json").is_file());
+
+    // The created project is a live session: Save answers like any other.
+    let op = core.handle.save_tune().expect("the save is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+    assert!(matches!(event, Event::TuneSaved { .. }), "{event:?}");
+}
+
+#[test]
+fn inspect_definition_answers_with_the_setting_groups() {
+    let dir = TempDir::new("inspect");
+    let path = dir.path().join("groups.ini");
+    fs::write(&path, INSPECT_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .inspect_definition(&path)
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    match event {
+        Event::DefinitionInspected {
+            path: answered,
+            preview,
+            ..
+        } => {
+            assert_eq!(answered, path);
+            assert_eq!(preview.signature, "speeduino 202501");
+            assert_eq!(preview.groups.len(), 1);
+            assert_eq!(preview.groups[0].label, "Pressure Display");
+            assert_eq!(preview.groups[0].default.as_deref(), Some("DEFAULT"));
+            assert!(preview.tested_flags.iter().any(|flag| flag == "celsius"));
+        }
+        other => panic!("expected an inspected definition, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_created_project_remembers_the_wizard_connection() {
+    let dir = TempDir::new("create-connection");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Roadster".to_owned(),
+            ini_path: definition_path(dir.path()),
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: Some(ConnectionSeed {
+                port: "/dev/cu.test".to_owned(),
+                baud: 57_600,
+            }),
+            layout: ProjectLayout::default(),
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let summary = opened(&event);
+    assert_eq!(
+        summary.connection.last_port.as_deref(),
+        Some("/dev/cu.test")
+    );
+    assert_eq!(summary.connection.baud_override, Some(57_600));
+}
+
+#[test]
+fn a_refused_create_reports_the_reason_and_writes_nothing() {
+    let dir = TempDir::new("create-refused");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Mismatch".to_owned(),
+            ini_path: definition_path(dir.path()),
+            expected_signature: Some("other firmware".to_owned()),
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+        })
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (reason, message) = failure(&event);
+    assert_eq!(reason, FailureCode::ProjectRejected);
+    assert!(message.contains("other firmware"), "{message}");
+    assert!(
+        !dir.path().join("Mismatch").exists(),
+        "a refused create leaves no folder behind"
+    );
+}
+
+#[test]
+fn the_project_view_carries_the_remembered_connection() {
+    let dir = project_dir("device", TUNE);
+    dir.write(
+        ".oxtuner/project.json",
+        r#"{"schema_version": 1, "connection": {"last_port": "/dev/ttyACM0", "baud_override": 115200}}"#,
+    );
+
+    let core = Harness::start();
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+
+    assert_eq!(
+        summary.connection.last_port.as_deref(),
+        Some("/dev/ttyACM0")
+    );
+    assert_eq!(summary.connection.baud_override, Some(115_200));
+}
+
+#[test]
+fn a_project_without_state_has_no_remembered_connection() {
+    let dir = project_dir("no-device", TUNE);
+
+    let core = Harness::start();
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+
+    assert_eq!(summary.connection.last_port, None);
+    assert_eq!(summary.connection.baud_override, None);
+}
+
+#[test]
+fn the_project_layout_is_stored_in_its_own_state_file() {
+    let dir = project_dir("layout", TUNE);
+    let core = Harness::start();
+
+    let _ = core.open(dir.path());
+    let summary = opened(&core.next()).clone();
+    assert!(
+        summary.layout.primary_sidebar_visible,
+        "a fresh project starts open"
+    );
+
+    let layout = oxtuner_project::ProjectLayout {
+        primary_sidebar_width: 300.0,
+        secondary_sidebar_width: 260.0,
+        bottom_panel_height: 240.0,
+        primary_sidebar_visible: false,
+        secondary_sidebar_visible: true,
+        bottom_panel_visible: true,
+        table_low_at_top: true,
+    };
+    core.handle
+        .set_project_layout(layout.clone())
+        .expect("the layout command is queued");
+    let ack = core.next();
+    assert!(
+        matches!(ack, Event::ProjectLayoutSaved { .. }),
+        "the layout command answers: {ack:?}"
+    );
+
+    // Commands run in order on the core thread, so the save proves the layout
+    // write finished before the file is read.
+    let op = core.handle.save_tune().expect("the save is queued");
+    let event = core.next();
+    assert_eq!(event.op(), Some(op));
+
+    let state = oxtuner_project::ProjectState::read(dir.path())
+        .expect("the state is readable")
+        .expect("the state was written");
+    assert_eq!(state.layout, layout);
+}
+
+#[test]
+fn a_layout_command_with_no_project_open_is_ignored() {
+    let dir = project_dir("layout-no-project", TUNE);
+    let core = Harness::start();
+
+    core.handle
+        .set_project_layout(oxtuner_project::ProjectLayout::default())
+        .expect("the command is queued");
+    let ack = core.next();
+    assert!(
+        matches!(ack, Event::ProjectLayoutSaved { .. }),
+        "a command with no project still answers: {ack:?}"
+    );
+    assert!(!dir.path().join(".oxtuner").exists());
 }
