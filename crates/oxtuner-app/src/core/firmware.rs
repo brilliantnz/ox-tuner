@@ -56,11 +56,12 @@ pub(crate) fn host_of(url: &str) -> String {
 /// when a device was plugged in. This keeps the appearance order the port
 /// events carry and sorts it newest first: the ECU the user just connected is
 /// usually the newest port, and meeting it first is what keeps a scan short on
-/// a machine with several serial adapters. On the very first sample nothing has
-/// been plugged in yet, so that baseline is just the name order reversed. The
-/// list is the core's pushed snapshot; when no sample arrived yet the scan
-/// waits for it instead of reporting a portless machine. The request hurries
-/// the baseline along, and the next Detect press scans it.
+/// a machine with several serial adapters. The first sample carries no
+/// appearance history yet, so its order is the published name order and the
+/// scan walks it from the last name to the first. The list is the core's
+/// pushed snapshot; when no sample arrived yet the scan waits for it instead of
+/// reporting a portless machine. The request hurries the baseline along, and
+/// the next Detect press scans it.
 pub(crate) fn start_scan(cx: &mut App) {
     // A scan already owns the core's probe path; a second one would drop the
     // op of the attempt in flight and leave its answer unattributed.
@@ -107,28 +108,14 @@ pub(crate) fn start_scan(cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Records which ports first appeared when, oldest first.
-///
-/// Called for every published port list. A name that is still present keeps
-/// its place, so re-enumerating the same set in another order is not a new
-/// appearance, and a device that leaves and comes back counts as new.
-pub(crate) fn note_appearance(order: &mut Vec<String>, ports: &[PortView]) {
-    order.retain(|name| ports.iter().any(|port| &port.name == name));
-
-    for port in ports {
-        if !order.iter().any(|name| name == &port.name) {
-            order.push(port.name.clone());
-        }
-    }
-}
-
 /// The order a scan walks the ports in: newest appearance first, then name.
 ///
-/// A port the order does not know sorts as the oldest, which is only reachable
-/// when a list arrived without passing through [`note_appearance`].
+/// The appearance order itself is kept by [`CoreStatus::note_ports`]. A port
+/// the order does not know sorts as the oldest, which is only reachable when a
+/// list arrived without passing through that method.
 fn scan_order(ports: &[PortView], appeared: &[String]) -> Vec<String> {
     let mut names: Vec<&str> = ports.iter().map(|port| port.name.as_str()).collect();
-    names.sort_by_key(|name| (Reverse(rank(appeared, name)), *name));
+    names.sort_by_cached_key(|name| (Reverse(rank(appeared, name)), *name));
 
     names.into_iter().map(str::to_owned).collect()
 }
@@ -817,44 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn an_appearing_port_joins_the_order_last_and_a_removed_one_leaves() {
-        let mut order = Vec::new();
-
-        note_appearance(&mut order, &[port("/dev/cu.first"), port("/dev/cu.second")]);
-        assert_eq!(order, ["/dev/cu.first", "/dev/cu.second"]);
-
-        // The same set in another enumeration order is not a new appearance.
-        note_appearance(&mut order, &[port("/dev/cu.second"), port("/dev/cu.first")]);
-        assert_eq!(order, ["/dev/cu.first", "/dev/cu.second"]);
-
-        note_appearance(
-            &mut order,
-            &[
-                port("/dev/cu.first"),
-                port("/dev/cu.second"),
-                port("/dev/cu.third"),
-            ],
-        );
-        assert_eq!(order.last().expect("the newest port"), "/dev/cu.third");
-
-        note_appearance(&mut order, &[port("/dev/cu.second"), port("/dev/cu.third")]);
-        assert_eq!(
-            order,
-            ["/dev/cu.second", "/dev/cu.third"],
-            "a port that left stops being a candidate"
-        );
-
-        // Unplug the ECU and plug it back in: it is the newest port again.
-        note_appearance(&mut order, &[port("/dev/cu.second")]);
-        note_appearance(&mut order, &[port("/dev/cu.third"), port("/dev/cu.second")]);
-        assert_eq!(
-            order.last().expect("the newest port"),
-            "/dev/cu.third",
-            "a device that comes back is new"
-        );
-    }
-
-    #[test]
     fn the_scan_starts_with_the_newest_port_not_the_last_name() {
         // Neither ascending nor descending: only the appearance order produces
         // this sequence, so a name sort cannot pass in its place.
@@ -896,11 +845,11 @@ mod tests {
             port("/dev/cu.mmm"),
             port("/dev/cu.zzz"),
         ];
-        let mut order = Vec::new();
-        note_appearance(&mut order, &[port("/dev/cu.aaa"), port("/dev/cu.zzz")]);
-        note_appearance(&mut order, &ports);
+        let mut status = CoreStatus::default();
+        status.note_ports(&[port("/dev/cu.aaa"), port("/dev/cu.zzz")]);
+        status.note_ports(&ports);
 
-        let attempts = attempts_for(&scan_order(&ports, &order));
+        let attempts = attempts_for(&scan_order(&ports, &status.port_order));
 
         assert_eq!(
             attempts[0].port, "/dev/cu.mmm",

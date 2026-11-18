@@ -573,6 +573,11 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_framing_reads_as_the_legacy_query() {
+        assert_eq!(super::framing_label(LinkMode::Legacy), "legacy");
+    }
+
+    #[test]
     fn byte_counts_read_as_units() {
         assert_eq!(super::format_bytes(0), "0 B");
         assert_eq!(super::format_bytes(512), "512 B");

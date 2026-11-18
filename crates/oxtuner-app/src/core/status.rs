@@ -210,6 +210,23 @@ pub(crate) struct TraceSaved {
 }
 
 impl CoreStatus {
+    /// Records which ports are new since the last published list.
+    ///
+    /// A name that is still present keeps its place, so re-enumerating the
+    /// same set in another order is not a new appearance, and a device that
+    /// leaves and comes back counts as new. The order is what a scan reads to
+    /// try the port the user just plugged in before the others.
+    pub(crate) fn note_ports(&mut self, ports: &[PortView]) {
+        self.port_order
+            .retain(|name| ports.iter().any(|port| &port.name == name));
+
+        for port in ports {
+            if !self.port_order.iter().any(|name| name == &port.name) {
+                self.port_order.push(port.name.clone());
+            }
+        }
+    }
+
     /// Clears the pending prompt, the running fetch and its progress.
     ///
     /// The decline is a user decision, not download state, so it stays.

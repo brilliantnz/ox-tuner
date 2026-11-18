@@ -104,7 +104,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         let service = cx.global_mut::<CoreService>();
         service.status.ports.clone_from(ports);
         service.status.ports_revision = service.status.ports_revision.saturating_add(1);
-        crate::core::firmware::note_appearance(&mut service.status.port_order, ports);
+        service.status.note_ports(ports);
 
         // A Detect press that arrived before the first sample asked for that
         // sample instead of scanning; now it can.
