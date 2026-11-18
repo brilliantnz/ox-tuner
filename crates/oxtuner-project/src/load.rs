@@ -612,8 +612,8 @@ fn load_entry(
                 users.push(user);
             }
 
-            let mut clamped: Option<(f64, f64, f64)> = None;
-            let mut out_of_storage: Option<f64> = None;
+            let mut clamped: Option<(usize, f64, f64, f64)> = None;
+            let mut out_of_storage: Option<(usize, f64)> = None;
 
             for (index, user) in users.into_iter().enumerate() {
                 // A file value outside the declared range is clamped the way
@@ -633,20 +633,24 @@ fn load_entry(
                 // same raw value changed nothing.
                 let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
                 if written_raw != Some(conversion.raw) {
-                    clamped.get_or_insert((user, low, high));
+                    clamped.get_or_insert((index, user, low, high));
                 }
                 if conversion.is_out_of_range() {
-                    out_of_storage.get_or_insert(clamped_user);
+                    out_of_storage.get_or_insert((index, clamped_user));
+                }
+                if !conversion.raw.is_finite() {
+                    return Err(format!("`{}` = {user} has no finite raw value", spec.name));
                 }
 
                 tune.set_raw_at(&spec.name, index, conversion.raw)
                     .map_err(|error| error.to_string())?;
             }
 
-            // A value already reported as clamped is not also reported as
-            // unstorable: one sentence per variable is what the user can act
-            // on.
-            if let (Some(value), None) = (out_of_storage, clamped) {
+            // A cell already reported as clamped is not also reported as
+            // unstorable; another cell of the same array still is.
+            if let Some((index, value)) = out_of_storage
+                && clamped.is_none_or(|(clamped_index, ..)| clamped_index != index)
+            {
                 report.warn(
                     IssueKind::ValueOutOfRange,
                     format!(
@@ -657,7 +661,7 @@ fn load_entry(
                 );
             }
 
-            if let Some((found, low, high)) = clamped {
+            if let Some((_, found, low, high)) = clamped {
                 let range = match (low.is_finite(), high.is_finite()) {
                     (true, true) => format!("{low}..{high}"),
                     (true, false) => format!("the declared minimum {low}"),

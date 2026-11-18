@@ -841,10 +841,12 @@ fn default_raw(
         return spec.clamp_raw(conversion.raw);
     }
 
-    // No declared default. Zero is right for almost every variable, and it is
-    // only worth the full clamp when zero itself falls outside the declared
-    // range or the storage type.
-    let zero_in_range = 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
+    // No declared default. A raw zero is the right default only when it reads
+    // back as user zero inside the declared range: a translate offset moves it,
+    // and the fast path would return exactly the value the clamp exists to
+    // avoid. Zero is inside every storage type, so that half needs no check.
+    let zero_in_range = spec.translate == Some(0.0)
+        && 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
         && 0.0 <= spec.maximum.unwrap_or(f64::INFINITY);
     if zero_in_range {
         return 0.0;
@@ -1038,10 +1040,12 @@ defaultValue = p, 7.25
         let layout = TuneLayout::build(&definition, &|_| None);
         let spec = layout.variable("p").expect("p");
 
-        let user = spec.to_user(spec.default_raw).expect("user units");
-        assert!(
-            user >= 7.25,
-            "an omitted default is written at the next representable value, not below its bound: {user}"
+        // The writer carries at least one decimal, so a raw default that reads
+        // back as 7.25 exactly would still be written as 7.2, below the bound.
+        let written = spec.format_file(spec.default_raw).expect("written");
+        assert_eq!(
+            written, "7.3",
+            "an omitted default is written at the next representable value"
         );
     }
 

@@ -190,6 +190,7 @@ fn detect_controls(status: &crate::core::CoreStatus, locked: bool) -> AnyElement
                 Button::new("new-project-stop-scan")
                     .label(t!("app.new_project.stop_scan"))
                     .outline()
+                    .disabled(locked)
                     .on_click(|_, _, cx| firmware::cancel_scan(cx)),
             )
         })

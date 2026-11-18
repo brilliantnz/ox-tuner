@@ -1473,6 +1473,53 @@ defaultValue = p, 7.25
 }
 
 #[test]
+fn a_bad_token_in_an_array_keeps_every_cell_at_its_default() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+axis = array, U08, 0, [2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="axis">1.0 nope</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("partial-array");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let values = project
+        .tune()
+        .value("axis")
+        .expect("the axis is in the tune");
+    assert_eq!(
+        (values.number(0), values.number(1)),
+        (Some(0.0), Some(0.0)),
+        "a bad token leaves no cell written from the file"
+    );
+    assert_eq!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .filter(|issue| issue.kind == IssueKind::ValueSkipped)
+            .count(),
+        1,
+        "the value is skipped once, not half-applied"
+    );
+}
+
+#[test]
 fn a_non_finite_value_is_skipped_and_keeps_the_default() {
     const DEFINITION: &str = r#"
 [MegaTune]
