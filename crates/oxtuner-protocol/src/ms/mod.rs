@@ -796,22 +796,45 @@ impl MsProtocol {
         Ok(reply.payload)
     }
 
-    /// Checks a framed acknowledgement and returns the bytes after it.
+    /// Checks a framed write acknowledgement.
     ///
-    /// A write is acknowledged either by an empty payload (rusEFI) or by a
-    /// leading zero return code (Speeduino). Anything else is a refusal.
-    fn expect_ok<'a>(
-        &self,
-        payload: &'a [u8],
-        operation: &'static str,
-    ) -> Result<&'a [u8], ProtocolError> {
-        match (self.reply_code, payload.first()) {
-            (_, None) => Ok(&[]),
-            (ReplyCode::Leading | ReplyCode::Absent, Some(0)) => Ok(&payload[1..]),
-            (_, Some(code)) => Err(ProtocolError::ReturnCode {
-                code: *code,
-                operation,
-            }),
+    /// The two families acknowledge a write differently. Speeduino answers with
+    /// exactly one return code byte, so only `0x00` means the write landed.
+    /// rusEFI and FOME answer with an empty payload, and report a refusal as a
+    /// single non-zero code. Any other shape is a protocol violation rather
+    /// than a success, because the write may never have been applied.
+    fn expect_ok(&self, payload: &[u8], operation: &'static str) -> Result<(), ProtocolError> {
+        match self.reply_code {
+            ReplyCode::Leading => match payload {
+                [0] => Ok(()),
+                [code] => Err(ProtocolError::ReturnCode {
+                    code: *code,
+                    operation,
+                }),
+                [] => Err(ProtocolError::UnexpectedReply(format!(
+                    "the {operation} acknowledgement is missing: this firmware answers a write \
+                     with a return code"
+                ))),
+                _ => Err(ProtocolError::UnexpectedReply(format!(
+                    "the {operation} acknowledgement carries {} byte(s), expected one return \
+                     code",
+                    payload.len()
+                ))),
+            },
+            ReplyCode::Absent => match payload {
+                [] => Ok(()),
+                // A lone non-zero byte is the framed refusal shape, so name the
+                // code instead of the shape.
+                [code] if *code != 0 => Err(ProtocolError::ReturnCode {
+                    code: *code,
+                    operation,
+                }),
+                _ => Err(ProtocolError::UnexpectedReply(format!(
+                    "the {operation} acknowledgement carries {} byte(s), expected an empty \
+                     payload",
+                    payload.len()
+                ))),
+            },
         }
     }
 
