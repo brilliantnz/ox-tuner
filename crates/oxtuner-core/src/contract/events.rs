@@ -132,12 +132,12 @@ pub enum Event {
     /// including the first sample when it found ports: a view that opens later
     /// renders the last published list and never has to ask for the initial
     /// one. A steady machine produces no traffic. The same snapshot answers
-    /// [`super::CoreCommand::ListPorts`].
+    /// [`super::EcuCommand::ListPorts`].
     PortsChanged {
         /// The ports as they are now.
         ports: Vec<PortView>,
     },
-    /// A [`super::CoreCommand::TestConnection`] read a signature.
+    /// An [`super::EcuCommand::TestConnection`] read a signature.
     ///
     /// The summary describes what a real connection would be: the same verdict
     /// and read-only rule, without a session or a page read.

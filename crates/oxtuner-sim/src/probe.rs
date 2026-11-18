@@ -272,9 +272,8 @@ impl Transport for SimProbeSet {
             return Err(TransportError::NotOpen);
         }
 
-        // Nothing buffered is an answer here, not a timed-out read: that is
-        // what a silent port does.
-        match self.answering.and_then(|index| self.probes.get_mut(index)) {
+        // Having nothing buffered is an answer here, not a timed-out read.
+        match self.answering_probe() {
             Some(probe) => probe.read_available(buf),
             None => Ok(0),
         }
@@ -297,6 +296,11 @@ impl Transport for SimProbeSet {
 }
 
 impl SimProbeSet {
+    /// The probe whose answer is pending, if one is selected.
+    fn answering_probe(&mut self) -> Option<&mut SimProbe> {
+        self.answering.and_then(|index| self.probes.get_mut(index))
+    }
+
     /// The probe whose answer is pending, or the silence of the whole set.
     ///
     /// `expected` is what the caller asked for, so a silent read reports the
@@ -306,10 +310,8 @@ impl SimProbeSet {
             return Err(TransportError::NotOpen);
         }
 
-        match self.answering.and_then(|index| self.probes.get_mut(index)) {
-            Some(probe) => Ok(probe),
-            None => Err(TransportError::Timeout { got: 0, expected }),
-        }
+        self.answering_probe()
+            .ok_or(TransportError::Timeout { got: 0, expected })
     }
 }
 
@@ -387,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_query_no_probe_speaks_clears_the_previous_answer() {
+    fn a_query_no_probe_speaks_stops_serving_the_previous_answer() {
         let mut set = SimProbeSet::new([SPEEDUINO]);
         set.open().expect("the set opens");
 
@@ -399,6 +401,17 @@ mod tests {
             matches!(set.read_available(&mut buf), Ok(0)),
             "an unmatched query leaves nothing to read"
         );
+    }
+
+    #[test]
+    fn a_closed_probe_set_refuses_a_read_available() {
+        let mut set = SimProbeSet::new([SPEEDUINO]);
+        let mut buf = [0u8; 8];
+
+        assert!(matches!(
+            set.read_available(&mut buf),
+            Err(TransportError::NotOpen)
+        ));
     }
 
     #[test]

@@ -38,11 +38,12 @@ const PROGRESS_TICK: Duration = Duration::from_millis(100);
 ///
 /// This bounds the UI, not the core: the core bounds its own wait and releases a
 /// wedged thread, but a started group still takes its settle, its open and every
-/// query's reply deadline. The wait covers two groups, because a cancelled scan
-/// leaves one on the core and the next Detect queues behind it; expiring on that
-/// one would skip a group the core never asked. After this the group counts as a
-/// miss and the scan tries the next one; a late answer is ignored by the op
-/// check.
+/// query's reply deadline. The wait also covers the group a cancelled scan
+/// leaves on the core, so the next Detect cannot expire before the core reaches
+/// it; pressing Detect through several cancels can still queue more, and a
+/// skipped attempt there is a miss, never a wrong detection. After this the
+/// group counts as a miss and the scan tries the next one; a late answer is
+/// ignored by the op check.
 const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The host a download prompt names, for the consent text.
