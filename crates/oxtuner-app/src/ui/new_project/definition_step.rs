@@ -314,9 +314,8 @@ fn download_progress(status: &crate::core::CoreStatus, cx: &App) -> AnyElement {
 
 /// Bytes as the tuner reads them: `48 KB`, never a raw count.
 ///
-/// Halves round up, so 1536 bytes read as `2 KB` while 1025 bytes still read
-/// as `1 KB`: a count that always rounds up would show a half-downloaded file
-/// as whole kilobytes.
+/// Rounds to the nearest unit, so a half-downloaded file never reads as whole
+/// kilobytes, while a file just under a megabyte still reads as kilobytes.
 fn format_bytes(bytes: u64) -> String {
     const UNIT: u64 = 1024;
 
@@ -495,6 +494,8 @@ mod tests {
         assert_eq!(super::format_bytes(1025), "1 KB");
         assert_eq!(super::format_bytes(1536), "2 KB");
         assert_eq!(super::format_bytes(48 * 1024), "48 KB");
+        assert_eq!(super::format_bytes(1024 * 1024 - 1), "1024 KB");
+        assert_eq!(super::format_bytes(3 * 1024 * 1024 / 2), "2 MB");
         assert_eq!(super::format_bytes(3 * 1024 * 1024), "3 MB");
     }
 }

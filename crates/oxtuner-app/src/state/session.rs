@@ -587,10 +587,10 @@ thread_local! {
     static SAVE_GENERATION: Cell<u64> = const { Cell::new(0) };
     /// Whether a debounce task is already waiting to write.
     static SAVE_PENDING: Cell<bool> = const { Cell::new(false) };
-    /// The layout last sent to the core. Core conversations are strictly
-    /// sequential, so a layout that did not move must not occupy the loop a
-    /// drag never touched — only a change earns a command.
-    static SENT_LAYOUT: std::cell::RefCell<Option<oxtuner_core::ProjectLayout>> =
+    /// The last layout sent to the core, keyed by project. Core conversations
+    /// are strictly sequential, so a layout that did not move must not occupy
+    /// the loop a drag never touched — only a change earns a command.
+    static SENT_LAYOUT: std::cell::RefCell<Option<(PathBuf, ProjectLayout)>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -621,11 +621,13 @@ pub(crate) fn schedule_save(cx: &mut App) {
             // executor: `sync_all` can stall on a busy disk, and the UI thread
             // has no business waiting for it. The layout also belongs to the
             // open project, so it is captured with the same snapshot.
-            let (path, data, project_layout) = cx.update(|cx| {
+            let (path, data, project_snapshot) = cx.update(|cx| {
                 let global = cx.global::<AppState>();
-                let project_layout =
-                    CoreService::project_open(cx).then(|| global.data.layout.to_project_layout());
-                (global.path.clone(), global.data.clone(), project_layout)
+                let project_snapshot = CoreService::status(cx)
+                    .project
+                    .as_ref()
+                    .map(|project| (project.root.clone(), global.data.layout.to_project_layout()));
+                (global.path.clone(), global.data.clone(), project_snapshot)
             });
             let (path, result) = cx
                 .background_executor()
@@ -641,11 +643,19 @@ pub(crate) fn schedule_save(cx: &mut App) {
                     "could not save application state"
                 );
             }
-            if let Some(layout) = project_layout
-                && SENT_LAYOUT
-                    .with(|last| last.replace(Some(layout.clone())) != Some(layout.clone()))
-            {
-                cx.update(|cx| crate::core::save_project_layout(cx, layout));
+            if let Some((root, layout)) = project_snapshot {
+                let changed = SENT_LAYOUT.with(|last| {
+                    let mut last = last.borrow_mut();
+                    let fresh = (root.clone(), layout.clone());
+                    if last.as_ref() == Some(&fresh) {
+                        return false;
+                    }
+                    *last = Some(fresh);
+                    true
+                });
+                if changed {
+                    cx.update(|cx| crate::core::save_project_layout(cx, layout));
+                }
             }
 
             // Checked and cleared with no await in between, so a change that

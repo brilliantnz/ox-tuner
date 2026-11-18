@@ -88,7 +88,7 @@ pub(crate) struct CoreStatus {
     /// looking rather than as an empty machine.
     pub(crate) ports_revision: u64,
     /// The port a signature test is running against.
-    pub(crate) testing: Option<String>,
+    pub(crate) testing: Option<TestingConnection>,
     /// The last signature test.
     pub(crate) test: Option<ConnectionTest>,
     /// The last inspected definition, with the file it came from.
@@ -226,7 +226,10 @@ impl CoreStatus {
     /// Clears the pending project if `op` is its answer.
     ///
     /// The caller repaints on every answer, so the result is not returned.
-    /// [`Self::finish_pending_project_at`] keeps it for the tests.
+    /// [`Self::finish_pending_project_at`] keeps it for the tests. A pending
+    /// project with no op yet only exists inside the synchronous send that
+    /// assigns it, so no event can interleave before the op lands: `None`
+    /// never clears a wait that another request started.
     pub(crate) fn finish_pending_project(&mut self, op: Option<OpId>) {
         self.finish_pending_project_at(op.map(OpId::get));
     }
@@ -278,6 +281,19 @@ pub(crate) struct InspectedDefinition {
     pub(crate) path: PathBuf,
     /// The signature and setting groups the dialog renders.
     pub(crate) preview: oxtuner_core::DefinitionPreview,
+}
+
+/// The connection a signature test is running against.
+///
+/// Kept beside the answer so a result is only shown while the pickers still
+/// describe the inputs it ran on: changing the port or the baud afterwards
+/// hides the stale result instead of attributing it to the new selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TestingConnection {
+    /// Device path the test was sent to.
+    pub(crate) port: String,
+    /// Baud rate the test ran at, when the choice named one.
+    pub(crate) baud: Option<u32>,
 }
 
 /// One probe attempt: a port, a baud rate and a family.
@@ -346,7 +362,7 @@ impl DownloadProgress {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::as_conversions,
-            reason = "a 0.0..=1.0 ratio always fits in f32; the bar clamps out-of-range values itself"
+            reason = "a clamped 0.0..=1.0 ratio always fits in f32"
         )]
         let ratio = ratio.clamp(0.0, 1.0) as f32;
         Some(ratio)
@@ -486,9 +502,10 @@ impl CoreStatus {
                 self.menu_revision = self.menu_revision.wrapping_add(1);
             }
             Update::Tested(summary) => {
-                let port = summary.port.clone();
+                let testing = self.testing.take();
                 self.test = Some(ConnectionTest {
-                    port,
+                    port: summary.port.clone(),
+                    baud: testing.and_then(|testing| testing.baud),
                     outcome: Ok(summary),
                 });
                 self.testing = None;
@@ -632,9 +649,14 @@ impl CoreStatus {
                 // A failed test must not leave the dialog stuck on "working".
                 // The message stays for the dialog to show.
                 if failure.code == FailureCode::TestFailed {
-                    let port = self.testing.take().unwrap_or_default();
+                    let (port, baud) = self
+                        .testing
+                        .take()
+                        .map(|testing| (testing.port, testing.baud))
+                        .unwrap_or_default();
                     self.test = Some(ConnectionTest {
                         port,
+                        baud,
                         outcome: Err(failure.message.clone()),
                     });
                 }

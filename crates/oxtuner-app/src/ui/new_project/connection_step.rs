@@ -275,8 +275,8 @@ pub(super) fn connection_body(
 
     body = body.child(
         Button::new("new-project-test-connection")
-            .label(if let Some(testing) = status.testing.as_deref() {
-                t!("app.connect.testing", port = testing)
+            .label(if let Some(testing) = status.testing.as_ref() {
+                t!("app.connect.testing", port = testing.port.clone())
             } else {
                 t!("app.connect.test")
             })

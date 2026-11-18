@@ -111,7 +111,6 @@ pub(super) fn footer(
                     // A failure belongs to the request that produced it; going
                     // back to change the inputs starts a new attempt.
                     wizard.retarget();
-                    wizard.failure_serial = 0;
                     drop(wizard);
                     cx.refresh_windows();
                 }

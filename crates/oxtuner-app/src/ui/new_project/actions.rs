@@ -7,7 +7,7 @@ use oxtuner_core::{ConnectionSeed, CreateRequest};
 
 use super::connection_step::effective_connection;
 use super::name_step::name_target_problem;
-use super::state::{DefinitionMode, SharedWizard};
+use super::state::{DefinitionMode, SharedWizard, Step};
 use crate::core::{self, CoreService};
 use crate::state::session::AppState;
 
@@ -18,9 +18,14 @@ use crate::state::session::AppState;
 /// pickers, which default to the detection while the user has not chosen.
 pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut App) {
     // The target is checked again here: the folder can appear between the
-    // Next click that validated it and this one.
+    // Next click that validated it and this one. A refusal belongs to the
+    // Name step, which is the only step that renders it — so go back there
+    // instead of stranding the review without an explanation.
     if let Some(problem) = name_target_problem(name, parent) {
-        model.borrow_mut().name_error = Some(problem);
+        let mut wizard = model.borrow_mut();
+        wizard.name_error = Some(problem);
+        wizard.step = Step::Name;
+        drop(wizard);
         cx.refresh_windows();
         return;
     }

@@ -177,8 +177,10 @@ pub(super) fn name_target_problem(name: &str, parent: &Path) -> Option<String> {
 
 /// Advances past the name step once the name and the target are usable.
 ///
-/// The check runs on the click, not on every frame: the same predicate the
-/// Next button reads, so the two cannot disagree.
+/// The name enables the Next button; the target lives on disk, so its check
+/// runs here on the click, not on every frame. The same project-crate rules
+/// creation applies decide it, so the wizard cannot accept a name or a
+/// folder that Create would refuse.
 pub(super) fn advance_from_name(model: &SharedWizard, name: &str, parent: &Path, cx: &mut App) {
     match name_target_problem(name, parent) {
         None => {
@@ -246,5 +248,25 @@ mod tests {
         assert!(validate_project_name("Roadster").is_ok());
         assert!(validate_project_name("a/b").is_err());
         assert!(validate_project_name("").is_err());
+    }
+
+    #[test]
+    fn an_existing_target_blocks_advance_with_a_reason() {
+        let parent =
+            std::env::temp_dir().join(format!("oxtuner-wizard-test-{}", std::process::id()));
+        std::fs::create_dir_all(&parent).expect("the temp folder is created");
+        std::fs::create_dir_all(parent.join("Taken")).expect("the taken folder is created");
+
+        assert!(
+            name_target_problem("Roadster", &parent).is_none(),
+            "a free target advances"
+        );
+        let problem = name_target_problem("Taken", &parent);
+        assert!(
+            problem.is_some(),
+            "an existing folder blocks advance with a reason"
+        );
+
+        std::fs::remove_dir_all(&parent).ok();
     }
 }

@@ -32,7 +32,7 @@ use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, AppContext as _, Entity, ParentElement as _, Styled as _, Window, div, px};
-use oxtuner_core::FailureCode;
+use oxtuner_core::{FailureCode, validate_project_name};
 use rust_i18n::t;
 
 use self::configuration_step::{configuration_body, ensure_pickers, sync_pickers};
@@ -41,7 +41,7 @@ use self::connection_step::{
 };
 use self::definition_step::definition_body;
 use self::footer::{FooterState, creation_failure, footer};
-use self::name_step::{name_body, name_target_problem, subscribe_fields};
+use self::name_step::{name_body, subscribe_fields};
 use self::review_step::{review_body, success_body};
 use self::state::{ConnectionType, DEFAULT_NAME, SharedWizard, Step, Wizard, effective_definition};
 use crate::core::{CoreService, firmware};
@@ -118,28 +118,38 @@ fn render(
             wizard.failure_serial,
         )
     };
-    // One read of the core state per frame. The local owns the clone, so the
-    // bodies borrow from it instead of borrowing `cx` four times, and no
-    // preview or port list is cloned just to render.
-    let status = CoreService::status(cx).clone();
-    // The active source only: detection's answer in Auto, the picked file in
-    // Manual. Toggling the mode never leaks the other side in.
-    let definition = effective_definition(
-        mode,
-        picked_definition,
-        status
+    // Reads are cheap shared borrows; the clones below are the only
+    // per-frame allocations, and each feeds a call that needs `cx` mutably
+    // while a borrow of it would still be live. An unsampled port list reads
+    // as empty here on purpose: the pickers rebuild when a snapshot arrives,
+    // and only the dialog's empty text tells the two states apart.
+    let (definition, preview, ports, detected) = {
+        let status = CoreService::status(cx);
+        // The active source only: detection's answer in Auto, the picked file
+        // in Manual. Toggling the mode never leaks the other side in.
+        let definition = effective_definition(
+            mode,
+            picked_definition,
+            status
+                .detected_firmware
+                .as_ref()
+                .and_then(|detected| detected.definition.clone()),
+        );
+        // The preview belongs to the definition currently picked: a late
+        // answer for an earlier file is ignored instead of filling the wrong
+        // dialog.
+        let preview = status
+            .inspected
+            .as_ref()
+            .filter(|inspected| definition.as_deref() == Some(inspected.path.as_path()))
+            .map(|inspected| inspected.preview.clone());
+        let ports = status.ports.clone();
+        let detected = status
             .detected_firmware
             .as_ref()
-            .and_then(|detected| detected.definition.clone()),
-    );
-
-    // The preview belongs to the definition currently picked: a late answer
-    // for an earlier file is ignored instead of filling the wrong dialog.
-    let preview = status
-        .inspected
-        .as_ref()
-        .filter(|inspected| definition.as_deref() == Some(inspected.path.as_path()))
-        .map(|inspected| &inspected.preview);
+            .map(|detected| (detected.port.clone(), detected.baud));
+        (definition, preview, ports, detected)
+    };
 
     // The first time a preview arrives, build one picker per group. The
     // pickers own their selection; the model only mirrors it.
@@ -149,17 +159,17 @@ fn render(
 
     sync_pickers(model, cx);
 
-    // The pickers need the ports and the detection, borrowed from the local
-    // status so no borrow of `cx` outlives the sync calls below. An
-    // unsampled list reads as empty here on purpose: the pickers rebuild
-    // when a snapshot arrives, and only the dialog's empty text tells the
-    // two states apart.
-    let detected = status
-        .detected_firmware
-        .as_ref()
-        .map(|detected| (detected.port.as_str(), detected.baud));
-    sync_connection_pickers(model, &status.ports, detected, window, cx);
+    sync_connection_pickers(
+        model,
+        &ports,
+        detected.as_ref().map(|(port, baud)| (port.as_str(), *baud)),
+        window,
+        cx,
+    );
 
+    // The bodies only need `cx` shared, so they borrow the status again
+    // instead of cloning it a second time.
+    let status = CoreService::status(cx);
     let creating = status
         .pending_project
         .as_ref()
@@ -202,14 +212,18 @@ fn render(
                 definition_error,
                 inspect_error.as_deref(),
                 preview.is_some(),
-                &status,
+                status,
                 cx,
                 creating,
             ),
-            Step::Configuration => {
-                configuration_body(model, preview, inspect_error.as_deref(), cx, creating)
-            }
-            Step::Connection => connection_body(model, &status, creating, cx),
+            Step::Configuration => configuration_body(
+                model,
+                preview.as_ref(),
+                inspect_error.as_deref(),
+                cx,
+                creating,
+            ),
+            Step::Connection => connection_body(model, status, creating, cx),
             Step::Review => {
                 let (port, baud) = effective_connection(model, cx);
                 let is_serial = connection_type(model, cx) == ConnectionType::Serial;
@@ -267,7 +281,9 @@ fn render(
             creating,
             retry: failure.is_some(),
             can_advance: match step {
-                Step::Name => name_target_problem(&name_text, &parent).is_none(),
+                // The button checks the cheap half; the target lives on
+                // disk, so its check runs on the click, not on every frame.
+                Step::Name => validate_project_name(&name_text).is_ok(),
                 Step::Definition => definition_ready && preview.is_some(),
                 Step::Configuration => preview.is_some(),
                 Step::Connection => true,

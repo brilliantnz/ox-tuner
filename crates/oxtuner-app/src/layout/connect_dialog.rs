@@ -402,14 +402,17 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             cx,
             connection.as_ref(),
             link_lost.as_deref(),
-            testing.as_deref(),
+            testing.as_ref().map(|testing| testing.port.as_str()),
             // A test answers for the picker state at click time; a changed
             // picker hides the stale answer instead of attributing it to the
             // new selection.
             test.as_ref().filter(|test| {
-                chosen
-                    .as_ref()
-                    .is_some_and(|choice| choice.label() == test.port)
+                chosen.as_ref().is_some_and(|choice| match choice {
+                    PortChoice::Serial { port, baud } => {
+                        test.port == *port && test.baud == Some(*baud)
+                    }
+                    PortChoice::Custom(link) => test.port == link.label() && test.baud.is_none(),
+                })
             }),
             connecting.as_deref(),
             muted,
@@ -418,8 +421,8 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         );
 
         let test_button = Button::new("connect-test")
-            .label(match testing.as_deref() {
-                Some(port) => t!("app.connect.testing", port = port),
+            .label(match testing.as_ref() {
+                Some(testing) => t!("app.connect.testing", port = testing.port.clone()),
                 None => t!("app.connect.test"),
             })
             .icon(IconName::Search)

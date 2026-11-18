@@ -173,10 +173,11 @@ impl Wizard {
 
     /// Points the wizard at another target folder.
     ///
-    /// A new folder is a new attempt, so a create failure for the old one no
-    /// longer applies.
+    /// A new folder is a new attempt: the target goes, and so does the
+    /// failure serial of the create it belonged to.
     pub(super) fn retarget(&mut self) {
         self.target = None;
+        self.failure_serial = 0;
     }
 }
 
@@ -232,5 +233,38 @@ mod tests {
             effective_definition(DefinitionMode::Manual, None, None),
             None
         );
+    }
+
+    #[gpui_kit::test]
+    fn retrying_the_definition_clears_the_previous_attempt(cx: &mut gpui_kit::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("oxtuner-wizard-test-{}", std::process::id()));
+        cx.update(|cx| {
+            cx.set_global(crate::platform::paths::AppPaths {
+                config_dir: root.join("config"),
+                cache_dir: root.join("cache"),
+                logs_dir: root.join("logs"),
+                projects_dir: root.join("OxTunerProjects"),
+            });
+        });
+        let model: SharedWizard =
+            std::rc::Rc::new(std::cell::RefCell::new(cx.update(|cx| Wizard::new(cx))));
+        {
+            let mut wizard = model.borrow_mut();
+            wizard.definition_error = Some("refused".to_owned());
+            wizard.preview_path = Some(PathBuf::from("/tmp/old.ini"));
+            wizard
+                .choices
+                .insert("group".to_owned(), Some("option".to_owned()));
+            wizard.target = Some(PathBuf::from("/tmp/Old"));
+        }
+
+        model.borrow_mut().retry_definition();
+
+        let wizard = model.borrow();
+        assert!(wizard.definition_error.is_none());
+        assert!(wizard.preview_path.is_none());
+        assert_eq!(wizard.choices.len(), 0);
+        assert_eq!(wizard.display_groups.len(), 0);
+        assert!(wizard.target.is_none());
     }
 }

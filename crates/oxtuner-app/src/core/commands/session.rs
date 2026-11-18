@@ -52,8 +52,17 @@ pub(crate) fn test_connection(port: PortChoice, framing: Option<LinkMode>, cx: &
     let Some(handle) = handle_or_report(cx, FailureCode::TestFailed) else {
         return;
     };
-    let label = port.label();
-    cx.global_mut::<CoreService>().status.testing = Some(label);
+    let testing = match &port {
+        PortChoice::Serial { port, baud } => crate::core::TestingConnection {
+            port: port.clone(),
+            baud: Some(*baud),
+        },
+        PortChoice::Custom(link) => crate::core::TestingConnection {
+            port: link.label().to_owned(),
+            baud: None,
+        },
+    };
+    cx.global_mut::<CoreService>().status.testing = Some(testing);
     if let Err(error) = handle.test_connection(port, framing) {
         tracing::warn!(%error, "the core refused the connection test");
         cx.global_mut::<CoreService>().status.testing = None;

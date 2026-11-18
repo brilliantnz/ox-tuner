@@ -1,7 +1,7 @@
 //! The event boundary: failure records, the status fold and its follow-up commands.
 
 use gpui_kit::App;
-use oxtuner_core::{Event, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
+use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
 
 use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
 use super::service::CoreService;
@@ -68,9 +68,13 @@ fn log_outcome(event: &Event, op: Option<OpId>) {
 )]
 pub(super) fn apply(event: Event, cx: &mut App) {
     let event_op = event.op();
-    // A rejection answers the command without an update: the pending open
-    // must still end, or the splash survives until the expiry.
-    let rejected = matches!(event, Event::Rejected { .. });
+    // A rejection answers without an update: the pending project must still
+    // end, or the splash survives until the expiry. The reason is kept beside
+    // the flag for the fold below.
+    let rejected_reason = match &event {
+        Event::Rejected { reason, .. } => Some(*reason),
+        _ => None,
+    };
 
     // Every failure and rejection gets one record with the op field that
     // Diagnostics filters on. The core logs its own technical detail, but not
@@ -266,7 +270,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     };
     let read_pages = matches!(&update, Update::Connected(_) | Update::Reconnected(_));
     let poll = matches!(&update, Update::PagesRead(_));
-    let finishes_open = finishes_open(&update, rejected);
+    // Every accepted command answers exactly once — opened, failed or
+    // rejected — and a rejection carries no update, so it arrives as its own
+    // flag instead of matching an update arm.
+    let finishes_open = finishes_open(&update, rejected_reason.is_some());
     // A project carries its own panel layout; standalone tunes keep the
     // installation's.
     let project_layout = match &update {
@@ -317,11 +324,25 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // Every accepted command answers exactly once — opened, failed or
     // rejected — so the pending project ends on every answer type. A
     // rejection carries no update, which is why this sits outside the fold
-    // above instead of beside the other `finishes_open` arm.
+    // above instead of beside the other `finishes_open` arm. The splash
+    // clears and the screen repaints here; a rejection that ended a pending
+    // project also leaves its reason as the project failure, or the wizard
+    // would return to a review with no message.
     if finishes_open {
-        cx.global_mut::<CoreService>()
-            .status
-            .finish_pending_project(event_op);
+        let status = &mut cx.global_mut::<CoreService>().status;
+        let had_pending = status.pending_project.is_some();
+        status.finish_pending_project(event_op);
+        if had_pending
+            && status.pending_project.is_none()
+            && let Some(reason) = rejected_reason
+        {
+            status.failure = Some(Failure {
+                code: FailureCode::ProjectRejected,
+                message: reason.as_str().to_owned(),
+            });
+            status.failure_serial = status.failure_serial.wrapping_add(1);
+        }
+        cx.refresh_windows();
     }
 
     if auto_connect {

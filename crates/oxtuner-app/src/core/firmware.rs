@@ -16,7 +16,7 @@ use oxtuner_registry::{BlockingClient, CacheStore, Registry};
 use rust_i18n::t;
 
 use super::status::{
-    DefinitionDownload, DetectedFirmware, DownloadProgress, FirmwareScan, ProbeAttempt,
+    CoreStatus, DefinitionDownload, DetectedFirmware, DownloadProgress, FirmwareScan, ProbeAttempt,
 };
 use super::{CoreService, inspect_definition};
 use crate::platform::paths::AppPaths;
@@ -44,15 +44,14 @@ pub(crate) fn host_of(url: &str) -> String {
 ///
 /// A freshly plugged device lands at the end of the port list, so the scan
 /// walks that list back to front to meet it sooner. The list is the core's
-/// pushed snapshot: no scan is requested here because the core publishes its
-/// first sample on its own. When no sample arrived yet the scan waits for it
-/// instead of reporting a portless machine: the request hurries the baseline
-/// along, and the next Detect press scans it.
+/// pushed snapshot; when no sample arrived yet the scan waits for it instead
+/// of reporting a portless machine. The request hurries the baseline along,
+/// and the next Detect press scans it.
 pub(crate) fn start_scan(cx: &mut App) {
     let Some(published) = crate::core::ports(cx) else {
         crate::core::refresh_ports(cx);
         let status = &mut cx.global_mut::<CoreService>().status;
-        status.firmware_scan = None;
+        clear_detection(status);
         status.firmware_error = Some(t!("app.new_project.scan_ports_pending").to_string());
         cx.refresh_windows();
         return;
@@ -60,12 +59,10 @@ pub(crate) fn start_scan(cx: &mut App) {
     let ports: Vec<String> = published.iter().map(|port| port.name.clone()).collect();
 
     let status = &mut cx.global_mut::<CoreService>().status;
+    clear_detection(status);
     status.firmware_error = None;
-    status.definition_download = None;
-    status.detected_firmware = None;
 
     if ports.is_empty() {
-        status.firmware_scan = None;
         status.firmware_error = Some(t!("app.new_project.scan_no_ports").to_string());
         cx.refresh_windows();
         return;
@@ -86,6 +83,16 @@ pub(crate) fn start_scan(cx: &mut App) {
 
     send_current(cx);
     cx.refresh_windows();
+}
+
+/// Clears the answers a scan produced, so starting over never shows them.
+///
+/// Both branches of [`start_scan`] run this: a new scan is a new attempt,
+/// whether the last one found an ECU, found nothing, or never started.
+fn clear_detection(status: &mut CoreStatus) {
+    status.firmware_scan = None;
+    status.definition_download = None;
+    status.detected_firmware = None;
 }
 
 /// The attempts a scan makes, in order: newest port first, then common baud, then family.
@@ -179,7 +186,9 @@ pub(crate) fn cancel_scan(cx: &mut App) {
 /// The dialog owns no detection state itself: the scan, the signature, the
 /// download prompt and inspected preview, and the last connection test all
 /// live in the core status, so closing or reopening the wizard must wipe them
-/// or the next open shows the previous session. An in-flight download still
+/// or the next open shows the previous session. The inspect serial is reset
+/// to the failure serial with them: with no definition pending, no stored
+/// failure may read as this session's answer. An in-flight download still
 /// finishes, but without a stored download it cannot attach to a detection
 /// and its answer is dropped.
 pub(crate) fn reset_detection(cx: &mut App) {
@@ -193,6 +202,7 @@ pub(crate) fn reset_detection(cx: &mut App) {
     status.download_progress = None;
     status.test = None;
     status.testing = None;
+    status.inspect_serial = status.failure_serial;
     cx.refresh_windows();
 }
 
