@@ -45,8 +45,9 @@ fn probe_wait(spec: &ProbeSpec) -> Duration {
 /// The shortest answer that can be a firmware signature.
 ///
 /// A wrong baud often leaves a couple of printable bytes in the buffer, and a
-/// signature that short cannot match any definition. Every shipped definition
-/// declares a longer one, so a shorter run is noise and the scan moves on.
+/// run that short is noise rather than a signature. Every shipped definition
+/// declares a longer one; a longer garbage run is still possible, so the
+/// registry lookup is what finally judges the text.
 const MIN_SIGNATURE_LEN: usize = 7;
 
 /// Sends one probe and reports the signature, or that the port stayed silent.

@@ -69,10 +69,11 @@ pub struct ProbeSpec {
     pub behavior: BehaviorKind,
     /// The exact query bytes.
     pub query: &'static [u8],
-    /// The framing the probe uses when the caller does not override it.
+    /// The framing the probe uses when no caller overrides it.
     ///
-    /// A scan passes its own framing, so both framings can be tried without a
-    /// separate probe per framing.
+    /// The core always passes an explicit framing for a probe, so this field
+    /// only describes the default the spec is built with; the simulator reads
+    /// it to decide how to answer.
     pub link: LinkMode,
     /// How long the port may settle before the query is sent.
     ///

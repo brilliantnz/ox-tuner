@@ -497,7 +497,7 @@ fn use_definition(path: &Path, model: &SharedWizard, cx: &mut App) {
 
     // The serial moves with the send: an inspect failure that arrives after
     // this point belongs to this definition.
-    crate::core::firmware::note_inspect_sent(cx);
+    crate::core::firmware::note_inspect_sent(path, cx);
     model.borrow_mut().retry_definition();
 
     // The core reads and parses the file; the answer carries the signature and

@@ -595,6 +595,15 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Forgets the layout recorded as sent, so the next change writes it again.
+///
+/// The core answers [`oxtuner_core::Event::ProjectLayoutSaved`] with whether
+/// the layout reached the file. A refusal must not stay in the record, or the
+/// next identical layout would look stored and never be retried.
+pub(crate) fn forget_sent_layout() {
+    SENT_LAYOUT.with(|last| *last.borrow_mut() = None);
+}
+
 /// Schedules a debounced state write.
 ///
 /// Every call bumps a generation; the waiting task writes once the burst has

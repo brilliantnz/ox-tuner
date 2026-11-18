@@ -48,20 +48,30 @@ pub(super) fn handle(
             // The command is the on-demand resync, so it samples now and
             // answers from the snapshot it just published: a view never sees a
             // list that disagrees with the last change the core pushed.
-            if let Err(error) = ports.refresh() {
-                tracing::warn!(%op, %error, "serial ports could not be listed");
-                report.failures += 1;
-                send(
-                    events,
-                    Event::Failed {
-                        op,
-                        failure: Failure {
-                            code: FailureCode::ConnectFailed,
-                            message: error.to_string(),
+            match ports.refresh() {
+                Ok(changed) => {
+                    // The on-demand sample is a real sample: a change it saw
+                    // first is pushed like any other, and the timer restarts.
+                    ports.polled();
+                    if let Some(changed) = changed {
+                        send(events, Event::PortsChanged { ports: changed });
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%op, %error, "serial ports could not be listed");
+                    report.failures += 1;
+                    send(
+                        events,
+                        Event::Failed {
+                            op,
+                            failure: Failure {
+                                code: FailureCode::ConnectFailed,
+                                message: error.to_string(),
+                            },
                         },
-                    },
-                );
-                return Outcome::Continue;
+                    );
+                    return Outcome::Continue;
+                }
             }
 
             let summary = ports.snapshot().to_vec();

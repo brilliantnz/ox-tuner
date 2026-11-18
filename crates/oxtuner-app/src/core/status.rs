@@ -93,6 +93,11 @@ pub(crate) struct CoreStatus {
     pub(crate) test: Option<ConnectionTest>,
     /// The last inspected definition, with the file it came from.
     pub(crate) inspected: Option<InspectedDefinition>,
+    /// The file sent for inspect whose answer has not arrived.
+    ///
+    /// The last answer may still describe another file, so this is what says
+    /// "the preview on screen is on its way" without guessing.
+    pub(crate) inspect_pending: Option<PathBuf>,
     /// The firmware scan in progress, if any.
     pub(crate) firmware_scan: Option<FirmwareScan>,
     /// The ECU the last completed scan found.
@@ -439,6 +444,7 @@ impl CoreStatus {
         match update {
             Update::Inspected { path, preview } => {
                 self.inspected = Some(InspectedDefinition { path, preview });
+                self.inspect_pending = None;
             }
             Update::Loaded(summary) => {
                 self.definition = Some(summary);
@@ -653,6 +659,9 @@ impl CoreStatus {
                 }
                 if failure.code == FailureCode::DialogUnavailable {
                     self.dialog = None;
+                }
+                if failure.code == FailureCode::DefinitionRejected {
+                    self.inspect_pending = None;
                 }
                 // A failed test must not leave the dialog stuck on "working".
                 // The message stays for the dialog to show.

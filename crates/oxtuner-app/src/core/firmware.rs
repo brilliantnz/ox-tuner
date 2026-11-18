@@ -30,6 +30,14 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// new byte count arrived; the tick stops with the download.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
+/// How long one probe may stay unanswered before the scan moves on.
+///
+/// The core answers an attempt in a few seconds at most: the port settle, the
+/// bounded open and one reply timeout. A dropped event or a lost thread must
+/// not leave Detect disabled forever, so the attempt expires and counts as a
+/// miss; the op check makes a late answer harmless.
+const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
 /// The host a download prompt names, for the consent text.
 pub(crate) fn host_of(url: &str) -> String {
     url.split_once("://")
@@ -48,6 +56,12 @@ pub(crate) fn host_of(url: &str) -> String {
 /// of reporting a portless machine. The request hurries the baseline along,
 /// and the next Detect press scans it.
 pub(crate) fn start_scan(cx: &mut App) {
+    // A scan already owns the core's probe path; a second one would drop the
+    // op of the attempt in flight and leave its answer unattributed.
+    if cx.global::<CoreService>().status.firmware_scan.is_some() {
+        return;
+    }
+
     let Some(published) = crate::core::ports(cx) else {
         crate::core::refresh_ports(cx);
         let status = &mut cx.global_mut::<CoreService>().status;
@@ -111,7 +125,12 @@ const PROBE_FRAMINGS: [LinkMode; 2] = [LinkMode::Envelope, LinkMode::Legacy];
 /// The attempts a scan makes, in order: newest port first, then common baud,
 /// then family, then framing.
 fn attempts_for(ports: &[String]) -> Vec<ProbeAttempt> {
-    let mut attempts = Vec::with_capacity(ports.len() * COMMON_PROBE_BAUD_RATES.len() * 4);
+    let mut attempts = Vec::with_capacity(
+        ports.len()
+            * COMMON_PROBE_BAUD_RATES.len()
+            * FirmwareProbe::ALL.len()
+            * PROBE_FRAMINGS.len(),
+    );
 
     for port in ports.iter().rev() {
         for baud in COMMON_PROBE_BAUD_RATES {
@@ -158,6 +177,17 @@ fn send_current(cx: &mut App) {
                 scan.op = Some(op);
             }
 
+            // An answer that never arrives must not leave the step scanning
+            // forever. The deadline calls the same miss path, so a real answer
+            // that already advanced the scan makes it a no-op.
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(PROBE_DEADLINE).await;
+                cx.update(|cx| {
+                    crate::core::firmware::missed(op, None, cx);
+                });
+            })
+            .detach();
+
             tracing::debug!(
                 port = %attempt.port,
                 baud = attempt.baud,
@@ -182,9 +212,10 @@ fn send_current(cx: &mut App) {
 }
 
 /// Ends the scan with a visible reason.
-fn fail_scan(cx: &mut App, message: &str) {
+pub(crate) fn fail_scan(cx: &mut App, message: &str) {
     let status = &mut cx.global_mut::<CoreService>().status;
     status.firmware_scan = None;
+    status.scan_after_ports = false;
     status.firmware_error = Some(message.to_owned());
     cx.refresh_windows();
 }
@@ -192,9 +223,13 @@ fn fail_scan(cx: &mut App, message: &str) {
 /// Stops a scan the user walked away from.
 ///
 /// A probe already in flight still answers, but its miss is dropped: nothing is
-/// left to advance, and a probe miss is never a notification.
+/// left to advance, and a probe miss is never a notification. A Detect press
+/// still waiting for the first port sample is cancelled with it, so closing the
+/// dialog cannot start a scan nobody is watching.
 pub(crate) fn cancel_scan(cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
+    status.scan_after_ports = false;
+
     if status.firmware_scan.take().is_some() {
         tracing::debug!("the firmware scan was cancelled");
     }
@@ -222,6 +257,7 @@ pub(crate) fn reset_detection(cx: &mut App) {
     status.test = None;
     status.testing = None;
     status.inspect_serial = status.failure_serial;
+    status.inspect_pending = None;
     cx.refresh_windows();
 }
 
@@ -284,6 +320,8 @@ pub(crate) fn missed(op: OpId, reason: Option<&str>, cx: &mut App) -> bool {
 
     let attempts = scan.attempts.len();
     status.firmware_scan = None;
+    // A silent port gets the localized summary; a refusal keeps the core's own
+    // sentence, which says why the probe could not run at all.
     status.firmware_error = Some(reason.map_or_else(
         || t!("app.new_project.scan_no_answer").to_string(),
         str::to_owned,
@@ -295,14 +333,47 @@ pub(crate) fn missed(op: OpId, reason: Option<&str>, cx: &mut App) -> bool {
 }
 
 /// Resolves a signature through the registry and the local cache.
+///
+/// The cache lookup hashes the definition, which can be a megabyte, so it runs
+/// on the background executor and the answer is applied only while the same
+/// detection is still on screen.
 fn resolve(signature: &str, cx: &mut App) {
     let registry = Registry::with_defaults();
-    match registry.resolve(signature) {
-        Ok(resolved) => {
-            let store = CacheStore::new(AppPaths::get(cx).registry_dir());
-            let path = store.definition_ini(&resolved.id);
+    let resolved = match registry.resolve(signature) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(signature, %error, "no definition source for the signature");
+            cx.global_mut::<CoreService>().status.firmware_error = Some(error.to_string());
+            cx.refresh_windows();
+            return;
+        }
+    };
 
-            if store.verify_file(&path) {
+    let directory = AppPaths::get(cx).registry_dir();
+    let store = CacheStore::new(&directory);
+    let path = store.definition_ini(&resolved.id);
+    let verified = path.clone();
+    let work =
+        cx.background_spawn(async move { CacheStore::new(&directory).verify_file(&verified) });
+
+    let signature = signature.to_owned();
+    cx.spawn(async move |cx| {
+        let cached = work.await;
+
+        cx.update(|cx| {
+            let current = cx
+                .global::<CoreService>()
+                .status
+                .detected_firmware
+                .as_ref()
+                .is_some_and(|detected| detected.signature == signature);
+            if !current {
+                // A new scan or a manual pick replaced this detection while
+                // the hash ran.
+                return;
+            }
+
+            if cached {
                 tracing::debug!(
                     signature,
                     path = %path.display(),
@@ -313,16 +384,14 @@ fn resolve(signature: &str, cx: &mut App) {
             }
 
             cx.global_mut::<CoreService>().status.definition_download = Some(DefinitionDownload {
-                signature: signature.to_owned(),
+                signature,
                 url: resolved.ini_url,
                 id: resolved.id,
             });
-        }
-        Err(error) => {
-            tracing::warn!(signature, %error, "no definition source for the signature");
-            cx.global_mut::<CoreService>().status.firmware_error = Some(error.to_string());
-        }
-    }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
 }
 
 /// Starts the consented download on the background executor.
@@ -447,23 +516,43 @@ pub(crate) fn download(cx: &mut App) {
 /// belongs to the other source. Nothing happens when the current preview
 /// already is the detected file, or when detection has not resolved one yet.
 pub(crate) fn inspect_detected(cx: &mut App) {
-    let status = &cx.global::<CoreService>().status;
-    let Some(path) = status
-        .detected_firmware
-        .as_ref()
-        .and_then(|detected| detected.definition.clone())
-    else {
+    let (path, signature, may_offer) = {
+        let status = &cx.global::<CoreService>().status;
+        let Some(detected) = status.detected_firmware.as_ref() else {
+            return;
+        };
+
+        (
+            detected.definition.clone(),
+            detected.signature.clone(),
+            status.definition_download.is_none() && !status.downloading_definition,
+        )
+    };
+
+    let Some(path) = path else {
+        // Leaving Auto cleared the prompt; returning must offer it again
+        // instead of leaving the step with nothing to press.
+        if may_offer {
+            resolve(&signature, cx);
+        }
+
         return;
     };
-    if status
-        .inspected
-        .as_ref()
-        .is_some_and(|inspected| inspected.path == path)
-    {
+
+    let already_known = {
+        let status = &cx.global::<CoreService>().status;
+
+        status
+            .inspected
+            .as_ref()
+            .is_some_and(|inspected| inspected.path == path)
+            || status.inspect_pending.as_deref() == Some(path.as_path())
+    };
+    if already_known {
         return;
     }
 
-    note_inspect_sent(cx);
+    note_inspect_sent(&path, cx);
     inspect_definition(&path, cx);
 }
 
@@ -487,18 +576,22 @@ fn finish(path: &Path, cx: &mut App) {
     }
     status.firmware_error = None;
     status.inspect_serial = status.failure_serial;
+    status.inspect_pending = Some(path.to_path_buf());
 
     inspect_definition(path, cx);
     cx.refresh_windows();
 }
 
-/// Records that the active definition was just sent for inspect.
+/// Records that `path` was just sent for inspect.
 ///
 /// The serial moves with the send: an inspect failure that arrives after this
-/// point belongs to this definition, and the dialog compares against it.
-pub(crate) fn note_inspect_sent(cx: &mut App) {
+/// point belongs to this definition, and the dialog compares against it. The
+/// path is recorded too, because the last *answer* may describe another file
+/// while this one is still in flight.
+pub(crate) fn note_inspect_sent(path: &Path, cx: &mut App) {
     let status = &mut cx.global_mut::<CoreService>().status;
     status.inspect_serial = status.failure_serial;
+    status.inspect_pending = Some(path.to_path_buf());
 }
 
 #[cfg(test)]

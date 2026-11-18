@@ -120,8 +120,8 @@ pub(crate) enum CommandRequest {
     ///
     /// Indexing, parsing and writing happen on the core thread. The reply is
     /// [`super::Event::ProjectOpened`], or [`super::Event::Failed`] with
-    /// [`super::FailureCode::ProjectRejected`]; a failed create leaves no
-    /// folder behind and the previous session untouched.
+    /// [`super::FailureCode::ProjectRejected`]; a failed create removes the
+    /// folder it made and leaves the previous session untouched.
     CreateProject {
         /// The definition bytes copied into `projectCfg/`.
         request: oxtuner_project::CreateRequest,

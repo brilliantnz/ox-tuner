@@ -82,8 +82,14 @@ fn sync_from_name(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // Editing the name starts a new attempt; the old refusal no longer holds.
-    model.borrow_mut().name_error = None;
+    // Editing the name starts a new attempt: the old refusal no longer holds,
+    // and the target it named is not what the field describes any more.
+    let failure_serial = crate::core::CoreService::status(cx).failure_serial;
+    {
+        let mut wizard = model.borrow_mut();
+        wizard.name_error = None;
+        wizard.retarget(failure_serial);
+    }
     let name_text = name.read(cx).value().trim().to_owned();
     let parent = model.borrow().parent.clone();
 

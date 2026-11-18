@@ -2,6 +2,7 @@
 
 use gpui_kit::App;
 use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
+use rust_i18n::t;
 
 use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
 use super::service::CoreService;
@@ -130,10 +131,40 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         crate::core::firmware::probed(*op, port.clone(), *baud, *framing, *probe, signature, cx);
         return;
     }
-    if let Event::Failed { op, failure, .. } = &event
-        && crate::core::firmware::missed(*op, Some(&failure.message), cx)
+    if let Event::Failed { op, failure, .. } = &event {
+        // Only a refusal from the core keeps its own sentence; a silent port
+        // gets the localized summary.
+        let reason =
+            (failure.code == FailureCode::ConnectFailed).then_some(failure.message.as_str());
+        if crate::core::firmware::missed(*op, reason, cx) {
+            return;
+        }
+    }
+
+    // A rejection (the core drained the queue on shutdown) still answers the
+    // attempt in flight, so the scan cannot keep waiting for it.
+    if let Event::Rejected { op, .. } = &event
+        && crate::core::firmware::missed(*op, None, cx)
     {
         return;
+    }
+
+    // The core stopped: nothing will answer the probe that is waiting.
+    if matches!(event, Event::Stopped) {
+        crate::core::firmware::fail_scan(cx, t!("app.new_project.scan_core_stopped").as_ref());
+    }
+
+    // A probe miss that belongs to no scan is a scan step, never news.
+    if let Event::Failed { failure, .. } = &event
+        && failure.code == FailureCode::FirmwareNotDetected
+    {
+        return;
+    }
+
+    // A rejected layout must not be remembered as stored: the next change
+    // sends it again, and a refused write is not a silent success.
+    if let Event::ProjectLayoutSaved { stored: false, .. } = &event {
+        crate::state::session::forget_sent_layout();
     }
 
     let (update, remember) = match event {
