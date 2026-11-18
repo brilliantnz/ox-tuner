@@ -160,3 +160,16 @@ fn a_rusefi_write_that_leads_with_a_zero_code_is_refused() {
         other => panic!("expected a shape error, got {other}"),
     }
 }
+
+#[test]
+fn a_rusefi_write_with_two_bytes_is_refused() {
+    let error = write(&rusefi(), &[0x00, 0x01]).expect_err("this family acknowledges with nothing");
+
+    match error {
+        ProtocolError::UnexpectedReply(message) => {
+            assert!(message.contains("page write"), "{message}");
+            assert!(message.contains("2 byte(s)"), "{message}");
+        }
+        other => panic!("expected a shape error, got {other}"),
+    }
+}
