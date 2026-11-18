@@ -381,7 +381,7 @@ fn classify(signature: &str) -> Verdict {
     }
 }
 
-/// Why an attempt did not produce a signature.
+/// Why an attempt produced no usable detection.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Miss<'a> {
     /// The port stayed silent.
@@ -396,7 +396,7 @@ pub(crate) enum Miss<'a> {
     Stopped,
 }
 
-/// Handles a probe that found nothing.
+/// Handles a probe that did not detect firmware.
 ///
 /// A miss that belongs to no scan (cancelled, or a stale op) is still not a
 /// visible failure: a scan step is never news on its own. Any failure that
@@ -429,7 +429,7 @@ pub(crate) fn missed(op: OpId, miss: Miss<'_>, cx: &mut App) -> bool {
     true
 }
 
-/// The sentence an unanswered scan ends with.
+/// The sentence a scan that found no ECU ends with.
 ///
 /// A refusal keeps the core's own reason; everything else is the UI's own
 /// wording for what happened.
@@ -446,7 +446,8 @@ fn miss_message(miss: Miss<'_>) -> String {
 /// Re-offers the definition for a signature the scan already detected.
 ///
 /// Used when the user returns to Auto: the detection is on screen, but the
-/// download prompt was dropped while the manual tab was active.
+/// download prompt was dropped while the manual tab was active. An unserved
+/// detection comes back as the same upload hint the scan showed.
 fn resolve(signature: &str, cx: &mut App) {
     match classify(signature) {
         Verdict::Served(resolved) => serve(resolved, signature, cx),
@@ -456,7 +457,14 @@ fn resolve(signature: &str, cx: &mut App) {
             tracing::warn!(signature, reason, "no definition source for the signature");
             fail_detection(unsupported_message(signature), cx);
         }
-        Verdict::Noise => fail_detection(t!("app.new_project.scan_not_ecu").to_string(), cx),
+        Verdict::Noise => {
+            // Nothing set a detection without classifying it first, so this is
+            // only reachable when the registry changed underneath one. Drop the
+            // detection with the message, or the step would show an ECU and
+            // "not an ECU" at the same time.
+            cx.global_mut::<CoreService>().status.detected_firmware = None;
+            fail_detection(t!("app.new_project.scan_not_ecu").to_string(), cx);
+        }
     }
 }
 
@@ -772,6 +780,14 @@ mod tests {
     #[test]
     fn a_lost_attempt_keeps_its_own_verdict() {
         assert_eq!(
+            miss_message(Miss::Silent),
+            t!("app.new_project.scan_no_answer").to_string()
+        );
+        assert_eq!(
+            miss_message(Miss::Noise),
+            t!("app.new_project.scan_not_ecu").to_string()
+        );
+        assert_eq!(
             miss_message(Miss::Expired),
             t!("app.new_project.scan_timed_out").to_string()
         );
@@ -818,7 +834,15 @@ mod tests {
 
     /// Installs a core for the scan to send through, and the paths it reads.
     fn start_core(cx: &mut gpui_kit::TestAppContext) -> oxtuner_core::CoreThread {
-        let root = std::env::temp_dir().join(format!("oxtuner-probe-scan-{}", std::process::id()));
+        // A stamp as well as the pid: plain `cargo test` runs every test in one
+        // process, and a future test that seeds a cache file here must not read
+        // what another one wrote.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let root =
+            std::env::temp_dir().join(format!("oxtuner-probe-scan-{}-{stamp}", std::process::id()));
 
         cx.update(|cx| {
             cx.set_global(crate::platform::paths::AppPaths {
@@ -871,7 +895,11 @@ mod tests {
                     .firmware_scan
                     .as_ref()
                     .expect("the scan runs");
-                let attempt = scan.attempts[scan.next].clone();
+                let attempt = scan
+                    .attempts
+                    .get(scan.next)
+                    .cloned()
+                    .expect("the scan never left the noisy port");
                 (attempt, scan.op.expect("an attempt is in flight"))
             });
 
@@ -908,7 +936,11 @@ mod tests {
             assert!(status.firmware_error.is_none(), "a miss is not an error");
 
             let scan = status.firmware_scan.as_ref().expect("the scan continues");
-            let attempt = scan.attempts[scan.next].clone();
+            let attempt = scan
+                .attempts
+                .get(scan.next)
+                .cloned()
+                .expect("the scan continues past the noisy port");
 
             (attempt, scan.op.expect("the second port is being probed"))
         });
@@ -939,6 +971,62 @@ mod tests {
             let detected = status.detected_firmware.as_ref().expect("ECU #2");
             assert_eq!(detected.port, "/dev/ecu");
             assert_eq!(detected.signature, "speeduino 202501.7");
+        });
+
+        core.join();
+    }
+
+    #[gpui_kit::test]
+    fn a_scan_that_only_heard_noise_ends_not_an_ecu(cx: &mut gpui_kit::TestAppContext) {
+        let core = start_core(cx);
+
+        // One attempt on one port, so answering it with noise exhausts the scan
+        // and runs the terminal path the advance test never reaches.
+        let op = cx.update(|cx| {
+            let mut attempts = attempts_for(&["/dev/noise".to_owned()]);
+            attempts.truncate(1);
+
+            cx.global_mut::<CoreService>().status.firmware_scan = Some(FirmwareScan {
+                attempts,
+                next: 0,
+                op: None,
+            });
+            send_current(cx);
+
+            cx.global::<CoreService>()
+                .status
+                .firmware_scan
+                .as_ref()
+                .and_then(|scan| scan.op)
+                .expect("the only attempt was sent")
+        });
+
+        cx.update(|cx| {
+            probed(
+                op,
+                "/dev/noise".to_owned(),
+                Some(115_200),
+                LinkMode::Legacy,
+                FirmwareProbe::Speeduino,
+                NMEA,
+                cx,
+            );
+        });
+
+        cx.update(|cx| {
+            let status = &cx.global::<CoreService>().status;
+            assert!(
+                status.firmware_scan.is_none(),
+                "the scan has nowhere left to go"
+            );
+            assert!(
+                status.detected_firmware.is_none(),
+                "noise is not a detection"
+            );
+            assert_eq!(
+                status.firmware_error.clone(),
+                Some(t!("app.new_project.scan_not_ecu").to_string())
+            );
         });
 
         core.join();

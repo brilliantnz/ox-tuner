@@ -90,10 +90,14 @@ struct Answering(&'static str);
 
 impl CustomLink for Answering {
     fn label(&self) -> &'static str {
+        // One label for every payload: nothing compares two of these today,
+        // and `PortChoice::eq` matches custom links by label.
         "answering"
     }
 
     fn open(&self, _definition: &Definition) -> Result<Box<dyn Transport>, String> {
+        // Probe-only: the answer is what this link exists for, so a session
+        // opened on it stays silent, the same as [`Silent`].
         Ok(Box::new(SimProbe::silent(oxtuner_protocol::SPEEDUINO)))
     }
 
