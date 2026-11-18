@@ -47,7 +47,7 @@ fn project() -> ProjectView {
         loaded: 817,
         skipped: 0,
         warnings: Vec::new(),
-        ui: oxtuner_project::UiState::default(),
+        layout: oxtuner_core::ProjectLayout::default(),
         connection: ProjectConnection::default(),
     }
 }

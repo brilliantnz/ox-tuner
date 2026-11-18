@@ -11,7 +11,7 @@ use crate::platform::paths::AppPaths;
 pub(crate) fn start_log(cx: &mut App) {
     let directory = CoreService::status(cx).project.as_ref().map_or_else(
         || AppPaths::get(cx).logs_dir.clone(),
-        |project| project.root.join(oxtuner_project::SIDECAR_DIR).join("logs"),
+        |project| project.root.join(oxtuner_core::SIDECAR_DIR).join("logs"),
     );
 
     send(cx, FailureCode::LogFailed, "start-log", move |handle| {

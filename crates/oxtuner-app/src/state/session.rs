@@ -18,10 +18,7 @@ use std::{
 };
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, point, px, size};
-use oxtuner_project::{
-    DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PRIMARY_SIDEBAR_WIDTH, DEFAULT_SECONDARY_SIDEBAR_WIDTH,
-    UiState,
-};
+use oxtuner_core::ProjectLayout;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -310,9 +307,9 @@ const fn default_true() -> bool {
 impl Default for LayoutState {
     fn default() -> Self {
         Self {
-            primary_sidebar_width: DEFAULT_PRIMARY_SIDEBAR_WIDTH,
-            secondary_sidebar_width: DEFAULT_SECONDARY_SIDEBAR_WIDTH,
-            bottom_panel_height: DEFAULT_BOTTOM_PANEL_HEIGHT,
+            primary_sidebar_width: ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH,
+            secondary_sidebar_width: ProjectLayout::DEFAULT_SECONDARY_SIDEBAR_WIDTH,
+            bottom_panel_height: ProjectLayout::DEFAULT_BOTTOM_PANEL_HEIGHT,
             primary_sidebar_visible: true,
             secondary_sidebar_visible: true,
             bottom_panel_visible: true,
@@ -341,8 +338,8 @@ impl LayoutState {
     }
 
     /// The project state this layout is stored as.
-    pub(crate) fn to_project_ui(&self) -> UiState {
-        UiState {
+    pub(crate) fn to_project_layout(&self) -> ProjectLayout {
+        ProjectLayout {
             primary_sidebar_width: self.primary_sidebar_width,
             secondary_sidebar_width: self.secondary_sidebar_width,
             bottom_panel_height: self.bottom_panel_height,
@@ -358,14 +355,14 @@ impl LayoutState {
     /// The stored numbers are used as they are: [`Self::primary`] and the other
     /// readers clamp them, so a file edited by hand cannot open a panel at an
     /// unusable size.
-    pub(crate) fn apply_project_ui(&mut self, ui: &UiState) {
-        self.primary_sidebar_width = ui.primary_sidebar_width;
-        self.secondary_sidebar_width = ui.secondary_sidebar_width;
-        self.bottom_panel_height = ui.bottom_panel_height;
-        self.primary_sidebar_visible = ui.primary_sidebar_visible;
-        self.secondary_sidebar_visible = ui.secondary_sidebar_visible;
-        self.bottom_panel_visible = ui.bottom_panel_visible;
-        self.table_low_at_top = ui.table_low_at_top;
+    pub(crate) fn apply_project_layout(&mut self, layout: &ProjectLayout) {
+        self.primary_sidebar_width = layout.primary_sidebar_width;
+        self.secondary_sidebar_width = layout.secondary_sidebar_width;
+        self.bottom_panel_height = layout.bottom_panel_height;
+        self.primary_sidebar_visible = layout.primary_sidebar_visible;
+        self.secondary_sidebar_visible = layout.secondary_sidebar_visible;
+        self.bottom_panel_visible = layout.bottom_panel_visible;
+        self.table_low_at_top = layout.table_low_at_top;
     }
 
     /// Records the width the outer group reports for its first panel: the
@@ -619,11 +616,11 @@ pub(crate) fn schedule_save(cx: &mut App) {
             // executor: `sync_all` can stall on a busy disk, and the UI thread
             // has no business waiting for it. The layout also belongs to the
             // open project, so it is captured with the same snapshot.
-            let (path, data, project_ui) = cx.update(|cx| {
+            let (path, data, project_layout) = cx.update(|cx| {
                 let global = cx.global::<AppState>();
-                let project_ui =
-                    CoreService::project_open(cx).then(|| global.data.layout.to_project_ui());
-                (global.path.clone(), global.data.clone(), project_ui)
+                let project_layout =
+                    CoreService::project_open(cx).then(|| global.data.layout.to_project_layout());
+                (global.path.clone(), global.data.clone(), project_layout)
             });
             let (path, result) = cx
                 .background_executor()
@@ -639,8 +636,8 @@ pub(crate) fn schedule_save(cx: &mut App) {
                     "could not save application state"
                 );
             }
-            if let Some(ui) = project_ui {
-                cx.update(|cx| crate::core::save_project_ui(cx, ui));
+            if let Some(layout) = project_layout {
+                cx.update(|cx| crate::core::save_project_layout(cx, layout));
             }
 
             // Checked and cleared with no await in between, so a change that
@@ -751,11 +748,11 @@ mod tests {
         assert_eq!(data.last_project, Some(PathBuf::from("/projects/roadster")));
         assert_eq!(
             data.layout.primary_sidebar_width,
-            DEFAULT_PRIMARY_SIDEBAR_WIDTH
+            ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH
         );
         assert_eq!(
             data.layout.secondary_sidebar_width,
-            DEFAULT_SECONDARY_SIDEBAR_WIDTH
+            ProjectLayout::DEFAULT_SECONDARY_SIDEBAR_WIDTH
         );
         // Panels are open by default; a file that predates them must not open a
         // window with everything hidden.
@@ -804,7 +801,10 @@ mod tests {
 
         assert_eq!(layout.primary_sidebar_width, 260.);
         // The editor absorbs the rest; it is never stored.
-        assert_eq!(layout.bottom_panel_height, DEFAULT_BOTTOM_PANEL_HEIGHT);
+        assert_eq!(
+            layout.bottom_panel_height,
+            ProjectLayout::DEFAULT_BOTTOM_PANEL_HEIGHT
+        );
     }
 
     #[test]
@@ -814,7 +814,10 @@ mod tests {
         layout.apply_secondary_sidebar(&[px(900.), px(320.)]);
 
         assert_eq!(layout.secondary_sidebar_width, 320.);
-        assert_eq!(layout.primary_sidebar_width, DEFAULT_PRIMARY_SIDEBAR_WIDTH);
+        assert_eq!(
+            layout.primary_sidebar_width,
+            ProjectLayout::DEFAULT_PRIMARY_SIDEBAR_WIDTH
+        );
     }
 
     #[test]
@@ -983,7 +986,7 @@ mod tests {
         };
 
         let mut restored = LayoutState::default();
-        restored.apply_project_ui(&layout.to_project_ui());
+        restored.apply_project_layout(&layout.to_project_layout());
 
         assert_eq!(restored, layout);
     }

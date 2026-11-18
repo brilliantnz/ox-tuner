@@ -200,7 +200,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         Event::Failed { failure, .. } => (Update::Failed(failure), None),
         // No view reads a probe result yet, so the core log carries the answer.
         Event::FirmwareProbed { .. }
-        | Event::ProjectUiSaved { .. }
+        | Event::ProjectLayoutSaved { .. }
         | Event::PortsListed { .. }
         | Event::PortsChanged { .. }
         | Event::Rejected { .. }
@@ -244,7 +244,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // A project carries its own panel layout; standalone tunes keep the
     // installation's.
     let project_layout = match &update {
-        Update::Opened(view) if view.in_project => Some(view.ui.clone()),
+        Update::Opened(view) if view.in_project => Some(view.layout.clone()),
         _ => None,
     };
     // The core persisted this connection into the project state; mirror it in the
@@ -269,7 +269,7 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         cx.global_mut::<CoreService>().status.apply(update);
         if let Some(layout) = project_layout {
             crate::state::session::AppState::update_global(cx, |state| {
-                state.layout.apply_project_ui(&layout);
+                state.layout.apply_project_layout(&layout);
             });
         }
         if let Some((port, baud)) = confirmed_connection

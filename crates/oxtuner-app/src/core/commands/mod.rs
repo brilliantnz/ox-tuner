@@ -10,8 +10,8 @@ mod tune;
 pub(crate) use edits::{edit_axis, edit_scalar, edit_table, read_dialog, read_table};
 pub(crate) use log::{start_log, stop_log};
 pub(crate) use project::{
-    choose_definition, close_project, open_project, refresh_project_availability, save_project_ui,
-    save_tune,
+    choose_definition, close_project, open_project, refresh_project_availability,
+    save_project_layout, save_tune,
 };
 pub(crate) use session::{
     adopt_ecu_tune, connect, connect_to_simulator, disconnect, read_all, refresh_ports,
