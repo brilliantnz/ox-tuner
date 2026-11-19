@@ -39,22 +39,23 @@ pub(crate) fn parse_setting_groups(
                     || (*name).to_owned(),
                     |field| crate::fields::unquote(field).to_owned(),
                 );
-                let replaced = definition.setting_groups.insert(
-                    name.to_owned(),
-                    SettingGroup {
-                        name: name.to_owned(),
-                        label,
-                        options: Vec::new(),
-                    },
-                );
-                if replaced.is_some() {
-                    section.error(
-                        "duplicate-name",
-                        format!(
-                            "setting group `{name}` is declared more than once; the later \
-                             declaration replaces the earlier one"
-                        ),
+                if let Some(existing) = definition.setting_groups.get_mut(name) {
+                    // A repeated header continues the group: options collected
+                    // under either header are kept in one list.
+                    existing.label = label;
+                    section.note(
+                        "merged-setting-group",
+                        format!("setting group `{name}` is declared more than once; options are appended"),
                         *line,
+                    );
+                } else {
+                    definition.setting_groups.insert(
+                        name.to_owned(),
+                        SettingGroup {
+                            name: name.to_owned(),
+                            label,
+                            options: Vec::new(),
+                        },
                     );
                 }
                 current = Some(name.to_owned());
@@ -131,12 +132,22 @@ pub(crate) fn parse_dialogs(
                 line: *line,
             };
             current = Some(name.to_owned());
-            if definition.dialogs.insert(name, dialog).is_some() {
-                section.error(
-                    "duplicate-name",
-                    format!("dialog `{name}` is declared more than once; the later wins"),
+            if let Some(existing) = definition.dialogs.get_mut(name) {
+                // A second header continues the dialog instead of starting a
+                // new one, so rows written under either header stay together.
+                if dialog.title.is_some() {
+                    existing.title = dialog.title;
+                }
+                if dialog.layout.is_some() {
+                    existing.layout = dialog.layout;
+                }
+                section.note(
+                    "merged-dialog",
+                    format!("dialog `{name}` is declared more than once; rows are appended"),
                     *line,
                 );
+            } else {
+                definition.dialogs.insert(name, dialog);
             }
             section.understand(*line);
             continue;
@@ -468,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_setting_group_is_reported_and_the_later_one_wins() {
+    fn a_repeated_setting_group_header_merges_its_options() {
         let definition = parse(
             "\
 [MegaTune]
@@ -485,15 +496,16 @@ settingOption = second, \"Second\"
         let diagnostic = definition
             .diagnostics
             .iter()
-            .find(|diagnostic| diagnostic.code == "duplicate-name")
-            .expect("the second declaration is reported");
+            .find(|diagnostic| diagnostic.code == "merged-setting-group")
+            .expect("the repeated header is reported");
         assert_eq!(diagnostic.line, Some(7));
-        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.severity, Severity::Note);
 
         let group = definition.setting_groups.get("mcu").expect("group");
         assert_eq!(group.label, "Second");
-        assert_eq!(group.options.len(), 1);
-        assert_eq!(group.options[0].name, "second");
+        assert_eq!(group.options.len(), 2);
+        assert_eq!(group.options[0].name, "first");
+        assert_eq!(group.options[1].name, "second");
     }
 
     #[test]

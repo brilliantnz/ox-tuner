@@ -92,17 +92,25 @@ pub(crate) fn parse_identification(
 struct Cursor {
     next: u32,
     last: u32,
+    /// Set when an offset could not be read. While poisoned, `nextOffset` and
+    /// `lastOffset` must not be used: they would fabricate an address from a
+    /// cursor whose last step is unknown. A fresh explicit offset clears it.
+    poisoned: bool,
 }
 
 impl Cursor {
     fn reset(&mut self) {
-        self.next = 0;
-        self.last = 0;
+        *self = Self::default();
+    }
+
+    fn poison(&mut self) {
+        self.poisoned = true;
     }
 
     fn advance(&mut self, address: Option<u32>, size: Option<u32>) {
         if let Some(address) = address {
             self.last = address;
+            self.poisoned = false;
             if let Some(size) = size {
                 self.next = address.saturating_add(size);
             }
@@ -479,16 +487,31 @@ fn parse_constant(
 
     // A `string` entry may omit its offset entirely (`string, ASCII, 20`), so
     // the offset decision is made per class.
-    let (offset, index) = if class == ConstantClass::String && fields.len() == 3 {
+    let (mut offset, index) = if class == ConstantClass::String && fields.len() == 3 {
         (Offset::Next, 2usize)
     } else {
         match fields.get(2) {
             Some(field) if looks_like_offset(field) => {
-                (parse_offset(section, line, key, field), 3usize)
+                (parse_offset(section, line, key, field, cursor), 3usize)
             }
             _ => (Offset::Next, 2usize),
         }
     };
+
+    // An offset derived from a poisoned cursor is not an address. Keep it
+    // unresolved and say why, instead of handing a consumer a plausible but
+    // wrong location it could write to.
+    if cursor.poisoned && matches!(offset, Offset::Next | Offset::Last) {
+        section.note(
+            "bad-offset",
+            format!(
+                "`{key}` derives its offset from an earlier unreadable offset; its memory \
+                 location is recorded as unknown"
+            ),
+            line,
+        );
+        offset = Offset::Unknown;
+    }
 
     let mut context = AttributeContext {
         fields: &fields,
@@ -732,7 +755,13 @@ fn looks_like_offset(field: &str) -> bool {
     !field.starts_with('"') && !field.starts_with('[') && !field.starts_with('{')
 }
 
-fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) -> Offset {
+fn parse_offset(
+    section: &mut SectionParser,
+    line: u32,
+    key: &str,
+    field: &str,
+    cursor: &mut Cursor,
+) -> Offset {
     let lowered = field.trim_ascii().to_ascii_lowercase();
     match lowered.as_str() {
         "nextoffset" => return Offset::Next,
@@ -749,7 +778,10 @@ fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) 
             // failed parse must never become a fabricated — and therefore
             // writable — address. `Offset::Unknown` marks the constant's
             // layout as unresolved; the warning names the constant so
-            // consumers can filter for definitions with unknown layout.
+            // consumers can filter for definitions with unknown layout. The
+            // cursor is poisoned too, because every later derived offset would
+            // be measured from an unknown point.
+            cursor.poison();
             section.warn(
                 "bad-offset",
                 format!(
@@ -794,7 +826,10 @@ fn parse_dimension(field: &str) -> Option<Dimension> {
     let source = crate::fields::expression_body(field).unwrap_or(field);
     crate::expr::Expr::parse(source)
         .ok()
-        .map(Dimension::Expression)
+        .map(|parsed| Dimension::Expression {
+            source: source.to_owned(),
+            parsed,
+        })
 }
 
 fn parse_string_shape<'a>(fields: impl IntoIterator<Item = &'a str>) -> (Shape, usize) {

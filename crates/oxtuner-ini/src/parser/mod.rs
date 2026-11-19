@@ -16,7 +16,7 @@ mod dialogs;
 mod editors;
 mod misc;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::error::{Diagnostic, IniError, Severity};
 use crate::model::{Coverage, Definition, SectionCoverage};
@@ -111,6 +111,16 @@ fn assemble(
         let mut coverage = Coverage::default();
         for section in &sections {
             let mut parser = SectionParser::new(&section.name);
+            if section.repeats > 0 {
+                parser.note_section(
+                    "merged-section",
+                    format!(
+                        "`[{}]` has {} header(s); their entries are merged into one section",
+                        section.name,
+                        section.repeats + 1
+                    ),
+                );
+            }
             dispatch(&mut definition, &mut parser, &section.lines, &expander);
             parser.finish(&mut definition, &mut coverage);
         }
@@ -150,25 +160,41 @@ fn assemble(
 struct RawSection<'a> {
     name: String,
     lines: Vec<(u32, &'a str)>,
+    /// Extra headers with this name folded into this one. Real files use one
+    /// block per section, but a second one must continue the first builder
+    /// instead of throwing its state away.
+    repeats: usize,
 }
 
 fn split_sections(lines: &[LogicalLine]) -> Vec<RawSection<'_>> {
     let mut sections: Vec<RawSection<'_>> = vec![RawSection {
         name: String::new(),
         lines: Vec::new(),
+        repeats: 0,
     }];
+    let mut by_name: HashMap<&str, usize> = HashMap::new();
+    let mut current = 0usize;
 
     for line in lines {
         if let Some(name) = section_header(&line.text) {
-            sections.push(RawSection {
-                name: name.to_owned(),
-                lines: Vec::new(),
-            });
+            if let Some(&index) = by_name.get(name) {
+                sections[index].repeats += 1;
+                current = index;
+            } else {
+                let index = sections.len();
+                by_name.insert(name, index);
+                sections.push(RawSection {
+                    name: name.to_owned(),
+                    lines: Vec::new(),
+                    repeats: 0,
+                });
+                current = index;
+            }
             continue;
         }
-        if let Some(current) = sections.last_mut() {
-            current.lines.push((line.line, line.text.as_str()));
-        }
+        sections[current]
+            .lines
+            .push((line.line, line.text.as_str()));
     }
 
     sections
@@ -946,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_table_or_curve_names_the_redeclaration_line() {
+    fn a_repeated_table_or_curve_header_merges_and_names_the_line() {
         let text = "\
 [MegaTune]
 signature = \"x\"
@@ -968,13 +994,124 @@ yBins = y
 
         let definition = parse_str(text, &SettingsContext::new()).expect("parses");
 
+        assert_eq!(definition.tables.len(), 1);
+        assert_eq!(definition.curves.len(), 1);
         let lines: Vec<Option<u32>> = definition
             .diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.code == "duplicate-name")
+            .filter(|diagnostic| {
+                matches!(diagnostic.code.as_ref(), "merged-table" | "merged-curve")
+            })
             .map(|diagnostic| diagnostic.line)
             .collect();
         assert_eq!(lines, vec![Some(7), Some(14)]);
+    }
+
+    #[test]
+    fn doubled_constants_sections_merge_into_one_page_table() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+[Constants]
+page = 1
+b = scalar, U08, 1, \"u\", 1, 0, 0, 255, 0
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.pages.len(), 1);
+        assert_eq!(definition.constants.len(), 2);
+        assert_eq!(definition.constant("a").and_then(|c| c.address), Some(0));
+        assert_eq!(definition.constant("b").and_then(|c| c.address), Some(1));
+        assert!(
+            definition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "merged-section")
+        );
+        assert!(
+            !definition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "offset-outside-page")
+        );
+    }
+
+    #[test]
+    fn doubled_dialog_sections_continue_the_same_dialog() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[UiDialogs]
+dialog = d, \"Title\", yAxis
+ field = \"A\", a
+[UiDialogs]
+dialog = d, \"Title 2\", yAxis
+ field = \"B\", b
+ field = \"C\", c
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.dialogs.len(), 1);
+        let dialog = definition.dialogs.get("d").expect("the merged dialog");
+        assert_eq!(dialog.title.as_deref(), Some("Title 2"));
+        assert_eq!(dialog.rows.len(), 3);
+        assert_eq!(dialog.rows[0].fields[1], "a");
+        assert_eq!(dialog.rows[1].fields[1], "b");
+        assert_eq!(dialog.rows[2].fields[1], "c");
+        assert!(
+            !definition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "duplicate-name")
+        );
+        assert!(
+            definition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "merged-dialog")
+        );
+    }
+
+    #[test]
+    fn a_bad_offset_poisons_derived_offsets_until_an_explicit_one() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 256
+page = 1
+bad = scalar, U08, bad@offset, \"u\", 1, 0, 0, 255, 0
+derived = scalar, U08, nextOffset, \"u\", 1, 0, 0, 255, 0
+fixed = scalar, U08, 10, \"u\", 1, 0, 0, 255, 0
+after = scalar, U08, nextOffset, \"u\", 1, 0, 0, 255, 0
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let address = |name| definition.constant(name).and_then(|c| c.address);
+        assert_eq!(address("bad"), None);
+        assert_eq!(address("derived"), None);
+        assert_eq!(address("fixed"), Some(10));
+        assert_eq!(address("after"), Some(11));
+        assert_eq!(
+            definition.constant("derived").map(|c| &c.offset),
+            Some(&crate::Offset::Unknown)
+        );
+        let bad_offsets: Vec<u32> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "bad-offset")
+            .filter_map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(bad_offsets, vec![7, 8]);
     }
 
     #[test]

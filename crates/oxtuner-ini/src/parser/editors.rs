@@ -136,12 +136,63 @@ fn insert_table(definition: &mut Definition, section: &mut SectionParser, table:
     }
     let id = table.id.clone();
     let line = table.line;
-    if definition.tables.insert(&id, table).is_some() {
-        section.error(
-            "duplicate-name",
-            format!("table `{id}` is declared more than once; the later wins"),
+    if let Some(existing) = definition.tables.get_mut(&id) {
+        merge_table(existing, table);
+        section.note(
+            "merged-table",
+            format!("table `{id}` is declared more than once; its fields are merged"),
             line,
         );
+    } else {
+        definition.tables.insert(&id, table);
+    }
+}
+
+/// Applies a second `table = id` header to the first declaration without
+/// dropping either block's axes or labels.
+fn merge_table(existing: &mut Table, next: Table) {
+    let Table {
+        id: _,
+        map_id,
+        title,
+        page,
+        x_bins,
+        y_bins,
+        z_bins,
+        xy_labels,
+        up_down_label,
+        grid_height,
+        grid_orient,
+        topic_help,
+        line: _,
+    } = next;
+
+    if map_id.is_some() {
+        existing.map_id = map_id;
+    }
+    existing.title = title;
+    if page.is_some() {
+        existing.page = page;
+    }
+    if x_bins.is_some() {
+        existing.x_bins = x_bins;
+    }
+    if y_bins.is_some() {
+        existing.y_bins = y_bins;
+    }
+    if z_bins.is_some() {
+        existing.z_bins = z_bins;
+    }
+    existing.xy_labels.extend(xy_labels);
+    existing.up_down_label.extend(up_down_label);
+    if grid_height.is_some() {
+        existing.grid_height = grid_height;
+    }
+    if grid_orient.is_some() {
+        existing.grid_orient = grid_orient;
+    }
+    if topic_help.is_some() {
+        existing.topic_help = topic_help;
     }
 }
 
@@ -275,13 +326,56 @@ fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve:
     }
     let name = curve.name.clone();
     let line = curve.line;
-    if definition.curves.insert(&name, curve).is_some() {
-        section.error(
-            "duplicate-name",
-            format!("curve `{name}` is declared more than once; the later wins"),
+    if let Some(existing) = definition.curves.get_mut(&name) {
+        merge_curve(existing, curve);
+        section.note(
+            "merged-curve",
+            format!("curve `{name}` is declared more than once; its fields are merged"),
             line,
         );
+    } else {
+        definition.curves.insert(&name, curve);
     }
+}
+
+/// Applies a second `curve = name` header to the first declaration. Series and
+/// labels accumulate; a header with a fresh range replaces the old range.
+fn merge_curve(existing: &mut Curve, next: Curve) {
+    let Curve {
+        name: _,
+        title,
+        column_labels,
+        x_axis,
+        y_axis,
+        x_bins,
+        y_bins,
+        line_labels,
+        gauge,
+        show_text_values,
+        suppress_graph,
+        line: _,
+    } = next;
+
+    existing.title = title;
+    if !column_labels.is_empty() {
+        existing.column_labels = column_labels;
+    }
+    if !x_axis.is_empty() {
+        existing.x_axis = x_axis;
+    }
+    if !y_axis.is_empty() {
+        existing.y_axis = y_axis;
+    }
+    if x_bins.is_some() {
+        existing.x_bins = x_bins;
+    }
+    existing.y_bins.extend(y_bins);
+    existing.line_labels.extend(line_labels);
+    if gauge.is_some() {
+        existing.gauge = gauge;
+    }
+    existing.show_text_values |= show_text_values;
+    existing.suppress_graph |= suppress_graph;
 }
 
 fn is_true(value: &str) -> bool {

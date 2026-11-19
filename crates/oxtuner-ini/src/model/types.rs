@@ -193,6 +193,23 @@ impl Number {
     pub fn is_dynamic(&self) -> bool {
         matches!(self, Self::Expression { .. })
     }
+
+    /// Canonical form for comparisons, independent of how the value was written.
+    ///
+    /// [`Self::Display`] round-trips the source text, which is what golden
+    /// summaries need. Two attributes can still mean the same number while
+    /// being written differently (`2` and `{ 1 + 1 }`). This folds expressions
+    /// that depend on nothing but literals and pure builtins to one number, and
+    /// leaves everything else as its source. It never guesses: an unresolved
+    /// name or a call this build cannot fold keeps its source form.
+    pub fn normalized(&self) -> String {
+        match self {
+            Self::Literal(value) => format_literal(*value),
+            Self::Expression { source, .. } => self
+                .evaluate(&|_| None)
+                .map_or_else(|| source.clone(), format_literal),
+        }
+    }
 }
 
 /// Largest magnitude a `f64` still displays as an exact integer.
@@ -211,16 +228,20 @@ fn whole_number(value: f64) -> i64 {
     value as i64
 }
 
+/// The one numeric text form shared by [`Number::Display`] and
+/// [`Number::normalized`], so a comparison never disagrees with a printout.
+fn format_literal(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < MAX_EXACT_INTEGER {
+        whole_number(value).to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 impl fmt::Display for Number {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Literal(value) => {
-                if value.fract() == 0.0 && value.abs() < MAX_EXACT_INTEGER {
-                    write!(formatter, "{}", whole_number(*value))
-                } else {
-                    write!(formatter, "{value}")
-                }
-            }
+            Self::Literal(value) => formatter.write_str(&format_literal(*value)),
             Self::Expression { source, .. } => write!(formatter, "{{{source}}}"),
         }
     }
@@ -292,7 +313,15 @@ pub enum Dimension {
     /// Known at parse time.
     Fixed(u32),
     /// Resolved at runtime from constant values (iniSpec 3.12/3.22/3.53).
-    Expression(Expr),
+    ///
+    /// The source is kept beside the parsed tree so [`Self::Display`] round-trips
+    /// the written form instead of printing a placeholder.
+    Expression {
+        /// The expression as written, without braces.
+        source: String,
+        /// The parsed tree.
+        parsed: Expr,
+    },
 }
 
 /// A non-negative dimension expression converted to the model's element count.
@@ -311,7 +340,7 @@ impl Dimension {
     pub fn value(&self) -> Option<u32> {
         match self {
             Self::Fixed(value) => Some(*value),
-            Self::Expression(_) => None,
+            Self::Expression { .. } => None,
         }
     }
 
@@ -319,10 +348,26 @@ impl Dimension {
     pub fn evaluate(&self, lookup: &dyn Fn(&str) -> Option<f64>) -> Option<u32> {
         match self {
             Self::Fixed(value) => Some(*value),
-            Self::Expression(expression) => expression
+            Self::Expression { parsed, .. } => parsed
                 .evaluate(lookup)
                 .filter(|value| *value >= 0.0)
                 .map(dimension_value),
+        }
+    }
+
+    /// Canonical form for comparisons, the same way [`Number::normalized`]
+    /// works for numeric attributes. A pure constant expression folds to a
+    /// number; anything that needs runtime values keeps its source.
+    pub fn normalized(&self) -> String {
+        match self {
+            Self::Fixed(value) => value.to_string(),
+            Self::Expression { source, parsed } => parsed
+                .evaluate(&|_| None)
+                .filter(|value| *value >= 0.0)
+                .map_or_else(
+                    || source.clone(),
+                    |value| dimension_value(value).to_string(),
+                ),
         }
     }
 }
@@ -331,9 +376,7 @@ impl fmt::Display for Dimension {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fixed(value) => write!(formatter, "{value}"),
-            // The AST has no source-preserving printer; the parser keeps the
-            // written form on the owning entry, so this is only ever a label.
-            Self::Expression(_) => formatter.write_str("{...}"),
+            Self::Expression { source, .. } => write!(formatter, "{{{source}}}"),
         }
     }
 }
@@ -426,5 +469,38 @@ impl fmt::Display for Shape {
                 None => write!(formatter, "string[{length}]"),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn number_display_round_trips_the_expression_source() {
+        let number = Number::parse(" { fuel_cols + 1 } ");
+
+        assert_eq!(number.to_string(), "{fuel_cols + 1}");
+        assert_eq!(Number::parse(&number.to_string()), number);
+    }
+
+    #[test]
+    fn normalized_folds_pure_expressions_but_keeps_dynamic_sources() {
+        assert_eq!(Number::parse("{ 1 + 1 }").normalized(), "2");
+        assert_eq!(
+            Number::parse("{ fuel_cols + 1 }").normalized(),
+            "fuel_cols + 1"
+        );
+    }
+
+    #[test]
+    fn dimension_display_round_trips_the_written_expression() {
+        let dimension = Dimension::Expression {
+            source: "fuel_cols * 2".to_owned(),
+            parsed: crate::expr::Expr::parse("fuel_cols * 2").expect("the expression parses"),
+        };
+
+        assert_eq!(dimension.to_string(), "{fuel_cols * 2}");
+        assert_eq!(dimension.normalized(), "fuel_cols * 2");
     }
 }

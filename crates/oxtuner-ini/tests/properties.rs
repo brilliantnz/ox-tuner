@@ -9,7 +9,7 @@
 use proptest::prelude::*;
 
 use oxtuner_ini::{
-    Dimension, IniError, SettingsContext, Shape, parse_bytes, parse_str, preprocess,
+    Dimension, IniError, Number, SettingsContext, Shape, Text, parse_bytes, parse_str, preprocess,
 };
 
 fn parse(text: &str) -> Result<oxtuner_ini::Definition, IniError> {
@@ -178,5 +178,40 @@ proptest! {
         );
 
         let _ = parse(&text);
+    }
+
+    /// `Display` round-trips the source of an attribute expression, so printing
+    /// a parsed attribute and parsing it again must rebuild the same tree.
+    #[test]
+    fn attribute_expressions_survive_print_parse_print(
+        expression in prop::sample::select(vec![
+            "1",
+            "1 + 2",
+            "fuel_cols",
+            "fuel_cols * 2",
+            "min(a, b)",
+            "max(a, b) + 1",
+            "abs(-3)",
+            "sqrt(4)",
+            "a ? b : c",
+            "a && b || c",
+            "array.foo[3]",
+            "getChannelScaleByOffset(6)",
+            "bitStringValue(units, algo)",
+        ])
+    ) {
+        let source = format!("{{{expression}}}");
+
+        let number = Number::parse(&source);
+        let printed = number.to_string();
+        let reparsed = Number::parse(&printed);
+        prop_assert_eq!(&reparsed, &number);
+        prop_assert_eq!(reparsed.to_string(), printed);
+
+        let text = Text::parse(&source);
+        let printed = text.to_string();
+        let reparsed = Text::parse(&printed);
+        prop_assert_eq!(&reparsed, &text);
+        prop_assert_eq!(reparsed.to_string(), printed);
     }
 }
