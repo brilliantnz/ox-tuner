@@ -262,22 +262,21 @@ fn reconcile_pages(
 
         // Two values for one set of bytes have no single answer to give.
         // Rebuilding the page would pick one by the order the file lists them
-        // in, so its values stand as written and the caller decides what to do
-        // about them. That can be the file stating two answers, or the declared
-        // ranges clamping one value into two, and the message says which of the
-        // two it is.
+        // in, so the page is left as loaded and the caller decides what to do
+        // about it. That can be the file stating two answers, or the declared
+        // ranges clamping one value into two; the message names the pair and
+        // covers both, because the caller treats them the same.
         let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
-        let clashes: Vec<_> = layout
+        let clash = layout
             .value_conflicts(page.page, tune)
             .into_iter()
-            .filter(|conflict| carried(&conflict.first) && carried(&conflict.second))
-            .collect();
-        if let Some(conflict) = clashes.first() {
+            .find(|conflict| carried(&conflict.first) && carried(&conflict.second));
+        if let Some(conflict) = clash {
             report.warn(
                 IssueKind::ValueSkipped,
                 format!(
-                    "page {}: the values for `{}` and `{}` cannot both fit the bytes they share \
-                     within their declared ranges, so its values are kept as written",
+                    "page {}: the values for `{}` and `{}` cannot both stand within their \
+                     declared ranges over the bytes they share, so the page is left as loaded",
                     page.page, conflict.first, conflict.second
                 ),
             );

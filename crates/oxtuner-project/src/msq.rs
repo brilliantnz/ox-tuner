@@ -184,7 +184,8 @@ pub enum MsqError {
     /// shared bytes.
     ///
     /// The cause is kept as text because this error compares for equality and
-    /// [`TuneError`] holds floats, so it cannot be carried as a source here.
+    /// [`TuneError`](oxtuner_tune::TuneError) holds floats, so it cannot be
+    /// carried as a source here.
     UnsettledDefaults {
         /// Why the settle failed.
         reason: String,

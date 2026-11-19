@@ -386,7 +386,9 @@ impl Tune {
     /// already holds one value is pulled onto the tightest range among its
     /// members and that value is written back to all of them. A group that
     /// holds two different values is left alone: that disagreement is real and
-    /// judging it belongs to the caller.
+    /// judging it belongs to the caller. So is a group whose ranges have no
+    /// value in common, because the fold would then put a value one of them
+    /// rejects on the tune and hide the disagreement from the write gate.
     pub fn clamp_shared_bytes(&mut self) {
         let mut settled: HashSet<String> = HashSet::new();
 
@@ -1138,9 +1140,6 @@ second = scalar, U08, 0, "x", 1, 0, 0, 5, 0
 
     #[test]
     fn a_group_with_no_common_value_keeps_its_values() {
-        // `first` cannot store anything from 11 up and `second` cannot store
-        // anything below 20, so no value fits both and nothing is moved: the
-        // write gate has to be able to see that.
         let definition = parse_str(
             r#"
 [MegaTune]
@@ -1158,12 +1157,16 @@ second = scalar, U08, 0, "x", 1, 0, 20, 255, 0
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
 
-        tune.set_image_raw("first", 0, 5.0).unwrap();
-        tune.set_image_raw("second", 0, 20.0).unwrap();
+        // Both hold fifteen, which no member of the pair can store: `first`
+        // tops out at ten and `second` starts at twenty. Nothing may move,
+        // because a value either one would reject must not land on the tune and
+        // hide the disagreement from the write gate.
+        tune.set_image_raw("first", 0, 15.0).unwrap();
+        tune.set_image_raw("second", 0, 15.0).unwrap();
         tune.clamp_shared_bytes();
 
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 20.0);
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 15.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 15.0);
     }
 
     #[test]
