@@ -221,6 +221,22 @@ impl TuneImages {
         self.overlays
             .retain(|_, overlay| *overlay != Overlay::WriteFailed);
 
+        // A controller-owned value is the ECU's, not the project's: the
+        // reference behavior overwrites the offline copy on every connect.
+        for (variable, spec) in self.layout.variables().iter().enumerate() {
+            if !spec.is_controller_owned() || spec.ini_page().is_none() {
+                continue;
+            }
+            let Some(values) = ram.values().get(variable) else {
+                continue;
+            };
+            for index in 0..spec.element_count() {
+                if let Some(raw) = values.number(index) {
+                    let _ = self.working.set_image_raw(&spec.name, index, raw);
+                }
+            }
+        }
+
         let mut conflicts = Vec::new();
         for (variable, spec) in self.layout.variables().iter().enumerate() {
             if !self.is_sendable(variable) {
@@ -541,6 +557,7 @@ impl TuneImages {
     pub fn import(&mut self, tune: Tune) -> Result<(), TuneError> {
         self.working.adopt_values(&tune)?;
         self.clear_resolutions();
+        self.clear_write_failures();
         Ok(())
     }
 
@@ -557,11 +574,13 @@ impl TuneImages {
         page: IniPage,
         tune: &Tune,
         applied: &[String],
+        resolved: &mut Vec<String>,
     ) -> Result<(), TuneError> {
         let names = self.layout.page_patch_names(applied, page);
         if names.is_empty() {
             return Ok(());
         }
+        resolved.extend(names.iter().map(|name| (*name).to_owned()));
 
         let source = match source {
             Some(source) => source,
@@ -632,6 +651,9 @@ impl TuneImages {
         // The merge lands in a copy: a page that fails halfway must leave the
         // working image exactly as it was, like the whole-image import does.
         let mut merged = self.working.snapshot();
+        // Only the variables this file actually moved lose their decision; a
+        // difference it never touched is still the user's to resolve.
+        let mut resolved: Vec<String> = Vec::new();
         let pages: Vec<IniPage> = self.layout.pages().iter().map(|page| page.page).collect();
         // The file's tune has its own layout allocation, and a value copy needs
         // the destination's layout. This copy holds the file's values under the
@@ -643,7 +665,14 @@ impl TuneImages {
             // without reading the overlap as text. The values the file carried
             // are adopted as they stand, so nothing the file wrote is dropped.
             if self.layout.page_has_text_overlap(page) {
-                self.merge_overlapping_page(&mut merged, &mut source, page, tune, applied)?;
+                self.merge_overlapping_page(
+                    &mut merged,
+                    &mut source,
+                    page,
+                    tune,
+                    applied,
+                    &mut resolved,
+                )?;
 
                 continue;
             }
@@ -682,6 +711,7 @@ impl TuneImages {
             }
 
             merged.adopt_named(&decoded, &moved)?;
+            resolved.extend(moved.iter().map(|name| (*name).to_owned()));
         }
 
         // Settings with no page are not on the wire; they are copied as they
@@ -707,12 +737,13 @@ impl TuneImages {
                     merged.set_image_text(&spec.name, text)?;
                 }
             }
+            resolved.push(spec.name.clone());
         }
 
         self.working.adopt_values(&merged)?;
-        // The imported values are new; a decision about the old ones does not
-        // carry over.
-        self.clear_resolutions();
+        // The imported values are new; a decision about those values does not
+        // carry over. A difference the file did not touch still stands.
+        self.clear_resolutions_for(&resolved);
         Ok(())
     }
 
@@ -825,6 +856,8 @@ impl TuneImages {
             && !spec.is_controller_owned()
             && !spec.no_msq_save
             && spec.address.is_some()
+            && spec.scale.is_some()
+            && spec.translate.is_some()
             && !self.layout.is_alias_at(variable)
             && spec.bit_field_round_trips()
     }
@@ -883,6 +916,8 @@ impl TuneImages {
         if spec.is_controller_owned()
             || spec.no_msq_save
             || spec.address.is_none()
+            || spec.scale.is_none()
+            || spec.translate.is_none()
             || !spec.bit_field_round_trips()
         {
             return CellState::NotApplicable;

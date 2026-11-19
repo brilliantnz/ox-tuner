@@ -77,7 +77,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
     // here because the core publishes its first sample on its own.
     let render_model = Rc::clone(&model);
     let close_model = Rc::clone(&model);
-    crate::app::dialog::open(window, cx, move |dialog, window, cx| {
+    let opened = crate::app::dialog::open(window, cx, move |dialog, window, cx| {
         // Cloned per open: the inner callback takes ownership, so the outer
         // builder stays a plain Fn.
         let close_model = Rc::clone(&close_model);
@@ -89,8 +89,16 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
             drop(close_model.borrow_mut().name_subscription.take());
             drop(close_model.borrow_mut().path_subscription.take());
             firmware::reset_detection(cx);
+            if cx.has_global::<crate::core::CoreService>() {
+                crate::core::CoreService::status_mut(cx).dialog_owner = None;
+            }
+            crate::layout::write_dialogs::retry_pending_review(cx);
         })
     });
+    if opened {
+        crate::core::CoreService::status_mut(cx).dialog_owner =
+            Some(crate::core::DialogOwner::Wizard);
+    }
 }
 
 /// One frame of the wizard.

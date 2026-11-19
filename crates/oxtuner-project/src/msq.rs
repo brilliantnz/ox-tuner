@@ -864,6 +864,32 @@ impl Msq {
         })
     }
 
+    /// Whether the document carries one entry.
+    #[must_use]
+    pub fn has_entry(&self, page: EntryPage, kind: EntryKind, name: &str) -> bool {
+        let Some(root) = self.root() else {
+            return false;
+        };
+
+        root.children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(element) if element.name == "page" => Some(element),
+                _ => None,
+            })
+            .filter(|element| page_address(element) == Some(page))
+            .flat_map(|element| element.children.iter())
+            .filter_map(|node| match node {
+                Node::Element(element) if element.name == kind.element() => Some(element),
+                _ => None,
+            })
+            .any(|entry| {
+                entry
+                    .attr("name")
+                    .is_some_and(|written| written.eq_ignore_ascii_case(name))
+            })
+    }
+
     /// Removes one entry from the document, when it is there.
     ///
     /// A constant whose bytes another constant covers is a view and must not

@@ -704,6 +704,64 @@ controllerPriority = owned
 
         assert_eq!(conflicts.len(), 0, "the ECU owns the value");
         assert_eq!(images.conflicts().len(), 0);
+        assert_eq!(
+            images.working().raw_at("owned", 0).unwrap(),
+            9.0,
+            "the ECU's value replaces the offline copy"
+        );
+    }
+
+    #[test]
+    fn importing_one_variable_keeps_another_variables_decision() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        ram.set_user("b", 9.0).unwrap();
+        images.reconcile_read(ram.clone()).unwrap();
+        images.keep_working();
+
+        let mut imported = Tune::new(Arc::clone(images.layout()));
+        imported.set_user("a", 4.0).unwrap();
+        images
+            .import_applied(&imported, &["a".to_owned()])
+            .expect("import");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].name, "a", "only the imported value asks again");
+    }
+
+    #[test]
+    fn a_value_with_no_presentation_is_never_sent_or_reported() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+scaled = scalar, U08, 0, \"\", {unknownExpression}, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        let mut ram = Tune::new(layout);
+        ram.set_image_raw("scaled", 0, 9.0).expect("the ECU value");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 0, "the value has no file form");
+        assert_eq!(
+            images.cell_state("scaled", 0, 0).unwrap(),
+            CellState::NotApplicable
+        );
+        assert_eq!(images.status().pending_write.cells, 0);
     }
 
     #[test]

@@ -398,6 +398,33 @@ fn missing_entries<'a>(definition: &'a Definition, seen: &BTreeSet<String>) -> V
     missing
 }
 
+/// Drops derived views from the missing-value report.
+///
+/// A view is removed from a saved file on purpose; a reopen derives it from
+/// its owner, so reporting it as missing would be false.
+pub(crate) fn drop_derived_missing(report: &mut LoadReport, is_derived: impl Fn(&str) -> bool) {
+    let before = report.missing_values.len();
+    report.missing_values.retain(|name| !is_derived(name));
+    if report.missing_values.len() == before {
+        return;
+    }
+
+    report
+        .warnings
+        .retain(|issue| issue.kind != IssueKind::MissingValue);
+    if !report.missing_values.is_empty() {
+        let missing: Vec<&str> = report.missing_values.iter().map(String::as_str).collect();
+        report.warn(
+            IssueKind::MissingValue,
+            format!(
+                "{} definition entries have no value in the tune; their defaults are used{}",
+                missing.len(),
+                preview(&missing),
+            ),
+        );
+    }
+}
+
 fn check_entries(msq: &Msq, definition: &Definition, report: &mut LoadReport) {
     let entries = msq.entries();
     // Case-folded, because a lookup by name is case-insensitive: an entry that

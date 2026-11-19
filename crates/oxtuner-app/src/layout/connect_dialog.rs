@@ -152,7 +152,7 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
         )
     });
 
-    crate::app::dialog::open(window, cx, move |dialog, _, cx| {
+    let opened = crate::app::dialog::open(window, cx, move |dialog, _, cx| {
         let status = CoreService::status(cx);
         // The ports the core last published; empty until its first sample
         // arrives, so the dialog tells still-looking apart from no-ports.
@@ -531,6 +531,9 @@ pub(crate) fn show(window: &mut Window, cx: &mut App) {
                     .child(connect_button),
             )
     });
+    if opened {
+        CoreService::status_mut(cx).dialog_owner = Some(crate::core::DialogOwner::Connect);
+    }
 }
 
 /// A labelled section.

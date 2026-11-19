@@ -11,7 +11,7 @@ use super::commands::{
 };
 use super::firmware;
 use super::service::CoreService;
-use super::status::{JournalView, TraceSaved, Update};
+use super::status::{DialogOwner, JournalView, ResolveChain, TraceSaved, Update};
 
 /// One second in milliseconds, for the poll interval.
 const MILLIS_PER_SECOND: u32 = 1_000;
@@ -26,21 +26,38 @@ enum ApplyStep {
 
 /// The step one update means for the resolve chain, if any.
 ///
-/// Only the chain's own outcomes advance it: a refusal or an unrelated event
-/// ends nothing by itself, and a duplicate is not a new step.
-fn next_step(applying: bool, update: &Update) -> Option<ApplyStep> {
-    if !applying {
+/// Only the chain's own command advances it: the op is matched before the
+/// update is read, so another write's failure cannot cancel the burn the user
+/// asked for, and another write's success cannot start one. A link loss, a
+/// project change or a rejection ends the chain whatever it was waiting for.
+fn next_step(
+    chain: Option<&ResolveChain>,
+    op: Option<oxtuner_core::OpId>,
+    rejected: bool,
+    update: &Update,
+) -> Option<ApplyStep> {
+    let chain = chain?;
+
+    if rejected
+        || matches!(
+            update,
+            Update::Opened(_) | Update::Disconnected | Update::LinkLost(_)
+        )
+    {
+        return Some(ApplyStep::Stop);
+    }
+
+    if op != Some(chain.op()) {
+        // Another command's answer; the chain keeps waiting for its own.
         return None;
     }
-    match update {
-        Update::ConflictsResolved => Some(ApplyStep::Write),
-        Update::Written(report) if report.verified => Some(ApplyStep::Burn),
-        Update::Burned(_)
-        | Update::Failed(_)
-        | Update::Opened(_)
-        | Update::Disconnected
-        | Update::LinkLost(_) => Some(ApplyStep::Stop),
-        _ => None,
+
+    match (chain, update) {
+        (ResolveChain::Resolve(_), Update::ConflictsResolved) => Some(ApplyStep::Write),
+        (ResolveChain::Write(_), Update::Written(report)) if report.verified => {
+            Some(ApplyStep::Burn)
+        }
+        _ => Some(ApplyStep::Stop),
     }
 }
 
@@ -324,6 +341,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         && cx.global::<CoreService>().status.connection.is_none();
     let conflict_review =
         matches!(&update, Update::PagesRead(report) if !report.conflicts.is_empty());
+    if conflict_review {
+        cx.global_mut::<CoreService>().status.review_pending = true;
+    }
     let import_consent = if matches!(
         &update,
         Update::Failed(failure) if failure.code == FailureCode::ImportNeedsConsent
@@ -380,16 +400,27 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         _ => None,
     };
 
-    // A dialog that started an asynchronous task ends with it. Connection and
-    // project opening are the two that keep the window open while the core
-    // works; leaving them up would also block the review dialog that the read
-    // which follows a connect has to show.
-    let task_finished = matches!(&update, Update::Connected(_) | Update::Opened(_));
+    // A dialog that started an asynchronous task ends with it; the owner keeps
+    // an unrelated dialog (a settings sheet, an import consent, the review)
+    // from being closed by a success it did not ask for.
+    let dialog_owner = cx.global::<CoreService>().status.dialog_owner;
+    let task_finished = match &update {
+        Update::Connected(_) => dialog_owner == Some(DialogOwner::Connect),
+        Update::Opened(_) => {
+            matches!(
+                dialog_owner,
+                Some(DialogOwner::Connect | DialogOwner::Wizard)
+            )
+        }
+        _ => false,
+    };
 
     // The project choice writes and burns after the resolution; decide the
     // next step before the update is folded into the status.
     let apply_step = next_step(
-        cx.global::<CoreService>().status.applying_project_tune,
+        cx.global::<CoreService>().status.resolve_chain.as_ref(),
+        event_op,
+        rejected_reason.is_some(),
         &update,
     );
 
@@ -445,17 +476,16 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     }
     match apply_step {
         Some(ApplyStep::Write) => {
-            if !write_to_ram(cx) {
-                cx.global_mut::<CoreService>().status.applying_project_tune = false;
-            }
+            let op = write_to_ram(cx);
+            cx.global_mut::<CoreService>().status.resolve_chain = op.map(ResolveChain::Write);
         }
         Some(ApplyStep::Burn) => {
             // The chain has no step after the burn, whatever the queue does.
-            cx.global_mut::<CoreService>().status.applying_project_tune = false;
+            cx.global_mut::<CoreService>().status.resolve_chain = None;
             let _ = burn_to_flash(cx);
         }
         Some(ApplyStep::Stop) => {
-            cx.global_mut::<CoreService>().status.applying_project_tune = false;
+            cx.global_mut::<CoreService>().status.resolve_chain = None;
         }
         None => {}
     }
@@ -464,7 +494,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // while the command was still in flight.
     if task_finished && let Some(window) = crate::app::window::main(cx) {
         window
-            .update(cx, |_, window, cx| window.close_dialog(cx))
+            .update(cx, |_, window, cx| {
+                window.close_dialog(cx);
+                cx.global_mut::<CoreService>().status.dialog_owner = None;
+            })
             .ok();
     }
     if read_pages {
@@ -483,15 +516,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     if refresh_status {
         refresh_tune_status(cx);
     }
-    if conflict_review {
+    if cx.global::<CoreService>().status.review_pending {
+        // The prompt replaces whatever dialog is in the way; it is the only
+        // path that satisfies the core's write gate, so it cannot wait for a
+        // user to close an unrelated dialog.
         cx.defer(|cx| {
-            if let Some(window) = crate::app::window::main(cx) {
-                window
-                    .update(cx, |_, window, cx| {
-                        crate::layout::write_dialogs::show_conflicts(window, cx);
-                    })
-                    .ok();
-            }
+            crate::layout::write_dialogs::retry_pending_review(cx);
         });
     }
     if needs_import_consent {
@@ -522,31 +552,42 @@ mod tests {
 
     #[test]
     fn the_resolve_chain_moves_only_on_its_own_outcomes() {
+        let chain = ResolveChain::Resolve(oxtuner_core::OpId::FIRST_ID);
+
         assert_eq!(
-            next_step(true, &Update::ConflictsResolved),
+            next_step(
+                Some(&chain),
+                Some(oxtuner_core::OpId::FIRST_ID),
+                false,
+                &Update::ConflictsResolved
+            ),
             Some(ApplyStep::Write)
         );
         assert_eq!(
-            next_step(
-                true,
-                &Update::Failed(oxtuner_core::Failure {
-                    code: FailureCode::WriteRefused,
-                    message: String::new(),
-                }),
-            ),
-            Some(ApplyStep::Stop)
-        );
-        assert_eq!(
-            next_step(true, &Update::LinkLost(String::new())),
+            next_step(Some(&chain), None, false, &Update::LinkLost(String::new())),
             Some(ApplyStep::Stop),
             "a chain cannot outlive its link"
         );
         assert_eq!(
-            next_step(false, &Update::ConflictsResolved),
+            next_step(Some(&chain), None, true, &Update::Nothing),
+            Some(ApplyStep::Stop),
+            "a rejected command ends the chain"
+        );
+        assert_eq!(
+            next_step(Some(&chain), None, false, &Update::Nothing),
+            None,
+            "another command's answer leaves the chain waiting"
+        );
+        assert_eq!(
+            next_step(
+                None,
+                Some(oxtuner_core::OpId::FIRST_ID),
+                false,
+                &Update::ConflictsResolved
+            ),
             None,
             "a chain that is not running stays still"
         );
-        assert_eq!(next_step(true, &Update::Nothing), None);
     }
 
     #[test]

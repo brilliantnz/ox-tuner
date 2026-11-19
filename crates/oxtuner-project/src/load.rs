@@ -164,6 +164,8 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         report.warn(IssueKind::Definition, issue.to_string());
     }
 
+    crate::check::drop_derived_missing(&mut report, |name| layout.is_alias(name));
+
     let mut tune = Tune::new(Arc::clone(&layout));
     // An array default the definition declares per cell is not in the layout,
     // so a tune that omits the array would otherwise open on zeros and then

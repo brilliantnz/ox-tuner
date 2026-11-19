@@ -682,19 +682,18 @@ fn conflict_table(
                 .px_2()
                 .py_1()
                 .text_sm()
-                .child(div().w(px(200.)).min_w_0().truncate().child(row.name))
-                .child(
-                    div()
-                        .w(px(64.))
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("[{}:{}]", row.row, row.column)),
-                )
+                .child(div().w(px(200.)).min_w_0().child(row.name))
+                .child(div().w(px(64.)).text_xs().text_color(muted).child(
+                    if row.row == 0 && row.column == 0 {
+                        "—".to_owned()
+                    } else {
+                        format!("[{}:{}]", row.row, row.column)
+                    },
+                ))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .font_family(mono.clone())
                         .child(row.working),
                 )
@@ -702,7 +701,6 @@ fn conflict_table(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .font_family(mono.clone())
                         .child(row.ecu),
                 )
@@ -719,47 +717,79 @@ fn conflict_table(
         })
 }
 
+/// Opens the queued review prompt, if one is still owed.
+pub(crate) fn retry_pending_review(cx: &mut App) {
+    if !CoreService::status(cx).review_pending {
+        return;
+    }
+    let Some(window) = crate::app::window::main(cx) else {
+        return;
+    };
+    window
+        .update(cx, |_, window, cx| show_conflicts(window, cx))
+        .ok();
+}
+
 /// Shows the cells that differ between the project tune and the ECU tune.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dialog reads its live gates, table and two choices in one builder"
+)]
 pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
     let status = CoreService::status(cx);
     let Some(read) = status.pages_read.clone() else {
+        CoreService::status_mut(cx).review_pending = false;
         return;
     };
     // A dialog for a difference the core has already decided would offer
     // choices that no longer apply; every operation that decides clears the
     // list. The status can lag the read by one refresh, so it is not consulted.
     if read.conflicts.is_empty() {
+        CoreService::status_mut(cx).review_pending = false;
         return;
     }
-    let read_only = status
-        .project
-        .as_ref()
-        .is_some_and(|project| project.read_only);
-    let ready = status.writes_enabled
-        && status.connection.as_ref().is_some_and(|connection| {
-            connection.verdict == oxtuner_core::SignatureVerdict::Match && !connection.read_only
-        })
-        && !read_only
-        && status.write_halted.is_none();
+
+    // The review is the only path that satisfies the core's write gate. It
+    // replaces whatever dialog is in the way instead of being dropped.
+    if window.has_active_dialog(cx) {
+        window.close_dialog(cx);
+    }
 
     let total = read.conflicts.len();
     let rows: Vec<oxtuner_core::ConflictReport> = read.conflicts.iter().take(10).cloned().collect();
     let hidden = total.saturating_sub(rows.len());
 
-    dialog::open(window, cx, move |dialog, _, cx| {
+    let opened = dialog::open(window, cx, move |dialog, _, cx| {
+        let status = CoreService::status(cx);
         let muted = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
+        let connected = status.connection.is_some() && status.link_lost.is_none();
+        let read_only = status
+            .project
+            .as_ref()
+            .is_some_and(|project| project.read_only)
+            || status.project_missing;
+        let signature_ok = status.connection.as_ref().is_some_and(|connection| {
+            !connection.read_only && connection.verdict == oxtuner_core::SignatureVerdict::Match
+        });
+        let ready = status.writes_enabled
+            && connected
+            && signature_ok
+            && !read_only
+            && status.write_halted.is_none();
+        let ecu_ready = connected && !read_only;
+
         dialog
             .title(t!("app.conflict.title"))
             .width(px(680.))
             .child(
                 v_flex()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(t!("app.conflict.body", count = total.to_string())),
-                    )
+                    .child(div().text_sm().child(if total == 1 {
+                        t!("app.conflict.body_one")
+                    } else {
+                        t!("app.conflict.body", count = total.to_string())
+                    }))
                     .child(conflict_table(cx, rows.clone(), hidden))
                     .child(
                         div()
@@ -781,12 +811,21 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                                 .child(t!("app.conflict.read_only")),
                         )
                     })
-                    .when(!read_only && !ready, |this| {
+                    .when(!read_only, |this| {
+                        this.child(safety_warnings(
+                            cx,
+                            None,
+                            status.writes_enabled,
+                            connected,
+                            status.write_halted.clone(),
+                        ))
+                    })
+                    .when(connected && !signature_ok, |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(danger)
-                                .child(t!("app.conflict.needs_writes")),
+                                .child(t!("app.conflict.signature")),
                         )
                     }),
             )
@@ -797,7 +836,7 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("conflict-project")
                             .label(t!("app.conflict.keep"))
-                            .primary()
+                            .outline()
                             .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
@@ -810,8 +849,8 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("conflict-ecu")
                             .label(t!("app.conflict.use_ecu"))
-                            .outline()
-                            .disabled(read_only)
+                            .primary()
+                            .disabled(!ecu_ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
                                     oxtuner_core::ConflictResolution::UseEcu,
@@ -822,4 +861,6 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     ),
             )
     });
+
+    CoreService::status_mut(cx).review_pending = !opened;
 }

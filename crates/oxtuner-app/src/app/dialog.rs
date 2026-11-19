@@ -19,9 +19,12 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
     build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
-) {
+) -> bool {
     if window.has_active_dialog(cx) {
-        return;
+        return false;
+    }
+    if cx.has_global::<crate::core::CoreService>() {
+        crate::core::CoreService::status_mut(cx).dialog_owner = None;
     }
     window.open_dialog(cx, move |dialog, window, cx| {
         build(
@@ -33,6 +36,7 @@ pub(crate) fn open(
             cx,
         )
     });
+    true
 }
 
 /// Opens `build` as the window's alert dialog, under the same rules.
@@ -40,13 +44,14 @@ pub(crate) fn open_alert(
     window: &mut Window,
     cx: &mut App,
     build: impl Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
-) {
+) -> bool {
     if window.has_active_dialog(cx) {
-        return;
+        return false;
     }
     window.open_alert_dialog(cx, move |alert, window, cx| {
         // An alert's backdrop dismissal is disabled by the library itself;
         // Escape is the one door this helper still has to close.
         build(alert.keyboard(false), window, cx)
     });
+    true
 }

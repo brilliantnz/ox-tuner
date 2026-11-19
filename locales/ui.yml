@@ -577,6 +577,8 @@ app:
       en: Project and ECU tune differ
     body:
       en: '%{count} cells differ between the project tune and the tune read from the ECU. Choose which one the project should use.'
+    body_one:
+      en: 'One cell differs between the project tune and the tune read from the ECU. Choose which one the project should use.'
     column_variable:
       en: Variable
     column_cell:
@@ -591,8 +593,8 @@ app:
       en: 'Use project tune saves the file, writes it to ECU RAM and burns it to flash. The engine must be off.'
     use_ecu_hint:
       en: Use ECU tune replaces the project's values with the ECU's and saves the project file.
-    needs_writes:
-      en: Connect a matching ECU, enable write access, and clear a halted write path before applying the project tune.
+    signature:
+      en: The definition's signature does not match the ECU, so the project tune cannot be written or burned.
     read_only:
       en: The project is read-only, so the difference cannot be resolved or saved here.
     keep:

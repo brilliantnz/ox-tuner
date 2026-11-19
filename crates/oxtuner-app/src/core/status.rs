@@ -16,6 +16,29 @@ use oxtuner_core::{
 };
 use oxtuner_registry::FirmwareId;
 
+/// The dialog whose asynchronous task is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DialogOwner {
+    Connect,
+    Wizard,
+}
+
+/// The command a "use project tune" choice still owes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolveChain {
+    Resolve(oxtuner_core::OpId),
+    Write(oxtuner_core::OpId),
+}
+
+impl ResolveChain {
+    /// The command this step waits on.
+    pub(crate) const fn op(self) -> oxtuner_core::OpId {
+        match self {
+            Self::Resolve(op) | Self::Write(op) => op,
+        }
+    }
+}
+
 /// What the views show about the core. Small and `Clone`: rendering reads it
 /// every frame.
 #[expect(
@@ -40,11 +63,18 @@ pub(crate) struct CoreStatus {
     pub(crate) project_missing: bool,
     /// The last successful save, shown until the next open or failure.
     pub(crate) last_save: Option<SaveReport>,
-    /// Whether a "use project tune" choice is still applying.
+    /// The command a "use project tune" choice is still waiting for.
     ///
     /// The resolution saves the tune; the event loop then writes it and burns
-    /// it, one command after the other, stopping at the first failure.
-    pub(crate) applying_project_tune: bool,
+    /// it, matching each answer by its own op id.
+    pub(crate) resolve_chain: Option<ResolveChain>,
+    /// The review prompt the UI still owes the user.
+    ///
+    /// A read found differences while another dialog was up; the prompt opens
+    /// as soon as no dialog blocks it.
+    pub(crate) review_pending: bool,
+    /// The dialog a running task belongs to, cleared when another one opens.
+    pub(crate) dialog_owner: Option<DialogOwner>,
     /// The table the UI last read, kept until another table replaces it.
     pub(crate) table: Option<TableView>,
     /// The dialog the UI last read, kept until another dialog replaces it.
@@ -220,6 +250,7 @@ impl CoreStatus {
         if let Some(read) = &mut self.pages_read {
             read.conflicts.clear();
         }
+        self.review_pending = false;
     }
 
     /// Records which ports are new since the last published list.
@@ -523,6 +554,12 @@ impl CoreStatus {
                 self.dirty.clear();
                 self.failure = None;
                 self.tune_status = None;
+                self.clear_review();
+                self.pages_read = None;
+                self.connection = None;
+                self.link_lost = None;
+                self.realtime = false;
+                self.dialog_owner = None;
                 self.definition_revision = self.definition_revision.wrapping_add(1);
                 self.menu_revision = self.menu_revision.wrapping_add(1);
             }
@@ -538,6 +575,12 @@ impl CoreStatus {
                 self.tune_status = None;
                 self.journal = None;
                 self.snapshots.clear();
+                self.clear_review();
+                self.pages_read = None;
+                self.connection = None;
+                self.link_lost = None;
+                self.realtime = false;
+                self.dialog_owner = None;
                 self.definition_revision = self.definition_revision.wrapping_add(1);
                 self.menu_revision = self.menu_revision.wrapping_add(1);
             }
@@ -614,6 +657,7 @@ impl CoreStatus {
                 self.link_lost = Some(reason);
                 self.realtime = false;
                 self.pending_connect = None;
+                self.clear_review();
             }
             Update::Disconnected => {
                 self.connection = None;
@@ -621,6 +665,7 @@ impl CoreStatus {
                 self.pending_connect = None;
                 // The last read still describes what the tune image holds.
                 self.realtime = false;
+                self.clear_review();
             }
             Update::PagesRead(summary) => {
                 self.pages_read = Some(summary);

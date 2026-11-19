@@ -76,6 +76,10 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
         if spec.is_controller_owned() || spec.no_msq_save {
             continue;
         }
+        if spec.scale.is_none() || spec.translate.is_none() {
+            // No presentation, so no file form and no value to send.
+            continue;
+        }
         if project.layout().is_alias(&spec.name) {
             // A view of bytes another variable owns; it follows that value.
             continue;
@@ -248,6 +252,20 @@ pub(super) fn resolve_conflicts(
             "read the ECU before resolving a conflict",
         );
     };
+    // Both choices save the project. A read-only project would adopt values it
+    // cannot keep, so refuse before touching the working image.
+    if project.is_read_only() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::TuneSaveFailed,
+            format!(
+                "the project is read-only: {}",
+                project.report().read_only_reasons().join("; ")
+            ),
+        );
+    }
 
     match resolution {
         ConflictResolution::UseEcu => {
@@ -257,6 +275,9 @@ pub(super) fn resolve_conflicts(
                     return refuse(events, report, op, FailureCode::SnapshotFailed, error);
                 }
             };
+            // Adopting changes the working image; a save that fails must not
+            // leave it adopted and the project file behind.
+            let backup = project.images().clone();
             if let Err(error) = project.images_mut().import(ram) {
                 return refuse(
                     events,
@@ -269,6 +290,7 @@ pub(super) fn resolve_conflicts(
             let saved = match save_resolution(project) {
                 Ok(path) => path,
                 Err(error) => {
+                    *project.images_mut() = backup;
                     return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
                 }
             };
@@ -287,13 +309,15 @@ pub(super) fn resolve_conflicts(
             );
         }
         ConflictResolution::UseProject => {
-            project.images_mut().keep_working();
+            // Save first: a save that fails must leave the difference undecided
+            // so the write gate still refuses it.
             let saved = match save_resolution(project) {
                 Ok(path) => path,
                 Err(error) => {
                     return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
                 }
             };
+            project.images_mut().keep_working();
             record_local_journal(
                 session,
                 journal_dir,

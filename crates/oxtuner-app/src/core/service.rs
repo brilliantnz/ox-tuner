@@ -49,6 +49,11 @@ impl CoreService {
         &cx.global::<Self>().status
     }
 
+    /// The status for the command and event layers to update.
+    pub(crate) fn status_mut(cx: &mut App) -> &mut CoreStatus {
+        &mut cx.global_mut::<Self>().status
+    }
+
     /// A handle for sending commands, or `None` when the core failed to start.
     ///
     /// The app keeps running without a core (see [`start`]); a command sent

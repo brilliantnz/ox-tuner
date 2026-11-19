@@ -77,6 +77,8 @@ pub(super) fn diff_writable_values(
         if variable.is_controller_owned()
             || variable.no_msq_save
             || variable.address.is_none()
+            || variable.scale.is_none()
+            || variable.translate.is_none()
             || !variable.bit_field_round_trips()
         {
             continue;

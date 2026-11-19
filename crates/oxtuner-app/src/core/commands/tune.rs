@@ -1,16 +1,17 @@
 //! Tune writes, burns, reverts and the derived tune status.
 
 use gpui_kit::App;
-use oxtuner_core::FailureCode;
+use oxtuner_core::{FailureCode, OpId};
 
 use super::{handle_or_report, send};
+use crate::core::ResolveChain;
 use crate::settings::preferences::AppSettings;
 
 /// Asks the core to sync the tune values that differ from ECU RAM.
 ///
-/// Returns whether the command was queued; a caller that chains commands must
-/// stop when it was not.
-pub(crate) fn write_to_ram(cx: &mut App) -> bool {
+/// Returns the op the answer will carry; a caller that chains commands matches
+/// it so another command's answer cannot advance the chain.
+pub(crate) fn write_to_ram(cx: &mut App) -> Option<OpId> {
     send(cx, FailureCode::WriteRefused, "write-to-ram", |handle| {
         handle.write_to_ram(Vec::new())
     })
@@ -18,9 +19,8 @@ pub(crate) fn write_to_ram(cx: &mut App) -> bool {
 
 /// Asks the core to burn RAM to flash.
 ///
-/// Returns whether the command was queued; a caller that chains commands must
-/// stop when it was not.
-pub(crate) fn burn_to_flash(cx: &mut App) -> bool {
+/// Returns the op the answer will carry, for the same reason.
+pub(crate) fn burn_to_flash(cx: &mut App) -> Option<OpId> {
     send(cx, FailureCode::BurnRefused, "burn-to-flash", |handle| {
         handle.burn_to_flash(Vec::new())
     })
@@ -52,7 +52,7 @@ pub(crate) fn set_writes_enabled(enabled: bool, cx: &mut App) {
         move |handle| handle.set_writes_enabled(enabled),
     );
 
-    if accepted {
+    if accepted.is_some() {
         AppSettings::set_writes_enabled(cx, enabled);
     }
 }
@@ -71,20 +71,19 @@ pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) 
         "run-controller-command",
         move |handle| handle.run_controller_command(dialog, command),
     )
+    .is_some()
 }
 
 /// Resolves cells that differ between the working image and the ECU.
-pub(crate) fn resolve_conflicts(resolution: oxtuner_core::ConflictResolution, cx: &mut App) {
-    // The project choice promises a write and a burn; the event loop runs them
-    // after the resolution is answered and stops at the first failure.
-    let applies = resolution == oxtuner_core::ConflictResolution::UseProject;
-    if applies {
-        cx.global_mut::<crate::core::CoreService>()
-            .status
-            .applying_project_tune = true;
-    }
-
-    let accepted = send(
+///
+/// The project choice promises a write and a burn; the event loop runs them
+/// after this resolution is answered and stops at the first failure. The chain
+/// remembers the op, so a different command's answer cannot advance it.
+pub(crate) fn resolve_conflicts(
+    resolution: oxtuner_core::ConflictResolution,
+    cx: &mut App,
+) -> Option<OpId> {
+    let op = send(
         cx,
         FailureCode::WriteRefused,
         "resolve-conflicts",
@@ -94,11 +93,16 @@ pub(crate) fn resolve_conflicts(resolution: oxtuner_core::ConflictResolution, cx
             ))
         },
     );
-    if applies && !accepted {
-        cx.global_mut::<crate::core::CoreService>()
-            .status
-            .applying_project_tune = false;
-    }
+
+    let chain = (resolution == oxtuner_core::ConflictResolution::UseProject)
+        .then_some(op)
+        .flatten()
+        .map(ResolveChain::Resolve);
+    cx.global_mut::<crate::core::CoreService>()
+        .status
+        .resolve_chain = chain;
+
+    op
 }
 
 /// Clears a halted write path after the user reviewed the failure.

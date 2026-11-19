@@ -42,7 +42,8 @@ pub(crate) use commands::{
 pub(crate) use service::CoreService;
 pub use service::start;
 pub(crate) use status::{
-    CoreStatus, PendingProject, PendingProjectKind, ProbeAttempt, TestingConnection,
+    CoreStatus, DialogOwner, PendingProject, PendingProjectKind, ProbeAttempt, ResolveChain,
+    TestingConnection,
 };
 
 /// The port snapshot the core last published.

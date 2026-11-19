@@ -20,6 +20,12 @@ impl OpId {
     /// The first id a fresh core hands out.
     pub(crate) const FIRST: u64 = 1;
 
+    /// The first id, as a value a test can hold.
+    ///
+    /// Clients never create an id; a test that compares chain steps needs one.
+    #[doc(hidden)]
+    pub const FIRST_ID: Self = Self(1);
+
     pub(crate) const fn new(raw: u64) -> Self {
         Self(raw)
     }
