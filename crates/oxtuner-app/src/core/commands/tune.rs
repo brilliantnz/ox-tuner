@@ -7,17 +7,23 @@ use super::{handle_or_report, send};
 use crate::settings::preferences::AppSettings;
 
 /// Asks the core to sync the tune values that differ from ECU RAM.
-pub(crate) fn write_to_ram(cx: &mut App) {
+///
+/// Returns whether the command was queued; a caller that chains commands must
+/// stop when it was not.
+pub(crate) fn write_to_ram(cx: &mut App) -> bool {
     send(cx, FailureCode::WriteRefused, "write-to-ram", |handle| {
         handle.write_to_ram(Vec::new())
-    });
+    })
 }
 
 /// Asks the core to burn RAM to flash.
-pub(crate) fn burn_to_flash(cx: &mut App) {
+///
+/// Returns whether the command was queued; a caller that chains commands must
+/// stop when it was not.
+pub(crate) fn burn_to_flash(cx: &mut App) -> bool {
     send(cx, FailureCode::BurnRefused, "burn-to-flash", |handle| {
         handle.burn_to_flash(Vec::new())
-    });
+    })
 }
 
 /// Discards the unsaved cells one document owns.

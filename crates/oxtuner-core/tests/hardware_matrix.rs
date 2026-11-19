@@ -176,9 +176,9 @@ impl Harness {
 
     /// Chooses the project tune when the ECU's tune differs.
     ///
-    /// The read reports the difference; this is the dialog's "keep project"
-    /// action, and every write or burn needs it first.
-    fn keep_working(&self) {
+    /// The read reports the difference; this is the dialog's "use project
+    /// tune" action, and every write or burn needs it first.
+    fn use_project_tune(&self) {
         let op = self
             .handle
             .execute(oxtuner_core::CoreCommand::Tune(
@@ -368,6 +368,11 @@ fn prepare_project() -> (PathBuf, PathBuf) {
         copy_dir(&source, &project).expect("the project copies");
         fs::copy(project.join("CurrentTune.msq"), &before).expect("the before tune copies");
     }
+    assert!(
+        before.exists(),
+        "{} is missing; delete the matrix folder so the first stage copies it again",
+        before.display()
+    );
 
     (project, before)
 }
@@ -703,7 +708,7 @@ fn stage_restore() {
     // The write needs the ECU image; the imported tune is the working image,
     // which is what gets written.
     harness.read_all();
-    harness.keep_working();
+    harness.use_project_tune();
     assert!(harness.rpm() < 1000.0, "the engine is running");
 
     let written = harness.write();
@@ -882,7 +887,7 @@ fn stage_after_interrupt() {
 
     // The imported tune is the target; the read makes the ECU image known so
     // the delta is what the interrupted session left behind.
-    harness.keep_working();
+    harness.use_project_tune();
     let written = harness.write();
     assert!(written.verified, "the recovery write did not verify");
     let burned = harness.burn();

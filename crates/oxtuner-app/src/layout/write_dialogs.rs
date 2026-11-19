@@ -160,7 +160,7 @@ fn burn_body(flash_known: bool, pending: usize, pages: usize) -> SharedString {
             cells = pending.to_string()
         )
     } else {
-        t!("app.burn.body_unknown")
+        t!("app.burn.body_unknown", pages = pages.to_string())
     }
 }
 
@@ -659,8 +659,20 @@ fn conflict_table(
                 .text_color(muted)
                 .border_b_1()
                 .border_color(border)
-                .child(div().w(px(200.)).child(t!("app.conflict.column_variable")))
-                .child(div().w(px(64.)).child(t!("app.conflict.column_cell")))
+                .child(
+                    div()
+                        .w(px(200.))
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("app.conflict.column_variable")),
+                )
+                .child(
+                    div()
+                        .w(px(64.))
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("app.conflict.column_cell")),
+                )
                 .child(div().flex_1().child(t!("app.conflict.column_project")))
                 .child(div().flex_1().child(t!("app.conflict.column_ecu"))),
         )
@@ -719,7 +731,15 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
     if read.conflicts.is_empty() {
         return;
     }
-    let ready = status.writes_enabled && status.connection.is_some();
+    let ready = status.writes_enabled
+        && status.connection.as_ref().is_some_and(|connection| {
+            connection.verdict == oxtuner_core::SignatureVerdict::Match && !connection.read_only
+        })
+        && status
+            .project
+            .as_ref()
+            .is_none_or(|project| !project.read_only)
+        && status.write_halted.is_none();
 
     let total = read.conflicts.len();
     let rows: Vec<oxtuner_core::ConflictReport> = read.conflicts.iter().take(10).cloned().collect();
@@ -766,9 +786,9 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     .gap_2()
                     .justify_end()
                     .child(
-                        Button::new("conflict-keep")
+                        Button::new("conflict-project")
                             .label(t!("app.conflict.keep"))
-                            .ghost()
+                            .primary()
                             .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
@@ -781,7 +801,7 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     .child(
                         Button::new("conflict-ecu")
                             .label(t!("app.conflict.use_ecu"))
-                            .primary()
+                            .outline()
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
                                     oxtuner_core::ConflictResolution::UseEcu,

@@ -78,7 +78,14 @@ pub(crate) fn diff_values(layout: &TuneLayout, baseline: &[Values], other: &[Val
         let (Some(left), Some(right)) = (baseline.get(index), other.get(index)) else {
             continue;
         };
-        let changed = left.changed_cells(right);
+        let changed = match (left, right) {
+            // A cell that goes on the wire is compared as the wire stores it;
+            // a PC-side value and text compare exactly.
+            (Values::Numbers(_), Values::Numbers(_)) if variable.ini_page().is_some() => {
+                left.changed_wire_cells(right, variable)
+            }
+            _ => left.changed_cells(right),
+        };
         if changed == 0 {
             continue;
         }

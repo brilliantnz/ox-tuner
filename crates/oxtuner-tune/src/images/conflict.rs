@@ -75,6 +75,7 @@ pub(super) fn diff_writable_values(
     let mut diff = TuneDiff::default();
     for (index, variable) in layout.variables().iter().enumerate() {
         if variable.is_controller_owned()
+            || variable.no_msq_save
             || variable.address.is_none()
             || !variable.bit_field_round_trips()
         {

@@ -543,7 +543,6 @@ impl CoreStatus {
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
-                self.clear_review();
                 self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
@@ -680,12 +679,17 @@ impl CoreStatus {
             }
             Update::Reverted(summary) => {
                 self.last_revert = Some(summary);
-                self.clear_review();
                 self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
             }
-            Update::TuneStatus(status) => self.tune_status = Some(status),
+            Update::TuneStatus(status) => {
+                // Only the core knows whether a difference is still undecided.
+                if status.conflicts == 0 {
+                    self.clear_review();
+                }
+                self.tune_status = Some(status);
+            }
             Update::WriteAccess {
                 enabled,
                 connection,

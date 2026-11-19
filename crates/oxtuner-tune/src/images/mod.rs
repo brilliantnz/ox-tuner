@@ -153,8 +153,6 @@ impl TuneImages {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
         self.ecu_unknown = false;
-        self.overlays
-            .retain(|_, overlay| *overlay != Overlay::WriteFailed);
         Ok(())
     }
 
@@ -338,9 +336,9 @@ impl TuneImages {
     ///
     /// A page-scoped write makes its own variables agree with RAM; a decision
     /// about a cell it did not send still stands.
-    pub fn clear_resolutions_for(&mut self, names: &[String]) {
+    pub fn clear_resolutions_for(&mut self, names: &[impl AsRef<str>]) {
         for name in names {
-            let Some(variable) = self.layout.index(name) else {
+            let Some(variable) = self.layout.index(name.as_ref()) else {
                 continue;
             };
             self.overlays.retain(|key, overlay| {
@@ -807,6 +805,7 @@ impl TuneImages {
 
         spec.owner != Owner::Pc
             && !spec.is_controller_owned()
+            && !spec.no_msq_save
             && spec.address.is_some()
             && !self.layout.is_alias_at(variable)
             && spec.bit_field_round_trips()
@@ -860,6 +859,15 @@ impl TuneImages {
                 Some(mapped) => self.state_at(owner, usize::try_from(mapped).unwrap_or(0)),
                 None => CellState::Unknown,
             };
+        }
+
+        // A value the write plan cannot send has no sync state to show.
+        if spec.is_controller_owned()
+            || spec.no_msq_save
+            || spec.address.is_none()
+            || !spec.bit_field_round_trips()
+        {
+            return CellState::NotApplicable;
         }
 
         if self.overlays.get(&CellRef { variable, index }) == Some(&Overlay::WriteFailed) {

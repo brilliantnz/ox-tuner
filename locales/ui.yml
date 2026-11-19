@@ -592,7 +592,7 @@ app:
     use_ecu_hint:
       en: Use ECU tune replaces the project's values with the ECU's and saves the project file.
     needs_writes:
-      en: Enable write access and connect before applying the project tune.
+      en: Connect a matching ECU, enable write access, and clear a halted write path before applying the project tune.
     keep:
       en: Use project tune (write and burn)
     use_ecu:
@@ -998,7 +998,7 @@ app:
     body:
       en: Burn %{pages} pages holding %{cells} RAM changes to flash.
     body_unknown:
-      en: Burn the ECU's RAM to flash. The project is saved and a snapshot is written first.
+      en: Burn %{pages} pages of the ECU's RAM to flash. Flash has not been verified since this connection.
     unsent:
       en: '%{cells} tune values are not in ECU RAM yet. Write them first; burning now would persist the older values.'
     conflicts:

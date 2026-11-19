@@ -537,18 +537,6 @@ pub(super) fn burn_to_flash(
         );
     }
 
-    // A burn makes the tune durable, so the project file records it too. A
-    // save that fails stops the burn instead of leaving the file behind.
-    if let Err(error) = project.save() {
-        return refuse(
-            events,
-            report,
-            op,
-            FailureCode::TuneSaveFailed,
-            format!("the burn needs the project saved first: {error}"),
-        );
-    }
-
     let burnable: Vec<u8> = project
         .definition()
         .pages
@@ -585,6 +573,21 @@ pub(super) fn burn_to_flash(
         chosen.dedup();
         chosen
     };
+
+    // A burn makes the tune durable, so the project file records it too.
+    // Every check that can refuse the burn has passed; a save that fails stops
+    // it instead of leaving the file behind.
+    if !project.images().status().unsaved.is_empty()
+        && let Err(error) = project.save()
+    {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::TuneSaveFailed,
+            format!("the burn needs the project saved first: {error}"),
+        );
+    }
 
     let snapshot = match snapshot::write(project, "burn") {
         Ok(path) => path,

@@ -241,7 +241,7 @@ impl Harness {
         self.wait(|event| event.op() == Some(op))
     }
 
-    fn keep_working(&self) {
+    fn use_project_tune(&self) {
         match self.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject) {
             Event::ConflictsResolved { .. } => {}
             other => panic!("expected a resolution, got {other:?}"),
@@ -324,7 +324,7 @@ fn a_write_round_trips_and_reads_back_verified() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(77.0);
 
     let event = core.write();
@@ -378,7 +378,7 @@ fn a_value_that_does_not_round_trip_still_burns() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
 
     // 14.7 stored at one decimal reads back as 14.700000000000001, so an exact
     // float comparison would leave this cell pending forever.
@@ -461,7 +461,7 @@ fn a_page_that_moved_under_the_writer_is_refused() {
     core.open(dir.path());
     core.connect_with(config, Some(oxtuner_core::LinkMode::Legacy));
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(77.0);
 
     let (kind, message) = failure(&core.write());
@@ -583,7 +583,7 @@ fn writes_are_off_by_default_and_the_switch_gates_them() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(50.0);
 
     let (kind, message) = failure(&core.write());
@@ -642,7 +642,7 @@ fn a_partial_write_fails_verification_and_halts_the_path() {
         ..SimConfig::default()
     });
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(90.0);
 
     let event = core.write();
@@ -782,7 +782,7 @@ fn the_poller_is_held_while_a_write_runs() {
         ..SimConfig::default()
     });
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(61.0);
 
     // `read_all` auto-starts polling; stop it and let an in-flight reply land so
@@ -840,7 +840,7 @@ fn a_link_loss_during_a_write_is_reported_and_halts() {
         ..SimConfig::default()
     });
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(88.0);
 
     let event = core.write();
@@ -862,7 +862,7 @@ fn snapshots_are_listed_through_the_core() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
-    core.keep_working();
+    core.use_project_tune();
     core.edit_cell(44.0);
     let event = core.write();
     assert!(matches!(event, Event::TuneWritten { .. }), "{event:?}");

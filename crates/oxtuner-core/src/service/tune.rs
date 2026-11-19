@@ -15,10 +15,6 @@ use super::*;
 /// turn "leave the ECU's tune alone" into a write of a different number — a
 /// definition's range is not the firmware's limit. Controller-owned values are
 /// not part of the write plan either. Returns how many cells changed.
-#[expect(
-    clippy::float_cmp,
-    reason = "a value needs sending only when the ECU's stored raw value differs exactly"
-)]
 pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
     let mut clamped: Vec<(String, usize, f64)> = Vec::new();
     {
@@ -34,10 +30,14 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
                 let Ok(value) = images.working().user_at(&spec.name, index) else {
                     continue;
                 };
-                if ram
-                    .user_at(&spec.name, index)
-                    .is_ok_and(|sent| sent == value)
-                {
+                let same_at_wire = match (
+                    images.working().raw_at(&spec.name, index),
+                    ram.raw_at(&spec.name, index),
+                ) {
+                    (Ok(wanted), Ok(sent)) => spec.same_wire_value(wanted, sent),
+                    _ => false,
+                };
+                if same_at_wire {
                     // The ECU holds this value; there is nothing to send.
                     continue;
                 }
@@ -73,7 +73,7 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
     let mut pages = std::collections::BTreeSet::new();
     let mut cells = 0usize;
     for spec in project.layout().variables() {
-        if spec.is_controller_owned() {
+        if spec.is_controller_owned() || spec.no_msq_save {
             continue;
         }
         if project.layout().is_alias(&spec.name) {

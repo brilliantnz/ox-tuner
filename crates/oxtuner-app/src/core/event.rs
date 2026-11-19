@@ -17,11 +17,27 @@ use super::status::{JournalView, TraceSaved, Update};
 const MILLIS_PER_SECOND: u32 = 1_000;
 
 /// The next command a "use project tune" choice runs.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplyStep {
     Write,
     Burn,
     Stop,
+}
+
+/// The step one update means for the resolve chain, if any.
+///
+/// Only the chain's own outcomes advance it: a refusal or an unrelated event
+/// ends nothing by itself, and a duplicate is not a new step.
+fn next_step(applying: bool, update: &Update) -> Option<ApplyStep> {
+    if !applying {
+        return None;
+    }
+    match update {
+        Update::ConflictsResolved => Some(ApplyStep::Write),
+        Update::Written(report) if report.verified => Some(ApplyStep::Burn),
+        Update::Burned(_) | Update::Failed(_) => Some(ApplyStep::Stop),
+        _ => None,
+    }
 }
 
 /// Writes the diagnostic anchor for the outcomes that carry a details action.
@@ -368,16 +384,10 @@ pub(super) fn apply(event: Event, cx: &mut App) {
     // which follows a connect has to show.
     let task_finished = matches!(&update, Update::Connected(_) | Update::Opened(_));
 
-    let apply_step = if cx.global::<CoreService>().status.applying_project_tune {
-        match &update {
-            Update::ConflictsResolved => Some(ApplyStep::Write),
-            Update::Written(report) if report.verified => Some(ApplyStep::Burn),
-            Update::Burned(_) | Update::Failed(_) => Some(ApplyStep::Stop),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let apply_step = next_step(
+        cx.global::<CoreService>().status.applying_project_tune,
+        &update,
+    );
 
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
@@ -430,8 +440,16 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         connect_to_simulator(cx);
     }
     match apply_step {
-        Some(ApplyStep::Write) => write_to_ram(cx),
-        Some(ApplyStep::Burn) => burn_to_flash(cx),
+        Some(ApplyStep::Write) => {
+            if !write_to_ram(cx) {
+                cx.global_mut::<CoreService>().status.applying_project_tune = false;
+            }
+        }
+        Some(ApplyStep::Burn) => {
+            // The chain has no step after the burn, whatever the queue does.
+            cx.global_mut::<CoreService>().status.applying_project_tune = false;
+            let _ = burn_to_flash(cx);
+        }
         Some(ApplyStep::Stop) => {
             cx.global_mut::<CoreService>().status.applying_project_tune = false;
         }
@@ -494,6 +512,30 @@ fn finishes_open(update: &Update, rejected: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_resolve_chain_moves_only_on_its_own_outcomes() {
+        assert_eq!(
+            next_step(true, &Update::ConflictsResolved),
+            Some(ApplyStep::Write)
+        );
+        assert_eq!(
+            next_step(
+                true,
+                &Update::Failed(oxtuner_core::Failure {
+                    code: FailureCode::WriteRefused,
+                    message: String::new(),
+                }),
+            ),
+            Some(ApplyStep::Stop)
+        );
+        assert_eq!(
+            next_step(false, &Update::ConflictsResolved),
+            None,
+            "a chain that is not running stays still"
+        );
+        assert_eq!(next_step(true, &Update::Nothing), None);
+    }
 
     #[test]
     fn a_rejection_ends_the_pending_project() {

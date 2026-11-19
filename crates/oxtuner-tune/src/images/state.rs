@@ -27,7 +27,8 @@ pub enum CellState {
     /// The working value equals the file but the ECU holds something else, or a
     /// reconnect found the ECU changed. Needs a decision, never an auto-write.
     Conflict,
-    /// A PC-side variable: stored only in the tune file, never sent.
+    /// A PC-side variable, or a value the write plan cannot send: it has no
+    /// sync state to show.
     NotApplicable,
 }
 
