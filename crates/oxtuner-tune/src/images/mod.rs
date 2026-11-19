@@ -372,7 +372,7 @@ impl TuneImages {
     ///
     /// A file names nearly every constant, so "the file carried it" is not the
     /// same as "the merge moved it". Only a changed cell loses its decision.
-    pub fn clear_resolutions_changed_since(&mut self, before: &Tune, names: &[String]) {
+    pub(crate) fn clear_resolutions_changed_since(&mut self, before: &Tune, names: &[String]) {
         for name in names {
             let Some(variable) = self.layout.index(name) else {
                 continue;

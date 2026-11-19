@@ -110,7 +110,10 @@ impl Project {
                 Ok(text) => text,
                 // The ECU owns this value and the file cannot express it; the
                 // file's own text stays rather than wedging every later save.
-                Err(_) if spec.is_controller_owned() => continue,
+                Err(error) if spec.is_controller_owned() => {
+                    tracing::debug!(%name, %error, "a controller-owned value stays as the file had it");
+                    continue;
+                }
                 Err(source) => {
                     return Err(ProjectError::Unrepresentable {
                         name: name.clone(),
@@ -213,6 +216,11 @@ impl Project {
             let Some(spec) = self.layout().variable(name) else {
                 continue;
             };
+            if spec.is_controller_owned() || spec.scale.is_none() || spec.translate.is_none() {
+                // The ECU owns it, or the definition has no presentation for
+                // it; the sidecar keeps its text rather than wedging a save.
+                continue;
+            }
             let Some(values) = self.tune().value(name) else {
                 continue;
             };
