@@ -35,7 +35,11 @@ fn next_step(applying: bool, update: &Update) -> Option<ApplyStep> {
     match update {
         Update::ConflictsResolved => Some(ApplyStep::Write),
         Update::Written(report) if report.verified => Some(ApplyStep::Burn),
-        Update::Burned(_) | Update::Failed(_) => Some(ApplyStep::Stop),
+        Update::Burned(_)
+        | Update::Failed(_)
+        | Update::Opened(_)
+        | Update::Disconnected
+        | Update::LinkLost(_) => Some(ApplyStep::Stop),
         _ => None,
     }
 }
@@ -531,6 +535,11 @@ mod tests {
                 }),
             ),
             Some(ApplyStep::Stop)
+        );
+        assert_eq!(
+            next_step(true, &Update::LinkLost(String::new())),
+            Some(ApplyStep::Stop),
+            "a chain cannot outlive its link"
         );
         assert_eq!(
             next_step(false, &Update::ConflictsResolved),

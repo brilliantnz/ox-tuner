@@ -593,6 +593,8 @@ app:
       en: Use ECU tune replaces the project's values with the ECU's and saves the project file.
     needs_writes:
       en: Connect a matching ECU, enable write access, and clear a halted write path before applying the project tune.
+    read_only:
+      en: The project is read-only, so the difference cannot be resolved or saved here.
     keep:
       en: Use project tune (write and burn)
     use_ecu:

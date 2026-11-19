@@ -731,14 +731,15 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
     if read.conflicts.is_empty() {
         return;
     }
+    let read_only = status
+        .project
+        .as_ref()
+        .is_some_and(|project| project.read_only);
     let ready = status.writes_enabled
         && status.connection.as_ref().is_some_and(|connection| {
             connection.verdict == oxtuner_core::SignatureVerdict::Match && !connection.read_only
         })
-        && status
-            .project
-            .as_ref()
-            .is_none_or(|project| !project.read_only)
+        && !read_only
         && status.write_halted.is_none();
 
     let total = read.conflicts.len();
@@ -772,7 +773,15 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                             .text_color(muted)
                             .child(t!("app.conflict.use_ecu_hint")),
                     )
-                    .when(!ready, |this| {
+                    .when(read_only, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(t!("app.conflict.read_only")),
+                        )
+                    })
+                    .when(!read_only && !ready, |this| {
                         this.child(
                             div()
                                 .text_xs()
@@ -802,6 +811,7 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                         Button::new("conflict-ecu")
                             .label(t!("app.conflict.use_ecu"))
                             .outline()
+                            .disabled(read_only)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
                                     oxtuner_core::ConflictResolution::UseEcu,
