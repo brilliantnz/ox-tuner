@@ -172,6 +172,45 @@ pub(super) fn unsent_ambiguous_page(project: &Project, variables: &[String]) -> 
     })
 }
 
+/// The first target page holding values the shared bytes cannot both carry.
+///
+/// The refusal is page-wide, like the ambiguous one. Writing the value that
+/// happens to be declared first leaves the other pending, and the next write
+/// would put its bytes back, so the page stays unwritable until the two agree.
+pub(super) fn conflicting_value_page(project: &Project, targets: &[u8]) -> Option<ValueConflict> {
+    let layout = project.layout();
+    let working = project.images().working();
+
+    targets.iter().find_map(|page| {
+        let page = IniPage::new(*page)?;
+        layout.value_conflicts(page, working).into_iter().next()
+    })
+}
+
+/// The first page among `variables` holding values the shared bytes cannot both
+/// carry.
+///
+/// A burn is refused before it can point the user at a write that would always
+/// be refused for the same page. Each page is checked once, however many of its
+/// variables are still unsent.
+pub(super) fn unsent_conflicting_value(
+    project: &Project,
+    variables: &[String],
+) -> Option<ValueConflict> {
+    let layout = project.layout();
+    let working = project.images().working();
+    let mut checked = std::collections::BTreeSet::new();
+
+    variables.iter().find_map(|name| {
+        let page = layout.variable(name)?.ini_page()?;
+        if !checked.insert(page.get()) {
+            return None;
+        }
+
+        layout.value_conflicts(page, working).into_iter().next()
+    })
+}
+
 /// Counts edits that have not reached ECU RAM.
 ///
 /// A burn persists whatever RAM holds, so an edit that is only in the working

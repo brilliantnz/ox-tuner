@@ -418,6 +418,122 @@ pub fn patch_page(
     Ok(bytes)
 }
 
+/// One variable's claim on the bytes it covers.
+///
+/// `bytes` holds the value the codec would write there, and `mask` is `0xff`
+/// where the variable owns the bit. A bit field owns only its own range, so
+/// several fields can split one word and still agree on every byte.
+#[derive(Debug, Clone)]
+pub(crate) struct Claim {
+    /// The variable's first byte in its page.
+    pub(crate) start: usize,
+    /// The value each covered byte would hold.
+    pub(crate) bytes: Vec<u8>,
+    /// `0xff` where the variable owns the bit, `0x00` where it does not.
+    pub(crate) mask: Vec<u8>,
+}
+
+impl Claim {
+    /// Whether this claim and `other` agree about every bit both cover.
+    ///
+    /// A bit only one of the two owns is left to that one, which is how a bit
+    /// field merges into a word another constant fills. A bit both own must
+    /// carry the same value: one page image cannot hold both.
+    pub(crate) fn agrees_with(&self, other: &Self) -> bool {
+        let (earlier, later) = if self.start <= other.start {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let shift = later.start - earlier.start;
+        let shared = later
+            .bytes
+            .len()
+            .min(earlier.bytes.len().saturating_sub(shift));
+
+        (0..shared).all(|index| {
+            let owned = earlier.mask[shift + index] & later.mask[index];
+            (earlier.bytes[shift + index] & owned) == (later.bytes[index] & owned)
+        })
+    }
+}
+
+/// What `variable` would write across its own span, and which bits it owns.
+///
+/// Returns `None` for anything the page codec would not write: text, a
+/// variable with no resolved address, a bit field the codec refuses, a type
+/// the wire carries as something other than a number, or a value the tune does
+/// not hold. Such a variable never reaches the page image, so it cannot
+/// disagree with a neighbour over what the bytes should say.
+pub(crate) fn claim_of(
+    variable: &VariableSpec,
+    endianness: Endianness,
+    tune: &Tune,
+) -> Option<Claim> {
+    if variable.data_type == DataType::Ascii {
+        return None;
+    }
+
+    let width = type_width(variable.data_type).min(8);
+    if width == 0 {
+        return None;
+    }
+    let start = usize::try_from(variable.address?).ok()?;
+    let mut bytes = Vec::new();
+    let mut mask = Vec::new();
+
+    match variable.shape {
+        // Text is one blob the codec owns end to end and the overlap rules
+        // treat it as a single field, so there is no per-bit claim to compare.
+        EntryShape::Text { .. } => return None,
+        EntryShape::Bits { low, high, .. } => {
+            if !bit_field_can_round_trip(variable.data_type, low, high) {
+                return None;
+            }
+
+            let value = tune.raw_at(&variable.name, 0).ok()?;
+            // The field is merged into a zero word here, so the bits it does
+            // not own stay outside its claim rather than being written as zero.
+            let word = merge_bits(0.0, value, variable.data_type, low, high);
+            let mut wanted = vec![0u8; width];
+            ordered_bytes(
+                wire_bytes(word, variable.data_type),
+                width,
+                endianness,
+                &mut wanted,
+            );
+
+            let mut owned = vec![0u8; width];
+            ordered_bytes(
+                mask_wire_bytes(bit_mask(low, high), variable.data_type),
+                width,
+                endianness,
+                &mut owned,
+            );
+
+            bytes.extend_from_slice(&wanted);
+            mask.extend_from_slice(&owned);
+        }
+        EntryShape::Scalar | EntryShape::Array { .. } => {
+            for element in 0..variable.element_count() {
+                let raw = tune.raw_at(&variable.name, element).ok()?;
+                let mut wanted = vec![0u8; width];
+                ordered_bytes(
+                    wire_bytes(raw, variable.data_type),
+                    width,
+                    endianness,
+                    &mut wanted,
+                );
+
+                bytes.extend_from_slice(&wanted);
+                mask.extend(std::iter::repeat_n(0xff, width));
+            }
+        }
+    }
+
+    (!bytes.is_empty()).then_some(Claim { start, bytes, mask })
+}
+
 /// A variable's byte offset in its page, when it can be placed.
 fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
     let address = variable.address?;
@@ -581,14 +697,36 @@ fn write_value(
     }
 
     let little = wire_bytes(raw, data_type);
+    ordered_bytes(little, width, endianness, &mut bytes[start..end]);
+}
+
+/// Copies the low `width` bytes of a little-endian word into `out`.
+///
+/// A big-endian link reverses them, which is the one byte-order rule the page
+/// codec applies to every value it writes.
+fn ordered_bytes(little: [u8; 8], width: usize, endianness: Endianness, out: &mut [u8]) {
+    let width = width.min(little.len()).min(out.len());
     match endianness {
-        Endianness::Little => bytes[start..end].copy_from_slice(&little[..width]),
+        Endianness::Little => out[..width].copy_from_slice(&little[..width]),
         Endianness::Big => {
             for index in 0..width {
-                bytes[start + index] = little[width - 1 - index];
+                out[index] = little[width - 1 - index];
             }
         }
     }
+}
+
+/// A bit mask as the little-endian bytes of its storage word.
+///
+/// The mask is a bit pattern, not a value: a field over the top bit of a
+/// signed word covers `0xff` there, and [`wire_bytes`] would clamp that
+/// pattern to the signed range instead of keeping it.
+fn mask_wire_bytes(mask: u32, data_type: DataType) -> [u8; 8] {
+    let width = type_width(data_type).min(8);
+    let pattern = u64::from(mask).to_le_bytes();
+    let mut buffer = [0u8; 8];
+    buffer[..width].copy_from_slice(&pattern[..width]);
+    buffer
 }
 
 /// One raw value as the wire stores it, least significant byte first.

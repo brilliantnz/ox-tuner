@@ -331,6 +331,108 @@ straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
         );
     }
 
+    const PEERS: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    fn peer_images() -> (TuneImages, Tune) {
+        let definition = parse_str(PEERS, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        // A file builds its own layout allocation, as a real import does.
+        let file_definition = parse_str(PEERS, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+
+        (images, Tune::new(file_layout))
+    }
+
+    #[test]
+    fn a_file_carrying_two_values_for_one_byte_is_refused() {
+        let (mut images, mut imported) = peer_images();
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 200.0)
+            .expect("the second takes a value");
+
+        let error = images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect_err("one byte cannot carry both values");
+
+        assert!(
+            matches!(error, TuneError::ConflictingValues { .. }),
+            "the refusal names the pair: {error}"
+        );
+    }
+
+    #[test]
+    fn a_refused_file_leaves_the_working_image_alone() {
+        let (mut images, mut imported) = peer_images();
+        images
+            .working_mut()
+            .set_image_raw("first", 0, 7.0)
+            .expect("the image holds a value");
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 200.0)
+            .expect("the second takes a value");
+
+        let _ = images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect_err("the import is refused");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            7.0,
+            "a refused import must not move a single cell"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_peers_agree_merges() {
+        let (mut images, mut imported) = peer_images();
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 100.0)
+            .expect("the second takes a value");
+
+        images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect("the two values agree");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            100.0
+        );
+        assert_eq!(
+            images
+                .working()
+                .raw_at("second", 0)
+                .expect("the image reads"),
+            100.0
+        );
+    }
+
     #[test]
     fn a_page_a_text_field_overlaps_keeps_what_the_file_carried() {
         let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");

@@ -730,7 +730,14 @@ impl TuneImages {
         // image's layout; the file does not change while pages are merged.
         let mut source: Option<Tune> = None;
 
-        for page in pages {
+        // A file is judged on what it states, not on what the codec settles
+        // afterwards. Two values that share bytes can only both stand when they
+        // agree, and a merge would otherwise pick a winner by declaration
+        // order, so the file is refused instead.
+        let stated = self.stated_values(&merged, tune, applied)?;
+        self.reject_conflicting_values(&pages, &stated)?;
+
+        for &page in &pages {
             // A page whose numeric constants share bytes with no owner keeps
             // the file's values as written, and its views follow their owners.
             // A file that says nothing about the page leaves it alone, like the
@@ -836,11 +843,75 @@ impl TuneImages {
             resolved.push(spec.name.clone());
         }
 
+        // Two values that share bytes can only both stand when they agree. The
+        // page codec would settle such a pair by declaration order, so the
+        // merge is refused instead of quietly dropping one of them.
+        self.reject_conflicting_values(&pages, &merged)?;
+
         self.working.adopt_values(&merged)?;
         // The imported values are new; a decision about a value the merge
         // changed does not carry over. A difference it did not touch still
         // stands, even when the file named the variable.
         self.clear_resolutions_changed_since(&before, &resolved);
+        Ok(())
+    }
+
+    /// The values as the file states them, laid over what the image holds.
+    ///
+    /// Everything the file carried takes the file's own value, and anything it
+    /// left out keeps the one the image already has. That is what the merge
+    /// means before the page codec has settled anything, which is the only
+    /// moment where two values that share bytes can still be seen disagreeing.
+    fn stated_values(
+        &self,
+        image: &Tune,
+        tune: &Tune,
+        applied: &[String],
+    ) -> Result<Tune, TuneError> {
+        let mut stated = image.snapshot();
+
+        for name in applied {
+            if self.layout.variable(name).is_none() {
+                continue;
+            }
+
+            match tune.value(name) {
+                Some(Values::Numbers(numbers)) => {
+                    for (index, raw) in numbers.iter().enumerate() {
+                        stated.set_image_raw(name, index, *raw)?;
+                    }
+                }
+                Some(Values::Text(text)) => {
+                    stated.set_image_text(name, text)?;
+                }
+                // The file names a constant it carries no value for.
+                None => {}
+            }
+        }
+
+        Ok(stated)
+    }
+
+    /// Refuses a merge that leaves two values fighting over the same bits.
+    ///
+    /// Sharing bytes is legal, and the codec merges a bit field into a word
+    /// another constant fills. What it cannot do is carry two different values
+    /// for one bit, so a file that asks for that is refused whole instead of
+    /// being settled by the order the file happens to list its constants in.
+    fn reject_conflicting_values(&self, pages: &[IniPage], stated: &Tune) -> Result<(), TuneError> {
+        for &page in pages {
+            let Some(conflict) = self.layout.value_conflicts(page, stated).into_iter().next()
+            else {
+                continue;
+            };
+
+            return Err(TuneError::ConflictingValues {
+                page,
+                first: conflict.first,
+                second: conflict.second,
+            });
+        }
+
         Ok(())
     }
 

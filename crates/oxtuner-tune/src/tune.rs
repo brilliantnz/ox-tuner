@@ -112,6 +112,15 @@ pub enum TuneError {
         /// The first character that does not fit.
         character: char,
     },
+    /// Two variables sharing bytes hold values the bytes cannot both carry.
+    ConflictingValues {
+        /// The page holding the shared bytes.
+        page: IniPage,
+        /// The first variable.
+        first: String,
+        /// The second variable.
+        second: String,
+    },
 }
 
 impl std::fmt::Display for TuneError {
@@ -146,6 +155,15 @@ impl std::fmt::Display for TuneError {
             Self::TextNotLatin1 { name, character } => write!(
                 formatter,
                 "`{name}` contains {character:?}, which has no ISO-8859-1 byte"
+            ),
+            Self::ConflictingValues {
+                page,
+                first,
+                second,
+            } => write!(
+                formatter,
+                "`{first}` and `{second}` hold different values for the bytes they share on \
+                 page {page}, and one value cannot carry both"
             ),
         }
     }

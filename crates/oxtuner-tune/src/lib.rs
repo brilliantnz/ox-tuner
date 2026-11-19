@@ -85,7 +85,7 @@ pub use images::{
 };
 pub use layout::{
     EntryShape, IssueSeverity, LayoutIssue, LayoutIssueKind, Owner, PageLayout, TuneLayout,
-    VariableSpec,
+    ValueConflict, VariableSpec,
 };
 pub use page::{IniPage, MsqPage};
 pub use tune::{EditOutcome, Tune, TuneError};

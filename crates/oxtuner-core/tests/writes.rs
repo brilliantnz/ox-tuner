@@ -395,6 +395,65 @@ fn a_page_with_overlapping_constants_is_never_written() {
 }
 
 #[test]
+fn a_page_whose_peers_disagree_is_never_written() {
+    // `overlapA` covers exactly the bytes `veTable` does, so the two are peers
+    // and one page image can hold only one of their values. Editing the table
+    // alone leaves the pair disagreeing, and a write would settle it by
+    // declaration order.
+    let dir = TempDir::with_constants(
+        "peers",
+        "overlapA = array, U08, 0, [2x2], \"%\", 1, 0, 0, 255, 0\n",
+    );
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+    core.use_project_tune();
+    core.edit_cell(77.0);
+
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
+    assert!(
+        message.contains("veTable") && message.contains("overlapA"),
+        "the refusal names the two constants: {message}"
+    );
+
+    // The refusal comes before the journal and the snapshot, so the write
+    // leaves neither behind. The conflict resolution above writes its own
+    // entries, which are not this write's.
+    let (_, entries) = core.journal();
+    assert!(
+        entries.iter().all(|entry| entry.operation != "write"),
+        "a refused write must not reach the journal: {entries:?}"
+    );
+    let write_snapshots = fs::read_dir(dir.snapshots()).map_or_else(
+        |_| 0,
+        |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("-write-"))
+                .count()
+        },
+    );
+    assert_eq!(
+        write_snapshots, 0,
+        "a refused write must not snapshot first"
+    );
+
+    // A burn cannot persist RAM while the working image holds two values for
+    // one byte either, and it names the pair instead of asking for a write
+    // that would always be refused.
+    let (kind, message) = failure(&core.burn());
+    assert_eq!(kind, FailureCode::BurnRefused);
+    assert!(
+        message.contains("hold different values"),
+        "a burn must name the reason: {message}"
+    );
+
+    core.close();
+}
+
+#[test]
 fn a_write_round_trips_and_reads_back_verified() {
     let dir = TempDir::new("verified");
     let core = Harness::start(true);
