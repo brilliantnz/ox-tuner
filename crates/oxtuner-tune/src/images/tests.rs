@@ -138,6 +138,58 @@ data3 = bits, U08, 3, [0:7]
     }
 
     #[test]
+    fn a_file_that_writes_only_a_view_moves_its_owner() {
+        let mut images = aliased_images();
+        let mut imported = aliased_tune(&images);
+        imported
+            .set_image_raw("data0", 0, 5.0)
+            .expect("the view takes a value");
+
+        images
+            .import_applied(&imported, &["data0".to_owned()])
+            .expect("import");
+
+        assert_eq!(
+            images.working().raw_at("data", 0).unwrap(),
+            5.0,
+            "the owner follows the byte the view wrote"
+        );
+        assert_eq!(images.working().scalar_raw("data0").unwrap(), 5.0);
+        assert_eq!(
+            images.working().raw_at("data", 1).unwrap(),
+            0.0,
+            "a byte the file did not write keeps its value"
+        );
+    }
+
+    #[test]
+    fn a_view_shows_the_state_of_the_element_it_covers() {
+        let mut images = aliased_images();
+        images
+            .set_ecu_ram(aliased_tune(&images))
+            .expect("same layout");
+        images
+            .set_ecu_flash(aliased_tune(&images))
+            .expect("same layout");
+
+        images
+            .working_mut()
+            .set_image_raw("data", 1, 9.0)
+            .expect("the array takes a value");
+
+        assert_eq!(
+            images.cell_state("data0", 0, 0).unwrap(),
+            CellState::Synced,
+            "byte 0 did not change"
+        );
+        assert_eq!(
+            images.cell_state("data1", 0, 0).unwrap(),
+            CellState::LocalDirty,
+            "byte 1 is the view's element"
+        );
+    }
+
+    #[test]
     fn without_an_ecu_read_everything_is_unknown() {
         let images = images();
         assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Unknown);

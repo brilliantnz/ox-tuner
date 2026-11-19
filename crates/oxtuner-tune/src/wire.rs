@@ -99,7 +99,7 @@ pub fn decode_page(
                 };
                 let text: String = slice.iter().copied().map(char::from).collect();
                 if tune
-                    .set_text(&variable.name, text.trim_end_matches('\0'))
+                    .set_image_text(&variable.name, text.trim_end_matches('\0'))
                     .is_ok()
                 {
                     report.decoded += 1;
@@ -575,6 +575,9 @@ fn write_value(
         return;
     }
 
+    if data_type == DataType::Ascii {
+        return;
+    }
     let little = wire_bytes(raw, data_type);
     match endianness {
         Endianness::Little => bytes[start..end].copy_from_slice(&little[..width]),

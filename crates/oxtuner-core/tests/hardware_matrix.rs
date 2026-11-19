@@ -10,7 +10,7 @@
 //! stage_cold_boot      S7     power-cycle, then prove flash by CRC
 //! stage_restore        S8a    revert to the saved tune, write, burn
 //! stage_restore_check  S8b    power-cycle, then prove the baseline is back
-//! stage_interrupt      S9a    import and burn, then pull the cable
+//! stage_interrupt      S9a    edit a cell and burn, then pull the cable
 //! stage_after_interrupt S9b   replug, check, recover, burn, power-cycle
 //! stage_final_check    S9c    prove the baseline is back
 //! ```
@@ -588,10 +588,12 @@ fn stage_format() {
     );
 
     let after_write = harness.status();
-    println!(
-        "S4b: {} pending after the write: {:?}",
-        after_write.pending_write.cells, after_write.pending_write.changed_variables
+    assert_eq!(
+        after_write.pending_write.cells, 0,
+        "the write left cells pending: {:?}",
+        after_write.pending_write.changed_variables
     );
+    println!("S4b: 0 pending after the write");
 
     // S5 - the whole tune to flash, in this same session. A port reopen resets
     // the board and the firmware reloads its config from EEPROM, so a RAM change

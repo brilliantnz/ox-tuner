@@ -450,8 +450,19 @@ impl TuneImages {
 
         for page in pages {
             // A page that overlaps text with numbers cannot be decoded back
-            // without reading the overlap as text; its values stay as applied.
+            // without reading the overlap as text. Its values are adopted as
+            // the file carried them, so nothing the file wrote is dropped.
             if self.layout.page_has_text_overlap(page) {
+                let Some(page_layout) = self.layout.page(page) else {
+                    continue;
+                };
+                let names: Vec<&str> = page_layout
+                    .variables
+                    .iter()
+                    .map(|index| self.layout.variables()[*index].name.as_str())
+                    .collect();
+                merged.adopt_named(tune, &names)?;
+
                 continue;
             }
 

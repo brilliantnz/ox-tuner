@@ -668,7 +668,7 @@ fn load_entry(
                     text.chars().count()
                 ));
             }
-            tune.set_text(&spec.name, &text)
+            tune.set_image_text(&spec.name, &text)
                 .map_err(|error| error.to_string())
         }
         EntryShape::Bits { .. } => {
@@ -1739,9 +1739,7 @@ serial = bits, U08, 1, [3:6], "Generic (Fixed List)". "Generic (ini File)". "CAN
         load(&Msq::parse(MSQ.as_bytes()).unwrap(), definition())
     }
 
-    #[test]
-    fn a_file_without_its_alias_leaves_the_view_to_the_array() {
-        const ALIASED: &str = r#"
+    const ALIASED_DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
 
@@ -1755,6 +1753,9 @@ data1 = bits, U08, 1, [0:7]
 data2 = bits, U08, 2, [0:7]
 data3 = bits, U08, 3, [0:7]
 "#;
+
+    #[test]
+    fn a_file_without_its_alias_leaves_the_view_to_the_array() {
         // The array only, the way TunerStudio writes it; the aliases are absent.
         const MSQ: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
@@ -1765,7 +1766,7 @@ data3 = bits, U08, 3, [0:7]
 </msq>
 "#;
         let definition =
-            parse_str(ALIASED, &SettingsContext::new()).expect("the definition parses");
+            parse_str(ALIASED_DEFINITION, &SettingsContext::new()).expect("the definition parses");
         let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
 
         assert_eq!(loaded.applied, ["data"], "only the file's variables");
@@ -1778,6 +1779,35 @@ data3 = bits, U08, 3, [0:7]
                 "the view follows the array's bytes"
             );
         }
+    }
+
+    #[test]
+    fn a_file_that_carries_only_a_view_reaches_the_owner() {
+        // A writer that saved one view but skipped the array it lives in.
+        const MSQ: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.7" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <constant name="data1">9.0</constant>
+    </page>
+</msq>
+"#;
+        let definition =
+            parse_str(ALIASED_DEFINITION, &SettingsContext::new()).expect("the definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert_eq!(loaded.applied, ["data1"]);
+        assert_eq!(
+            loaded.tune.raw_at("data", 1).unwrap(),
+            9.0,
+            "the owner takes the byte the view wrote"
+        );
+        assert_eq!(loaded.tune.scalar_raw("data1").unwrap(), 9.0);
+        assert_eq!(
+            loaded.tune.raw_at("data", 0).unwrap(),
+            0.0,
+            "a byte the file did not write keeps its value"
+        );
     }
 
     #[test]

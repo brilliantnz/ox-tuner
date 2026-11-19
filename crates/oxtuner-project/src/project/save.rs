@@ -12,27 +12,33 @@ impl Project {
     /// Drops every constant whose bytes another constant owns.
     ///
     /// A view is not a value a file carries: another tool would apply it after
-    /// the owner and read a different tune. A file an older build wrote keeps
-    /// those entries, so every save and every snapshot removes them.
+    /// the owner and read a different tune. A file can still hold those entries,
+    /// because some writers persist every constant, so every save and every
+    /// snapshot removes them.
     fn remove_alias_entries(&self, document: &mut Msq) {
         for spec in self.layout().variables() {
             if !self.layout().is_alias(&spec.name) {
                 continue;
             }
 
-            let (page, kind) = match spec.ini_page() {
-                Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
-                None => (EntryPage::Pc, EntryKind::PcVariable),
+            let Some(page) = spec.ini_page() else {
+                continue;
             };
-            document.remove_entry(page, kind, &spec.name);
+            document.remove_entry(
+                EntryPage::Numbered(page.to_msq()),
+                EntryKind::Constant,
+                &spec.name,
+            );
         }
     }
 
     /// Writes changed values back to the tune file.
     ///
     /// Only variables whose values differ from the baseline are touched, so an
-    /// unedited project keeps its file byte-for-byte; unknown elements,
-    /// comments and entries this build does not model are never rewritten.
+    /// unedited project keeps its file byte-for-byte apart from one thing: a
+    /// constant whose bytes another constant covers is removed, because a view
+    /// is not a value a file carries. Unknown elements, comments and entries
+    /// this build does not model are never rewritten.
     ///
     /// # Errors
     ///

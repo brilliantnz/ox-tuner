@@ -814,7 +814,7 @@ impl TuneLayout {
             return false;
         };
 
-        let spans: Vec<(&VariableSpec, u32, u32)> = page_layout
+        let spans: Vec<(usize, bool, u32, u32)> = page_layout
             .variables
             .iter()
             .filter_map(|index| {
@@ -828,15 +828,16 @@ impl TuneLayout {
                         width.checked_mul(u32::try_from(spec.element_count()).ok()?)?
                     }
                 };
+                let text = matches!(spec.shape, EntryShape::Text { .. });
 
-                Some((spec, start, len))
+                Some((*index, text, start, len))
             })
             .collect();
 
-        spans.iter().any(|(spec, start, len)| {
-            matches!(spec.shape, EntryShape::Text { .. })
-                && spans.iter().any(|(other, other_start, other_len)| {
-                    !std::ptr::eq(*spec, *other)
+        spans.iter().any(|(index, text, start, len)| {
+            *text
+                && spans.iter().any(|(other, _, other_start, other_len)| {
+                    index != other
                         && *other_start < start.saturating_add(*len)
                         && *start < other_start.saturating_add(*other_len)
                 })
@@ -1036,6 +1037,56 @@ fn default_raw(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_number_inside_a_text_field_flags_the_page() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, \"x\", 1, 0
+outside = scalar, U08, 12, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(
+            layout.page_has_text_overlap(IniPage::FIRST),
+            "the scalar at 4 sits inside the eight text bytes"
+        );
+    }
+
+    #[test]
+    fn a_text_field_beside_a_number_is_not_an_overlap() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+after = scalar, U08, 8, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(!layout.page_has_text_overlap(IniPage::FIRST));
+    }
 
     #[test]
     fn a_full_width_bit_alias_is_a_view_and_a_partial_one_is_not() {

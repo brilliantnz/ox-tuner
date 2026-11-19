@@ -312,8 +312,8 @@ impl VariableSpec {
     /// A tune's values are raw, so `14.7` at scale `0.1` is stored as `147.0`
     /// and a page returns `147.0`; the user text and its round trip are the
     /// same cell. Comparing the stored bytes is the wire's own meaning, and
-    /// `scale` plays no part: a bin array at `scale 100` keeps `1200` and
-    /// `1300` distinct.
+    /// `scale` plays no part: a bin array at `scale 100` keeps 1200 rpm and
+    /// 1300 rpm apart, because their raws `12` and `13` differ.
     ///
     /// A bit field compares exactly, because the page codec owns its masking.
     #[must_use]
@@ -467,10 +467,10 @@ mod tests {
 
     #[test]
     fn a_scaled_bin_array_keeps_its_neighbours_apart() {
-        // Raw values, scale 100: 1200 rpm and 1300 rpm are different cells.
-        let spec = scalar(DataType::U08, 100.0, 0.0);
+        // Raw values, scale 100: raw 12 and 13 are 1200 and 1300 rpm.
+        let spec = scalar(DataType::U16, 100.0, 0.0);
 
-        for (left, right) in [(8.0, 9.0), (12.0, 13.0), (147.0, 148.0)] {
+        for (left, right) in [(8.0, 9.0), (12.0, 13.0), (1_200.0, 1_300.0)] {
             assert!(
                 !spec.same_wire_value(left, right),
                 "{left} and {right} must not collapse"
