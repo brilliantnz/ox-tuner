@@ -14,7 +14,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use oxtuner_ini::{CommandArguments, Offset, SettingsContext, parse_str};
+use oxtuner_ini::{
+    CommandArguments, Dimension, Number, Offset, RowClassification, RowKind, SettingsContext, Text,
+    parse_str, parse_str_with_includes,
+};
 
 fn fixture(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -420,4 +423,89 @@ second = scalar, U08, \"x\", 1.0, 0.0, 0.0, 255.0, 1
         Some(1),
         "the dead entry must not advance the inferred offset"
     );
+}
+
+/// A single report covering the four golden cases INI.md asks for: repeated
+/// sections, a deep include chain, expression display round-trips, and the
+/// row-kind audit. Kept as a snapshot so a change in any of them is reviewable.
+#[test]
+fn staged_dialect_behaviour_has_a_golden_report() {
+    use std::fmt::Write as _;
+
+    let merged = parse_str(
+        "\
+[MegaTune]
+signature = \"golden\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+[Constants]
+page = 1
+b = scalar, U08, 1, \"u\", 1, 0, 0, 255, 0
+",
+        &SettingsContext::new(),
+    )
+    .expect("merges");
+
+    let text = "[MegaTune]\nsignature = \"golden\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include a.inc\n";
+    let resolver = |name: &str| match name {
+        "a.inc" => Some("#include b.inc\n".to_owned()),
+        "b.inc" => Some("#include c.inc\n".to_owned()),
+        "c.inc" => Some("deep = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0\n".to_owned()),
+        _ => None,
+    };
+    let included = parse_str_with_includes(text, &SettingsContext::new(), &resolver)
+        .expect("three-deep include chain parses");
+
+    let mut report = String::new();
+    let _ = writeln!(report, "constants|{}", merged.constants.len());
+    let _ = writeln!(report, "pages|{}", merged.pages.len());
+    for diagnostic in &merged.diagnostics {
+        let _ = writeln!(report, "diagnostic|{diagnostic}");
+    }
+    let _ = writeln!(
+        report,
+        "included_deep|{}",
+        included.constant("deep").is_some()
+    );
+
+    let deep_resolver = |name: &str| {
+        let number = name.strip_suffix(".inc")?.parse::<u32>().ok()?;
+        Some(format!("#include {}.inc\n", number + 1))
+    };
+    let too_deep = parse_str_with_includes(
+        "[MegaTune]\nsignature = \"golden\"\n#include 0.inc\n",
+        &SettingsContext::new(),
+        &deep_resolver,
+    )
+    .expect("depth cap stays non-fatal");
+    let _ = writeln!(
+        report,
+        "include_depth_exceeded|{}",
+        too_deep
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "include-depth-exceeded")
+    );
+    let number = Number::parse("{ min(4, 2) }");
+    let _ = writeln!(report, "number|{number}|{}", number.normalized());
+    let text_attribute = Text::parse("{ bitStringValue(units, algo) }");
+    let _ = writeln!(report, "text|{text_attribute}");
+    let dimension = Dimension::Fixed(16);
+    let _ = writeln!(report, "dimension|{dimension}");
+    for kind in RowKind::ALL {
+        let _ = writeln!(report, "row|{kind:?}|{:?}", kind.classification());
+    }
+    let _ = writeln!(
+        report,
+        "deferred|{}",
+        RowKind::ALL
+            .iter()
+            .filter(|kind| kind.classification() == RowClassification::Deferred)
+            .count()
+    );
+
+    check_golden("staged-dialect", &report);
 }

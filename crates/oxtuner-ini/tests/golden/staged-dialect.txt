@@ -1,0 +1,35 @@
+constants|2
+pages|1
+diagnostic|note: [Constants] `[Constants]` has 2 header(s); their entries are merged into one section (merged-section)
+included_deep|true
+include_depth_exceeded|true
+number|{min(4, 2)}|2
+text|{bitStringValue(units, algo)}
+dimension|16
+row|Field|Structured
+row|DisplayOnlyField|Verbatim
+row|Checkbox|Structured
+row|Radio|Structured
+row|Slider|Structured
+row|SettingSelector|Structured
+row|SettingOption|Structured
+row|Array1D|Structured
+row|RuntimeValue|Structured
+row|EmbeddedPanel|Structured
+row|Gauge|Structured
+row|LiveGraph|Structured
+row|GraphLine|Structured
+row|IndicatorPanel|Structured
+row|Indicator|Structured
+row|ReadoutPanel|Structured
+row|Readout|Structured
+row|CommandButton|Structured
+row|HelpText|Verbatim
+row|WebHelp|Verbatim
+row|TopicHelp|Verbatim
+row|ChannelSelector|Deferred
+row|CanDeviceSelector|Deferred
+row|CanClientIdSelector|Deferred
+row|LogFieldSelector|Deferred
+row|UserPassword|Deferred
+deferred|5

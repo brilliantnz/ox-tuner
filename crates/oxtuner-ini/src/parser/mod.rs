@@ -243,8 +243,8 @@ fn dispatch(
         "referencetables" => misc::parse_reference_tables(definition, section, lines),
         "datalog" => misc::parse_datalog(definition, section, lines),
         "loggerdefinition" => sections::parse_loggers(definition, section, lines),
-        "porteditor" | "ftpbrowser" | "triggerwheel" | "veanalyze" | "wueanalyze" | "gammae"
-        | "datalogviews" | "tools" => sections::parse_config_section(definition, section, lines),
+        "porteditor" | "ftpbrowser" | "veanalyze" | "wueanalyze" | "gammae" | "datalogviews"
+        | "tools" => sections::parse_config_section(definition, section, lines),
         "" => {
             // File-level attributes before the first header. rusEFI opens with
             // `enable2ndByteCanID = false`; keep it, do not reject the file.
