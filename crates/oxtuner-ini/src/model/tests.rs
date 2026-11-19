@@ -17,6 +17,7 @@ first = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
 ";
     let renamed = base.replace("first =", "second =");
     let commented = format!("{base}; a comment that changes no model data\n");
+    let reshaped = base.replace("scalar, U08, 0,", "array, U08, 0, [4x4],");
 
     let parse =
         |text: &str| crate::parse_str(text, &crate::SettingsContext::new()).expect("parses");
@@ -24,6 +25,7 @@ first = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
 
     assert_eq!(parse(&commented).structural_hash(), original);
     assert_ne!(parse(&renamed).structural_hash(), original);
+    assert_ne!(parse(&reshaped).structural_hash(), original);
 }
 
 #[test]

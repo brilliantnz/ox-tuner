@@ -6,8 +6,9 @@ use std::sync::Arc;
 use crate::expr::Expr;
 
 thread_local! {
-    /// Per-parse interner for literal text. Cleared at the start of every parse,
-    /// so a 65k-field definition holds one copy of each repeated unit or title.
+    /// Per-parse interner for literal text. The parser clears it when the parse
+    /// leaves, so a 65k-field definition holds one copy of each repeated unit
+    /// or title without retaining the table afterwards.
     static TEXT_CACHE: RefCell<HashMap<Arc<str>, Arc<str>>> = RefCell::new(HashMap::new());
 }
 
