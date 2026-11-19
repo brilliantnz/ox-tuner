@@ -193,9 +193,11 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
     let mut bytes = vec![0u8; size];
 
     // Non-bits values fill their words first, then bits fields merge into the
-    // result, so declaration order never decides which value survives. A
-    // variable another one covers is a view of the same bytes and must not
-    // overwrite the value that owns them.
+    // result, so a `bits` field always merges last whatever the declaration
+    // order says. Two non-bits peers over the same bytes still resolve in
+    // declaration order, with the later one winning, which is what the
+    // shared-byte checks exist to catch. A variable another one covers is a
+    // view of the same bytes and must not overwrite the value that owns them.
     for bits_only in [false, true] {
         for index in &page_layout.variables {
             if layout.is_alias_at(*index) {

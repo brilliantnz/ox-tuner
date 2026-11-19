@@ -854,9 +854,11 @@ impl TuneImages {
     /// Refuses a file that states two values the shared bytes cannot both carry.
     ///
     /// Only the values the file actually carried are judged, and only against
-    /// each other. A constant it left out keeps whatever the image holds, which
-    /// the merge reconciles with its neighbour, so the file states nothing
-    /// about it. A page the file says nothing about is not its business either.
+    /// each other. A constant it left out keeps whatever the image holds, so the
+    /// file states nothing about it: on an ordinary page the merge reconciles
+    /// that with its neighbour, and a page a text field overlaps is left as it
+    /// stands for the write gate to name whatever still disagrees. A page the
+    /// file says nothing about is not this check's business either.
     fn reject_conflicting_values(&self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
         let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
 

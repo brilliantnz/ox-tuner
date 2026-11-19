@@ -59,17 +59,7 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
 
     // A clamp moves bytes a neighbour may also claim, and this runs just before
     // the gate that looks for two values over one set of them.
-    touched.sort_unstable();
-    touched.dedup();
-    for name in &touched {
-        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
-            tracing::warn!(
-                %name,
-                %error,
-                "shared bytes could not be reconciled after a clamp"
-            );
-        }
-    }
+    reconcile_groups(project, &touched, "a clamp");
     count
 }
 
@@ -190,10 +180,10 @@ pub(super) fn unsent_ambiguous_page(project: &Project, variables: &[String]) -> 
 
 /// The first target page holding values the shared bytes cannot both carry.
 ///
-/// The refusal is page-wide, like the ambiguous one. The codec fills shared
-/// bytes in declaration order, so the constant declared later would keep them
-/// and the other would be dropped and stay pending until a later write put its
-/// bytes back. The page stays unwritable until the two agree.
+/// The refusal is page-wide, like the ambiguous one. The codec runs non-bits
+/// first and bits after, so one of the two would be dropped and stay pending
+/// until a later write put its bytes back. The page stays unwritable until the
+/// two agree.
 pub(super) fn conflicting_value_page(project: &Project, targets: &[u8]) -> Option<ValueConflict> {
     let layout = project.layout();
     let working = project.images().working();
@@ -226,6 +216,31 @@ pub(super) fn unsent_conflicting_value(
 
         layout.value_conflicts(page, working).into_iter().next()
     })
+}
+
+/// Re-derives the constants whose bytes any of `names` moved.
+///
+/// Two constants can sit over the same bytes and moving one moves the bytes
+/// both of them claim, so the neighbours are re-derived from the page image and
+/// the moved value is the one that survives. Anything still left disagreeing is
+/// caught by the write gate before it reaches the ECU. One constant per sharing
+/// group is enough, since re-deriving it settles the whole group.
+pub(super) fn reconcile_groups(project: &mut Project, names: &[String], what: &str) {
+    let mut settled = std::collections::BTreeSet::new();
+
+    for name in names {
+        if settled.contains(name.as_str()) {
+            continue;
+        }
+
+        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
+            tracing::warn!(%what, %name, %error, "shared bytes could not be reconciled");
+            continue;
+        }
+        for shared in project.layout().names_sharing_bytes(name) {
+            settled.insert(shared.to_owned());
+        }
+    }
 }
 
 /// Counts edits that have not reached ECU RAM.
@@ -517,15 +532,7 @@ pub(super) fn revert_target(
     // A revert moves bytes a neighbour may still claim from an edit, so the
     // neighbours are re-derived here too or the page would hold two values and
     // refuse every write until someone edits one of them again.
-    for name in &variables {
-        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
-            tracing::warn!(
-                %name,
-                %error,
-                "shared bytes could not be reconciled after a revert"
-            );
-        }
-    }
+    reconcile_groups(project, &variables, "a revert");
     tracing::info!(
         %op,
         target = %name,

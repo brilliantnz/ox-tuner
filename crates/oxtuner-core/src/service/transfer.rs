@@ -6,9 +6,9 @@
 use super::dispatch::{refuse, send, send_status};
 use super::ecu::connection_lost;
 use super::tune::{
-    ambiguous_write_page, clamp_working_changes, conflicting_value_page, unresolved_conflicts,
-    unsent_ambiguous_page, unsent_changes, unsent_conflicting_value, unsent_edits,
-    unsent_for_pages,
+    ambiguous_write_page, clamp_working_changes, conflicting_value_page, reconcile_groups,
+    unresolved_conflicts, unsent_ambiguous_page, unsent_changes, unsent_conflicting_value,
+    unsent_edits, unsent_for_pages,
 };
 use super::*;
 
@@ -1430,25 +1430,8 @@ pub(super) fn apply_verified_write(
     // with one that changed still holds whatever the working image said before
     // the write. The working image is what the user asked for and what the
     // write verified, so it is the source here rather than the read-back; only
-    // the neighbours are re-derived from it. One constant per sharing group is
-    // enough, since re-deriving it settles the whole group.
-    let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for name in &transaction.changed_variables {
-        if settled.contains(name.as_str()) {
-            continue;
-        }
-
-        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
-            tracing::warn!(
-                %name,
-                %error,
-                "shared bytes could not be reconciled after a verified write"
-            );
-        }
-        for shared in project.layout().names_sharing_bytes(name) {
-            settled.insert(shared.to_owned());
-        }
-    }
+    // the neighbours are re-derived from it.
+    reconcile_groups(project, &transaction.changed_variables, "a verified write");
     live.images.page_bytes.extend(
         transaction
             .readback

@@ -199,6 +199,13 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         }
     }
 
+    // A clamp moves each constant on its own, and two over the same bytes can
+    // end up apart even where the file said one thing to both. Where the peers
+    // agree they are pulled onto a value the tightest of them can store, so a
+    // clamp cannot invent a disagreement the file never stated. A pair that
+    // really did state two values is left apart for the caller to judge.
+    tune.clamp_shared_bytes();
+
     reconcile_pages(&layout, &mut tune, &applied, &mut report);
     check_page_data(msq, definition, &layout, &tune, &mut report);
 

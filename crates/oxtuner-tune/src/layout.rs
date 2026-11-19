@@ -1138,7 +1138,7 @@ impl TuneLayout {
             }
         }
 
-        let mut claims: Vec<Option<Claim>> = (0..spans.len()).map(|_| None).collect();
+        let mut claims: Vec<Option<Claim>> = vec![None; spans.len()];
         for position in involved {
             let Some(span) = spans.get(position) else {
                 continue;

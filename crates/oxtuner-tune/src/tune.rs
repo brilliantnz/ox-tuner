@@ -9,7 +9,7 @@
 //! ([`crate::VariableSpec::to_user`]). That is the only place the conversion
 //! exists, so a table cell and a scalar cannot disagree about it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -324,8 +324,117 @@ impl Tune {
         let mut decoded = self.snapshot();
         crate::wire::decode_page(&layout, page, &patched, &mut decoded)?;
 
+        // A peer with a tighter range cannot store what the edited value leaves
+        // in the bytes. Sending that would put a value on the wire its own clamp
+        // rejects, so the re-derivation stands down and the write gate refuses
+        // the disagreement instead. A word and a bit field inside it hold
+        // different numbers and are not judged against each other.
+        let storable = self.same_value_peers(name).iter().all(|peer| {
+            let Some(spec) = layout.variable(peer) else {
+                return true;
+            };
+
+            (0..spec.element_count()).all(|cell| {
+                decoded
+                    .raw_at(peer, cell)
+                    .is_ok_and(|value| spec.same_wire_value(spec.clamp_raw(value), value))
+            })
+        });
+        if !storable {
+            return Ok(());
+        }
+
         let moved = layout.names_sharing_bytes(name);
         self.adopt_named(&decoded, &moved)
+    }
+
+    /// The variables storing the same quantity as `name` over the same bytes.
+    ///
+    /// A word and a bit field inside it share bytes but hold different numbers,
+    /// each read against its own range. Only peers of the same shape store one
+    /// quantity, so only those can be clamped or judged against each other.
+    fn same_value_peers(&self, name: &str) -> Vec<String> {
+        let Some(spec) = self.layout.variable(name) else {
+            return Vec::new();
+        };
+
+        self.layout
+            .names_sharing_bytes(name)
+            .into_iter()
+            .filter(|peer| {
+                self.layout.variable(peer).is_some_and(|other| {
+                    other.data_type == spec.data_type && other.shape == spec.shape
+                })
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Makes every value that shares bytes agree on one they can all store.
+    ///
+    /// Two constants over the same bytes can declare different ranges, and a
+    /// clamp moves each of them on its own. That leaves a pair holding two
+    /// values for one byte even where the caller stated one, and the write gate
+    /// then refuses the page over something nobody asked for. So a group that
+    /// already holds one value is pulled onto the tightest range among its
+    /// members and that value is written back to all of them. A group that
+    /// holds two different values is left alone: that disagreement is real and
+    /// judging it belongs to the caller.
+    pub fn clamp_shared_bytes(&mut self) {
+        let mut settled: HashSet<String> = HashSet::new();
+
+        for page in self.layout.pages().to_vec() {
+            let names: Vec<String> = page
+                .variables
+                .iter()
+                .copied()
+                .filter_map(|index| self.layout.variables().get(index))
+                .map(|spec| spec.name.clone())
+                .collect();
+
+            for name in names {
+                if settled.contains(&name) {
+                    continue;
+                }
+
+                let peers = self.same_value_peers(&name);
+                for peer in &peers {
+                    settled.insert(peer.clone());
+                }
+                if peers.len() < 2 {
+                    continue;
+                }
+                let Some(spec) = self.layout.variable(&name) else {
+                    continue;
+                };
+                let cells = spec.element_count();
+
+                for cell in 0..cells {
+                    let Ok(value) = self.raw_at(&name, cell) else {
+                        continue;
+                    };
+                    let agreed = peers.iter().all(|peer| {
+                        self.raw_at(peer, cell).is_ok_and(|raw| {
+                            self.layout
+                                .variable(peer)
+                                .is_some_and(|other| other.same_wire_value(raw, value))
+                        })
+                    });
+                    if !agreed {
+                        continue;
+                    }
+
+                    let common = peers.iter().fold(value, |acc, peer| {
+                        self.layout
+                            .variable(peer)
+                            .map_or(acc, |other| other.clamp_raw(acc))
+                    });
+                    for peer in &peers {
+                        let _ = self.set_image_raw(peer, cell, common);
+                    }
+                }
+            }
+        }
     }
 
     /// Makes every value that shares bytes agree, page by page.
@@ -333,8 +442,11 @@ impl Tune {
     /// Where a definition gives two constants the same bytes and its own
     /// defaults disagree, there is no user intent to respect yet and one value
     /// still has to be picked. This writes each page image and reads it back,
-    /// which is the settle the codec does anyway: the constant declared later
-    /// keeps its value and the others follow the bytes. A tune built from a
+    /// which is the settle the codec does anyway: the page codec runs non-bits
+    /// first and bits after, so among peers of the same kind the later declared
+    /// one keeps its value while a `bits` field always merges last. Every
+    /// constant on the page follows the result, views included, and each group
+    /// is then pulled onto a value all of it can store. A tune built from a
     /// definition's defaults is consistent afterwards, instead of starting out
     /// with a pair no write would carry.
     ///
@@ -350,7 +462,6 @@ impl Tune {
                 .variables
                 .iter()
                 .copied()
-                .filter(|index| !layout.is_alias_at(*index))
                 .filter_map(|index| layout.variables().get(index))
                 .map(|spec| spec.name.as_str())
                 .collect();
@@ -364,6 +475,7 @@ impl Tune {
 
             self.adopt_named(&decoded, &names)?;
         }
+        self.clamp_shared_bytes();
 
         Ok(())
     }
@@ -905,6 +1017,49 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
         assert_eq!(
             tune.raw_at("first", 0).unwrap(),
             tune.raw_at("second", 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_peer_that_cannot_store_the_survivor_is_left_disagreeing() {
+        // `tight` cannot store what `loose` can, so the re-derivation stands
+        // down rather than move `tight` onto a value its own clamp rejects.
+        // The write gate still sees the pair and refuses the page.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+loose = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+tight = scalar, U08, 0, "x", 1, 0, 0, 5, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.set_image_raw("loose", 0, 12.0).unwrap();
+        tune.set_image_raw("tight", 0, 3.0).unwrap();
+        tune.reconcile_shared_bytes("loose").unwrap();
+
+        assert_eq!(
+            tune.raw_at("tight", 0).unwrap(),
+            3.0,
+            "the peer keeps its own value rather than taking one its clamp rejects"
+        );
+        assert_eq!(
+            tune.raw_at("loose", 0).unwrap(),
+            12.0,
+            "nothing moved at all"
+        );
+        assert_eq!(
+            tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
+            1,
+            "the gate still sees the disagreement"
         );
     }
 
