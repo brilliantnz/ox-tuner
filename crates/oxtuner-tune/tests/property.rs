@@ -62,14 +62,15 @@ fn position(name: &str, index: usize) -> (usize, usize) {
 }
 
 fn expected_state(working: f64, baseline: f64, ram: f64, flash: f64) -> CellState {
+    // The property builds no overlays, so a difference from RAM is always an
+    // unsent change; a conflict needs a read that found no decision.
+    let _ = baseline;
     if working == ram {
         if working == flash {
             CellState::Synced
         } else {
             CellState::InRam
         }
-    } else if working == baseline {
-        CellState::Conflict
     } else {
         CellState::LocalDirty
     }

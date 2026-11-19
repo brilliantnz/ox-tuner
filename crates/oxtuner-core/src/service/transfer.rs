@@ -5,7 +5,9 @@
 
 use super::dispatch::{refuse, send, send_status};
 use super::ecu::connection_lost;
-use super::tune::{clamp_working_changes, unsent_changes, unsent_edits, unsent_for_pages};
+use super::tune::{
+    clamp_working_changes, unresolved_conflicts, unsent_changes, unsent_edits, unsent_for_pages,
+};
 use super::*;
 
 #[expect(
@@ -274,6 +276,9 @@ pub(super) fn write_to_ram(
             "read every page before writing; an incomplete ECU image cannot be edited safely",
         );
     }
+    if let Some(reason) = unresolved_conflicts(project) {
+        return refuse(events, report, op, FailureCode::WriteRefused, &reason);
+    }
     let clamped = clamp_working_changes(project);
     if clamped > 0 {
         tracing::info!(%op, clamped, "out-of-range values clamped before writing");
@@ -517,6 +522,9 @@ pub(super) fn burn_to_flash(
             FailureCode::BurnRefused,
             "the ECU image is unknown; read it first",
         );
+    }
+    if let Some(reason) = unresolved_conflicts(project) {
+        return refuse(events, report, op, FailureCode::BurnRefused, &reason);
     }
     let (unsent, _) = unsent_edits(project);
     if unsent > 0 {
@@ -1341,6 +1349,7 @@ pub(super) fn apply_verified_write(
         .set_ecu_ram(image)
         .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
     project.images_mut().clear_write_failures();
+    project.images_mut().clear_resolutions();
     live.images.page_bytes.extend(
         transaction
             .readback
@@ -1367,7 +1376,8 @@ pub(super) fn apply_verified_burn(
     if transaction.pages.len() < burnable {
         // Only some pages were burned; the flash image of the rest is still
         // whatever it was, so claiming the whole image is verified would be a
-        // lie. The journal and the summary still record the verified pages.
+        // lie. The cached flash no longer describes the chip either.
+        project.images_mut().mark_flash_unknown();
         return Ok(());
     }
     let Some(ram) = project.images().ecu_ram().cloned() else {

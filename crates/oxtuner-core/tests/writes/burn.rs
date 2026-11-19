@@ -14,6 +14,7 @@ fn a_burn_follows_a_verified_write_and_is_journaled() {
     core.open(dir.path());
     core.connect(config);
     core.read_all();
+    core.keep_working();
     core.edit_cell(66.0);
 
     let event = core.write();
@@ -57,6 +58,7 @@ fn burning_before_writing_the_edit_is_refused() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
+    core.keep_working();
     core.edit_cell(55.0);
 
     let (kind, message) = failure(&core.burn());
@@ -77,12 +79,17 @@ fn no_edit_or_read_ever_burns() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
+    core.keep_working();
     core.edit_cell(22.0);
     let _ = core.write();
     let _ = core.table();
 
     let (_, entries) = core.journal();
-    assert!(entries.iter().all(|entry| entry.operation == "write"));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| matches!(entry.operation.as_str(), "write" | "conflict"))
+    );
     assert!(
         entries.iter().all(|entry| entry.operation != "burn"),
         "nothing but an explicit burn command may burn (S5)"

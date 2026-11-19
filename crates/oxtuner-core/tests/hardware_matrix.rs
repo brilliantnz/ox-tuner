@@ -174,6 +174,25 @@ impl Harness {
         }
     }
 
+    /// Chooses the project tune when the ECU's tune differs.
+    ///
+    /// The read reports the difference; this is the dialog's "keep project"
+    /// action, and every write or burn needs it first.
+    fn keep_working(&self) {
+        let op = self
+            .handle
+            .execute(oxtuner_core::CoreCommand::Tune(
+                oxtuner_core::TuneCommand::ResolveConflicts {
+                    resolution: oxtuner_core::ConflictResolution::KeepWorking,
+                },
+            ))
+            .expect("queued");
+        match self.wait("conflict resolution", |event| event.op() == Some(op)) {
+            Event::ConflictsResolved { .. } => {}
+            other => panic!("expected a conflict resolution, got {other:?}"),
+        }
+    }
+
     /// Starts realtime polling, which the burn wait needs to see `burnPending`.
     ///
     /// A session that already polls answers the same state, so a refusal is
@@ -680,6 +699,7 @@ fn stage_restore() {
     // The write needs the ECU image; opening the project already put the
     // project's tune in the working image, which is what gets written.
     harness.read_all();
+    harness.keep_working();
     assert!(harness.rpm() < 1000.0, "the engine is running");
 
     let written = harness.write();
@@ -855,6 +875,7 @@ fn stage_after_interrupt() {
 
     // The project's tune is the target; the read makes the ECU image known so
     // the delta is what the interrupted session left behind.
+    harness.keep_working();
     let written = harness.write();
     assert!(written.verified, "the recovery write did not verify");
     let burned = harness.burn();

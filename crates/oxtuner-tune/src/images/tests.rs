@@ -365,9 +365,14 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
         assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::InRam);
         assert_eq!(images.status().pending_write.cells, 0);
         assert_eq!(images.status().pending_burn.cells, 1);
+        assert!(images.status().flash_known);
 
         images.set_ecu_flash(ram).unwrap();
         assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Synced);
+
+        images.mark_flash_unknown();
+        assert!(!images.status().flash_known);
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::InRam);
     }
 
     #[test]
@@ -403,11 +408,13 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
                             } else {
                                 CellState::InRam
                             }
-                        } else if working == baseline {
-                            CellState::Conflict
                         } else {
+                            // A real difference from RAM is an unsent change;
+                            // only a read that found no decision marks a
+                            // conflict, and these images carry no overlays.
                             CellState::LocalDirty
                         };
+                        let _ = baseline;
 
                         assert_eq!(
                             images.cell_state("a", 0, 0).unwrap(),
@@ -450,20 +457,93 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
 
         let mut ram = tune();
         ram.set_user("a", 9.0).unwrap();
-        let conflicts = images.reconnect(ram).unwrap();
+        let conflicts = images.reconcile_read(ram).unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].name, "a");
         assert_eq!(conflicts[0].working, CellValue::Number(0.0));
         assert_eq!(conflicts[0].ecu, CellValue::Number(9.0));
         assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
+        assert_eq!(
+            images.status().conflicts,
+            images.status().pending_write.cells,
+            "every reported conflict is a cell the write could send"
+        );
 
         images.clear_conflict("a", 0, 0).unwrap();
         assert_eq!(
             images.cell_state("a", 0, 0).unwrap(),
-            CellState::Conflict,
-            "the underlying images still differ; only an overlay was cleared"
+            CellState::LocalDirty,
+            "without a conflict mark the difference is an unsent change"
         );
+    }
+
+    #[test]
+    fn a_controller_owned_value_is_not_a_conflict() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+owned = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+
+[ConstantsExtensions]
+controllerPriority = owned
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        let mut ram = Tune::new(layout);
+        ram.set_image_raw("owned", 0, 9.0).expect("takes a value");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 0, "the ECU owns the value");
+        assert_eq!(images.conflicts().len(), 0);
+    }
+
+    #[test]
+    fn keeping_the_working_values_turns_a_conflict_into_an_unsent_change() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+
+        let conflicts = images.reconcile_read(ram.clone()).unwrap();
+        assert_eq!(conflicts.len(), 1, "the first read reports the difference");
+
+        images.keep_working();
+
+        assert_eq!(images.conflicts().len(), 0, "the decision was recorded");
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::LocalDirty);
+        assert_eq!(images.status().pending_write.cells, 1);
+
+        // The ECU still holds its value, but the user already decided: a later
+        // read must not ask again.
+        let conflicts = images.reconcile_read(ram).unwrap();
+        assert_eq!(conflicts.len(), 0, "a decided cell is not a new conflict");
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::LocalDirty);
+    }
+
+    #[test]
+    fn a_read_that_finds_the_values_equal_clears_the_decision() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconcile_read(ram).unwrap();
+        images.keep_working();
+
+        images.reconcile_read(tune()).unwrap();
+
+        assert_eq!(images.conflicts().len(), 0);
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::InRam);
     }
 
     #[test]
@@ -502,7 +582,7 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
         let mut images = images();
         let mut ram = tune();
         ram.set_user("a", 9.0).unwrap();
-        images.reconnect(ram).unwrap();
+        images.reconcile_read(ram).unwrap();
         images.working_mut().set_user("a", 5.0).unwrap();
 
         images.revert_variables(&["a".to_owned()]);
@@ -511,9 +591,9 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
             images.conflicts().is_empty(),
             "the reverted variable carries no conflict mark"
         );
-        // The cell still reads Conflict: the ECU's value really does differ
-        // from the file. That is the value-based state, not a stale overlay.
-        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
+        // The ECU's value still differs from the file, so the cell is an
+        // unsent change rather than a conflict the user has to decide.
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::LocalDirty);
     }
 
     #[test]
@@ -538,6 +618,38 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
         images.commit_baseline();
 
         assert_eq!(images.status().unsaved.cells, 0);
+    }
+
+    #[test]
+    fn saving_without_edits_leaves_an_undecided_conflict() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconcile_read(ram).unwrap();
+
+        images.commit_baseline();
+
+        assert_eq!(
+            images.cell_state("a", 0, 0).unwrap(),
+            CellState::Conflict,
+            "a save with nothing to write is not a decision"
+        );
+    }
+
+    #[test]
+    fn saving_keeps_the_unsent_values_as_the_chosen_tune() {
+        let mut images = images();
+        images.set_ecu_ram(tune()).unwrap();
+        images.working_mut().set_user("a", 3.0).unwrap();
+
+        images.commit_baseline();
+
+        assert_eq!(images.status().unsaved.cells, 0);
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::LocalDirty);
+
+        let conflicts = images.reconcile_read(tune()).unwrap();
+        assert_eq!(conflicts.len(), 0, "a saved value is not a new conflict");
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::LocalDirty);
     }
 
     #[test]
@@ -587,7 +699,7 @@ note = string, ASCII, 8
         let mut ram = Tune::new(Arc::clone(images.layout()));
         ram.set_user("reqFuel", 12.3).unwrap();
 
-        let conflicts = images.reconnect(ram).unwrap();
+        let conflicts = images.reconcile_read(ram).unwrap();
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].name, "reqFuel");

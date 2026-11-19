@@ -80,6 +80,11 @@ pub struct TuneStatus {
     pub pending_burn: TuneDiff,
     /// Cells marked as conflicts.
     pub conflicts: usize,
+    /// Whether ECU flash is confirmed in this session.
+    ///
+    /// A full verified burn is the only confirmation; an empty `pending_burn`
+    /// means "nothing to burn" only when this is true.
+    pub flash_known: bool,
 }
 
 impl fmt::Display for TuneStatus {

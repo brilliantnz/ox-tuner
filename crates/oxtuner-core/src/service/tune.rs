@@ -150,6 +150,20 @@ pub(super) fn unsent_edits(project: &Project) -> (usize, usize) {
     (cells, variables.len())
 }
 
+/// Refuses a write or burn while a difference has no decision yet.
+///
+/// Writing would overwrite the ECU's tune and burning would persist it, so the
+/// operation stops until the user chooses. Reading never writes, so the state
+/// is safe to leave like this.
+pub(super) fn unresolved_conflicts(project: &Project) -> Option<String> {
+    let count = project.images().status().conflicts;
+    (count > 0).then(|| {
+        format!(
+            "{count} cell(s) differ between the project tune and the ECU tune; choose which to keep before writing or burning"
+        )
+    })
+}
+
 /// Makes the ECU image the working tune.
 ///
 /// Reading pages fills the ECU image but leaves the project file's values on
@@ -240,7 +254,6 @@ pub(super) fn resolve_conflicts(
                     error.to_string(),
                 );
             }
-            project.images_mut().clear_conflicts();
             record_local_journal(
                 session,
                 journal_dir,
@@ -252,7 +265,7 @@ pub(super) fn resolve_conflicts(
             );
         }
         ConflictResolution::KeepWorking => {
-            project.images_mut().clear_conflicts();
+            project.images_mut().keep_working();
             record_local_journal(
                 session,
                 journal_dir,

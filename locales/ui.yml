@@ -86,6 +86,8 @@ app:
       en: Burn to Flash…
     adopt_ecu_tune:
       en: Use ECU Tune
+    review_conflicts:
+      en: Review Tune Differences…
     revert_tune:
       en: Discard Local Edits…
     import_tune:
@@ -572,15 +574,17 @@ app:
       en: Enable writes to send this command.
   conflict:
     title:
-      en: Review ECU changes
+      en: Project and ECU tune differ
     body:
-      en: '%{count} cells differ from the values just read from the ECU.'
+      en: '%{count} cells differ between the project tune and the tune read from the ECU. Choose which one the project should use.'
     sample:
-      en: Working value -> ECU value
+      en: Project value -> ECU value
+    keep_hint:
+      en: Keeping the project tune writes nothing yet. The ECU keeps its values until you write the tune and burn it.
     keep:
-      en: Keep my values
+      en: Keep project tune
     use_ecu:
-      en: Use ECU values
+      en: Use ECU tune
   cluster:
     title:
       en: Cluster
@@ -968,6 +972,8 @@ app:
       en: Acknowledge the failed write
     verify:
       en: Only the values that differ from ECU RAM are patched into a fresh page read; controller-owned values are left untouched.
+    conflicts:
+      en: 'The project tune and the ECU tune differ in %{cells} cells. Choose which to keep before writing.'
     cancel:
       en: Cancel
     confirm:
@@ -981,6 +987,10 @@ app:
       en: Burn %{pages} pages holding %{cells} RAM changes to flash.
     unsent:
       en: '%{cells} tune values are not in ECU RAM yet. Write them first; burning now would persist the older values.'
+    conflicts:
+      en: 'The project tune and the ECU tune differ in %{cells} cells. Choose which to keep before burning.'
+    flash_unknown:
+      en: The ECU flash has not been verified since this connection. A completed burn is what makes it hold the tune.
     snapshot:
       en: A snapshot of the working tune is written before the burn. The pages are read back afterwards.
     cancel:

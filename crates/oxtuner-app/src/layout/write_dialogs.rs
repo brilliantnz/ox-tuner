@@ -13,11 +13,56 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{App, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui_kit::{
+    App, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px,
+};
 
 use crate::app::dialog;
 use crate::core::{self, CoreService};
 use crate::i18n::t;
+
+/// The reasons a write or burn cannot start, in one place.
+///
+/// Both dialogs name the same blockers; only the conflict sentence differs, so
+/// the caller passes it already translated.
+fn safety_warnings(
+    cx: &App,
+    conflict: Option<SharedString>,
+    writes_enabled: bool,
+    connected: bool,
+    halted: Option<String>,
+) -> impl IntoElement {
+    let danger = cx.theme().danger;
+    v_flex()
+        .gap_1()
+        .when_some(conflict, |this, text| {
+            this.child(div().text_xs().text_color(danger).child(text))
+        })
+        .when(!writes_enabled, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.writes_off")),
+            )
+        })
+        .when(!connected, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.not_connected")),
+            )
+        })
+        .when_some(halted, |this, reason| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.halted", reason = reason)),
+            )
+        })
+}
 
 /// Confirms syncing tune values that differ from ECU RAM.
 pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
@@ -27,13 +72,17 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
         .tune_status
         .as_ref()
         .map_or(0, |status| status.pending_write.cells);
+    let conflicts = status
+        .tune_status
+        .as_ref()
+        .map_or(0, |status| status.conflicts);
     let halted = status.write_halted.clone();
     let connected = status.connection.is_some();
 
     dialog::open(window, cx, move |dialog, _, cx| {
-        let danger = cx.theme().danger;
         let muted = cx.theme().muted_foreground;
-        let ready = writes_enabled && connected && halted.is_none() && pending > 0;
+        let ready =
+            writes_enabled && connected && halted.is_none() && conflicts == 0 && pending > 0;
         dialog
             .title(t!("app.write.title"))
             .width(px(540.))
@@ -51,42 +100,24 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
                             .text_color(muted)
                             .child(t!("app.write.snapshot")),
                     )
-                    .when(!writes_enabled, |this| {
+                    .child(safety_warnings(
+                        cx,
+                        (conflicts > 0)
+                            .then(|| t!("app.write.conflicts", cells = conflicts.to_string())),
+                        writes_enabled,
+                        connected,
+                        halted.clone(),
+                    ))
+                    .when_some(halted.clone(), |this, _| {
                         this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.writes_off")),
-                        )
-                    })
-                    .when(!connected, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.not_connected")),
-                        )
-                    })
-                    .when_some(halted.clone(), |this, reason| {
-                        this.child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(danger)
-                                        .child(t!("app.write.halted", reason = reason)),
-                                )
-                                .child(
-                                    Button::new("write-acknowledge")
-                                        .label(t!("app.write.acknowledge"))
-                                        .small()
-                                        .ghost()
-                                        .on_click(|_, window, cx| {
-                                            core::acknowledge_write_failure(cx);
-                                            window.close_dialog(cx);
-                                        }),
-                                ),
+                            Button::new("write-acknowledge")
+                                .label(t!("app.write.acknowledge"))
+                                .small()
+                                .ghost()
+                                .on_click(|_, window, cx| {
+                                    core::acknowledge_write_failure(cx);
+                                    window.close_dialog(cx);
+                                }),
                         )
                     })
                     .child(
@@ -132,6 +163,14 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
         .tune_status
         .as_ref()
         .map_or(0, |status| status.pending_write.cells);
+    let conflicts = status
+        .tune_status
+        .as_ref()
+        .map_or(0, |status| status.conflicts);
+    let flash_known = status
+        .tune_status
+        .as_ref()
+        .is_some_and(|status| status.flash_known);
     let connected = status.connection.is_some();
     let halted = status.write_halted.clone();
     let pages = status
@@ -142,7 +181,8 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
     dialog::open(window, cx, move |dialog, _, cx| {
         let danger = cx.theme().danger;
         let muted = cx.theme().muted_foreground;
-        let ready = writes_enabled && connected && halted.is_none() && unsent == 0;
+        let ready =
+            writes_enabled && connected && halted.is_none() && conflicts == 0 && unsent == 0;
         dialog
             .title(t!("app.burn.title"))
             .width(px(560.))
@@ -161,6 +201,14 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
                         pages = pages.to_string(),
                         cells = pending.to_string()
                     )))
+                    .child(safety_warnings(
+                        cx,
+                        (conflicts > 0)
+                            .then(|| t!("app.burn.conflicts", cells = conflicts.to_string())),
+                        writes_enabled,
+                        connected,
+                        halted.clone(),
+                    ))
                     .when(unsent > 0, |this| {
                         this.child(
                             div()
@@ -169,28 +217,12 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
                                 .child(t!("app.burn.unsent", cells = unsent.to_string())),
                         )
                     })
-                    .when(!writes_enabled, |this| {
+                    .when(connected && !flash_known, |this| {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.writes_off")),
-                        )
-                    })
-                    .when(!connected, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.not_connected")),
-                        )
-                    })
-                    .when_some(halted.clone(), |this, reason| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.halted", reason = reason)),
+                                .text_color(muted)
+                                .child(t!("app.burn.flash_unknown")),
                         )
                     })
                     .child(
@@ -590,7 +622,7 @@ pub(crate) fn show_import_consent(window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Shows the cells that differ between the working image and a fresh ECU read.
+/// Shows the cells that differ between the project tune and the ECU tune.
 pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
     let Some(read) = CoreService::status(cx).pages_read.clone() else {
         return;
@@ -636,7 +668,13 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .child(row)
-                    })),
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t!("app.conflict.keep_hint")),
+                    ),
             )
             .footer(
                 h_flex()
