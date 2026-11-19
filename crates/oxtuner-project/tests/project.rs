@@ -579,6 +579,31 @@ fn a_standalone_tune_uses_its_settings_snapshot_and_has_no_sidecar() {
 }
 
 #[test]
+fn a_standalone_tune_resolves_includes_from_a_noncanonical_temp_path() {
+    let dir = TempDir::new("standalone-include");
+    dir.write(
+        "standalone.ini",
+        "[MegaTune]\nsignature = \"speeduino 202501\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include extra.inc\n",
+    );
+    dir.write(
+        "extra.inc",
+        "fromInclude = scalar, U08, 0, \"\", 1, 0, 0, 255, 0\n",
+    );
+    dir.write("tune.msq", STANDALONE_TUNE);
+
+    let project = Project::open_standalone(
+        dir.path().join("tune.msq"),
+        dir.path().join("standalone.ini"),
+    )
+    .expect("the tune opens");
+
+    assert!(
+        project.definition().constant("fromInclude").is_some(),
+        "a standalone open must resolve its includes even when the base path is not canonical"
+    );
+}
+
+#[test]
 fn a_project_also_reads_the_settings_snapshot() {
     const DEFINITION: &str = r#"
 [MegaTune]

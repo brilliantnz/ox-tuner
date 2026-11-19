@@ -5,6 +5,28 @@ use crate::fields::CommandTemplate;
 use super::*;
 
 #[test]
+fn the_structural_hash_tracks_renames_but_not_comments() {
+    let base = "\
+[MegaTune]
+signature = \"hash test\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+first = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+";
+    let renamed = base.replace("first =", "second =");
+    let commented = format!("{base}; a comment that changes no model data\n");
+
+    let parse =
+        |text: &str| crate::parse_str(text, &crate::SettingsContext::new()).expect("parses");
+    let original = parse(base).structural_hash();
+
+    assert_eq!(parse(&commented).structural_hash(), original);
+    assert_ne!(parse(&renamed).structural_hash(), original);
+}
+
+#[test]
 fn an_ordered_collection_keeps_definition_order_and_replaces_in_place() {
     let mut constants: Ordered<u32> = Ordered::new();
     constants.insert("first", 1);

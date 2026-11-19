@@ -319,10 +319,10 @@ pub(crate) fn parse_constants(
 
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
-        if fields.truncated {
+        if fields.truncated() {
             section.warn(
                 "fields-truncated",
-                format!("`{key}` expands past the field cap; its list is kept short"),
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
                 *line,
             );
         }
@@ -1211,10 +1211,10 @@ pub(crate) fn parse_pc_variables(
         };
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
-        if fields.truncated {
+        if fields.truncated() {
             section.warn(
                 "fields-truncated",
-                format!("`{key}` expands past the field cap; its list is kept short"),
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
                 *line,
             );
         }

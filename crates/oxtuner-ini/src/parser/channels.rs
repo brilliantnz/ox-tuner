@@ -85,6 +85,13 @@ pub(crate) fn parse_channels(
 
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated() {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
+                *line,
+            );
+        }
         match parse_channel(key, value, &fields, *line) {
             Ok(channel) => {
                 let name = channel.name.clone();

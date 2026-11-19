@@ -202,6 +202,12 @@ impl Definition {
     /// library `DefaultHasher` may change between toolchains.
     pub fn structural_hash(&self) -> u64 {
         fn feed(hash: &mut u64, bytes: &[u8]) {
+            // A length prefix keeps two adjacent fields from hashing like one
+            // pair shifted by a character.
+            *hash ^= 0xff;
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            *hash ^= u64::from(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             for &byte in bytes {
                 *hash ^= u64::from(byte);
                 *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -218,6 +224,7 @@ impl Definition {
             &mut hash,
             &self.spec_version.map_or(0, f64::to_bits).to_le_bytes(),
         );
+        feed(&mut hash, &[u8::from(self.spec_version.is_some())]);
         for page in &self.pages {
             feed(&mut hash, &page.number.to_le_bytes());
             feed(&mut hash, &page.size.to_le_bytes());
@@ -230,7 +237,18 @@ impl Definition {
                 &mut hash,
                 &constant.address.unwrap_or(u32::MAX).to_le_bytes(),
             );
-            feed(&mut hash, format!("{:?}", constant.shape).as_bytes());
+            feed(
+                &mut hash,
+                &u8::from(constant.address.is_some()).to_le_bytes(),
+            );
+            feed(
+                &mut hash,
+                &constant.shape.element_count().unwrap_or(0).to_le_bytes(),
+            );
+            feed(
+                &mut hash,
+                &u8::from(constant.shape.is_dynamic()).to_le_bytes(),
+            );
         }
         for (name, values) in &self.defines {
             feed(&mut hash, name.as_bytes());

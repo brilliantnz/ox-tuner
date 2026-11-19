@@ -234,9 +234,7 @@ fn walk_dialogs(definition: &Definition, issues: &mut Issues) {
     for (_, dialog) in definition.dialogs.iter() {
         for row in &dialog.rows {
             for field in &row.fields {
-                if let Some(body) = crate::fields::is_expression_field(field)
-                    .then(|| crate::fields::expression_body(field))
-                    .flatten()
+                if let Some(body) = crate::fields::expression_body(field)
                     && let Ok(expression) = Expr::parse(body)
                 {
                     add_expr(&expression, row.line, &dialog.name, issues);

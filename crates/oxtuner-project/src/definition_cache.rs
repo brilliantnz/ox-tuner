@@ -358,7 +358,7 @@ impl DefinitionCache {
                 return None;
             }
         };
-        let mut bytes = Vec::with_capacity(4 * 1024 * 1024);
+        let mut bytes = Vec::with_capacity(64 * 1024);
         if file
             .take(MAX_CACHE_BYTES + 1)
             .read_to_end(&mut bytes)

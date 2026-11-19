@@ -125,7 +125,9 @@ fn assemble(
             Diagnostic::whole_file(
                 Severity::Warning,
                 "fields-truncated",
-                format!("`#define {name}` expands past the field cap; the list is kept short"),
+                format!(
+                    "`#define {name}` expands past the field cap; references to it are left unexpanded"
+                ),
             ),
         );
     }
@@ -466,27 +468,33 @@ fn resolve_comms_keys(definition: &mut Definition) {
     let mut notes = Vec::new();
 
     for (lower, candidates) in sources {
+        // A header still outranks a page-local spelling, but the last live
+        // declaration of the winning class wins, as the sequential reader did.
         let Some(winner) = candidates
             .iter()
-            .find(|source| {
+            .rfind(|source| {
                 source.section.eq_ignore_ascii_case("MegaTune")
                     || source.section.eq_ignore_ascii_case("TunerStudio")
             })
-            .or_else(|| candidates.first())
+            .or_else(|| candidates.last())
         else {
             continue;
         };
 
         if candidates.len() > 1 {
+            let loser = candidates
+                .iter()
+                .find(|source| !std::ptr::eq(*source, winner));
+            let other = loser.map_or_else(
+                || format!("{} other declaration(s)", candidates.len() - 1),
+                |source| format!("[{}] line {}", source.section, source.line),
+            );
             notes.push(Diagnostic::new(
                 Severity::Note,
                 "comms-key-winner",
                 format!(
-                    "`{}` from [{}] line {} wins over {} other declaration(s)",
-                    winner.key,
-                    winner.section,
-                    winner.line,
-                    candidates.len() - 1
+                    "`{}` from [{}] line {} wins over {other}",
+                    winner.key, winner.section, winner.line
                 ),
                 winner.line,
                 &winner.section,
@@ -1410,6 +1418,33 @@ x = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
             .expect("the conflicting spellings are reported");
         assert!(note.message.contains("blockingFactor"));
         assert_eq!(note.line, Some(3));
+    }
+
+    #[test]
+    fn the_last_declaration_wins_within_one_comms_section() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+blockingFactor = 99
+blockingFactor = 77
+x = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+",
+        );
+
+        assert_eq!(definition.comms.blocking_factor, Some(77));
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("blockingfactor")
+                .map(String::as_str),
+            Some("77")
+        );
     }
 
     #[test]

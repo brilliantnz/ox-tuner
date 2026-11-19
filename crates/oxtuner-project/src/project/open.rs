@@ -63,7 +63,6 @@ impl Project {
 
         let config = root.join(CONFIG_DIR);
         let definition_path = find_definition(&config)?;
-        let base = canonical_base(&config).unwrap_or_else(|| config.clone());
         let tune_path = root.join(TUNE_FILE);
 
         let definition_bytes = {
@@ -104,7 +103,7 @@ impl Project {
                 &definition_bytes,
                 definition_digest,
                 &settings,
-                &base,
+                &config,
                 cache_dir,
             )
         }?;
@@ -358,6 +357,11 @@ fn load_definition(
     base: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<(Definition, DefinitionSource), ProjectError> {
+    // One owner of the include-base invariant, for both folder and standalone
+    // opens: the cache key, every fingerprint and every `#include` read need
+    // the same resolved directory.
+    let base = canonical_base(base).unwrap_or_else(|| base.to_owned());
+    let base = base.as_path();
     let cache = cache_dir.and_then(|directory| {
         DefinitionCache::with_canonical_base(directory, base, definition_digest, settings)
     });

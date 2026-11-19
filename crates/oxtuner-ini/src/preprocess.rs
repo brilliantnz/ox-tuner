@@ -90,13 +90,18 @@ pub struct Fields<'a> {
     prefix: Vec<Cow<'a, str>>,
     tail: Option<&'a [&'a str]>,
     /// Set when an expansion cap stopped the list before its declared end.
-    pub truncated: bool,
+    truncated: bool,
 }
 
 impl Fields<'_> {
     /// Number of fields.
     pub fn len(&self) -> usize {
         self.prefix.len() + self.tail.map_or(0, <[&str]>::len)
+    }
+
+    /// Whether an expansion cap stopped the list before its declared end.
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Whether the list is empty.

@@ -48,9 +48,16 @@ nPages = 15
 ",
     );
 
-    for _ in 0..PAGES {
-        text.push_str("pageSize = 288\n");
+    // One list, as the real files write it: a repeated `pageSize` would
+    // replace the list and leave later pages with no declared size.
+    text.push_str("pageSize = ");
+    for index in 0..PAGES {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str("288");
     }
+    text.push('\n');
 
     for page in 1..=PAGES {
         let _ = writeln!(text, "page = {page}");

@@ -46,7 +46,11 @@ pub(crate) fn parse_setting_groups(
                 if let Some(existing) = definition.setting_groups.get_mut(name) {
                     // A repeated header continues the group: options collected
                     // under either header are kept in one list.
-                    existing.label = label;
+                    // A bare repeated header defaults the label to the group
+                    // name; keep the earlier label in that case.
+                    if label != name {
+                        existing.label = label;
+                    }
                     section.note(
                         "merged-setting-group",
                         format!("setting group `{name}` is declared more than once; options are appended"),

@@ -206,7 +206,11 @@ fn merge_table(existing: &mut Table, next: Table) {
     if map_id.is_some() {
         existing.map_id = map_id;
     }
-    existing.title = title;
+    // A bare repeated header defaults its title to the id; keep the earlier
+    // title in that case, the same rule the curve merger uses.
+    if title.literal() != Some(existing.id.as_str()) {
+        existing.title = title;
+    }
     if page.is_some() {
         existing.page = page;
     }

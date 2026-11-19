@@ -298,8 +298,9 @@ pub enum Text {
 }
 
 impl Text {
-    /// Shared literal text, for callers that already have a plain string.
-    pub(crate) fn shared(value: impl AsRef<str>) -> Self {
+    /// Shared literal text. One allocation per distinct value per parse; the
+    /// call is cheap outside a parse.
+    pub fn shared(value: impl AsRef<str>) -> Self {
         Self::Literal(intern_text(value.as_ref()))
     }
 
