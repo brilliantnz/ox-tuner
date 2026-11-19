@@ -17,7 +17,7 @@
 //! loaded, and reports any it cannot resolve instead of guessing. Re-evaluating
 //! them live as the user edits is M4 work.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use oxtuner_ini::expr::EvalContext;
@@ -1110,22 +1110,12 @@ impl TuneLayout {
         };
 
         let spans = page_spans(&self.variables, page_layout);
-        // One claim per variable, built once: the pairs below are many and the
-        // claim is the expensive part.
-        let claims: Vec<Option<Claim>> = spans
-            .iter()
-            .map(|span| {
-                let spec = self.variables.get(span.index)?;
-                // The codec places a constant at `address - start_offset`, and
-                // one it cannot place is never written. A claim has to say the
-                // same, or it would report bytes no write touches.
-                let start = offset_of(spec, page_layout.start_offset)?;
-
-                claim_of(spec, start, self.endianness, tune)
-            })
-            .collect();
-
-        let mut conflicts = Vec::new();
+        // Only a pair whose ranges contain one another is in scope, and seeing
+        // that is cheap. A claim is not, so one is built only for a variable
+        // that really is in such a pair: a page of ordinary constants then
+        // costs the scan alone, which is most pages on most definitions.
+        let mut in_scope: Vec<(usize, usize)> = Vec::new();
+        let mut involved = BTreeSet::new();
 
         for (position, span) in spans.iter().enumerate() {
             if self.is_alias_at(span.index) {
@@ -1142,25 +1132,53 @@ impl TuneLayout {
                     continue;
                 }
 
-                let (Some(first), Some(second)) =
-                    (claims[position].as_ref(), claims[other_position].as_ref())
-                else {
-                    continue;
-                };
-                if first.agrees_with(second) {
-                    continue;
-                }
-
-                let (first_spec, second_spec) =
-                    (&self.variables[span.index], &self.variables[other.index]);
-                conflicts.push(ValueConflict {
-                    page,
-                    first: first_spec.name.clone(),
-                    second: second_spec.name.clone(),
-                    start: span.start.max(other.start),
-                    end: span.end().min(other.end()),
-                });
+                in_scope.push((position, other_position));
+                involved.insert(position);
+                involved.insert(other_position);
             }
+        }
+
+        let mut claims: Vec<Option<Claim>> = (0..spans.len()).map(|_| None).collect();
+        for position in involved {
+            let Some(span) = spans.get(position) else {
+                continue;
+            };
+            let Some(spec) = self.variables.get(span.index) else {
+                continue;
+            };
+            // The codec places a constant at `address - start_offset`, and one
+            // it cannot place is never written. A claim has to say the same, or
+            // it would report bytes no write touches.
+            let Some(start) = offset_of(spec, page_layout.start_offset) else {
+                continue;
+            };
+
+            claims[position] = claim_of(spec, start, self.endianness, tune);
+        }
+
+        let mut conflicts = Vec::new();
+
+        for (position, other_position) in in_scope {
+            let (Some(first), Some(second)) =
+                (claims[position].as_ref(), claims[other_position].as_ref())
+            else {
+                continue;
+            };
+            if first.agrees_with(second) {
+                continue;
+            }
+
+            let span = spans[position];
+            let other = spans[other_position];
+            let (first_spec, second_spec) =
+                (&self.variables[span.index], &self.variables[other.index]);
+            conflicts.push(ValueConflict {
+                page,
+                first: first_spec.name.clone(),
+                second: second_spec.name.clone(),
+                start: span.start.max(other.start),
+                end: span.end().min(other.end()),
+            });
         }
 
         conflicts
