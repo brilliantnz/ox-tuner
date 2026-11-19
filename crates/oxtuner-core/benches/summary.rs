@@ -33,6 +33,7 @@ loadBins = array, U08, 18, [16], \"kPa\", 1, 0, 0, 255, 0
 veTable = array, U08, 34, [16x16], \"%\", 1, 0, 0, 255, 0
 
 [OutputChannels]
+ochBlockSize = 4
 rpm = scalar, U16, 0, \"RPM\", 1.0, 0.0
 map = scalar, U16, 2, \"kPa\", 0.1, 0.0
 
@@ -114,7 +115,12 @@ fn bench_table_clone(criterion: &mut Criterion) {
 fn bench_realtime_decode(criterion: &mut Criterion) {
     let definition = definition();
     let decoder = RealtimeDecoder::new(&definition);
-    let block = vec![0u8; decoder.block_size().max(1)];
+    let block = vec![0u8; decoder.block_size()];
+    assert_eq!(
+        decoder.decode(&block, 1).values.len(),
+        2,
+        "the decode fixture must decode, not take the wrong-size path"
+    );
 
     criterion.bench_function("core_realtime_decode", |bencher| {
         bencher.iter(|| black_box(decoder.decode(black_box(&block), black_box(1))));
@@ -145,7 +151,12 @@ fn bench_realtime_decode_computed(criterion: &mut Criterion) {
     let definition = oxtuner_ini::parse_str(COMPUTED_INI, &SettingsContext::new())
         .expect("the computed fixture parses");
     let decoder = RealtimeDecoder::new(&definition);
-    let block = vec![0u8; decoder.block_size().max(1)];
+    let block = vec![0u8; decoder.block_size()];
+    assert_eq!(
+        decoder.decode(&block, 1).values.len(),
+        3,
+        "the computed fixture must decode, not take the wrong-size path"
+    );
 
     criterion.bench_function("core_realtime_decode_computed", |bencher| {
         bencher.iter(|| black_box(decoder.decode(black_box(&block), black_box(1))));

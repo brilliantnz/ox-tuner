@@ -495,7 +495,7 @@ fn realtime_values_arrive_through_the_latest_frame() {
     let mut frame = None;
     while Instant::now() < deadline {
         if let Some(latest) = harness.latest.get()
-            && !latest.values.is_empty()
+            && !latest.is_empty()
         {
             frame = Some(latest);
             break;
