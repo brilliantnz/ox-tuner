@@ -18,5 +18,11 @@
       }
     }
   ],
-  "ignorePatterns": ["target/**", "Cargo.lock", ".agents/**", "**/tests/fixtures/**"]
+  "ignorePatterns": [
+    "target/**",
+    "Cargo.lock",
+    ".agents/**",
+    ".opencode/**",
+    "**/tests/fixtures/**"
+  ]
 }
