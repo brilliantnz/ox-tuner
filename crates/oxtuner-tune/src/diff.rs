@@ -71,6 +71,10 @@ pub(crate) fn diff_values(layout: &TuneLayout, baseline: &[Values], other: &[Val
     let mut diff = TuneDiff::default();
 
     for (index, variable) in layout.variables().iter().enumerate() {
+        if layout.is_alias_at(index) {
+            // A view follows its owner and is never written to a file.
+            continue;
+        }
         let (Some(left), Some(right)) = (baseline.get(index), other.get(index)) else {
             continue;
         };

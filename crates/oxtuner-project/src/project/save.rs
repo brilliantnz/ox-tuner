@@ -1,5 +1,6 @@
 use oxtuner_tune::TuneDiff;
 
+use crate::Msq;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
@@ -8,6 +9,25 @@ use crate::sidecar::{ProjectLayout, ProjectState};
 use super::{Project, ProjectError, SaveOutcome};
 
 impl Project {
+    /// Drops every constant whose bytes another constant owns.
+    ///
+    /// A view is not a value a file carries: another tool would apply it after
+    /// the owner and read a different tune. A file an older build wrote keeps
+    /// those entries, so every save and every snapshot removes them.
+    fn remove_alias_entries(&self, document: &mut Msq) {
+        for spec in self.layout().variables() {
+            if !self.layout().is_alias(&spec.name) {
+                continue;
+            }
+
+            let (page, kind) = match spec.ini_page() {
+                Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
+                None => (EntryPage::Pc, EntryKind::PcVariable),
+            };
+            document.remove_entry(page, kind, &spec.name);
+        }
+    }
+
     /// Writes changed values back to the tune file.
     ///
     /// Only variables whose values differ from the baseline are touched, so an
@@ -35,6 +55,7 @@ impl Project {
         // formatted) must leave the session's document exactly as it was, so a
         // later revert cannot save text from the failed attempt.
         let mut document = self.msq.clone();
+        self.remove_alias_entries(&mut document);
         let mut written: Vec<String> = Vec::new();
         let mut cells = 0;
         for name in &diff.changed_variables {
@@ -42,6 +63,10 @@ impl Project {
                 continue;
             };
             if spec.no_msq_save {
+                continue;
+            }
+            if self.layout().is_alias(name) {
+                // Already removed from the document above; nothing to write.
                 continue;
             }
             let Some(values) = self.tune().value(name) else {
@@ -125,8 +150,9 @@ impl Project {
     /// Returns [`ProjectError`] when the tune cannot be serialized.
     pub fn snapshot_msq(&self) -> Result<Vec<u8>, ProjectError> {
         let mut document = self.msq.clone();
+        self.remove_alias_entries(&mut document);
         for spec in self.layout().variables() {
-            if spec.no_msq_save {
+            if spec.no_msq_save || self.layout().is_alias(&spec.name) {
                 continue;
             }
             let Some(values) = self.tune().value(&spec.name) else {

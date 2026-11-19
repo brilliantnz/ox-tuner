@@ -1367,6 +1367,28 @@ pub(super) fn record_local_journal(
 
 /// Checks every edit before one is stored, so a rejected request leaves the tune
 /// exactly as it was.
+/// Refuses an edit to a value the tune does not own.
+///
+/// The controller owns some values and a view shares bytes with its owner.
+/// Both are read-only for the user, on every path that can reach an edit.
+fn refuse_uneditable(project: &Project, name: &str) -> Result<(), String> {
+    let Some(spec) = project.layout().variable(name) else {
+        return Err(format!("the tune has no variable named `{name}`"));
+    };
+    if spec.is_controller_owned() {
+        return Err(format!(
+            "`{name}` is owned by the controller and cannot be edited"
+        ));
+    }
+    if let Some(owner) = project.layout().alias_owner(name) {
+        return Err(format!(
+            "`{name}` is a view of `{owner}`; edit that value instead"
+        ));
+    }
+
+    Ok(())
+}
+
 pub(super) fn validate_edits(
     project: &Project,
     name: &str,
@@ -1379,14 +1401,10 @@ pub(super) fn validate_edits(
         ));
     }
 
+    refuse_uneditable(project, name)?;
     let Some(spec) = project.layout().variable(name) else {
         return Err(format!("the tune has no variable named `{name}`"));
     };
-    if spec.is_controller_owned() {
-        return Err(format!(
-            "`{name}` is owned by the controller and cannot be edited"
-        ));
-    }
     if !spec.shape.is_numeric() {
         return Err(format!("`{name}` holds text, not numbers"));
     }
@@ -1427,14 +1445,10 @@ pub(super) fn validate_axis_edits(
         ));
     }
 
+    refuse_uneditable(project, name)?;
     let Some(spec) = project.layout().variable(name) else {
         return Err(format!("the tune has no variable named `{name}`"));
     };
-    if spec.is_controller_owned() {
-        return Err(format!(
-            "`{name}` is owned by the controller and cannot be edited"
-        ));
-    }
     if !spec.shape.is_numeric() {
         return Err(format!("`{name}` holds text, not numbers"));
     }

@@ -47,6 +47,96 @@ pc = scalar, U08, 1, "", 1, 0, 0, 255, 0
         TuneImages::from_working(tune())
     }
 
+    const ALIASED: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+queryCommand = "Q"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+data = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+data0 = bits, U08, 0, [0:7]
+data1 = bits, U08, 1, [0:7]
+data2 = bits, U08, 2, [0:7]
+data3 = bits, U08, 3, [0:7]
+"#;
+
+    fn aliased_images() -> TuneImages {
+        let definition = parse_str(ALIASED, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+
+        TuneImages::from_working(Tune::new(layout))
+    }
+
+    fn aliased_tune(images: &TuneImages) -> Tune {
+        Tune::new(Arc::clone(images.working().layout()))
+    }
+
+    #[test]
+    fn a_file_without_its_aliases_keeps_them_with_the_page() {
+        let mut images = aliased_images();
+        let mut imported = aliased_tune(&images);
+        for index in 0..4 {
+            imported
+                .set_image_raw("data", index, 255.0)
+                .expect("the array takes a value");
+        }
+
+        // What TunerStudio writes: the array, none of its derived aliases.
+        images
+            .import_applied(&imported, &["data".to_owned()])
+            .expect("import");
+
+        for index in 0..4 {
+            assert_eq!(images.working().raw_at("data", index).unwrap(), 255.0);
+            let alias = format!("data{index}");
+            assert_eq!(
+                images.working().scalar_raw(&alias).unwrap(),
+                255.0,
+                "a derived alias follows the byte the file wrote"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_writes_an_alias_keeps_the_owner_in_charge_of_the_byte() {
+        let mut images = aliased_images();
+        let mut imported = aliased_tune(&images);
+        for index in 0..4 {
+            imported
+                .set_image_raw("data", index, 255.0)
+                .expect("the array takes a value");
+            imported
+                .set_image_raw(&format!("data{index}"), 0, 0.0)
+                .expect("the alias takes a value");
+        }
+
+        images
+            .import_applied(
+                &imported,
+                &[
+                    "data".to_owned(),
+                    "data0".to_owned(),
+                    "data1".to_owned(),
+                    "data2".to_owned(),
+                    "data3".to_owned(),
+                ],
+            )
+            .expect("import");
+
+        for index in 0..4 {
+            assert_eq!(
+                images.working().raw_at("data", index).unwrap(),
+                255.0,
+                "the owner writes the byte even when the file also carried the view"
+            );
+            let alias = format!("data{index}");
+            assert_eq!(images.working().scalar_raw(&alias).unwrap(), 255.0);
+        }
+    }
+
     #[test]
     fn without_an_ecu_read_everything_is_unknown() {
         let images = images();

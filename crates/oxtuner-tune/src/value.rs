@@ -95,6 +95,25 @@ impl Values {
         }
     }
 
+    /// Cells whose stored value differs, as the wire stores them.
+    ///
+    /// A page stores raw values, so a raw `147` and the raw a float page keeps
+    /// for the same user value are one cell when their bytes match. Comparing
+    /// raw floats exactly would leave a permanent unsent edit behind such a
+    /// write, and every later burn would be refused. Text compares exactly.
+    pub fn changed_wire_cells(&self, other: &Self, spec: &VariableSpec) -> usize {
+        if self.number(0).is_none() || other.number(0).is_none() {
+            return self.changed_cells(other);
+        }
+
+        (0..self.len().max(other.len()))
+            .filter(|index| match (self.number(*index), other.number(*index)) {
+                (Some(left), Some(right)) => !spec.same_wire_value(left, right),
+                _ => true,
+            })
+            .count()
+    }
+
     /// Whether the element at `index` equals the same element of `other`.
     ///
     /// Text values compare whole strings; the index is the single text cell.
@@ -288,6 +307,32 @@ impl VariableSpec {
         raw.clamp(storage_low, storage_high)
     }
 
+    /// Whether two **raw** values store as the same wire bytes.
+    ///
+    /// A tune's values are raw, so `14.7` at scale `0.1` is stored as `147.0`
+    /// and a page returns `147.0`; the user text and its round trip are the
+    /// same cell. Comparing the stored bytes is the wire's own meaning, and
+    /// `scale` plays no part: a bin array at `scale 100` keeps `1200` and
+    /// `1300` distinct.
+    ///
+    /// A bit field compares exactly, because the page codec owns its masking.
+    #[must_use]
+    #[expect(
+        clippy::float_cmp,
+        reason = "a bit field compares the value the codec stored, exactly"
+    )]
+    pub fn same_wire_value(&self, left_raw: f64, right_raw: f64) -> bool {
+        if matches!(
+            self.shape,
+            EntryShape::Bits { .. } | EntryShape::Text { .. }
+        ) {
+            return left_raw == right_raw;
+        }
+
+        crate::wire::wire_bytes(left_raw, self.data_type)
+            == crate::wire::wire_bytes(right_raw, self.data_type)
+    }
+
     /// Formats a user value with the definition's digit count.
     pub fn format_user(&self, user: f64) -> String {
         format_fixed(normalize_zero(user), usize::from(self.digits))
@@ -399,6 +444,38 @@ mod tests {
 
         assert!((spec.to_user(147.0).unwrap() - 14.7).abs() < 1e-12);
         assert_eq!(spec.to_raw(14.7).unwrap().raw, 147.0);
+    }
+
+    #[test]
+    fn two_raw_values_are_the_same_cell_when_the_wire_cannot_tell_them_apart() {
+        let spec = scalar(DataType::U08, 0.1, 0.0);
+
+        assert!(
+            spec.same_wire_value(147.0, 147.2),
+            "an integer wire rounds both to 147"
+        );
+        assert!(!spec.same_wire_value(147.0, 148.0));
+
+        // A float keeps its exact bits, so the value read back is the value the
+        // page stores even when the user text differs in the last place.
+        let float = scalar(DataType::F32, 1.0, 0.0);
+        assert!(
+            float.same_wire_value(14.7, f64::from(14.7_f32)),
+            "the page stores and returns the same float"
+        );
+    }
+
+    #[test]
+    fn a_scaled_bin_array_keeps_its_neighbours_apart() {
+        // Raw values, scale 100: 1200 rpm and 1300 rpm are different cells.
+        let spec = scalar(DataType::U08, 100.0, 0.0);
+
+        for (left, right) in [(8.0, 9.0), (12.0, 13.0), (147.0, 148.0)] {
+            assert!(
+                !spec.same_wire_value(left, right),
+                "{left} and {right} must not collapse"
+            );
+        }
     }
 
     #[test]

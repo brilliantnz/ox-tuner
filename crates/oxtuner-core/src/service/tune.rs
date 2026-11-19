@@ -6,27 +6,6 @@
 use super::dispatch::{record_local_journal, refuse, send, send_status};
 use super::*;
 
-/// working image. Used for an imported tune, whose layout is a separate
-/// allocation but describes the same definition.
-pub(super) fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
-    let mut cells = 0usize;
-    let mut variables = 0usize;
-    for spec in project.layout().variables() {
-        let Some(current) = project.tune().value(&spec.name) else {
-            continue;
-        };
-        let Some(imported) = other.value(&spec.name) else {
-            continue;
-        };
-        let changed = current.changed_cells(imported);
-        if changed > 0 {
-            cells += changed;
-            variables += 1;
-        }
-    }
-    (cells, variables)
-}
-
 /// Clamps every non-controller tune value that is about to be written.
 ///
 /// Edits are already clamped when they enter the core. An imported tune or a
@@ -48,7 +27,7 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
             return 0;
         };
         for spec in project.layout().variables() {
-            if spec.is_controller_owned() {
+            if spec.is_controller_owned() || project.layout().is_alias(&spec.name) {
                 continue;
             }
             for index in 0..spec.element_count() {
@@ -97,6 +76,10 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
         if spec.is_controller_owned() {
             continue;
         }
+        if project.layout().is_alias(&spec.name) {
+            // A view of bytes another variable owns; it follows that value.
+            continue;
+        }
         let Some(page) = spec.ini_page() else {
             // PC-side values are stored in the tune file, never sent to the ECU.
             continue;
@@ -114,7 +97,7 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
         let (Some(after), Some(sent)) = (working.value(&spec.name), ram.value(&spec.name)) else {
             continue;
         };
-        let remaining = after.changed_cells(sent);
+        let remaining = after.changed_wire_cells(sent, spec);
         if remaining == 0 {
             continue;
         }
@@ -147,7 +130,7 @@ pub(super) fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>,
         let (Some(after), Some(sent)) = (working.value(&name), ram.value(&name)) else {
             continue;
         };
-        let remaining = after.changed_cells(sent);
+        let remaining = after.changed_wire_cells(sent, spec);
         if remaining == 0 {
             continue;
         }
@@ -559,14 +542,17 @@ pub(super) fn import_tune(
     }
 
     let loaded = oxtuner_project::load::load(&msq, project.definition());
-    let (cells, variables) = changed_against(project, &loaded.tune);
+    let before = project.images().working().snapshot();
     let snapshot = match snapshot::write(project, operation) {
         Ok(path) => path,
         Err(error) => {
             return refuse(events, report, op, FailureCode::SnapshotFailed, error);
         }
     };
-    if let Err(error) = project.images_mut().import(loaded.tune) {
+    if let Err(error) = project
+        .images_mut()
+        .import_applied(&loaded.tune, &loaded.applied)
+    {
         return refuse(
             events,
             report,
@@ -575,6 +561,22 @@ pub(super) fn import_tune(
             error.to_string(),
         );
     }
+
+    // What the merge actually moved, not a second derivation of it.
+    let (cells, variables) =
+        match oxtuner_tune::TuneDiff::between(&before, project.images().working()) {
+            Ok(diff) => (diff.cells, diff.changed_variables.len()),
+            Err(error) => {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::ImportRejected,
+                    error.to_string(),
+                );
+            }
+        };
+
     tracing::info!(
         %op,
         path = %path.display(),

@@ -77,10 +77,14 @@ pub(super) fn diff_writable_values(
         if variable.is_controller_owned() || variable.address.is_none() {
             continue;
         }
+        if layout.is_alias_at(index) {
+            // Another variable owns these bytes; the view follows them.
+            continue;
+        }
         let (Some(left), Some(right)) = (left.get(index), right.get(index)) else {
             continue;
         };
-        let changed = left.changed_cells(right);
+        let changed = left.changed_wire_cells(right, variable);
         if changed == 0 {
             continue;
         }

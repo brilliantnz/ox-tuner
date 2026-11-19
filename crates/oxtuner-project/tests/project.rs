@@ -32,7 +32,7 @@ page = 1
 reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
 note = string, ASCII, 8
-table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+table = array, U08, 16, [2x2], "", 1, 0, 0, 255, 0
 #include page2.ini
 
 [PcVariables]

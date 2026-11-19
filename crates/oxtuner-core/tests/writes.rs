@@ -218,6 +218,19 @@ impl Harness {
         }
     }
 
+    fn edit_scalar(&self, dialog: &str, name: &str, value: f64) {
+        let op = self
+            .handle
+            .edit_scalar(dialog, name, value)
+            .expect("queued");
+        match self.wait(|event| event.op() == Some(op)) {
+            Event::DialogEdited { dialog, .. } => {
+                assert_eq!(dialog.id, "engineDialog", "the edited dialog");
+            }
+            other => panic!("expected a dialog edit, got {other:?}"),
+        }
+    }
+
     fn write(&self) -> Event {
         let op = self.handle.write_to_ram(Vec::new()).expect("queued");
         self.wait(|event| event.op() == Some(op))
@@ -342,6 +355,36 @@ fn a_write_round_trips_and_reads_back_verified() {
     assert_eq!(entries[1].phase, "result");
     assert_eq!(entries[1].result, "ok");
     assert_eq!(entries[1].cells, written_cells);
+
+    core.close();
+}
+
+#[test]
+fn a_value_that_does_not_round_trip_still_burns() {
+    let dir = TempDir::new("round-trip-burn");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+
+    // 14.7 stored at one decimal reads back as 14.700000000000001, so an exact
+    // float comparison would leave this cell pending forever.
+    core.edit_scalar("engineDialog", "reqFuel", 14.7);
+    let Event::TuneWritten { report, .. } = core.write() else {
+        panic!("the write was refused");
+    };
+    assert!(report.verified);
+
+    let status = core.status();
+    assert_eq!(
+        status.pending_write.cells, 0,
+        "a value that round-trips on the wire must not stay pending"
+    );
+
+    let Event::TuneBurned { report, .. } = core.burn() else {
+        panic!("the burn was refused after a verified write");
+    };
+    assert!(report.verified);
 
     core.close();
 }

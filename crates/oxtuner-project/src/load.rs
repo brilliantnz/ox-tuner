@@ -42,6 +42,12 @@ pub struct LoadedTune {
     pub layout: Arc<TuneLayout>,
     /// What the load gate found.
     pub report: LoadReport,
+    /// The variables the file carried, in the order the file lists them.
+    ///
+    /// An import applies only these onto the working image, so a constant the
+    /// file omits keeps the value the ECU gave it. A derived bit alias that the
+    /// writer leaves out is the common case.
+    pub applied: Vec<String>,
 }
 
 /// Why a tune value cannot be written back to text.
@@ -164,6 +170,7 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
     // save those zeros over the declared values.
     crate::msq::apply_definition_defaults(&mut tune, definition);
 
+    let mut applied = Vec::new();
     for entry in msq.entries() {
         if entry.is_nameless() {
             continue;
@@ -176,7 +183,10 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         let spec = &layout.variables()[index];
 
         match load_entry(&mut tune, spec, definition, &entry, &mut report) {
-            Ok(()) => report.loaded += 1,
+            Ok(()) => {
+                report.loaded += 1;
+                applied.push(spec.name.clone());
+            }
             Err(reason) => {
                 report.skipped += 1;
                 report.warn(
@@ -187,12 +197,89 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         }
     }
 
+    reconcile_pages(&layout, &mut tune, &applied, &mut report);
     check_page_data(msq, definition, &layout, &tune, &mut report);
 
     LoadedTune {
         tune,
         layout,
         report,
+        applied,
+    }
+}
+
+/// Rebuilds each page from the values the file carried and decodes it back.
+///
+/// A tune file is not a whole image: it leaves derived constants out. Encoding
+/// the page from the values it did carry and decoding every variable back makes
+/// a constant that shares bytes follow the variable that owns them, instead of
+/// keeping a default the file never wrote.
+fn reconcile_pages(
+    layout: &Arc<TuneLayout>,
+    tune: &mut Tune,
+    applied: &[String],
+    report: &mut LoadReport,
+) {
+    for page in layout.pages() {
+        let names = layout.page_patch_names(applied, page.page);
+
+        // A page with nothing the file wrote and no view to derive has nothing
+        // to reconcile; this is the common page and keeps an open cheap.
+        let has_alias = page
+            .variables
+            .iter()
+            .any(|index| layout.is_alias_at(*index));
+        if names.is_empty() && !has_alias {
+            continue;
+        }
+        if layout.page_has_text_overlap(page.page) {
+            // A definition quirk, not a user problem: the page keeps the file's
+            // values instead of being rebuilt through the overlap.
+            tracing::debug!(
+                page = page.page.get(),
+                "a text field overlaps another value; the page is not reconciled"
+            );
+            continue;
+        }
+
+        let outcome = (|| {
+            let base = oxtuner_tune::encode_page(layout, page.page, tune)?;
+            let patched = oxtuner_tune::patch_page(layout, page.page, &base, tune, &names)?;
+
+            // Decode into a scratch that already holds the tune: a page also
+            // carries values the file did not write, and a value the codec
+            // refuses keeps what the tune held instead of falling to zero.
+            let mut decoded = tune.snapshot();
+            oxtuner_tune::decode_page(layout, page.page, &patched, &mut decoded)?;
+
+            // The values the file wrote, the owners whose bytes a view wrote,
+            // and every view on the page follow the decoded result.
+            let mut moved: Vec<&str> = names.clone();
+            for name in &names {
+                if let Some(owner) = layout.alias_owner(name)
+                    && !moved.contains(&owner)
+                {
+                    moved.push(owner);
+                }
+            }
+            for index in &page.variables {
+                if layout.is_alias_at(*index) {
+                    let name = layout.variables()[*index].name.as_str();
+                    if !moved.contains(&name) {
+                        moved.push(name);
+                    }
+                }
+            }
+
+            tune.adopt_named(&decoded, &moved)
+        })();
+
+        if let Err(error) = outcome {
+            report.warn(
+                IssueKind::ValueSkipped,
+                format!("page {}: {error}", page.page),
+            );
+        }
     }
 }
 
@@ -973,7 +1060,7 @@ page = 1
 reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
 note = string, ASCII, 8
-table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+table = array, U08, 16, [2x2], "", 1, 0, 0, 255, 0
 canAddress = bits, U16, 10, [0:15], 256="0x100", 300="0x12C"
 numbered = bits, U08, 12, [0:7], "1", "2", "3"
 
@@ -1650,6 +1737,47 @@ serial = bits, U08, 1, [3:6], "Generic (Fixed List)". "Generic (ini File)". "CAN
 
     fn loaded() -> LoadedTune {
         load(&Msq::parse(MSQ.as_bytes()).unwrap(), definition())
+    }
+
+    #[test]
+    fn a_file_without_its_alias_leaves_the_view_to_the_array() {
+        const ALIASED: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+data = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+data0 = bits, U08, 0, [0:7]
+data1 = bits, U08, 1, [0:7]
+data2 = bits, U08, 2, [0:7]
+data3 = bits, U08, 3, [0:7]
+"#;
+        // The array only, the way TunerStudio writes it; the aliases are absent.
+        const MSQ: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.7" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <constant cols="1" digits="0" name="data" rows="4">255.0 255.0 255.0 255.0</constant>
+    </page>
+</msq>
+"#;
+        let definition =
+            parse_str(ALIASED, &SettingsContext::new()).expect("the definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert_eq!(loaded.applied, ["data"], "only the file's variables");
+        for index in 0..4 {
+            assert_eq!(loaded.tune.raw_at("data", index).unwrap(), 255.0);
+            let alias = format!("data{index}");
+            assert_eq!(
+                loaded.tune.scalar_raw(&alias).unwrap(),
+                255.0,
+                "the view follows the array's bytes"
+            );
+        }
     }
 
     #[test]

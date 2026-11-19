@@ -433,7 +433,7 @@ impl Msq {
         let mut pc_entries: Vec<Element> = Vec::new();
         let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
         for spec in layout.variables() {
-            if spec.no_msq_save {
+            if spec.no_msq_save || layout.is_alias(&spec.name) {
                 continue;
             }
             let Some(values) = tune.value(&spec.name) else {
@@ -862,6 +862,35 @@ impl Msq {
             page,
             name: name.to_owned(),
         })
+    }
+
+    /// Removes one entry from the document, when it is there.
+    ///
+    /// A constant whose bytes another constant covers is a view and must not
+    /// survive in a saved file: another tool would apply it after the owner and
+    /// read a different tune. A document without the entry is not an error.
+    pub fn remove_entry(&mut self, page: EntryPage, kind: EntryKind, name: &str) {
+        let Some(root) = self.root_mut() else {
+            return;
+        };
+
+        for page_element in root.children.iter_mut().filter_map(|node| match node {
+            Node::Element(element) if element.name == "page" => Some(element),
+            _ => None,
+        }) {
+            if page_address(page_element) != Some(page) {
+                continue;
+            }
+
+            page_element.children.retain(|node| match node {
+                Node::Element(entry) if entry.name == kind.element() => !entry
+                    .attr("name")
+                    .is_some_and(|written| written.eq_ignore_ascii_case(name)),
+                _ => true,
+            });
+
+            return;
+        }
     }
 
     /// Like [`Self::set_entry_text`], but appends a new entry when the file

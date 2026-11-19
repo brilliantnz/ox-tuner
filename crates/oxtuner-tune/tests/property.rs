@@ -153,3 +153,52 @@ proptest! {
         prop_assert_eq!(images.overall_state(), CellState::InRam);
     }
 }
+
+proptest! {
+    /// The cell comparison agrees with what an integer wire can carry.
+    ///
+    /// Both raw values go through the encoder's own rounding and clamping, so
+    /// two values the wire cannot tell apart are one cell and two it can tell
+    /// apart never collapse, whatever the definition's scale.
+    #[test]
+    fn an_integer_cell_compares_by_its_stored_byte(left in -1000.0f64..1000.0, right in -1000.0f64..1000.0) {
+        let definition = parse_str(
+            "[MegaTune]\nsignature = \"speeduino 202501\"\n\n[Constants]\nnPages = 1\npageSize = 1\npage = 1\nbin = scalar, U08, 0, \"\", 100.0, 0.0\n",
+            &SettingsContext::new(),
+        )
+        .expect("the fixture parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("bin").expect("the bin");
+
+        let stored = |value: f64| value.round().clamp(0.0, 255.0);
+        prop_assert_eq!(
+            spec.same_wire_value(left, right),
+            stored(left) == stored(right),
+            "{} and {}", left, right
+        );
+    }
+
+    /// A float cell compares its stored bits, so a user value and the value the
+    /// page returns are one cell.
+    #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::as_conversions,
+        reason = "the property is about the f64 to f32 narrowing the wire performs"
+    )]
+    fn a_float_cell_compares_by_its_stored_bits(left in -1e6f64..1e6, right in -1e6f64..1e6) {
+        let definition = parse_str(
+            "[MegaTune]\nsignature = \"speeduino 202501\"\n\n[Constants]\nnPages = 1\npageSize = 4\npage = 1\nf = scalar, F32, 0, \"\", 1.0, 0.0\n",
+            &SettingsContext::new(),
+        )
+        .expect("the fixture parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let spec = layout.variable("f").expect("the scalar");
+
+        prop_assert_eq!(
+            spec.same_wire_value(left, right),
+            (left as f32).to_bits() == (right as f32).to_bits(),
+            "{} and {}", left, right
+        );
+    }
+}

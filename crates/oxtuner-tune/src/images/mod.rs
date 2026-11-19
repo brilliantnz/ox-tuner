@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
+use crate::wire::{decode_page, encode_page, patch_page};
+use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout, Values};
 
 mod conflict;
 mod state;
@@ -429,6 +430,98 @@ impl TuneImages {
         Ok(())
     }
 
+    /// Merges the variables a tune file carried onto the working image.
+    ///
+    /// A file is not a whole image: it writes the constants it knows, and it
+    /// leaves derived ones out. The values it carries are patched into each
+    /// page's bytes and the page is decoded back, so constants that share
+    /// bytes end up agreeing. A constant the file omits keeps its current
+    /// value, which for a derived bit alias is the one the ECU gave it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TuneError`] when a page cannot be encoded, patched or
+    /// decoded, or when a value's shape does not fit the layout.
+    pub fn import_applied(&mut self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
+        // The merge lands in a copy: a page that fails halfway must leave the
+        // working image exactly as it was, like the whole-image import does.
+        let mut merged = self.working.snapshot();
+        let pages: Vec<IniPage> = self.layout.pages().iter().map(|page| page.page).collect();
+
+        for page in pages {
+            // A page that overlaps text with numbers cannot be decoded back
+            // without reading the overlap as text; its values stay as applied.
+            if self.layout.page_has_text_overlap(page) {
+                continue;
+            }
+
+            let names = self.layout.page_patch_names(applied, page);
+            if names.is_empty() {
+                continue;
+            }
+
+            let base = encode_page(&self.layout, page, &merged)?;
+            let patched = patch_page(&self.layout, page, &base, tune, &names)?;
+
+            // Decode into a scratch that already holds the image: a value the
+            // file did not mention, or one the codec refuses, keeps its value
+            // instead of falling to zero.
+            let mut decoded = merged.snapshot();
+            decode_page(&self.layout, page, &patched, &mut decoded)?;
+
+            // The values the file carried, the owners whose bytes a view
+            // wrote, and every view on the page follow the decoded result.
+            let mut moved: Vec<&str> = names.clone();
+            for name in &names {
+                if let Some(owner) = self.layout.alias_owner(name)
+                    && !moved.contains(&owner)
+                {
+                    moved.push(owner);
+                }
+            }
+            if let Some(page_layout) = self.layout.page(page) {
+                for index in &page_layout.variables {
+                    let spec = &self.layout.variables()[*index];
+                    if self.layout.is_alias_at(*index) && !moved.contains(&spec.name.as_str()) {
+                        moved.push(&spec.name);
+                    }
+                }
+            }
+
+            merged.adopt_named(&decoded, &moved)?;
+        }
+
+        // Settings with no page are not on the wire; they are copied as they
+        // are, and a file that omits them keeps the current value.
+        for name in applied {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            if spec.ini_page().is_some() {
+                continue;
+            }
+            let Some(values) = tune.value(&spec.name) else {
+                continue;
+            };
+
+            match values {
+                Values::Numbers(numbers) => {
+                    for (index, raw) in numbers.iter().enumerate() {
+                        merged.set_image_raw(&spec.name, index, *raw)?;
+                    }
+                }
+                Values::Text(text) => {
+                    merged.set_image_text(&spec.name, text)?;
+                }
+            }
+        }
+
+        self.working.adopt_values(&merged)?;
+        self.overlays
+            .retain(|_, overlay| *overlay != Overlay::Conflict);
+        Ok(())
+    }
+
     /// Derived state of one cell.
     ///
     /// # Errors
@@ -521,6 +614,24 @@ impl TuneImages {
         };
         if spec.owner == Owner::Pc {
             return CellState::NotApplicable;
+        }
+
+        // A view has no state of its own: the element its bytes carry is the
+        // cell the user must look at.
+        if let Some(owner) = self.layout.alias_owner_at(variable) {
+            let Some(owner_spec) = self.layout.variables().get(owner) else {
+                return CellState::Unknown;
+            };
+            let width = usize::try_from(owner_spec.data_type.size()).unwrap_or(0);
+            let offset = spec
+                .address
+                .zip(owner_spec.address)
+                .and_then(|(alias, start)| alias.checked_sub(start));
+
+            return match offset.and_then(|offset| offset.checked_div(u32::try_from(width).ok()?)) {
+                Some(mapped) => self.state_at(owner, usize::try_from(mapped).unwrap_or(0)),
+                None => CellState::Unknown,
+            };
         }
 
         match self.overlays.get(&CellRef { variable, index }) {

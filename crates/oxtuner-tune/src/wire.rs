@@ -193,9 +193,14 @@ pub fn encode_page(layout: &TuneLayout, page: IniPage, tune: &Tune) -> Result<Ve
     let mut bytes = vec![0u8; size];
 
     // Non-bits values fill their words first, then bits fields merge into the
-    // result, so declaration order never decides which value survives.
+    // result, so declaration order never decides which value survives. A
+    // variable another one covers is a view of the same bytes and must not
+    // overwrite the value that owns them.
     for bits_only in [false, true] {
         for index in &page_layout.variables {
+            if layout.is_alias_at(*index) {
+                continue;
+            }
             let variable = &layout.variables()[*index];
             let is_bits = matches!(variable.shape, EntryShape::Bits { .. });
             if is_bits != bits_only {
@@ -555,12 +560,6 @@ fn read_value(
 }
 
 /// Writes one value at `start`, in the layout's byte order.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::as_conversions,
-    reason = "each cast is clamped to the storage type's range or is the documented f64 raw representation"
-)]
 fn write_value(
     bytes: &mut [u8],
     start: usize,
@@ -576,7 +575,30 @@ fn write_value(
         return;
     }
 
-    let little: [u8; 8] = match data_type {
+    let little = wire_bytes(raw, data_type);
+    match endianness {
+        Endianness::Little => bytes[start..end].copy_from_slice(&little[..width]),
+        Endianness::Big => {
+            for index in 0..width {
+                bytes[start + index] = little[width - 1 - index];
+            }
+        }
+    }
+}
+
+/// One raw value as the wire stores it, least significant byte first.
+///
+/// The encoder writes these bytes (reordering for a big-endian link) and the
+/// value comparison reads them, so "same cell" and "what is sent" cannot drift.
+/// An integer type rounds and clamps here exactly as it does on the wire.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::as_conversions,
+    reason = "each cast is clamped to the storage type's range or is the documented f64 raw representation"
+)]
+pub(crate) fn wire_bytes(raw: f64, data_type: DataType) -> [u8; 8] {
+    match data_type {
         DataType::U08 | DataType::M08 => [raw.round().clamp(0.0, 255.0) as u8, 0, 0, 0, 0, 0, 0, 0],
         DataType::S08 => {
             let value = raw.round().clamp(-128.0, 127.0) as i8;
@@ -613,16 +635,7 @@ fn write_value(
         }
         DataType::U64 => (raw.max(0.0) as u64).to_le_bytes(),
         DataType::S64 => (raw as i64).to_le_bytes(),
-        DataType::Ascii => return,
-    };
-
-    match endianness {
-        Endianness::Little => bytes[start..end].copy_from_slice(&little[..width]),
-        Endianness::Big => {
-            for index in 0..width {
-                bytes[start + index] = little[width - 1 - index];
-            }
-        }
+        DataType::Ascii => [0u8; 8],
     }
 }
 
