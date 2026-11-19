@@ -15,6 +15,7 @@ mod dashboard;
 mod dialogs;
 mod editors;
 mod misc;
+mod sections;
 mod validation;
 
 use std::collections::{BTreeSet, HashMap};
@@ -235,6 +236,9 @@ fn dispatch(
         "controllercommands" => misc::parse_controller_commands(definition, section, lines),
         "referencetables" => misc::parse_reference_tables(definition, section, lines),
         "datalog" => misc::parse_datalog(definition, section, lines),
+        "loggerdefinition" => sections::parse_loggers(definition, section, lines),
+        "porteditor" | "ftpbrowser" | "triggerwheel" | "veanalyze" | "wueanalyze" | "gammae"
+        | "datalogviews" | "tools" => sections::parse_config_section(definition, section, lines),
         "" => {
             // File-level attributes before the first header. rusEFI opens with
             // `enable2ndByteCanID = false`; keep it, do not reject the file.
@@ -417,6 +421,7 @@ pub(crate) fn entry_line<'a>(
 /// Cross-section validation and reference resolution.
 fn finalize(definition: &mut Definition) {
     apply_extension_flags(definition);
+    validation::promote_live_cursors(definition);
     validate_pages(definition);
     validate_references(definition);
     validation::validate_expression_calls(definition);
@@ -1234,5 +1239,112 @@ x = scalar, U08, 0, { bitStringValue(units, algo) }, 1, 0, 0, 255, 1
         assert_eq!(diagnostic.severity, Severity::Note);
         assert_eq!(diagnostic.line, Some(11));
         assert!(diagnostic.message.contains("missing.inc"));
+    }
+
+    #[test]
+    fn a_logger_definition_keeps_bit_fields_and_symbolic_conditions() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[LoggerDefinition]
+loggerDef = tooth, \"Tooth Logger\", tooth
+ startCommand = \"H\"
+ stopCommand = \"h\"
+ dataReadCommand = \"T\"
+ dataReadyCondition = { toothLog1Ready == 1 }
+ recordDef = 0, 0, 4
+ recordField = toothTime, \"ToothTime\", 0, 32, 1.0, \"uS\"
+ calcField = maxTime, \"MaxTime\", \"ms\", { maxValue(refTime) }, hidden
+",
+        );
+
+        assert_eq!(definition.loggers.len(), 1);
+        let logger = &definition.loggers[0];
+        assert_eq!(logger.name, "tooth");
+        assert_eq!(logger.kind, "tooth");
+        assert_eq!(logger.header_len, 0);
+        assert_eq!(logger.record_len, 4);
+        assert_eq!(logger.start_command.as_deref(), Some("H"));
+        assert_eq!(
+            logger.data_ready_condition.as_deref(),
+            Some("{ toothLog1Ready == 1 }")
+        );
+        assert_eq!(logger.fields.len(), 1);
+        assert_eq!(logger.fields[0].name, "toothTime");
+        assert_eq!(logger.fields[0].start_bit, Some(0));
+        assert_eq!(logger.fields[0].bit_count, Some(32));
+        assert_eq!(logger.fields[0].units.literal(), Some("uS"));
+        assert_eq!(logger.calculated.len(), 1);
+        assert!(logger.calculated[0].hidden);
+    }
+
+    #[test]
+    fn named_configuration_sections_keep_typed_entries() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[PortEditor]
+pins = 1, 2, 3
+ watched = { rpm }, >, 3000
+[FTPBrowser]
+host = \"192.168.0.1\"
+ port = 21
+",
+        );
+
+        assert_eq!(definition.config_sections.len(), 2);
+        let ports = &definition.config_sections[0];
+        assert_eq!(ports.name, "PortEditor");
+        assert_eq!(ports.entries.len(), 2);
+        assert_eq!(ports.entries[0].fields, vec!["1", "2", "3"]);
+        assert_eq!(ports.entries[1].fields[1], ">");
+        assert_eq!(definition.config_sections[1].name, "FTPBrowser");
+        assert_eq!(definition.unsupported.len(), 0);
+    }
+
+    #[test]
+    fn unknown_standard_menu_targets_are_listed_and_marked_unsupported() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Menu]
+menu = \"Tools\"
+subMenu = std_realtime, \"Realtime\"
+subMenu = std_ms3SdConsole, \"SD Console\"
+",
+        );
+
+        assert_eq!(definition.unresolved_targets, vec!["std_ms3SdConsole"]);
+        let menu = definition.menus.first().expect("the menu");
+        assert!(menu.items[0].supported);
+        assert!(!menu.items[1].supported);
+        assert_eq!(menu.items[1].kind, crate::MenuTargetKind::Standard);
+    }
+
+    #[test]
+    fn a_table_and_curve_promote_their_axis_channels_as_live_cursors() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[TableEditor]
+table = t, m, \"T\"
+xBins = rpmBins, rpm
+yBins = mapBins, map
+zBins = veTable
+[CurveEditor]
+curve = c, \"C\", rpm, map
+yBins = curveBins, firstChannel
+yBins = otherBins, secondChannel
+",
+        );
+
+        let table = definition.table("t").expect("the table");
+        assert_eq!(table.live_cursor.as_deref(), Some("rpm"));
+        let curve = definition.curves.get("c").expect("the curve");
+        assert_eq!(curve.live_cursor.as_deref(), Some("firstChannel"));
     }
 }

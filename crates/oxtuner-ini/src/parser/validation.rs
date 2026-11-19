@@ -14,6 +14,30 @@ use crate::model::{ChannelKind, Definition, Dimension, Number, Shape, Text};
 /// A reason to keep a call symbolic, keyed by its lowercase name.
 type Issues = BTreeMap<String, (u32, String, String)>;
 
+/// Records each view's live cursor once, from the axis that carries a tracking
+/// channel. The first `yBins` with a channel wins for multi-series curves.
+pub(crate) fn promote_live_cursors(definition: &mut Definition) {
+    for (_, table) in definition.tables.iter_mut() {
+        if table.live_cursor.is_none() {
+            table.live_cursor = table
+                .x_bins
+                .as_ref()
+                .and_then(|axis| axis.channel.clone())
+                .or_else(|| table.y_bins.as_ref().and_then(|axis| axis.channel.clone()));
+        }
+    }
+
+    for (_, curve) in definition.curves.iter_mut() {
+        if curve.live_cursor.is_none() {
+            curve.live_cursor = curve
+                .y_bins
+                .iter()
+                .find_map(|axis| axis.channel.clone())
+                .or_else(|| curve.x_bins.as_ref().and_then(|axis| axis.channel.clone()));
+        }
+    }
+}
+
 pub(crate) fn validate_expression_calls(definition: &mut Definition) {
     let mut issues = Issues::new();
 

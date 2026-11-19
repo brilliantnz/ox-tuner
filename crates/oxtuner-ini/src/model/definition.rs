@@ -5,9 +5,10 @@ use crate::error::Diagnostic;
 use crate::fields::CommandTemplate;
 
 use super::{
-    Channel, ChannelKind, CommsSettings, Constant, ConstantClass, ControllerCommand, Coverage,
-    Curve, DatalogEntry, Dialog, Endianness, Extensions, FrontPage, Gauge, KeyAction, Menu, Number,
-    Ordered, Page, PcVariable, ReferenceTable, SettingGroup, Table, UnsupportedSection,
+    Channel, ChannelKind, CommsSettings, ConfigSection, Constant, ConstantClass, ControllerCommand,
+    Coverage, Curve, DatalogEntry, Dialog, Endianness, Extensions, FrontPage, Gauge, KeyAction,
+    LoggerDefinition, Menu, Number, Ordered, Page, PcVariable, ReferenceTable, SettingGroup, Table,
+    UnsupportedSection,
 };
 
 /// The frozen result of parsing an INI file.
@@ -68,6 +69,12 @@ pub struct Definition {
     pub key_actions: Vec<KeyAction>,
     /// Sections kept as raw data.
     pub unsupported: Vec<UnsupportedSection>,
+    /// High-speed loggers from `[LoggerDefinition]`.
+    pub loggers: Vec<LoggerDefinition>,
+    /// Named configuration sections modelled as typed entry lists.
+    pub config_sections: Vec<ConfigSection>,
+    /// `std_*` menu targets with no renderer in this build, in first-seen order.
+    pub unresolved_targets: Vec<String>,
     /// `#define` string lists, keyed lowercase.
     pub defines: BTreeMap<String, Vec<String>>,
     /// Flags the file asked about.
@@ -127,6 +134,9 @@ impl Definition {
             reference_tables: Ordered::new(),
             key_actions: Vec::new(),
             unsupported: Vec::new(),
+            loggers: Vec::new(),
+            config_sections: Vec::new(),
+            unresolved_targets: Vec::new(),
             defines: BTreeMap::new(),
             tested_flags: BTreeSet::new(),
             active_flags: BTreeSet::new(),
@@ -355,6 +365,30 @@ impl Definition {
         let _ = writeln!(out, "unsupported|{}", self.unsupported.len());
         for section in &self.unsupported {
             let _ = writeln!(out, "unsupported_section|{}", section.name);
+        }
+        let _ = writeln!(out, "loggers|{}", self.loggers.len());
+        for logger in &self.loggers {
+            let _ = writeln!(
+                out,
+                "logger|{}|kind={}|fields={}|calculated={}",
+                logger.name,
+                logger.kind,
+                logger.fields.len(),
+                logger.calculated.len()
+            );
+        }
+        let _ = writeln!(out, "config_sections|{}", self.config_sections.len());
+        for section in &self.config_sections {
+            let _ = writeln!(
+                out,
+                "config_section|{}|entries={}",
+                section.name,
+                section.entries.len()
+            );
+        }
+        let _ = writeln!(out, "unresolved_targets|{}", self.unresolved_targets.len());
+        for target in &self.unresolved_targets {
+            let _ = writeln!(out, "unresolved_target|{target}");
         }
         let _ = writeln!(out, "coverage|{:.2}", self.coverage.percent());
         let errors = self

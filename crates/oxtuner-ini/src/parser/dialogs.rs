@@ -14,6 +14,10 @@ use crate::model::{
 
 use super::SectionParser;
 
+/// `std_*` targets with an app-owned renderer. Anything else stays parseable
+/// but unsupported, with its name recorded on the definition.
+const RENDERED_STD_TARGETS: &[&str] = &["std_realtime", "std_injection", "std_ms3Rtc"];
+
 /// `[SettingGroups]`: options become `#if` flags.
 pub(crate) fn parse_setting_groups(
     definition: &mut Definition,
@@ -82,6 +86,16 @@ pub(crate) fn parse_setting_groups(
                     );
                     continue;
                 };
+                if name.eq_ignore_ascii_case("DEFAULT") {
+                    section.note(
+                        "default-setting-option",
+                        format!(
+                            "`{name}` is the fallback for `{group_name}`; when no option matches, \
+                             the `#else` branch of the flag is used"
+                        ),
+                        *line,
+                    );
+                }
                 if let Some(group) = definition.setting_groups.get_mut(group_name) {
                     group.options.push(SettingOption {
                         name: name.to_owned(),
@@ -243,6 +257,7 @@ pub(crate) fn parse_menu(
                     label: String::new(),
                     conditions: Vec::new(),
                     group: None,
+                    supported: true,
                     line: *line,
                 });
                 group = None;
@@ -288,6 +303,8 @@ pub(crate) fn parse_menu(
                 } else {
                     None
                 };
+                let supported =
+                    kind != MenuTargetKind::Standard || std_target_supported(definition, &target);
                 let Some(menu) = index.and_then(|index| definition.menus.get_mut(index)) else {
                     section.warn(
                         "orphan-menu-item",
@@ -303,6 +320,7 @@ pub(crate) fn parse_menu(
                     label,
                     conditions,
                     group: owner,
+                    supported,
                     line: *line,
                 });
                 // A group header opens a group and a child keeps it open; a
@@ -326,6 +344,24 @@ pub(crate) fn parse_menu(
             _ => section.unrecognized_key(key, *line),
         }
     }
+}
+
+/// Whether a `std_*` target has a renderer, recording it when it does not.
+fn std_target_supported(definition: &mut Definition, target: &str) -> bool {
+    if RENDERED_STD_TARGETS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(target))
+    {
+        return true;
+    }
+    if !definition
+        .unresolved_targets
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(target))
+    {
+        definition.unresolved_targets.push(target.to_owned());
+    }
+    false
 }
 
 /// Selects the menu with this title, creating it when it is new.

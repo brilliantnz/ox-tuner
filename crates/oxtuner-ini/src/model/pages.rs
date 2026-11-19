@@ -72,6 +72,8 @@ pub struct Table {
     pub y_bins: Option<Axis>,
     /// Cell array.
     pub z_bins: Option<String>,
+    /// Channel promoted from an axis as this view's live cursor, if any.
+    pub live_cursor: Option<String>,
     /// Axis label overrides.
     pub xy_labels: Vec<Text>,
     /// Wording for the 3-D vertical axis.
@@ -103,6 +105,9 @@ pub struct Curve {
     pub x_bins: Option<Axis>,
     /// One entry per plotted curve.
     pub y_bins: Vec<Axis>,
+    /// Channel promoted from the first series that carries one, so the UI does
+    /// not have to re-derive the live cursor from the axes.
+    pub live_cursor: Option<String>,
     /// Per-curve line labels.
     pub line_labels: Vec<Text>,
     /// Optional gauge to draw.

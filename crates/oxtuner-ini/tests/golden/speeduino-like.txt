@@ -39,6 +39,9 @@ commands|2
 datalog|1
 unsupported|1
 unsupported_section|EventTriggers
+loggers|0
+config_sections|0
+unresolved_targets|0
 coverage|98.80
 errors|0
 warnings|0

@@ -26,6 +26,7 @@ mod frontpage;
 mod menus;
 mod ordered;
 mod pages;
+mod sections;
 mod settings;
 mod types;
 
@@ -41,6 +42,7 @@ pub use frontpage::{FrontPage, Gauge, Indicator};
 pub use menus::{Menu, MenuItem, MenuTargetKind};
 pub use ordered::Ordered;
 pub use pages::{Axis, Curve, Page, Table};
+pub use sections::{ConfigEntry, ConfigSection, LoggerDefinition, LoggerField};
 pub use settings::{SettingGroup, SettingOption};
 pub use types::{DataType, Dimension, Endianness, Number, Shape, Text};
 
