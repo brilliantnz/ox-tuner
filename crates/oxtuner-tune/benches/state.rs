@@ -137,11 +137,42 @@ fn budget(criterion: &mut Criterion) {
             .set_raw_at("scalar_1_0", 0, 11.0)
             .expect("the fixture variable exists");
         bencher.iter(|| {
-            black_box(
-                edited
-                    .reconcile_shared_bytes(black_box("scalar_1_0"))
-                    .expect("the page reconciles"),
-            )
+            edited
+                .reconcile_shared_bytes(black_box("scalar_1_0"))
+                .expect("the page reconciles");
+        });
+    });
+
+    // The fixture above has no shared bytes, so it measures the page round trip
+    // alone. This one is the shape the re-derivation exists for: two tables over
+    // the same bytes and a word split between two bit fields.
+    criterion.bench_function("reconcile_shared_bytes_peer_page", |bencher| {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+peerA = array, U08, 0, [16x16], \"\", 1, 0, 0, 255, 0
+peerB = array, U08, 0, [16x16], \"\", 1, 0, 0, 255, 0
+word = scalar, U08, 256, \"bits\", 1, 0
+low = bits, U08, 256, [0:3]
+high = bits, U08, 256, [4:7]
+",
+            &SettingsContext::new(),
+        )
+        .expect("the synthetic definition parses");
+        let mut edited = Tune::from_definition(&definition);
+        edited
+            .set_raw_at("peerA", 100, 11.0)
+            .expect("the fixture variable exists");
+        bencher.iter(|| {
+            edited
+                .reconcile_shared_bytes(black_box("peerA"))
+                .expect("the page reconciles");
         });
     });
 }

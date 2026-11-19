@@ -428,6 +428,13 @@ impl Msq {
         let layout = TuneLayout::build_with_context(definition, &mut defaults);
         let mut tune = Tune::new(Arc::new(layout));
         apply_definition_defaults(&mut tune, definition);
+        // A definition can give two constants the same bytes and disagree with
+        // itself about what those bytes should hold. A new project must not be
+        // born with a pair no write would carry, so the defaults are settled
+        // through the page image before any of them is written out.
+        if let Err(error) = tune.settle_shared_bytes() {
+            tracing::warn!(%error, "the scaffold could not settle every shared byte");
+        }
         let layout = Arc::clone(tune.layout());
 
         let mut pc_entries: Vec<Element> = Vec::new();
@@ -1138,6 +1145,7 @@ mod tests {
         reason = "unit tests may unwrap; a failed call is a failed test"
     )]
     use super::*;
+    use oxtuner_ini::parse_str;
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
@@ -1393,6 +1401,45 @@ mod tests {
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         assert_eq!(reparsed.version_info().expect("the header survives"), info);
+    }
+
+    #[test]
+    fn a_scaffolded_tune_keeps_peers_over_one_byte_in_step() {
+        // A definition can give two constants the same bytes and disagree with
+        // itself about what those bytes should hold: `second` cannot read back
+        // as zero inside its range, so its default is seven while `first` stays
+        // at zero. A new project must not be born holding two values for one
+        // byte, and it has to read its own save back without a complaint.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let settings = SettingsContext::new();
+
+        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert!(
+            loaded
+                .layout
+                .value_conflicts(IniPage::FIRST, &loaded.tune)
+                .is_empty(),
+            "a project must not start with two values over one byte: {:?}",
+            loaded.layout.value_conflicts(IniPage::FIRST, &loaded.tune)
+        );
     }
 
     fn scaffold_definition() -> Definition {

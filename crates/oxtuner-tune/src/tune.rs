@@ -301,8 +301,9 @@ impl Tune {
     /// from it, the same way a load reconciles a page. The edited value is the
     /// one that survives, and the others follow the bytes.
     ///
-    /// A view owns no bytes and follows the constant that does, so editing one
-    /// is left where it is instead of being re-derived here.
+    /// A view is handled the same way. It is never written on its own, but
+    /// patching the page with it moves the bytes its owner claims, which is
+    /// what a file that carries a view without its owner already does.
     ///
     /// # Errors
     ///
@@ -310,7 +311,7 @@ impl Tune {
     /// decoded, or when a value's shape does not fit the layout.
     pub fn reconcile_shared_bytes(&mut self, name: &str) -> Result<(), TuneError> {
         let layout = Arc::clone(&self.layout);
-        if layout.variable(name).is_none() || layout.is_alias(name) {
+        if layout.variable(name).is_none() {
             return Ok(());
         }
         let Some(page) = layout.variable(name).and_then(VariableSpec::ini_page) else {
@@ -325,6 +326,46 @@ impl Tune {
 
         let moved = layout.names_sharing_bytes(name);
         self.adopt_named(&decoded, &moved)
+    }
+
+    /// Makes every value that shares bytes agree, page by page.
+    ///
+    /// Where a definition gives two constants the same bytes and its own
+    /// defaults disagree, there is no user intent to respect yet and one value
+    /// still has to be picked. This writes each page image and reads it back,
+    /// which is the settle the codec does anyway: the constant declared later
+    /// keeps its value and the others follow the bytes. A tune built from a
+    /// definition's defaults is consistent afterwards, instead of starting out
+    /// with a pair no write would carry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when a page cannot be encoded or decoded, or when
+    /// a value's shape does not fit the layout.
+    pub fn settle_shared_bytes(&mut self) -> Result<(), TuneError> {
+        let layout = Arc::clone(&self.layout);
+
+        for page in layout.pages() {
+            let names: Vec<&str> = page
+                .variables
+                .iter()
+                .copied()
+                .filter(|index| !layout.is_alias_at(*index))
+                .filter_map(|index| layout.variables().get(index))
+                .map(|spec| spec.name.as_str())
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+
+            let bytes = crate::wire::encode_page(&layout, page.page, self)?;
+            let mut decoded = self.snapshot();
+            crate::wire::decode_page(&layout, page.page, &bytes, &mut decoded)?;
+
+            self.adopt_named(&decoded, &names)?;
+        }
+
+        Ok(())
     }
 
     /// A copy of this tune's values without edit timestamps.
@@ -748,6 +789,123 @@ note = string, ASCII, 8, 4
         assert_eq!(tune.scalar_raw("reqFuel").unwrap(), 0.0);
         assert_eq!(tune.text("note").unwrap(), "");
         assert_eq!(tune.value("veTable").unwrap().len(), 8);
+    }
+
+    /// A word holding a bit field, and an array holding a view of its first cell.
+    const SHARED: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+word = scalar, U08, 0, "bits", 1, 0
+fan = bits, U08, 0, [0:1]
+data = array, U08, 4, [4], "", 1, 0, 0, 255, 0
+data0 = bits, U08, 4, [0:7]
+"#;
+
+    fn shared() -> Tune {
+        let definition = parse_str(SHARED, &SettingsContext::new()).expect("parses");
+        Tune::from_definition(&definition)
+    }
+
+    #[test]
+    fn an_edited_bit_field_keeps_the_rest_of_its_word() {
+        let mut tune = shared();
+        // 0b1010_0101 carries 1 in bits 0..1 and other bits besides.
+        tune.set_image_raw("word", 0, 165.0).unwrap();
+        tune.reconcile_shared_bytes("word").unwrap();
+        assert_eq!(tune.raw_at("fan", 0).unwrap(), 1.0);
+        assert_eq!(tune.raw_at("word", 0).unwrap(), 165.0);
+
+        // Moving the field moves its own bits and nothing else: the value
+        // named to the re-derivation is the one that survives.
+        tune.set_image_raw("fan", 0, 2.0).unwrap();
+        tune.reconcile_shared_bytes("fan").unwrap();
+        assert_eq!(tune.raw_at("fan", 0).unwrap(), 2.0);
+        assert_eq!(tune.raw_at("word", 0).unwrap(), 166.0, "0b1010_0110");
+    }
+
+    #[test]
+    fn an_edited_word_moves_the_bit_field_that_sits_in_it() {
+        let mut tune = shared();
+
+        tune.set_image_raw("word", 0, 3.0).unwrap();
+        tune.reconcile_shared_bytes("word").unwrap();
+        assert_eq!(
+            tune.raw_at("fan", 0).unwrap(),
+            3.0,
+            "the field reads the bits the word now carries"
+        );
+
+        tune.set_image_raw("word", 0, 0.0).unwrap();
+        tune.reconcile_shared_bytes("word").unwrap();
+        assert_eq!(tune.raw_at("fan", 0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn an_edited_view_moves_the_bytes_its_owner_holds() {
+        let mut tune = shared();
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            tune.set_image_raw("data", index, value).unwrap();
+        }
+
+        tune.set_image_raw("data0", 0, 9.0).unwrap();
+        tune.reconcile_shared_bytes("data0").unwrap();
+
+        assert_eq!(
+            tune.raw_at("data", 0).unwrap(),
+            9.0,
+            "a view is never written on its own, but it moves the owner's bytes"
+        );
+        assert_eq!(tune.raw_at("data0", 0).unwrap(), 9.0);
+        assert_eq!(
+            tune.raw_at("data", 1).unwrap(),
+            2.0,
+            "the elements the view does not cover are untouched"
+        );
+    }
+
+    #[test]
+    fn settling_shared_bytes_leaves_one_value_for_both() {
+        // A definition can disagree with itself about what a shared byte holds:
+        // `second` cannot read back as zero inside its range, so its default is
+        // seven while `first` stays at zero.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+        let layout = Arc::clone(tune.layout());
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 0.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 7.0);
+        assert_eq!(layout.value_conflicts(IniPage::FIRST, &tune).len(), 1);
+
+        tune.settle_shared_bytes().unwrap();
+
+        assert!(
+            layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
+            "one byte holds one value: {:?}",
+            tune.raw_at("first", 0)
+        );
+        assert_eq!(
+            tune.raw_at("first", 0).unwrap(),
+            tune.raw_at("second", 0).unwrap()
+        );
     }
 
     #[test]

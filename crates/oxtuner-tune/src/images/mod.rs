@@ -622,14 +622,10 @@ impl TuneImages {
         let mut decoded = merged.snapshot();
         decode_page(&self.layout, page, &patched, &mut decoded)?;
 
-        let mut moved = views.clone();
-        for name in &views {
-            if let Some(owner) = self.layout.alias_owner(name)
-                && !moved.contains(&owner)
-            {
-                moved.push(owner);
-            }
-        }
+        // Every constant that shares bytes with one of those moves too: a
+        // neighbour left behind would hold a value the patch just replaced and
+        // would ask to be sent over it.
+        let moved = self.layout.names_sharing_bytes_with(&views);
         merged.adopt_named(&decoded, &moved)?;
 
         Ok(())
@@ -871,6 +867,13 @@ impl TuneImages {
                     .is_some_and(|spec| spec.ini_page() == Some(page.page))
             });
             if !touched {
+                continue;
+            }
+            // A page whose shared bytes have no owner is adopted as the file
+            // wrote it and is refused for a write already. Judging it here
+            // would refuse a whole import over a page that never could be
+            // written, which is not this check's to do.
+            if self.layout.page_has_ambiguous_overlap(page.page) {
                 continue;
             }
 

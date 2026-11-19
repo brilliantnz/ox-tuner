@@ -49,9 +49,25 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
         }
     }
     let count = clamped.len();
+    let mut touched: Vec<String> = Vec::new();
     for (name, index, value) in clamped {
         if let Err(error) = project.tune_mut().set_user_at(&name, index, value) {
             tracing::warn!(%name, %error, "a clamped value could not be stored");
+        }
+        touched.push(name);
+    }
+
+    // A clamp moves bytes a neighbour may also claim, and this runs just before
+    // the gate that looks for two values over one set of them.
+    touched.sort_unstable();
+    touched.dedup();
+    for name in &touched {
+        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
+            tracing::warn!(
+                %name,
+                %error,
+                "shared bytes could not be reconciled after a clamp"
+            );
         }
     }
     count
@@ -174,9 +190,10 @@ pub(super) fn unsent_ambiguous_page(project: &Project, variables: &[String]) -> 
 
 /// The first target page holding values the shared bytes cannot both carry.
 ///
-/// The refusal is page-wide, like the ambiguous one. Writing the value that
-/// happens to be declared first leaves the other pending, and the next write
-/// would put its bytes back, so the page stays unwritable until the two agree.
+/// The refusal is page-wide, like the ambiguous one. The codec fills shared
+/// bytes in declaration order, so the constant declared later would keep them
+/// and the other would be dropped and stay pending until a later write put its
+/// bytes back. The page stays unwritable until the two agree.
 pub(super) fn conflicting_value_page(project: &Project, targets: &[u8]) -> Option<ValueConflict> {
     let layout = project.layout();
     let working = project.images().working();
@@ -497,6 +514,18 @@ pub(super) fn revert_target(
     };
 
     let reverted = project.images_mut().revert_variables(&variables);
+    // A revert moves bytes a neighbour may still claim from an edit, so the
+    // neighbours are re-derived here too or the page would hold two values and
+    // refuse every write until someone edits one of them again.
+    for name in &variables {
+        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
+            tracing::warn!(
+                %name,
+                %error,
+                "shared bytes could not be reconciled after a revert"
+            );
+        }
+    }
     tracing::info!(
         %op,
         target = %name,

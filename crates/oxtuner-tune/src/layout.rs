@@ -23,6 +23,7 @@ use std::fmt;
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ConstantClass, DataType, Definition, Endianness, Number, Shape};
 
+use crate::wire::{Claim, claim_of, offset_of};
 use crate::{IniPage, Tune, TuneError};
 
 /// An [`EvalContext`] over a plain name lookup.
@@ -1035,8 +1036,9 @@ impl TuneLayout {
     ///
     /// A view is included, because it reads the same bytes and has to follow
     /// them, and so is a text field: the codec reads one as its whole length,
-    /// so a number under it is part of that text. The variable itself comes
-    /// first, and a variable with no resolvable bytes has no neighbour here.
+    /// so a number under it is part of that text. The list is in page order and
+    /// holds the variable itself, and a variable with no resolvable bytes has
+    /// no neighbour here.
     #[must_use]
     pub fn names_sharing_bytes(&self, name: &str) -> Vec<&str> {
         let Some(index) = self.index(name) else {
@@ -1096,10 +1098,11 @@ impl TuneLayout {
     ///
     /// A view is left out: its owner carries the value and the view follows the
     /// decoded page. A pair that neither covers the other is not reported here
-    /// either, because [`Self::page_has_ambiguous_overlap`] already refuses
-    /// that page outright. Text is out of scope as well: the codec reads a text
-    /// field as one blob and [`Self::page_has_text_overlap`] leaves such a page
-    /// as it stands, so there is no per-bit claim to compare.
+    /// either: [`Self::page_has_ambiguous_overlap`] refuses such a page for a
+    /// write, and a file is left to stand on it instead of being judged.
+    /// Text is out of scope as well: the codec reads a text field as one blob
+    /// and [`Self::page_has_text_overlap`] leaves such a page as it stands, so
+    /// there is no per-bit claim to compare.
     #[must_use]
     pub fn value_conflicts(&self, page: IniPage, tune: &Tune) -> Vec<ValueConflict> {
         let Some(page_layout) = self.page(page) else {
@@ -1109,16 +1112,16 @@ impl TuneLayout {
         let spans = page_spans(&self.variables, page_layout);
         // One claim per variable, built once: the pairs below are many and the
         // claim is the expensive part.
-        let claims: Vec<Option<crate::wire::Claim>> = spans
+        let claims: Vec<Option<Claim>> = spans
             .iter()
             .map(|span| {
                 let spec = self.variables.get(span.index)?;
                 // The codec places a constant at `address - start_offset`, and
                 // one it cannot place is never written. A claim has to say the
                 // same, or it would report bytes no write touches.
-                let start = crate::wire::offset_of(spec, page_layout.start_offset)?;
+                let start = offset_of(spec, page_layout.start_offset)?;
 
-                crate::wire::claim_of(spec, start, self.endianness, tune)
+                claim_of(spec, start, self.endianness, tune)
             })
             .collect();
 
