@@ -376,14 +376,14 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         _ => None,
     };
 
-    // The project choice writes and burns after the resolution; decide the
-    // next step before the update is folded into the status.
     // A dialog that started an asynchronous task ends with it. Connection and
     // project opening are the two that keep the window open while the core
     // works; leaving them up would also block the review dialog that the read
     // which follows a connect has to show.
     let task_finished = matches!(&update, Update::Connected(_) | Update::Opened(_));
 
+    // The project choice writes and burns after the resolution; decide the
+    // next step before the update is folded into the status.
     let apply_step = next_step(
         cx.global::<CoreService>().status.applying_project_tune,
         &update,
@@ -455,6 +455,9 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         }
         None => {}
     }
+    // No-stacking makes the dialog open here the one the task started, except
+    // for the rare case where the user dismissed it and opened another one
+    // while the command was still in flight.
     if task_finished && let Some(window) = crate::app::window::main(cx) {
         window
             .update(cx, |_, window, cx| window.close_dialog(cx))

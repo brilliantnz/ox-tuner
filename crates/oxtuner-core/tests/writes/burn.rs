@@ -74,6 +74,11 @@ fn burning_before_writing_the_edit_is_refused() {
     assert_eq!(kind, FailureCode::BurnRefused);
     assert!(message.contains("not in ECU RAM"), "{message}");
 
+    assert!(
+        core.status().unsaved.cells > 0,
+        "a refused burn must not save the project"
+    );
+
     // No burn reached the wire, so the journal has no burn entry.
     let (_, entries) = core.journal();
     assert!(entries.iter().all(|entry| entry.operation != "burn"));

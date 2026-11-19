@@ -608,7 +608,7 @@ impl Tune {
     pub fn is_writable(&self, name: &str) -> bool {
         self.layout
             .variable(name)
-            .is_some_and(|variable| !variable.is_controller_owned())
+            .is_some_and(|variable| !variable.is_controller_owned() && !variable.no_msq_save)
             && !self.layout.is_alias(name)
     }
 

@@ -75,6 +75,10 @@ pub(crate) fn diff_values(layout: &TuneLayout, baseline: &[Values], other: &[Val
             // A view follows its owner and is never written to a file.
             continue;
         }
+        if variable.no_msq_save {
+            // The file cannot carry it, so it can never be an unsaved change.
+            continue;
+        }
         let (Some(left), Some(right)) = (baseline.get(index), other.get(index)) else {
             continue;
         };

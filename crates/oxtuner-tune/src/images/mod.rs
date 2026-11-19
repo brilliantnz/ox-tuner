@@ -139,7 +139,10 @@ impl TuneImages {
         self.ecu_unknown
     }
 
-    /// Records a confirmed RAM image (verified write or a page read).
+    /// Records a confirmed RAM image from a partial observation.
+    ///
+    /// A complete read goes through [`Self::reconcile_read`], which also
+    /// compares and clears failure marks; this setter stores the image only.
     ///
     /// # Errors
     ///
@@ -336,9 +339,9 @@ impl TuneImages {
     ///
     /// A page-scoped write makes its own variables agree with RAM; a decision
     /// about a cell it did not send still stands.
-    pub fn clear_resolutions_for(&mut self, names: &[impl AsRef<str>]) {
+    pub fn clear_resolutions_for(&mut self, names: &[String]) {
         for name in names {
-            let Some(variable) = self.layout.index(name.as_ref()) else {
+            let Some(variable) = self.layout.index(name) else {
                 continue;
             };
             self.overlays.retain(|key, overlay| {

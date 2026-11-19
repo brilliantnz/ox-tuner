@@ -1378,6 +1378,11 @@ fn refuse_uneditable(project: &Project, name: &str) -> Result<(), String> {
             "`{name}` is owned by the controller and cannot be edited"
         ));
     }
+    if spec.no_msq_save {
+        return Err(format!(
+            "`{name}` is not saved in a tune file and cannot be written by the app"
+        ));
+    }
     if let Some(owner) = project.layout().alias_owner(name) {
         return Err(format!(
             "`{name}` is a view of `{owner}`; edit that value instead"

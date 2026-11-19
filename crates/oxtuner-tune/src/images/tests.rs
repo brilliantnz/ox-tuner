@@ -540,6 +540,22 @@ f = scalar, F32, 0, \"\", 100.0, 0
     }
 
     #[test]
+    fn storing_a_partial_read_keeps_another_cells_failure() {
+        let mut images = images();
+        images.set_ecu_ram(tune()).unwrap();
+        images.mark_write_failed("a", 0, 0).unwrap();
+
+        // The write's base read covers one page and must not clear a mark the
+        // write path did not observe.
+        images.set_ecu_ram(tune()).unwrap();
+
+        assert_eq!(
+            images.cell_state("a", 0, 0).unwrap(),
+            CellState::WriteFailed
+        );
+    }
+
+    #[test]
     fn a_complete_read_clears_a_failed_write() {
         let mut images = images();
         images.set_ecu_ram(tune()).unwrap();
@@ -602,6 +618,41 @@ wide = bits, U16, 0, [40:47]
         let conflicts = images.reconcile_read(ram).unwrap();
 
         assert_eq!(conflicts.len(), 0, "the write plan cannot send it");
+        assert_eq!(images.status().conflicts, 0);
+        assert_eq!(images.status().pending_write.cells, 0);
+    }
+
+    #[test]
+    fn a_no_msq_save_value_is_never_sent_or_reported() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+saveMe = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+runtime = array, U08, 4, [4], \"\", 1, 0, 0, 255, 0, noMsqSave
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        let mut ram = Tune::new(layout);
+        ram.set_image_raw("runtime", 0, 9.0).expect("the ECU value");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 0, "the file cannot carry the value");
+        assert_eq!(
+            images.cell_state("runtime", 0, 0).unwrap(),
+            CellState::NotApplicable
+        );
         assert_eq!(images.status().conflicts, 0);
         assert_eq!(images.status().pending_write.cells, 0);
     }
