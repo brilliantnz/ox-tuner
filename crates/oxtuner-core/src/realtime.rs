@@ -53,14 +53,50 @@ pub struct RealtimeFrame {
     pub values: Vec<LiveValue>,
     /// `[FrontPage]` indicators, in the same order as the definition summary.
     pub indicators: Vec<IndicatorReading>,
+    /// Every decoded channel, hidden ones included, keyed by lowercase name.
+    ///
+    /// This is the evaluation context: hiding a channel from a chart, a log or
+    /// a table must not make a computed channel, a `[FrontPage]` indicator or a
+    /// dialog gate unresolved. The visible list above stays what a chart and a
+    /// log may show.
+    ///
+    /// Keys are folded, so a definition that declares two channels differing
+    /// only by case, which rusEFI does, collapses to one value and the later
+    /// insertion wins. The visible list keeps both; only expression resolution
+    /// folds.
+    pub(crate) context: HashMap<String, f64>,
 }
 
 impl RealtimeFrame {
-    /// One channel by name, case-insensitively.
+    /// One visible channel by name, case-insensitively.
+    ///
+    /// Hidden channels are not in this list. They decode and reach the frame's
+    /// evaluation context, but a chart, a log and this accessor never see them.
     pub fn value(&self, name: &str) -> Option<&LiveValue> {
         self.values
             .iter()
             .find(|value| value.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether the frame decoded no channel at all.
+    ///
+    /// Both representations are checked: a definition whose channels are all
+    /// hidden still decoded, and its indicators and gates must reach it. This
+    /// is the predicate a caller wants, not `values.is_empty()`.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.context.is_empty()
+    }
+
+    /// One decoded channel value, hidden ones included.
+    ///
+    /// The exact spelling is tried first, so the lowercase dialect spelling a
+    /// definition usually uses costs no allocation; a mixed-case query falls
+    /// back to the folded key.
+    pub(crate) fn channel_value(&self, name: &str) -> Option<f64> {
+        self.context
+            .get(name)
+            .copied()
+            .or_else(|| self.context.get(&name.to_ascii_lowercase()).copied())
     }
 }
 
@@ -356,18 +392,14 @@ impl RealtimeDecoder {
 
     /// Evaluates the definition's `[FrontPage]` indicators for one frame.
     ///
-    /// A name resolves case-insensitively in the frame's channels first, then
-    /// in the tune's scaled values (constants and PC variables). A name that
-    /// neither provides makes the indicator unavailable rather than off.
+    /// A name resolves case-insensitively in every decoded channel of the frame,
+    /// hidden ones included, then in the tune's scaled values (constants and PC
+    /// variables). A name that neither provides makes the indicator unavailable
+    /// rather than off.
     ///
     /// The list is in definition order, so it zips with the summary by
     /// position. Template-only entries are excluded.
-    pub fn indicators(&self, values: &[LiveValue], tune: Option<&Tune>) -> Vec<IndicatorReading> {
-        let known: HashMap<String, f64> = values
-            .iter()
-            .map(|value| (value.name.to_ascii_lowercase(), value.value))
-            .collect();
-
+    pub fn indicators(&self, frame: &RealtimeFrame, tune: Option<&Tune>) -> Vec<IndicatorReading> {
         self.indicators
             .iter()
             .map(|indicator| {
@@ -379,9 +411,8 @@ impl RealtimeDecoder {
                 };
 
                 let lookup = |name: &str| {
-                    known
-                        .get(&name.to_ascii_lowercase())
-                        .copied()
+                    frame
+                        .channel_value(name)
                         .or_else(|| tune.and_then(|tune| tune.scalar_user(name).ok()))
                 };
 
@@ -454,10 +485,11 @@ impl RealtimeDecoder {
                 sequence,
                 values: Vec::new(),
                 indicators: Vec::new(),
+                context: HashMap::new(),
             };
         }
 
-        let mut known: HashMap<String, f64> = HashMap::with_capacity(self.sources.len());
+        let mut context: HashMap<String, f64> = HashMap::with_capacity(self.sources.len());
         let mut values = Vec::with_capacity(self.sources.len());
 
         for source in &self.sources {
@@ -481,7 +513,7 @@ impl RealtimeDecoder {
                 continue;
             };
             let user = (raw + translate) * scale;
-            known.insert(name.to_ascii_lowercase(), user);
+            context.insert(name.to_ascii_lowercase(), user);
             if !hidden {
                 values.push(LiveValue {
                     name: name.clone(),
@@ -507,7 +539,7 @@ impl RealtimeDecoder {
             else {
                 continue;
             };
-            let lookup = |name: &str| known.get(&name.to_ascii_lowercase()).copied();
+            let lookup = |name: &str| context.get(&name.to_ascii_lowercase()).copied();
             let Some(raw) = expression.evaluate(&lookup) else {
                 continue;
             };
@@ -515,7 +547,7 @@ impl RealtimeDecoder {
             if !user.is_finite() {
                 continue;
             }
-            known.insert(name.to_ascii_lowercase(), user);
+            context.insert(name.to_ascii_lowercase(), user);
             if !hidden {
                 values.push(LiveValue {
                     name: name.clone(),
@@ -530,6 +562,7 @@ impl RealtimeDecoder {
             sequence,
             values,
             indicators: Vec::new(),
+            context,
         }
     }
 }
@@ -747,6 +780,7 @@ indicator = { running }, \"Not Running\", \"Running\", white, black, green, blac
 indicator = { tps > tpsflood }, \"Below Flood\", \"Flood Clear\", white, black, red, black
 indicator = { missingChannel }, \"Missing\", \"Missing\", white, black, red, black
 indicator = { rpm > }, \"Bad\", \"Bad\", white, black, red, black
+indicator = { halfRpm > 1000 }, \"Low\", \"High\", white, black, red, black
 indicatorTemplate = { running }, \"Template\", \"Template\", white, black, green, black
 
 [OutputChannels]
@@ -758,6 +792,7 @@ running = bits, U08, 2, [0:0]
 burnPending = bits, U08, 2, [4:4]
 tps = scalar, U08, 3, \"%\", 0.5, 0.0
 halfRpm = { rpm / 2 }, \"rpm\"
+quarterRpm = { halfRpm / 2 }, \"rpm\"
 ",
             &SettingsContext::new(),
         )
@@ -904,9 +939,9 @@ high = bits, U64, 0, [63:63]
         block[3] = 40;
 
         let frame = decoder.decode(&block, 1);
-        let readings = decoder.indicators(&frame.values, Some(&tune));
+        let readings = decoder.indicators(&frame, Some(&tune));
 
-        assert_eq!(readings.len(), 4, "template-only entries stay out");
+        assert_eq!(readings.len(), 5, "template-only entries stay out");
         assert_eq!(
             readings[0],
             IndicatorReading {
@@ -938,6 +973,100 @@ high = bits, U64, 0, [63:63]
     }
 
     #[test]
+    fn a_hidden_channel_still_answers_an_indicator_and_a_computed_channel() {
+        let mut definition = definition();
+        // The parser has no hidden flag on an output channel yet, so the fixture
+        // hides them by hand: the decoder is what has to keep the values. A
+        // measured channel and a computed intermediate stand in for the shapes
+        // a definition uses.
+        for name in ["running", "rpm", "halfRpm"] {
+            definition
+                .channels
+                .get_mut(name)
+                .unwrap_or_else(|| panic!("the fixture declares {name}"))
+                .hidden = true;
+        }
+
+        let decoder = RealtimeDecoder::new(&definition);
+        let mut block = vec![0u8; 8];
+        block[..2].copy_from_slice(&3500u16.to_le_bytes());
+        block[2] = 1;
+
+        let frame = decoder.decode(&block, 1);
+
+        for name in ["running", "rpm", "halfRpm"] {
+            assert!(
+                frame.value(name).is_none(),
+                "a hidden channel stays out of the visible list: {name}"
+            );
+        }
+        assert_eq!(
+            frame.value("quarterRpm").map(|value| value.value),
+            Some(875.0),
+            "a hidden computed channel still feeds the next one"
+        );
+
+        let readings = decoder.indicators(&frame, None);
+        assert_eq!(
+            readings[0],
+            IndicatorReading {
+                on: true,
+                available: true
+            },
+            "an indicator reads a hidden measured channel instead of going unavailable"
+        );
+        assert_eq!(
+            readings[4],
+            IndicatorReading {
+                on: true,
+                available: true
+            },
+            "an indicator reads a hidden computed channel too"
+        );
+    }
+
+    #[test]
+    fn a_frame_with_every_channel_hidden_is_not_empty() {
+        let mut definition = definition();
+        for (_, channel) in definition.channels.iter_mut() {
+            channel.hidden = true;
+        }
+
+        let decoder = RealtimeDecoder::new(&definition);
+        let frame = decoder.decode(&[0u8; 8], 1);
+
+        assert!(frame.values.is_empty(), "nothing is visible");
+        assert!(
+            !frame.is_empty(),
+            "the evaluation context keeps an all-hidden frame alive"
+        );
+    }
+
+    #[test]
+    fn hidden_channels_are_not_log_columns() {
+        let mut definition = definition();
+        definition
+            .channels
+            .get_mut("running")
+            .expect("the fixture declares it")
+            .hidden = true;
+
+        let decoder = RealtimeDecoder::new(&definition);
+        let columns: Vec<String> = decoder
+            .columns()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
+        assert!(
+            !columns
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("running")),
+            "a hidden channel must not reach the log or the chart picker: {columns:?}"
+        );
+    }
+
+    #[test]
     fn a_missing_tune_value_makes_the_indicator_unavailable() {
         let definition = definition();
         let decoder = RealtimeDecoder::new(&definition);
@@ -946,7 +1075,7 @@ high = bits, U64, 0, [63:63]
         block[3] = 40;
 
         let frame = decoder.decode(&block, 1);
-        let readings = decoder.indicators(&frame.values, None);
+        let readings = decoder.indicators(&frame, None);
 
         assert!(readings[0].available, "the running channel is in the frame");
         assert!(
@@ -965,7 +1094,7 @@ high = bits, U64, 0, [63:63]
 
         let block = vec![0u8; 8];
         let frame = decoder.decode(&block, 1);
-        let readings = decoder.indicators(&frame.values, Some(&tune));
+        let readings = decoder.indicators(&frame, Some(&tune));
 
         assert_eq!(
             readings[0],
@@ -1011,6 +1140,10 @@ high = bits, U64, 0, [63:63]
         assert!(
             frame.values.is_empty(),
             "a short block must decode to no values"
+        );
+        assert!(
+            frame.is_empty(),
+            "a short block carries no evaluation context either"
         );
     }
 
@@ -1086,6 +1219,7 @@ good = bits, U08, 0, [0:0]
             sequence: 3,
             values: Vec::new(),
             indicators: Vec::new(),
+            context: HashMap::new(),
         });
         assert_eq!(latest.get().unwrap().sequence, 3);
 
