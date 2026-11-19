@@ -450,18 +450,29 @@ impl TuneImages {
 
         for page in pages {
             // A page that overlaps text with numbers cannot be decoded back
-            // without reading the overlap as text. Its values are adopted as
-            // the file carried them, so nothing the file wrote is dropped.
+            // without reading the overlap as text. The values the file carried
+            // are adopted as they stand, so nothing the file wrote is dropped.
             if self.layout.page_has_text_overlap(page) {
-                let Some(page_layout) = self.layout.page(page) else {
+                let names = self.layout.page_patch_names(applied, page);
+                if names.is_empty() {
                     continue;
-                };
-                let names: Vec<&str> = page_layout
-                    .variables
-                    .iter()
-                    .map(|index| self.layout.variables()[*index].name.as_str())
-                    .collect();
-                merged.adopt_named(tune, &names)?;
+                }
+
+                // The file's tune has its own layout allocation, and a value
+                // copy needs the destination's layout. Copy into one that
+                // shares this image's layout before adopting the names.
+                let mut source = merged.snapshot();
+                source.adopt_values(tune)?;
+
+                let mut moved: Vec<&str> = names.clone();
+                for name in &names {
+                    if let Some(owner) = self.layout.alias_owner(name)
+                        && !moved.contains(&owner)
+                    {
+                        moved.push(owner);
+                    }
+                }
+                merged.adopt_named(&source, &moved)?;
 
                 continue;
             }

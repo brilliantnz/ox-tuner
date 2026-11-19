@@ -322,10 +322,12 @@ impl VariableSpec {
         reason = "a bit field compares the value the codec stored, exactly"
     )]
     pub fn same_wire_value(&self, left_raw: f64, right_raw: f64) -> bool {
-        if matches!(
-            self.shape,
-            EntryShape::Bits { .. } | EntryShape::Text { .. }
-        ) {
+        if self.data_type == DataType::Ascii
+            || matches!(
+                self.shape,
+                EntryShape::Bits { .. } | EntryShape::Text { .. }
+            )
+        {
             return left_raw == right_raw;
         }
 
@@ -470,7 +472,7 @@ mod tests {
         // Raw values, scale 100: raw 12 and 13 are 1200 and 1300 rpm.
         let spec = scalar(DataType::U16, 100.0, 0.0);
 
-        for (left, right) in [(8.0, 9.0), (12.0, 13.0), (1_200.0, 1_300.0)] {
+        for (left, right) in [(8.0, 9.0), (12.0, 13.0), (148.0, 149.0)] {
             assert!(
                 !spec.same_wire_value(left, right),
                 "{left} and {right} must not collapse"

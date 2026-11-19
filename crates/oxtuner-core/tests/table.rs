@@ -67,6 +67,49 @@ menu = "Tuning"
   subMenu = engineDialog, "Engine"
 "#;
 
+/// A definition with one constant whose bytes another constant covers.
+const VIEW_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+veTable = array, U08, 0, [2x2], "%", 1, 0, 0, 255, 0
+veCell0 = bits, U08, 0, [0:7]
+rpmBins = array, U16, 4, [2], "rpm", 1, 0, 0, 10000, 0
+mapBins = array, U08, 8, [2], "kPa", 1, 0, 0, 255, 0
+curveVals = array, U08, 10, [2], "%", 1, 0, 0, 255, 0
+
+[TableEditor]
+table = veTableTbl, veMap, "VE Table", 1
+  xBins = rpmBins, rpm
+  yBins = mapBins, map
+  zBins = veTable
+
+[CurveEditor]
+curve = viewCurve, "View Curve"
+  xBins = veCell0, cell
+  yBins = curveVals
+
+[UserDefined]
+dialog = engineDialog, "Engine"
+  field = "Cell 0", veCell0
+"#;
+
+const VIEW_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant cols="2" digits="0" name="veTable" rows="2" units="%">10.0 20.0 30.0 40.0</constant>
+        <constant name="rpmBins">1000.0 2000.0</constant>
+        <constant name="mapBins">50.0 100.0</constant>
+        <constant name="curveVals">5.0 6.0</constant>
+    </page>
+</msq>
+"#;
+
 const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
     <bibliography author="TunerStudio" tuneComment="fixture"/>
@@ -841,6 +884,88 @@ fn a_scalar_edit_rejects_an_array_variable() {
         panic!("expected a rejection");
     };
     assert_eq!(failure.code, FailureCode::DialogEditRejected);
+}
+
+#[test]
+fn a_scalar_edit_of_a_view_is_rejected() {
+    let dir = TempDir::with_definition("view-scalar", VIEW_DEFINITION, VIEW_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_scalar("engineDialog", "veCell0", 1.0)
+        .expect("the edit is queued");
+    let Event::Failed { failure, .. } = core.next() else {
+        panic!("expected a rejection");
+    };
+
+    assert_eq!(failure.code, FailureCode::DialogEditRejected);
+    assert!(
+        failure.message.contains("a view of `veTable`"),
+        "{}",
+        failure.message
+    );
+}
+
+#[test]
+fn a_table_edit_of_a_view_is_rejected() {
+    let dir = TempDir::with_definition("view-table", VIEW_DEFINITION, VIEW_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_table(
+            "veCell0",
+            vec![CellEdit {
+                row: 0,
+                column: 0,
+                value: 1.0,
+            }],
+        )
+        .expect("the edit is queued");
+    let Event::Failed { failure, .. } = core.next() else {
+        panic!("expected a rejection");
+    };
+
+    assert_eq!(failure.code, FailureCode::TableEditRejected);
+    assert!(
+        failure.message.contains("a view of `veTable`"),
+        "{}",
+        failure.message
+    );
+}
+
+#[test]
+fn an_axis_edit_of_a_view_is_rejected() {
+    use oxtuner_core::{AxisEdit, AxisKind};
+
+    let dir = TempDir::with_definition("view-axis", VIEW_DEFINITION, VIEW_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_axis(
+            "viewCurve",
+            AxisKind::X,
+            vec![AxisEdit {
+                index: 0,
+                value: 1.0,
+            }],
+        )
+        .expect("the edit is queued");
+    let Event::Failed { failure, .. } = core.next() else {
+        panic!("expected a rejection");
+    };
+
+    assert_eq!(failure.code, FailureCode::TableEditRejected);
+    assert!(
+        failure.message.contains("a view of `veTable`"),
+        "{}",
+        failure.message
+    );
 }
 
 #[test]

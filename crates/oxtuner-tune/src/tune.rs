@@ -572,8 +572,9 @@ impl Tune {
 
     /// Replaces a string variable's text without recording an edit.
     ///
-    /// A value that arrived from a file or a page is not a user edit; the edit
-    /// timestamp is what the dirty state reads, so it must not move.
+    /// A value that arrived from a file or a page is not a user edit, so it
+    /// must not claim a slot in the edit log. Dirty state is a value diff and
+    /// does not read that log, but a later reader of the log would.
     ///
     /// # Errors
     ///

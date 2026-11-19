@@ -21,6 +21,8 @@ impl Project {
                 continue;
             }
 
+            // A view is always a page constant: `mark_aliases` only looks at
+            // a page's variables, so there is no PC entry to remove.
             let Some(page) = spec.ini_page() else {
                 continue;
             };
@@ -143,7 +145,9 @@ impl Project {
     ///
     /// Unlike [`Self::save`], which touches only changed values in the file it
     /// owns, this writes every representable variable into a copy of the
-    /// document. It is the snapshot used before a risky operation (ADR-0011 S4)
+    /// document, except a constant whose bytes another constant covers: that
+    /// entry is removed, and a reload derives it from the owner. It is the
+    /// snapshot used before a risky operation (ADR-0011 S4)
     /// and is never written over the project's tune. A value the file cannot
     /// represent keeps the text the document already had: a variable with no
     /// label, a broken text constant, or a `scale` expression this build could

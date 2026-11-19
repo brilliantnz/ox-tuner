@@ -673,7 +673,7 @@ fn load_entry(
         }
         EntryShape::Bits { .. } => {
             let raw = label_to_raw(spec, definition, entry)?;
-            tune.set_raw_at(&spec.name, 0, raw)
+            tune.set_image_raw(&spec.name, 0, raw)
                 .map_err(|error| error.to_string())
         }
         EntryShape::Scalar | EntryShape::Array { .. } => load_numbers(tune, spec, entry, report),
@@ -754,7 +754,7 @@ fn load_numbers(
     // Every cell converted before any is written, so a refused value leaves
     // the variable entirely at its default.
     for (index, raw) in raws.into_iter().enumerate() {
-        tune.set_raw_at(&spec.name, index, raw)
+        tune.set_image_raw(&spec.name, index, raw)
             .map_err(|error| error.to_string())?;
     }
 
@@ -1806,7 +1806,7 @@ data3 = bits, U08, 3, [0:7]
         assert_eq!(
             loaded.tune.raw_at("data", 0).unwrap(),
             0.0,
-            "a byte the file did not write keeps its value"
+            "a byte the file did not write stays at the definition default"
         );
     }
 

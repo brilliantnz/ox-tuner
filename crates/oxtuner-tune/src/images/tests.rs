@@ -140,6 +140,11 @@ data3 = bits, U08, 3, [0:7]
     #[test]
     fn a_file_that_writes_only_a_view_moves_its_owner() {
         let mut images = aliased_images();
+        images
+            .working_mut()
+            .set_image_raw("data", 1, 7.0)
+            .expect("a byte to keep");
+
         let mut imported = aliased_tune(&images);
         imported
             .set_image_raw("data0", 0, 5.0)
@@ -157,7 +162,7 @@ data3 = bits, U08, 3, [0:7]
         assert_eq!(images.working().scalar_raw("data0").unwrap(), 5.0);
         assert_eq!(
             images.working().raw_at("data", 1).unwrap(),
-            0.0,
+            7.0,
             "a byte the file did not write keeps its value"
         );
     }
@@ -186,6 +191,56 @@ data3 = bits, U08, 3, [0:7]
             images.cell_state("data1", 0, 0).unwrap(),
             CellState::LocalDirty,
             "byte 1 is the view's element"
+        );
+    }
+
+    const OVERLAPPING: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+queryCommand = "Q"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, "", 1, 0, 0, 255, 0
+outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
+"#;
+
+    #[test]
+    fn a_page_a_text_field_overlaps_keeps_what_the_file_carried() {
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("outside", 0, 4.0)
+            .expect("a value to keep");
+
+        // The file's tune is built from its own layout, as a project load
+        // builds it; an alias test that reuses the image's `Arc` would hide the
+        // allocation mismatch a real import hits.
+        let file_definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        imported
+            .set_image_raw("inside", 0, 7.0)
+            .expect("a value to apply");
+
+        images
+            .import_applied(&imported, &["inside".to_owned()])
+            .expect("import");
+
+        assert_eq!(
+            images.working().raw_at("inside", 0).unwrap(),
+            7.0,
+            "the value the file carried is applied"
+        );
+        assert_eq!(
+            images.working().raw_at("outside", 0).unwrap(),
+            4.0,
+            "a value the file did not carry keeps its value"
         );
     }
 

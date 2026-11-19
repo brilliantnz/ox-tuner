@@ -575,9 +575,11 @@ fn write_value(
         return;
     }
 
+    // A text variable's bytes come from its string, not from this path.
     if data_type == DataType::Ascii {
         return;
     }
+
     let little = wire_bytes(raw, data_type);
     match endianness {
         Endianness::Little => bytes[start..end].copy_from_slice(&little[..width]),
