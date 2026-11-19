@@ -147,7 +147,7 @@ fn the_bench_ecu_reads_pages_and_realtime_without_writing() {
             && let Some(rpm) = latest.value("rpm")
         {
             frame = Some(std::sync::Arc::clone(&latest));
-            if frame.as_ref().is_some_and(|frame| !frame.values.is_empty()) {
+            if frame.as_ref().is_some_and(|frame| !frame.is_empty()) {
                 let _ = rpm;
                 break;
             }

@@ -107,13 +107,9 @@ impl<'tune> GateEvaluator<'tune> {
             }
         }
 
-        let live = live.map_or_else(HashMap::new, |frame| {
-            frame
-                .values
-                .iter()
-                .map(|value| (value.name.to_ascii_lowercase(), value.value))
-                .collect()
-        });
+        // The frame carries every decoded channel, hidden ones included, so a
+        // gate on an intermediate channel resolves like any other.
+        let live = live.map_or_else(HashMap::new, |frame| frame.context.clone());
 
         Self {
             tune,
@@ -403,6 +399,52 @@ cycleB = { cycleA }
     }
 
     #[test]
+    fn a_gate_sees_a_hidden_channel() {
+        const HIDDEN: &str = "\
+[MegaTune]
+signature = \"gate hidden\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 4
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 4
+rpm = scalar, U16, 0, \"rpm\", 1.0, 0.0
+status = scalar, U08, 2, \"bits\", 1.0, 0.0
+";
+
+        let mut definition = parse_bytes(HIDDEN.as_bytes(), &SettingsContext::new())
+            .expect("the test definition parses");
+        definition
+            .channels
+            .get_mut("status")
+            .expect("the fixture declares it")
+            .hidden = true;
+
+        let tune = Tune::from_definition(&definition);
+        let decoder = crate::realtime::RealtimeDecoder::new(&definition);
+        let mut block = vec![0u8; 4];
+        block[2] = 1;
+        let frame = decoder.decode(&block, 1);
+        assert!(
+            frame.value("status").is_none(),
+            "the channel is hidden from the visible list"
+        );
+
+        let mut gates = GateEvaluator::new(&definition, &tune, Some(&frame));
+
+        assert_eq!(
+            gates.gate("status > 0"),
+            GateOutcome::Open,
+            "a dialog gate resolves the hidden channel"
+        );
+    }
+
+    #[test]
     fn a_computed_channel_cycle_is_unresolved() {
         let tune = tune();
         let mut gates = evaluator(&tune);
@@ -460,6 +502,7 @@ cycleB = { cycleA }
                 units: "rpm".to_owned(),
             }],
             indicators: Vec::new(),
+            context: HashMap::from([("rpm".to_owned(), 1_000.0)]),
         };
         let mut gates = GateEvaluator::new(&definition, &tune, Some(&frame));
 

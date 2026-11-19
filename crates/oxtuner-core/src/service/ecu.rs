@@ -572,7 +572,7 @@ pub(super) fn on_reply(
             let sequence = live.telemetry.sequence;
             live.telemetry.sequence = sequence.wrapping_add(1);
             let mut frame = live.telemetry.decoder.decode(&block, sequence);
-            if frame.values.is_empty() {
+            if frame.is_empty() {
                 return true;
             }
             // Indicators read the same decoded frame and the tune the user is
@@ -582,7 +582,8 @@ pub(super) fn on_reply(
                 Session::Definition(_) => live.images.standalone.as_deref(),
                 Session::Empty => None,
             };
-            frame.indicators = live.telemetry.decoder.indicators(&frame.values, tune);
+            let indicators = live.telemetry.decoder.indicators(&frame, tune);
+            frame.indicators = indicators;
             let first = *live.telemetry.first_frame.get_or_insert_with(Instant::now);
             let time = first.elapsed().as_secs_f64();
             live.telemetry.last_frame_time = time;
@@ -898,6 +899,8 @@ pub(super) fn commit_pages(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::LiveValue;
 
@@ -952,6 +955,7 @@ mod tests {
             sequence: 0,
             values: vec![live("rpm", 900.0), live("map", 45.0), live("tps", 3.0)],
             indicators: Vec::new(),
+            context: HashMap::new(),
         };
         assert_eq!(align_log_values(&columns, &full), [900.0, 45.0, 3.0]);
 
@@ -960,6 +964,7 @@ mod tests {
             sequence: 1,
             values: vec![live("rpm", 900.0), live("tps", 3.0)],
             indicators: Vec::new(),
+            context: HashMap::new(),
         };
         let row = align_log_values(&columns, &short);
         assert_eq!(row.len(), columns.len());

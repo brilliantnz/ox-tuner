@@ -121,6 +121,74 @@ fn bench_realtime_decode(criterion: &mut Criterion) {
     });
 }
 
+/// A definition whose decoded frame includes a computed channel.
+const COMPUTED_INI: &str = "\
+[MegaTune]
+signature = \"bench computed\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+rpm = scalar, U16, 0, \"RPM\", 1.0, 0.0
+map = scalar, U16, 2, \"kPa\", 0.1, 0.0
+halfRpm = { rpm / 2 }, \"RPM\"
+";
+
+/// The same decode with a computed channel, so the map it builds is read too.
+fn bench_realtime_decode_computed(criterion: &mut Criterion) {
+    let definition = oxtuner_ini::parse_str(COMPUTED_INI, &SettingsContext::new())
+        .expect("the computed fixture parses");
+    let decoder = RealtimeDecoder::new(&definition);
+    let block = vec![0u8; decoder.block_size().max(1)];
+
+    criterion.bench_function("core_realtime_decode_computed", |bencher| {
+        bencher.iter(|| black_box(decoder.decode(black_box(&block), black_box(1))));
+    });
+}
+
+/// A definition with `[FrontPage]` indicators, for the per-frame evaluation.
+const INDICATOR_INI: &str = "\
+[MegaTune]
+signature = \"bench 1\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+
+[FrontPage]
+indicator = { rpm > 1000 }, \"Low\", \"High\", white, black, red, black
+indicator = { map > 50 }, \"Light\", \"Loaded\", white, black, green, black
+
+[OutputChannels]
+ochGetCommand = \"r%2o%2c\"
+ochBlockSize = 8
+rpm = scalar, U16, 0, \"RPM\", 1.0, 0.0
+map = scalar, U16, 2, \"kPa\", 0.1, 0.0
+";
+
+/// Evaluates the front-page indicators for one frame, as the poller does.
+fn bench_realtime_indicators(criterion: &mut Criterion) {
+    let definition = oxtuner_ini::parse_str(INDICATOR_INI, &SettingsContext::new())
+        .expect("the indicator fixture parses");
+    let decoder = RealtimeDecoder::new(&definition);
+    let block = vec![0u8; decoder.block_size().max(1)];
+    let frame = decoder.decode(&block, 1);
+
+    criterion.bench_function("core_realtime_indicators", |bencher| {
+        bencher.iter(|| {
+            black_box(decoder.indicators(black_box(&frame), None));
+        });
+    });
+}
+
 fn bench_history_push(criterion: &mut Criterion) {
     let history = ChartHistory::new(6000);
     history.configure(vec![
@@ -161,6 +229,8 @@ criterion_group!(
     bench_definition_summary,
     bench_table_clone,
     bench_realtime_decode,
+    bench_realtime_decode_computed,
+    bench_realtime_indicators,
     bench_history_push,
     bench_decimate
 );
