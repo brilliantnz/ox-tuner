@@ -36,7 +36,7 @@ pub use constants::{
 };
 pub use coverage::{Coverage, Extensions, SectionCoverage, UnsupportedSection};
 pub use definition::Definition;
-pub use dialogs::{Dialog, DialogRow, RowKind};
+pub use dialogs::{Dialog, DialogRow, RowClassification, RowKind};
 pub use frontpage::{FrontPage, Gauge, Indicator};
 pub use menus::{Menu, MenuItem, MenuTargetKind};
 pub use ordered::Ordered;

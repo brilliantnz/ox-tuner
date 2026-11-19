@@ -8,8 +8,8 @@
 
 use crate::fields::split_fields;
 use crate::model::{
-    Definition, Dialog, DialogRow, KeyAction, Menu, MenuItem, MenuTargetKind, RowKind,
-    SettingGroup, SettingOption,
+    Definition, Dialog, DialogRow, KeyAction, Menu, MenuItem, MenuTargetKind, RowClassification,
+    RowKind, SettingGroup, SettingOption,
 };
 
 use super::SectionParser;
@@ -197,6 +197,14 @@ pub(crate) fn parse_dialogs(
         if kind == RowKind::Unmodeled {
             // Kept as data; reported once so coverage stays honest.
             section.unrecognized_key(&keyword, *line);
+        } else if kind.classification() == RowClassification::Deferred {
+            // Also kept as data, but with a note that says why it is not
+            // interpreted yet, so a deferred row is never a silent drop.
+            section.note(
+                "row-deferred",
+                format!("`{keyword}` is kept verbatim until a consumer needs it"),
+                *line,
+            );
         }
         if let Some(dialog) = definition.dialogs.get_mut(name) {
             dialog.rows.push(DialogRow {
@@ -532,6 +540,45 @@ settingOption = second, \"Second\"
         assert_eq!(dialog.rows[0].kind, RowKind::Unmodeled);
         assert_eq!(dialog.rows[0].keyword, "brandNewRow");
         assert_eq!(dialog.rows[0].fields, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn every_row_kind_has_an_audit_classification() {
+        for kind in RowKind::ALL {
+            assert_ne!(*kind, RowKind::Unmodeled);
+            // `classification` matches every variant, so adding a kind without
+            // auditing it here is a compile error.
+            let _ = kind.classification();
+        }
+    }
+
+    #[test]
+    fn deferred_rows_keep_their_fields_and_get_a_note() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[UiDialogs]
+dialog = d, \"D\"
+channelSelector = a, b
+logFieldSelector = c, d
+userPassword = pw
+",
+        );
+
+        let dialog = definition.dialogs.get("d").expect("dialog");
+        assert_eq!(dialog.rows.len(), 3);
+        assert_eq!(dialog.rows[0].kind, RowKind::ChannelSelector);
+        assert_eq!(dialog.rows[0].fields, vec!["a", "b"]);
+        assert_eq!(dialog.rows[1].kind, RowKind::LogFieldSelector);
+        assert_eq!(dialog.rows[2].kind, RowKind::UserPassword);
+
+        let notes = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "row-deferred")
+            .count();
+        assert_eq!(notes, 3);
     }
 
     #[test]

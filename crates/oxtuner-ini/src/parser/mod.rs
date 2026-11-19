@@ -18,7 +18,7 @@ mod misc;
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::error::{Diagnostic, IniError, Severity};
+use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::model::{Coverage, Definition, SectionCoverage};
 use crate::preprocess::{Expander, IncludeResolver, LogicalLine};
 use crate::settings::SettingsContext;
@@ -97,10 +97,11 @@ fn assemble(
         .tested_flags
         .clone_from(preprocessed.settings.tested_flags());
     definition.active_flags = preprocessed.settings.active_flags();
-    definition.diagnostics.extend(extra_diagnostics);
-    definition
-        .diagnostics
-        .extend(preprocessed.diagnostics.iter().cloned());
+    extend_bounded(&mut definition.diagnostics, extra_diagnostics);
+    extend_bounded(
+        &mut definition.diagnostics,
+        preprocessed.diagnostics.iter().cloned(),
+    );
 
     let expander = Expander::new(&preprocessed.defines);
 
@@ -306,9 +307,14 @@ impl SectionParser {
         self.understood.insert(line);
     }
 
+    /// Adds one diagnostic through the file-wide bound.
+    fn record(&mut self, diagnostic: Diagnostic) {
+        push_bounded(&mut self.diagnostics, diagnostic);
+    }
+
     /// Records a warning tied to a line.
     pub(crate) fn warn(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.diagnostics.push(Diagnostic::new(
+        self.record(Diagnostic::new(
             Severity::Warning,
             code,
             message,
@@ -319,7 +325,7 @@ impl SectionParser {
 
     /// Records an informational note tied to a line.
     pub(crate) fn note(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.diagnostics.push(Diagnostic::new(
+        self.record(Diagnostic::new(
             Severity::Note,
             code,
             message,
@@ -331,7 +337,7 @@ impl SectionParser {
     /// Records an informational note about the section as a whole, for a fact
     /// that belongs to no single line.
     pub(crate) fn note_section(&mut self, code: &'static str, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::section_wide(
+        self.record(Diagnostic::section_wide(
             Severity::Note,
             code,
             message,
@@ -341,7 +347,7 @@ impl SectionParser {
 
     /// Records an error tied to a line.
     pub(crate) fn error(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.diagnostics.push(Diagnostic::new(
+        self.record(Diagnostic::new(
             Severity::Error,
             code,
             message,
@@ -388,7 +394,7 @@ impl SectionParser {
                 unsupported,
             });
         }
-        definition.diagnostics.extend(self.diagnostics);
+        extend_bounded(&mut definition.diagnostics, self.diagnostics);
     }
 }
 
@@ -520,7 +526,7 @@ fn validate_pages(definition: &mut Definition) {
         }
     }
 
-    definition.diagnostics.extend(problems);
+    extend_bounded(&mut definition.diagnostics, problems);
 }
 
 fn validate_references(definition: &mut Definition) {
@@ -575,7 +581,7 @@ fn validate_references(definition: &mut Definition) {
         }
     }
 
-    definition.diagnostics.extend(problems);
+    extend_bounded(&mut definition.diagnostics, problems);
 }
 
 #[cfg(test)]

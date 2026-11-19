@@ -63,7 +63,7 @@ pub mod preprocess;
 pub mod settings;
 pub mod source;
 
-pub use error::{Diagnostic, IniError, Severity};
+pub use error::{Diagnostic, IniError, MAX_DIAGNOSTICS, Severity, extend_bounded, push_bounded};
 pub use fields::{
     CommandArguments, CommandEncodeError, CommandTemplate, Placeholder, Segment, WireOrder,
 };
@@ -71,14 +71,14 @@ pub use model::{
     Axis, BitOption, BitRange, Channel, ChannelKind, CommsSettings, Constant, ConstantClass,
     ConstantFlags, Coverage, Curve, DataType, DatalogEntry, Definition, Dialog, DialogRow,
     Dimension, Endianness, Extensions, FrontPage, Gauge, Indicator, KeyAction, Menu, MenuItem,
-    MenuTargetKind, Number, Offset, Ordered, Page, PcVariable, ReferenceTable, RowKind,
-    ScatteredConfig, SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text,
+    MenuTargetKind, Number, Offset, Ordered, Page, PcVariable, ReferenceTable, RowClassification,
+    RowKind, ScatteredConfig, SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text,
     UnsupportedSection,
 };
 pub use parser::{
     MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,
 };
-pub use preprocess::{LogicalLine, Preprocessed, preprocess};
+pub use preprocess::{LogicalLine, MAX_INCLUDE_DEPTH, Preprocessed, preprocess};
 pub use settings::SettingsContext;
 
 impl Definition {
