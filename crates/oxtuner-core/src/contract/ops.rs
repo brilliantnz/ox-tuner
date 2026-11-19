@@ -577,10 +577,10 @@ pub enum TuneCommand {
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictResolution {
-    /// Replace the working values with the ECU read-back.
+    /// Take the ECU's tune: adopt the read-back and save it into the project.
     UseEcu,
-    /// Keep the working values and clear the conflict marks.
-    KeepWorking,
+    /// Keep the project's tune: save it. The client then writes and burns it.
+    UseProject,
 }
 
 /// ECU and link requests.

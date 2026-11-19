@@ -34,6 +34,11 @@ fn a_burn_follows_a_verified_write_and_is_journaled() {
     );
     assert!(summary.verified);
     assert!(summary.snapshot.as_ref().is_some_and(|path| path.exists()));
+    assert_eq!(
+        core.status().unsaved.cells,
+        0,
+        "a burn saves the project first"
+    );
 
     let (_, entries) = core.journal();
     let burns: Vec<&JournalEntry> = entries

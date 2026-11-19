@@ -577,14 +577,26 @@ app:
       en: Project and ECU tune differ
     body:
       en: '%{count} cells differ between the project tune and the tune read from the ECU. Choose which one the project should use.'
-    sample:
-      en: Project value -> ECU value
+    column_variable:
+      en: Variable
+    column_cell:
+      en: Cell
+    column_project:
+      en: Project tune
+    column_ecu:
+      en: ECU tune
+    more:
+      en: '%{count} more cells are not listed.'
     keep_hint:
-      en: Keeping the project tune writes nothing yet. The ECU keeps its values until you write the tune and burn it.
+      en: 'Use project tune saves the file, writes it to ECU RAM and burns it to flash. The engine must be off.'
+    use_ecu_hint:
+      en: Use ECU tune replaces the project's values with the ECU's and saves the project file.
+    needs_writes:
+      en: Enable write access and connect before applying the project tune.
     keep:
-      en: Keep project tune
+      en: Use project tune (write and burn)
     use_ecu:
-      en: Use ECU tune
+      en: Use ECU tune and save
   cluster:
     title:
       en: Cluster
@@ -985,6 +997,8 @@ app:
       en: A burn persists the ECU's RAM across power cycles. A wrong calibration can damage the engine.
     body:
       en: Burn %{pages} pages holding %{cells} RAM changes to flash.
+    body_unknown:
+      en: Burn the ECU's RAM to flash. The project is saved and a snapshot is written first.
     unsent:
       en: '%{cells} tune values are not in ECU RAM yet. Write them first; burning now would persist the older values.'
     conflicts:
@@ -992,7 +1006,7 @@ app:
     flash_unknown:
       en: The ECU flash has not been verified since this connection. A completed burn is what makes it hold the tune.
     snapshot:
-      en: A snapshot of the working tune is written before the burn. The pages are read back afterwards.
+      en: The project file is saved and a snapshot of the working tune is written before the burn. The pages are read back afterwards.
     cancel:
       en: Cancel
     confirm:

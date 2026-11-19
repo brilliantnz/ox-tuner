@@ -377,51 +377,44 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
 
     #[test]
     fn the_truth_table_is_exhaustive_over_image_equalities() {
-        // One cell, four images, each either 0 or 1. `ecu_unknown` is covered
-        // by the "no RAM read" case, and both overlays are tested separately.
+        // One cell, three live images, each either 0 or 1. The baseline does
+        // not enter the derived state, and both overlays are tested separately.
         for working in [0.0, 1.0] {
-            for baseline in [0.0, 1.0] {
-                for ram in [0.0, 1.0] {
-                    for flash in [0.0, 1.0] {
-                        let mut base = tune();
-                        base.set_raw_at("a", 0, baseline).unwrap();
+            for ram in [0.0, 1.0] {
+                for flash in [0.0, 1.0] {
+                    let mut work = tune();
+                    work.set_raw_at("a", 0, working).unwrap();
 
-                        let mut work = tune();
-                        work.set_raw_at("a", 0, working).unwrap();
+                    let mut ecu = tune();
+                    ecu.set_raw_at("a", 0, ram).unwrap();
 
-                        let mut ecu = tune();
-                        ecu.set_raw_at("a", 0, ram).unwrap();
+                    let mut burned = tune();
+                    burned.set_raw_at("a", 0, flash).unwrap();
 
-                        let mut burned = tune();
-                        burned.set_raw_at("a", 0, flash).unwrap();
+                    let images = TuneImages::new(tune(), work)
+                        .unwrap()
+                        .with_ecu_ram(ecu)
+                        .unwrap()
+                        .with_ecu_flash(burned)
+                        .unwrap();
 
-                        let images = TuneImages::new(base, work)
-                            .unwrap()
-                            .with_ecu_ram(ecu)
-                            .unwrap()
-                            .with_ecu_flash(burned)
-                            .unwrap();
-
-                        let expected = if working == ram {
-                            if working == flash {
-                                CellState::Synced
-                            } else {
-                                CellState::InRam
-                            }
+                    let expected = if working == ram {
+                        if working == flash {
+                            CellState::Synced
                         } else {
-                            // A real difference from RAM is an unsent change;
-                            // only a read that found no decision marks a
-                            // conflict, and these images carry no overlays.
-                            CellState::LocalDirty
-                        };
-                        let _ = baseline;
-
-                        assert_eq!(
-                            images.cell_state("a", 0, 0).unwrap(),
-                            expected,
-                            "w={working} b={baseline} r={ram} f={flash}"
-                        );
-                    }
+                            CellState::InRam
+                        }
+                    } else {
+                        // A real difference from RAM is an unsent change; only
+                        // a read that found no decision marks a conflict, and
+                        // these images carry no overlays.
+                        CellState::LocalDirty
+                    };
+                    assert_eq!(
+                        images.cell_state("a", 0, 0).unwrap(),
+                        expected,
+                        "w={working} r={ram} f={flash}"
+                    );
                 }
             }
         }
@@ -476,6 +469,141 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
             CellState::LocalDirty,
             "without a conflict mark the difference is an unsent change"
         );
+    }
+
+    #[test]
+    fn a_page_scoped_write_keeps_a_decision_it_did_not_write() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        ram.set_user("b", 9.0).unwrap();
+        images.reconcile_read(ram.clone()).unwrap();
+        images.keep_working();
+
+        images.clear_resolutions_for(&["a".to_owned()]);
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].name, "a");
+    }
+
+    #[test]
+    fn a_float_that_stores_the_same_bytes_is_not_a_conflict() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+f = scalar, F32, 0, \"\", 100.0, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_user("f", 5.0)
+            .expect("the raw value is 0.05");
+
+        // What the page decodes back: the raw narrowed to f32 and widened.
+        let mut ram = Tune::new(layout);
+        ram.set_image_raw("f", 0, f64::from(0.05_f32))
+            .expect("the ECU value");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 0, "the stored bytes are equal");
+        assert_eq!(images.status().conflicts, 0);
+        assert_eq!(images.status().pending_write.cells, 0);
+    }
+
+    #[test]
+    fn a_conflict_edited_back_to_the_ecu_value_is_resolved() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconcile_read(ram).unwrap();
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
+
+        images.working_mut().set_user("a", 9.0).unwrap();
+
+        assert_eq!(images.status().conflicts, 0);
+        assert_eq!(images.status().pending_write.cells, 0);
+        assert_eq!(images.conflicts().len(), 0);
+        assert_ne!(images.cell_state("a", 0, 0).unwrap(), CellState::Conflict);
+    }
+
+    #[test]
+    fn a_complete_read_clears_a_failed_write() {
+        let mut images = images();
+        images.set_ecu_ram(tune()).unwrap();
+        images.mark_write_failed("a", 0, 0).unwrap();
+        assert_eq!(
+            images.cell_state("a", 0, 0).unwrap(),
+            CellState::WriteFailed
+        );
+
+        images.reconcile_read(tune()).unwrap();
+
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::InRam);
+    }
+
+    #[test]
+    fn importing_another_tune_clears_the_decision_about_the_old_values() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        images.reconcile_read(ram.clone()).unwrap();
+        images.keep_working();
+
+        let mut imported = Tune::new(Arc::clone(images.layout()));
+        imported.set_user("a", 4.0).unwrap();
+        images
+            .import_applied(&imported, &["a".to_owned()])
+            .expect("import");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "the imported value is a new difference and must ask"
+        );
+    }
+
+    #[test]
+    fn a_value_the_codec_refuses_is_not_a_conflict_or_pending() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+queryCommand = \"Q\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+wide = bits, U16, 0, [40:47]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        let mut ram = Tune::new(layout);
+        ram.set_image_raw("wide", 0, 3.0).expect("the ECU value");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+
+        assert_eq!(conflicts.len(), 0, "the write plan cannot send it");
+        assert_eq!(images.status().conflicts, 0);
+        assert_eq!(images.status().pending_write.cells, 0);
     }
 
     #[test]

@@ -183,7 +183,7 @@ impl Harness {
             .handle
             .execute(oxtuner_core::CoreCommand::Tune(
                 oxtuner_core::TuneCommand::ResolveConflicts {
-                    resolution: oxtuner_core::ConflictResolution::KeepWorking,
+                    resolution: oxtuner_core::ConflictResolution::UseProject,
                 },
             ))
             .expect("queued");
@@ -692,12 +692,16 @@ fn stage_restore() {
         return;
     }
 
-    let (project, _) = prepare_project();
+    let (project, before) = prepare_project();
     let harness = Harness::start();
     harness.open(project);
+    // A burn saves the project, so the file now holds the last tune burned
+    // (the imported one). The restore target is the tune the board arrived
+    // with, kept aside before the first stage touched it.
+    harness.import(&before);
     harness.connect(&port());
-    // The write needs the ECU image; opening the project already put the
-    // project's tune in the working image, which is what gets written.
+    // The write needs the ECU image; the imported tune is the working image,
+    // which is what gets written.
     harness.read_all();
     harness.keep_working();
     assert!(harness.rpm() < 1000.0, "the engine is running");
@@ -860,7 +864,7 @@ fn stage_after_interrupt() {
         return;
     }
 
-    let (project, _) = prepare_project();
+    let (project, before) = prepare_project();
     let definition = definition_of(&project);
 
     let after = page_crcs(&port(), &definition);
@@ -869,11 +873,14 @@ fn stage_after_interrupt() {
 
     let harness = Harness::start();
     harness.open(project);
+    // The failed burn saved the edited tune; recover to the tune the board
+    // arrived with, kept aside before the first stage touched it.
+    harness.import(&before);
     harness.connect(&port());
     let read = harness.read_all();
     assert!(harness.rpm() < 1000.0, "the engine is running");
 
-    // The project's tune is the target; the read makes the ECU image known so
+    // The imported tune is the target; the read makes the ECU image known so
     // the delta is what the interrupted session left behind.
     harness.keep_working();
     let written = harness.write();

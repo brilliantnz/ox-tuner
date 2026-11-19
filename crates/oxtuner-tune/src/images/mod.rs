@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use crate::diff::diff_values;
 use crate::wire::{decode_page, encode_page, patch_page};
-use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout, Values};
+use crate::{
+    EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout, Values, VariableSpec,
+};
 
 mod conflict;
 mod state;
@@ -213,6 +215,10 @@ impl TuneImages {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
         self.ecu_unknown = false;
+        // A complete read observes every cell, so it is the verified read-back
+        // a failed write waits for.
+        self.overlays
+            .retain(|_, overlay| *overlay != Overlay::WriteFailed);
 
         let mut conflicts = Vec::new();
         for (variable, spec) in self.layout.variables().iter().enumerate() {
@@ -224,7 +230,7 @@ impl TuneImages {
                 let (working_value, ecu_value) = {
                     let working = &self.working.values()[variable];
                     let ecu = &ram.values()[variable];
-                    if working.same_at(ecu, index) {
+                    if Self::same_sent_value(spec, working, ecu, index) {
                         // Equal again: a decision about the difference is moot.
                         if matches!(
                             self.overlays.get(&key),
@@ -328,13 +334,28 @@ impl TuneImages {
             .retain(|_, overlay| !matches!(overlay, Overlay::Conflict | Overlay::Superseded));
     }
 
+    /// Clears the decisions about the named variables only.
+    ///
+    /// A page-scoped write makes its own variables agree with RAM; a decision
+    /// about a cell it did not send still stands.
+    pub fn clear_resolutions_for(&mut self, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            self.overlays.retain(|key, overlay| {
+                key.variable != variable
+                    || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
+            });
+        }
+    }
+
     /// Every currently marked conflict, in layout order.
     pub fn conflicts(&self) -> Vec<Conflict> {
         let mut conflicts = Vec::new();
         for (variable, spec) in self.layout.variables().iter().enumerate() {
             for index in 0..spec.element_count() {
-                let key = CellRef { variable, index };
-                if self.overlays.get(&key) != Some(&Overlay::Conflict) {
+                if !self.conflict_is_live(variable, index) {
                     continue;
                 }
                 let working = &self.working.values()[variable];
@@ -376,7 +397,7 @@ impl TuneImages {
             let spec = &self.layout.variables()[variable];
             for index in 0..spec.element_count() {
                 let working = &self.working.values()[variable];
-                if working.same_at(&ram.values()[variable], index) {
+                if Self::same_sent_value(spec, working, &ram.values()[variable], index) {
                     continue;
                 }
                 let key = CellRef { variable, index };
@@ -416,6 +437,7 @@ impl TuneImages {
                 continue;
             };
             let mut failed = false;
+            let mut moved = false;
 
             if matches!(spec.shape, EntryShape::Text { .. }) {
                 let saved = self.baseline.text(name).ok().map(str::to_owned);
@@ -424,6 +446,7 @@ impl TuneImages {
                     if saved != current {
                         if self.working.set_text(name, &saved).is_ok() {
                             reverted += 1;
+                            moved = true;
                         } else {
                             failed = true;
                         }
@@ -456,6 +479,7 @@ impl TuneImages {
                     }
 
                     reverted += 1;
+                    moved = true;
                 }
             }
 
@@ -464,7 +488,10 @@ impl TuneImages {
             // too, the way a whole-tune revert drops every conflict. A failed
             // write leaves the mark in place: it would otherwise point at a
             // value that did not move.
-            if !failed && let Some(variable) = self.layout.index(name) {
+            if !failed
+                && moved
+                && let Some(variable) = self.layout.index(name)
+            {
                 self.overlays.retain(|key, overlay| {
                     key.variable != variable
                         || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
@@ -667,8 +694,9 @@ impl TuneImages {
         }
 
         self.working.adopt_values(&merged)?;
-        self.overlays
-            .retain(|_, overlay| *overlay != Overlay::Conflict);
+        // The imported values are new; a decision about the old ones does not
+        // carry over.
+        self.clear_resolutions();
         Ok(())
     }
 
@@ -706,6 +734,37 @@ impl TuneImages {
         aggregate(states)
     }
 
+    /// Whether two images store the same value at one cell.
+    ///
+    /// The write plan compares wire bytes, so detection and the derived state
+    /// must too: a raw `f64` a page narrows to `f32` is equal to what the page
+    /// decodes even when the two `f64` values differ.
+    fn same_sent_value(spec: &VariableSpec, left: &Values, right: &Values, index: usize) -> bool {
+        match (left.number(index), right.number(index)) {
+            (Some(left), Some(right)) => spec.same_wire_value(left, right),
+            _ => left.same_at(right, index),
+        }
+    }
+
+    /// Whether `index` of `variable` is an undecided difference that still exists.
+    fn conflict_is_live(&self, variable: usize, index: usize) -> bool {
+        let key = CellRef { variable, index };
+        if self.overlays.get(&key) != Some(&Overlay::Conflict) {
+            return false;
+        }
+        let (Some(spec), Some(working), Some(ecu)) = (
+            self.layout.variables().get(variable),
+            self.working.values().get(variable),
+            self.ecu_ram
+                .as_ref()
+                .and_then(|ram| ram.values().get(variable)),
+        ) else {
+            return false;
+        };
+
+        !Self::same_sent_value(spec, working, ecu, index)
+    }
+
     /// The status bar's summary.
     pub fn status(&self) -> TuneStatus {
         let unsaved = diff_values(&self.layout, self.baseline.values(), self.working.values());
@@ -721,8 +780,8 @@ impl TuneImages {
         };
         let conflicts = self
             .overlays
-            .values()
-            .filter(|overlay| **overlay == Overlay::Conflict)
+            .keys()
+            .filter(|key| self.conflict_is_live(key.variable, key.index))
             .count();
 
         TuneStatus {
@@ -803,10 +862,8 @@ impl TuneImages {
             };
         }
 
-        match self.overlays.get(&CellRef { variable, index }) {
-            Some(Overlay::WriteFailed) => return CellState::WriteFailed,
-            Some(Overlay::Conflict) => return CellState::Conflict,
-            Some(Overlay::Superseded) | None => {}
+        if self.overlays.get(&CellRef { variable, index }) == Some(&Overlay::WriteFailed) {
+            return CellState::WriteFailed;
         }
         if self.ecu_unknown {
             return CellState::Unknown;
@@ -817,12 +874,16 @@ impl TuneImages {
             return CellState::Unknown;
         };
         let ram = &ram.values()[variable];
+        let equal = Self::same_sent_value(spec, working, ram, index);
 
-        if working.same_at(ram, index) {
-            let burned = self
-                .ecu_flash
-                .as_ref()
-                .is_some_and(|flash| working.same_at(&flash.values()[variable], index));
+        if self.overlays.get(&CellRef { variable, index }) == Some(&Overlay::Conflict) && !equal {
+            return CellState::Conflict;
+        }
+
+        if equal {
+            let burned = self.ecu_flash.as_ref().is_some_and(|flash| {
+                Self::same_sent_value(spec, working, &flash.values()[variable], index)
+            });
             return if burned {
                 CellState::Synced
             } else {

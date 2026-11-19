@@ -487,7 +487,7 @@ pub(super) fn burn_to_flash(
             "a controller command is running; burn after it finishes",
         );
     }
-    let Some(project) = session.project() else {
+    let Some(project) = session.project_mut() else {
         return refuse(
             events,
             report,
@@ -534,6 +534,18 @@ pub(super) fn burn_to_flash(
             op,
             FailureCode::BurnRefused,
             "the working image has edits that are not in ECU RAM. Write them first; burning would persist the older RAM values",
+        );
+    }
+
+    // A burn makes the tune durable, so the project file records it too. A
+    // save that fails stops the burn instead of leaving the file behind.
+    if let Err(error) = project.save() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::TuneSaveFailed,
+            format!("the burn needs the project saved first: {error}"),
         );
     }
 
@@ -1349,7 +1361,9 @@ pub(super) fn apply_verified_write(
         .set_ecu_ram(image)
         .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
     project.images_mut().clear_write_failures();
-    project.images_mut().clear_resolutions();
+    project
+        .images_mut()
+        .clear_resolutions_for(&transaction.changed_variables);
     live.images.page_bytes.extend(
         transaction
             .readback
@@ -1431,6 +1445,14 @@ pub(super) fn fail_transaction(
         if link_lost {
             session.mark_unknown();
         }
+    }
+    if transaction.kind == TxnKind::Burn
+        && (transaction.burned > 0 || transaction.phase == TxnPhase::Burn)
+        && let Some(project) = session.project_mut()
+    {
+        // At least one page may already be in flash, and a failing verify
+        // proved some of it differs; nothing about the chip is known now.
+        project.images_mut().mark_flash_unknown();
     }
     safety.halt(reason.clone());
     report.failures = report.failures.saturating_add(1);

@@ -39,13 +39,18 @@ fn the_first_read_reports_the_difference_and_the_write_waits_for_a_decision() {
     assert_eq!(kind, FailureCode::BurnRefused);
     assert!(message.contains("choose which to keep"), "{message}");
 
-    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::KeepWorking);
+    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject);
     assert!(
         matches!(event, Event::ConflictsResolved { .. }),
         "{event:?}"
     );
     assert_eq!(core.status().conflicts, 0);
     assert!(core.status().pending_write.cells >= 1);
+    assert_eq!(
+        core.status().unsaved.cells,
+        0,
+        "the chosen project tune was saved"
+    );
 
     let Event::TuneWritten {
         report: summary, ..
@@ -79,10 +84,11 @@ fn using_the_ecu_values_moves_them_into_the_project() {
     assert_eq!(core.table().cells[0], 77.0);
     assert_eq!(core.status().conflicts, 0);
     assert_eq!(core.status().pending_write.cells, 0);
-
-    // The project file still holds its own tune, so the adopted values are
-    // unsaved changes rather than a silent rewrite of the file.
-    assert!(core.status().unsaved.cells >= 1);
+    assert_eq!(
+        core.status().unsaved.cells,
+        0,
+        "the adopted values were saved into the project"
+    );
 
     core.close();
 }
@@ -94,7 +100,7 @@ fn an_edit_after_the_decision_is_not_a_new_conflict() {
     core.open(dir.path());
     core.connect(drifted());
     core.read_all();
-    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::KeepWorking);
+    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject);
     assert!(
         matches!(event, Event::ConflictsResolved { .. }),
         "{event:?}"

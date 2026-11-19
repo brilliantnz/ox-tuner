@@ -4,13 +4,24 @@ use gpui_kit::App;
 use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
 use rust_i18n::t;
 
-use super::commands::{connect_to_simulator, read_all, refresh_tune_status, start_realtime};
+use super::commands::{
+    burn_to_flash, connect_to_simulator, read_all, refresh_tune_status, start_realtime,
+    write_to_ram,
+};
 use super::firmware;
 use super::service::CoreService;
 use super::status::{JournalView, TraceSaved, Update};
 
 /// One second in milliseconds, for the poll interval.
 const MILLIS_PER_SECOND: u32 = 1_000;
+
+/// The next command a "use project tune" choice runs.
+#[derive(Clone, Copy)]
+enum ApplyStep {
+    Write,
+    Burn,
+    Stop,
+}
 
 /// Writes the diagnostic anchor for the outcomes that carry a details action.
 ///
@@ -348,6 +359,19 @@ pub(super) fn apply(event: Event, cx: &mut App) {
         _ => None,
     };
 
+    // The project choice writes and burns after the resolution; decide the
+    // next step before the update is folded into the status.
+    let apply_step = if cx.global::<CoreService>().status.applying_project_tune {
+        match &update {
+            Update::ConflictsResolved => Some(ApplyStep::Write),
+            Update::Written(report) if report.verified => Some(ApplyStep::Burn),
+            Update::Burned(_) | Update::Failed(_) => Some(ApplyStep::Stop),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     if !matches!(&update, Update::Nothing) {
         cx.global_mut::<CoreService>().status.apply(update);
         if let Some(layout) = project_layout {
@@ -397,6 +421,14 @@ pub(super) fn apply(event: Event, cx: &mut App) {
 
     if auto_connect {
         connect_to_simulator(cx);
+    }
+    match apply_step {
+        Some(ApplyStep::Write) => write_to_ram(cx),
+        Some(ApplyStep::Burn) => burn_to_flash(cx),
+        Some(ApplyStep::Stop) => {
+            cx.global_mut::<CoreService>().status.applying_project_tune = false;
+        }
+        None => {}
     }
     if read_pages {
         // The session is read-only until proven otherwise; pulling the tune in

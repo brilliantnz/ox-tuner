@@ -69,7 +69,16 @@ pub(crate) fn run_controller_command(dialog: &str, command: &str, cx: &mut App) 
 
 /// Resolves cells that differ between the working image and the ECU.
 pub(crate) fn resolve_conflicts(resolution: oxtuner_core::ConflictResolution, cx: &mut App) {
-    send(
+    // The project choice promises a write and a burn; the event loop runs them
+    // after the resolution is answered and stops at the first failure.
+    let applies = resolution == oxtuner_core::ConflictResolution::UseProject;
+    if applies {
+        cx.global_mut::<crate::core::CoreService>()
+            .status
+            .applying_project_tune = true;
+    }
+
+    let accepted = send(
         cx,
         FailureCode::WriteRefused,
         "resolve-conflicts",
@@ -79,6 +88,11 @@ pub(crate) fn resolve_conflicts(resolution: oxtuner_core::ConflictResolution, cx
             ))
         },
     );
+    if applies && !accepted {
+        cx.global_mut::<crate::core::CoreService>()
+            .status
+            .applying_project_tune = false;
+    }
 }
 
 /// Clears a halted write path after the user reviewed the failure.

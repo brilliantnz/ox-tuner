@@ -151,6 +151,19 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// The burn confirmation's main sentence.
+fn burn_body(flash_known: bool, pending: usize, pages: usize) -> SharedString {
+    if flash_known {
+        t!(
+            "app.burn.body",
+            pages = pages.to_string(),
+            cells = pending.to_string()
+        )
+    } else {
+        t!("app.burn.body_unknown")
+    }
+}
+
 /// Confirms burning RAM to flash.
 pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
     let status = CoreService::status(cx);
@@ -196,11 +209,11 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
                             .font_weight(FontWeight::MEDIUM)
                             .child(t!("app.burn.warning")),
                     )
-                    .child(div().text_sm().child(t!(
-                        "app.burn.body",
-                        pages = pages.to_string(),
-                        cells = pending.to_string()
-                    )))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(burn_body(flash_known, pending, pages)),
+                    )
                     .child(safety_warnings(
                         cx,
                         (conflicts > 0)
@@ -622,33 +635,102 @@ pub(crate) fn show_import_consent(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// The project-versus-ECU comparison table.
+fn conflict_table(
+    cx: &App,
+    rows: Vec<oxtuner_core::ConflictReport>,
+    hidden: usize,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    let border = cx.theme().border;
+    let mono = cx.theme().mono_font_family.clone();
+
+    v_flex()
+        .border_1()
+        .border_color(border)
+        .rounded(cx.theme().radius)
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .text_color(muted)
+                .border_b_1()
+                .border_color(border)
+                .child(div().w(px(200.)).child(t!("app.conflict.column_variable")))
+                .child(div().w(px(64.)).child(t!("app.conflict.column_cell")))
+                .child(div().flex_1().child(t!("app.conflict.column_project")))
+                .child(div().flex_1().child(t!("app.conflict.column_ecu"))),
+        )
+        .children(rows.into_iter().map(move |row| {
+            h_flex()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .child(div().w(px(200.)).min_w_0().truncate().child(row.name))
+                .child(
+                    div()
+                        .w(px(64.))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("[{}:{}]", row.row, row.column)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .child(row.working),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .child(row.ecu),
+                )
+        }))
+        .when(hidden > 0, |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(t!("app.conflict.more", count = hidden.to_string())),
+            )
+        })
+}
+
 /// Shows the cells that differ between the project tune and the ECU tune.
 pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
-    let Some(read) = CoreService::status(cx).pages_read.clone() else {
+    let status = CoreService::status(cx);
+    let Some(read) = status.pages_read.clone() else {
         return;
     };
+    // A dialog for a difference the core has already decided would offer
+    // choices that no longer apply; every operation that decides clears the
+    // list. The status can lag the read by one refresh, so it is not consulted.
     if read.conflicts.is_empty() {
         return;
     }
+    let ready = status.writes_enabled && status.connection.is_some();
 
     let total = read.conflicts.len();
-    let rows: Vec<String> = read
-        .conflicts
-        .iter()
-        .take(8)
-        .map(|conflict| {
-            format!(
-                "{} [{}:{}]  {}  ->  {}",
-                conflict.name, conflict.row, conflict.column, conflict.working, conflict.ecu
-            )
-        })
-        .collect();
+    let rows: Vec<oxtuner_core::ConflictReport> = read.conflicts.iter().take(10).cloned().collect();
+    let hidden = total.saturating_sub(rows.len());
 
     dialog::open(window, cx, move |dialog, _, cx| {
         let muted = cx.theme().muted_foreground;
+        let danger = cx.theme().danger;
         dialog
             .title(t!("app.conflict.title"))
-            .width(px(620.))
+            .width(px(680.))
             .child(
                 v_flex()
                     .gap_2()
@@ -657,24 +739,27 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                             .text_sm()
                             .child(t!("app.conflict.body", count = total.to_string())),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(t!("app.conflict.sample")),
-                    )
-                    .children(rows.clone().into_iter().map(|row| {
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_xs()
-                            .child(row)
-                    }))
+                    .child(conflict_table(cx, rows.clone(), hidden))
                     .child(
                         div()
                             .text_xs()
                             .text_color(muted)
                             .child(t!("app.conflict.keep_hint")),
-                    ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t!("app.conflict.use_ecu_hint")),
+                    )
+                    .when(!ready, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(t!("app.conflict.needs_writes")),
+                        )
+                    }),
             )
             .footer(
                 h_flex()
@@ -684,9 +769,10 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                         Button::new("conflict-keep")
                             .label(t!("app.conflict.keep"))
                             .ghost()
+                            .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
-                                    oxtuner_core::ConflictResolution::KeepWorking,
+                                    oxtuner_core::ConflictResolution::UseProject,
                                     cx,
                                 );
                                 window.close_dialog(cx);

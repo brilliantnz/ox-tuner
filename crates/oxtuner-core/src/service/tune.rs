@@ -209,7 +209,19 @@ pub(super) fn adopt_ecu_image(
     Outcome::Continue
 }
 
+/// Saves the chosen tune and returns its path.
+fn save_resolution(project: &mut Project) -> Result<std::path::PathBuf, String> {
+    project
+        .save()
+        .map(|outcome| outcome.path)
+        .map_err(|error| error.to_string())
+}
+
 /// Resolves cells that differ between the working image and the ECU.
+///
+/// Both choices leave the project file holding the chosen tune. `UseEcu`
+/// adopts the read-back and saves it; `UseProject` saves the project's tune and
+/// the caller follows with the write and burn the choice promises.
 pub(super) fn resolve_conflicts(
     op: OpId,
     session: &mut Session,
@@ -254,6 +266,12 @@ pub(super) fn resolve_conflicts(
                     error.to_string(),
                 );
             }
+            let saved = match save_resolution(project) {
+                Ok(path) => path,
+                Err(error) => {
+                    return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
+                }
+            };
             record_local_journal(
                 session,
                 journal_dir,
@@ -261,11 +279,21 @@ pub(super) fn resolve_conflicts(
                 0,
                 0,
                 "ok",
-                &format!("kept ECU values; snapshot {}", snapshot.display()),
+                &format!(
+                    "kept ECU values; snapshot {}; saved {}",
+                    snapshot.display(),
+                    saved.display()
+                ),
             );
         }
-        ConflictResolution::KeepWorking => {
+        ConflictResolution::UseProject => {
             project.images_mut().keep_working();
+            let saved = match save_resolution(project) {
+                Ok(path) => path,
+                Err(error) => {
+                    return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
+                }
+            };
             record_local_journal(
                 session,
                 journal_dir,
@@ -273,7 +301,7 @@ pub(super) fn resolve_conflicts(
                 0,
                 0,
                 "ok",
-                "kept working values",
+                &format!("kept the project tune; saved {}", saved.display()),
             );
         }
     }

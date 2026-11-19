@@ -242,7 +242,7 @@ impl Harness {
     }
 
     fn keep_working(&self) {
-        match self.resolve_conflicts(oxtuner_core::ConflictResolution::KeepWorking) {
+        match self.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject) {
             Event::ConflictsResolved { .. } => {}
             other => panic!("expected a resolution, got {other:?}"),
         }

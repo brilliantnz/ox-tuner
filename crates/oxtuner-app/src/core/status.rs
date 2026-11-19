@@ -40,6 +40,11 @@ pub(crate) struct CoreStatus {
     pub(crate) project_missing: bool,
     /// The last successful save, shown until the next open or failure.
     pub(crate) last_save: Option<SaveReport>,
+    /// Whether a "use project tune" choice is still applying.
+    ///
+    /// The resolution saves the tune; the event loop then writes it and burns
+    /// it, one command after the other, stopping at the first failure.
+    pub(crate) applying_project_tune: bool,
     /// The table the UI last read, kept until another table replaces it.
     pub(crate) table: Option<TableView>,
     /// The dialog the UI last read, kept until another dialog replaces it.
@@ -210,6 +215,13 @@ pub(crate) struct TraceSaved {
 }
 
 impl CoreStatus {
+    /// Forgets the review list after an operation decided or discarded it.
+    fn clear_review(&mut self) {
+        if let Some(read) = &mut self.pages_read {
+            read.conflicts.clear();
+        }
+    }
+
     /// Records which ports are new since the last published list.
     ///
     /// A name that is still present keeps its place, so re-enumerating the
@@ -531,6 +543,7 @@ impl CoreStatus {
             }
             Update::Saved(outcome) => {
                 self.last_save = Some(outcome);
+                self.clear_review();
                 self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
@@ -619,6 +632,7 @@ impl CoreStatus {
             }
             Update::EcuAdopted => {
                 self.failure = None;
+                self.clear_review();
                 // The adopted image is the new starting point for targets the
                 // core has not re-read; anything still marked is stale.
                 self.dirty.clear();
@@ -632,6 +646,7 @@ impl CoreStatus {
             }
             Update::Written(summary) => {
                 self.last_write = Some(summary);
+                self.clear_review();
                 self.write_halted = None;
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);
@@ -657,6 +672,7 @@ impl CoreStatus {
             }
             Update::Imported(summary) => {
                 self.last_import = Some(summary);
+                self.clear_review();
                 self.import_consent = None;
                 self.dirty.clear();
                 self.failure = None;
@@ -664,6 +680,7 @@ impl CoreStatus {
             }
             Update::Reverted(summary) => {
                 self.last_revert = Some(summary);
+                self.clear_review();
                 self.dirty.clear();
                 self.failure = None;
                 self.tune_revision = self.tune_revision.wrapping_add(1);

@@ -61,10 +61,9 @@ fn position(name: &str, index: usize) -> (usize, usize) {
     }
 }
 
-fn expected_state(working: f64, baseline: f64, ram: f64, flash: f64) -> CellState {
+fn expected_state(working: f64, ram: f64, flash: f64) -> CellState {
     // The property builds no overlays, so a difference from RAM is always an
     // unsent change; a conflict needs a read that found no decision.
-    let _ = baseline;
     if working == ram {
         if working == flash {
             CellState::Synced
@@ -107,12 +106,7 @@ proptest! {
 
         for (cell, (name, index)) in CELLS.iter().enumerate() {
             let value = |tune: &Tune| tune.raw_at(name, *index).unwrap();
-            let expected = expected_state(
-                value(&working),
-                value(&baseline),
-                value(&ram),
-                value(&flash),
-            );
+            let expected = expected_state(value(&working), value(&ram), value(&flash));
             let (row, column) = position(name, *index);
             prop_assert_eq!(
                 images.cell_state(name, row, column).unwrap(),
