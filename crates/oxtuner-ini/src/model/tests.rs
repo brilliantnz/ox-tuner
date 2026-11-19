@@ -174,7 +174,7 @@ fn a_constant_reports_its_size_only_when_the_shape_is_known() {
             cols: Dimension::Fixed(16),
             rows: Dimension::Fixed(16),
         },
-        units: Text::Literal("%".to_owned()),
+        units: Text::shared("%"),
         scale: Some(Number::Literal(0.1)),
         translate: None,
         minimum: None,

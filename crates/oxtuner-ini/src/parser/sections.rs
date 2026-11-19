@@ -19,6 +19,7 @@ pub(crate) fn parse_loggers(
     lines: &[(u32, &str)],
 ) {
     let mut current: Option<LoggerDefinition> = None;
+    let mut names = std::collections::BTreeSet::new();
 
     for (line, text) in lines {
         section.count_entry();
@@ -33,30 +34,11 @@ pub(crate) fn parse_loggers(
             if let Some(logger) = current.take() {
                 definition.loggers.push(logger);
             }
-            let Some(name) = fields.first().copied() else {
+            let opened = open_logger(&fields, *line, section, &mut names);
+            if opened.is_none() {
                 section.warn("bad-logger", "`loggerDef` needs a name", *line);
-                continue;
-            };
-            current = Some(LoggerDefinition {
-                name: name.to_owned(),
-                title: fields.get(1).map(|field| unquote(field).to_owned()),
-                kind: fields
-                    .get(2)
-                    .map_or_else(String::new, |field| field.to_ascii_lowercase()),
-                start_command: None,
-                stop_command: None,
-                data_read_command: None,
-                data_read_timeout_ms: None,
-                continuous_read: false,
-                data_ready_condition: None,
-                data_length: None,
-                header_len: 0,
-                footer_len: 0,
-                record_len: 0,
-                fields: Vec::new(),
-                calculated: Vec::new(),
-                line: *line,
-            });
+            }
+            current = opened;
             section.understand(*line);
             continue;
         }
@@ -75,7 +57,7 @@ pub(crate) fn parse_loggers(
             "stopcommand" => logger.stop_command = Some(unquote(value).to_owned()),
             "datareadcommand" => logger.data_read_command = Some(unquote(value).to_owned()),
             "datareadtimeout" => logger.data_read_timeout_ms = crate::fields::parse_u32(value),
-            "continuousread" => logger.continuous_read = is_true(value),
+            "continuousread" => logger.continuous_read = crate::fields::is_true(value),
             "datareadycondition" => logger.data_ready_condition = Some(value.to_owned()),
             "datalength" => logger.data_length = crate::fields::parse_u32(value),
             "recorddef" => {
@@ -93,6 +75,7 @@ pub(crate) fn parse_loggers(
                     .unwrap_or(0);
             }
             "recordfield" => logger.fields.push(record_field(&fields, *line)),
+            "headerfield" => logger.header_fields.push(record_field(&fields, *line)),
             "calcfield" => logger.calculated.push(calculated_field(&fields, *line)),
             _ => section.unrecognized_key(key, *line),
         }
@@ -102,6 +85,44 @@ pub(crate) fn parse_loggers(
     if let Some(logger) = current {
         definition.loggers.push(logger);
     }
+}
+
+/// Opens one `loggerDef = name, "Title", type` block.
+fn open_logger(
+    fields: &[&str],
+    line: u32,
+    section: &mut SectionParser,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Option<LoggerDefinition> {
+    let name = fields.first().copied()?;
+    if !names.insert(name.to_owned()) {
+        section.note(
+            "duplicate-logger",
+            format!("logger `{name}` is declared more than once; both records are kept"),
+            line,
+        );
+    }
+    Some(LoggerDefinition {
+        name: name.to_owned(),
+        title: fields.get(1).map(|field| unquote(field).to_owned()),
+        kind: fields
+            .get(2)
+            .map_or_else(String::new, |field| field.to_ascii_lowercase()),
+        start_command: None,
+        stop_command: None,
+        data_read_command: None,
+        data_read_timeout_ms: None,
+        continuous_read: false,
+        data_ready_condition: None,
+        data_length: None,
+        header_len: 0,
+        footer_len: 0,
+        record_len: 0,
+        fields: Vec::new(),
+        header_fields: Vec::new(),
+        calculated: Vec::new(),
+        line,
+    })
 }
 
 fn record_field(fields: &[&str], line: u32) -> LoggerField {
@@ -122,8 +143,9 @@ fn record_field(fields: &[&str], line: u32) -> LoggerField {
         scale: fields.get(4).map(|field| Number::parse(field)),
         units: fields
             .get(5)
-            .map_or(Text::Literal(String::new()), |field| Text::parse(field)),
+            .map_or(Text::empty(), |field| Text::parse(field)),
         update_condition: fields.get(6).map(|field| (*field).to_owned()),
+        expression: None,
         hidden,
         line,
     }
@@ -143,8 +165,9 @@ fn calculated_field(fields: &[&str], line: u32) -> LoggerField {
         scale: None,
         units: fields
             .get(2)
-            .map_or(Text::Literal(String::new()), |field| Text::parse(field)),
-        update_condition: fields.get(3).map(|field| (*field).to_owned()),
+            .map_or(Text::empty(), |field| Text::parse(field)),
+        update_condition: None,
+        expression: fields.get(3).map(|field| (*field).to_owned()),
         hidden,
         line,
     }
@@ -177,11 +200,4 @@ pub(crate) fn parse_config_section(
         name: section.name.clone(),
         entries,
     });
-}
-
-fn is_true(value: &str) -> bool {
-    matches!(
-        value.trim_ascii().to_ascii_lowercase().as_str(),
-        "true" | "on" | "1" | "yes"
-    )
 }

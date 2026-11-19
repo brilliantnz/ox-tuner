@@ -295,6 +295,8 @@ pub(crate) fn parse_menu(
                     .collect();
                 let kind = match lowered.as_str() {
                     "groupmenu" => MenuTargetKind::Group,
+                    // A divider is also written as `subMenu = std_separator`.
+                    _ if target.eq_ignore_ascii_case("std_separator") => MenuTargetKind::Separator,
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
                     _ => MenuTargetKind::DefinitionTarget,
                 };
@@ -348,6 +350,9 @@ pub(crate) fn parse_menu(
 
 /// Whether a `std_*` target has a renderer, recording it when it does not.
 fn std_target_supported(definition: &mut Definition, target: &str) -> bool {
+    if target.eq_ignore_ascii_case("std_separator") {
+        return true;
+    }
     if RENDERED_STD_TARGETS
         .iter()
         .any(|known| known.eq_ignore_ascii_case(target))
@@ -460,9 +465,10 @@ pub(crate) fn parse_context_help(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        definition
-            .context_help
-            .insert(key, crate::fields::unquote(value).to_owned());
+        definition.context_help.insert(
+            key,
+            crate::model::intern_text(crate::fields::unquote(value)),
+        );
         section.understand(*line);
     }
 }
@@ -580,6 +586,7 @@ settingOption = second, \"Second\"
 
     #[test]
     fn every_row_kind_has_an_audit_classification() {
+        assert_eq!(RowKind::ALL.len(), 26);
         for kind in RowKind::ALL {
             assert_ne!(*kind, RowKind::Unmodeled);
             // `classification` matches every variant, so adding a kind without

@@ -18,7 +18,7 @@ use std::fmt;
     clippy::exhaustive_enums,
     reason = "the three arity shapes cover the function table"
 )]
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arity {
     /// Exactly this many.
     Exact(usize),
@@ -54,7 +54,7 @@ impl fmt::Display for Arity {
     clippy::exhaustive_enums,
     reason = "the three kinds cover how a call can be treated"
 )]
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinKind {
     /// Pure maths with a literal result, folded at parse time.
     PureMath,
@@ -234,11 +234,7 @@ pub fn lookup(name: &str) -> Option<&'static Builtin> {
 /// [`crate::expr::EvalContext`] because it needs an array lookup, not just its
 /// numeric arguments.
 pub fn fold(name: &str, arguments: &[f64]) -> Option<f64> {
-    let builtin = lookup(name)?;
-    if builtin.name == "arrayvalue" {
-        return None;
-    }
-    builtin.fold(arguments)
+    lookup(name)?.fold(arguments)
 }
 
 #[cfg(test)]

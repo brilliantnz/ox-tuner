@@ -1,4 +1,9 @@
 # Synthetic section headers and keywords from the dialect. No vendor text.
+"="
+","
+"{"
+"}"
+"\""
 "[MegaTune]"
 "[TunerStudio]"
 "[Constants]"

@@ -67,6 +67,19 @@ pub struct ScatteredConfig {
     pub enabled: Option<String>,
 }
 
+/// Where one communication key was written, for last-wins resolution.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct CommsSource {
+    /// Key spelling as written, so a winner note can name it.
+    pub key: String,
+    /// Value as written.
+    pub value: String,
+    /// Section the key appeared in.
+    pub section: String,
+    /// Source line.
+    pub line: u32,
+}
+
 /// Communication parameters, derived **after** settings resolution.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct CommsSettings {

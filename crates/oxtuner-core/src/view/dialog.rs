@@ -292,7 +292,10 @@ impl<'project> RowWalk<'project> {
             options
         };
 
-        let help = definition.context_help.get_ignore_case(variable).cloned();
+        let help = definition
+            .context_help
+            .get_ignore_case(variable)
+            .map(ToString::to_string);
 
         (options, help)
     }

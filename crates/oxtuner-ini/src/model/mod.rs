@@ -30,12 +30,13 @@ mod sections;
 mod settings;
 mod types;
 
-pub use channels::{Channel, ChannelKind, CommsSettings, ScatteredConfig};
+pub use channels::{Channel, ChannelKind, CommsSettings, CommsSource, ScatteredConfig};
 pub use commands::{ControllerCommand, DatalogEntry, KeyAction, ReferenceTable};
 pub use constants::{
     BitOption, BitRange, Constant, ConstantClass, ConstantFlags, Offset, PcVariable,
 };
 pub use coverage::{Coverage, Extensions, SectionCoverage, UnsupportedSection};
+pub use definition::Capabilities;
 pub use definition::Definition;
 pub use dialogs::{Dialog, DialogRow, RowClassification, RowKind};
 pub use frontpage::{FrontPage, Gauge, Indicator};
@@ -45,6 +46,7 @@ pub use pages::{Axis, Curve, Page, Table};
 pub use sections::{ConfigEntry, ConfigSection, LoggerDefinition, LoggerField};
 pub use settings::{SettingGroup, SettingOption};
 pub use types::{DataType, Dimension, Endianness, Number, Shape, Text};
+pub(crate) use types::{clear_text_cache, intern_text};
 
 #[cfg(test)]
 mod tests;

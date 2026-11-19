@@ -72,8 +72,16 @@ pub struct Table {
     pub y_bins: Option<Axis>,
     /// Cell array.
     pub z_bins: Option<String>,
-    /// Channel promoted from an axis as this view's live cursor, if any.
+    /// Channel promoted from the X axis as this view's live cursor, if any.
     pub live_cursor: Option<String>,
+    /// Y-axis tracking channel, for the two-axis intersection.
+    pub live_cursor_y: Option<String>,
+    /// Resolved column budget from `maximumElements` on the X bin array.
+    pub x_size: Option<u32>,
+    /// Resolved row budget from `maximumElements` on the Y bin array.
+    pub y_size: Option<u32>,
+    /// Shared id when this table belongs to a multi-table family.
+    pub sibling_group: Option<String>,
     /// Axis label overrides.
     pub xy_labels: Vec<Text>,
     /// Wording for the 3-D vertical axis.
@@ -105,9 +113,11 @@ pub struct Curve {
     pub x_bins: Option<Axis>,
     /// One entry per plotted curve.
     pub y_bins: Vec<Axis>,
-    /// Channel promoted from the first series that carries one, so the UI does
-    /// not have to re-derive the live cursor from the axes.
+    /// Channel promoted from the X axis, so the UI does not have to re-derive
+    /// the live cursor from the axes.
     pub live_cursor: Option<String>,
+    /// First Y series' tracking channel, for the intersection.
+    pub live_cursor_y: Option<String>,
     /// Per-curve line labels.
     pub line_labels: Vec<Text>,
     /// Optional gauge to draw.

@@ -441,7 +441,42 @@ impl Expr {
         found
     }
 
+    /// Number of nodes in the tree, counted iteratively.
+    ///
+    /// The parser caps one tree's depth and source length. A file can still hold
+    /// many expressions, so the definition-wide budget uses this count.
+    pub fn node_count(&self) -> usize {
+        let mut pending = vec![self];
+        let mut count = 0usize;
+        while let Some(expression) = pending.pop() {
+            count += 1;
+            match expression {
+                Self::Number(_) | Self::Ident(_) => {}
+                Self::Unary(_, operand) => pending.push(operand),
+                Self::Binary(_, left, right) => {
+                    pending.push(left);
+                    pending.push(right);
+                }
+                Self::Ternary(condition, when_true, when_false) => {
+                    pending.push(condition);
+                    pending.push(when_true);
+                    pending.push(when_false);
+                }
+                Self::Call(_, arguments) => pending.extend(arguments.iter()),
+                Self::Index(base, index) => {
+                    pending.push(base);
+                    pending.push(index);
+                }
+            }
+        }
+        count
+    }
+
     /// Every call in the tree with its argument count, for builtin validation.
+    ///
+    /// The definition parser uses this to report unknown and runtime-only
+    /// builtins once per name. It is public so an application that compiles
+    /// expressions through a different path can run the same check.
     ///
     /// Iterative like [`Self::identifiers`], so a long flat expression cannot
     /// exhaust the stack while the definition is being checked.

@@ -54,7 +54,7 @@ use crate::project::read_include;
 ///
 /// The parser has its own [`PARSER_VERSION`] for grammatical changes; this one
 /// is about the cache file itself.
-pub const CACHE_FORMAT_VERSION: u32 = 1;
+pub const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Identifies a cache file as ours before any byte is interpreted.
 const MAGIC: &[u8; 8] = b"OXDEFN01";

@@ -158,7 +158,7 @@ fn parse_channel(
         index += 1;
     }
 
-    let mut units = Text::Literal(String::new());
+    let mut units = Text::empty();
     if let Some(field) = fields.get(index)
         && (field.starts_with('"') || crate::fields::is_expression_field(field))
     {
@@ -211,9 +211,7 @@ fn parse_computed_channel(
     let source = crate::fields::expression_body(field).unwrap_or("");
     let expression = crate::expr::Expr::parse(source)
         .map_err(|error| format!("expression {source:?}: {error}"))?;
-    let units = fields
-        .get(1)
-        .map_or(Text::Literal(String::new()), Text::parse);
+    let units = fields.get(1).map_or(Text::empty(), Text::parse);
 
     Ok(Channel {
         name: name.to_owned(),

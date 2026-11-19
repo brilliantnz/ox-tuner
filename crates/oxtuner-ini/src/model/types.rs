@@ -1,6 +1,33 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::expr::Expr;
+
+thread_local! {
+    /// Per-parse interner for literal text. Cleared at the start of every parse,
+    /// so a 65k-field definition holds one copy of each repeated unit or title.
+    static TEXT_CACHE: RefCell<HashMap<Arc<str>, Arc<str>>> = RefCell::new(HashMap::new());
+}
+
+/// Returns the shared copy of `value`, allocating it only on first use.
+pub(crate) fn intern_text(value: &str) -> Arc<str> {
+    TEXT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(found) = cache.get(value) {
+            return Arc::clone(found);
+        }
+        let shared: Arc<str> = Arc::from(value);
+        cache.insert(Arc::clone(&shared), Arc::clone(&shared));
+        shared
+    })
+}
+
+/// Drops this parse's text intern table.
+pub(crate) fn clear_text_cache() {
+    TEXT_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 /// Byte order of multi-byte values.
 #[expect(
@@ -196,6 +223,10 @@ impl Number {
 
     /// Canonical form for comparisons, independent of how the value was written.
     ///
+    /// Consumers comparing two attributes should use this rather than
+    /// [`Self::Display`]; a future definition cache key can use it too. Unlike
+    /// `Display`, it has no braces around a dynamic expression's source.
+    ///
     /// [`Self::Display`] round-trips the source text, which is what golden
     /// summaries need. Two attributes can still mean the same number while
     /// being written differently (`2` and `{ 1 + 1 }`). This folds expressions
@@ -255,8 +286,8 @@ impl fmt::Display for Number {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum Text {
-    /// Plain text, quotes removed.
-    Literal(String),
+    /// Plain text, quotes removed. Repeated values share one allocation.
+    Literal(Arc<str>),
     /// A `{ … }` expression that produces text at runtime.
     Expression {
         /// The expression as written.
@@ -267,6 +298,16 @@ pub enum Text {
 }
 
 impl Text {
+    /// Shared literal text, for callers that already have a plain string.
+    pub fn shared(value: impl AsRef<str>) -> Self {
+        Self::Literal(intern_text(value.as_ref()))
+    }
+
+    /// The shared empty literal.
+    pub fn empty() -> Self {
+        Self::shared("")
+    }
+
     /// Parses a units/label field.
     pub fn parse(field: &str) -> Self {
         let field = field.trim_ascii();
@@ -277,13 +318,13 @@ impl Text {
             let parsed = Expr::parse(&source).ok();
             return Self::Expression { source, parsed };
         }
-        Self::Literal(crate::fields::unquote(field).to_owned())
+        Self::shared(crate::fields::unquote(field))
     }
 
     /// The literal text, when there is one.
     pub fn literal(&self) -> Option<&str> {
         match self {
-            Self::Literal(text) => Some(text),
+            Self::Literal(text) => Some(text.as_ref()),
             Self::Expression { .. } => None,
         }
     }

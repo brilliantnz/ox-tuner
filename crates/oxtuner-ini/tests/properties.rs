@@ -214,4 +214,183 @@ proptest! {
         prop_assert_eq!(&reparsed, &text);
         prop_assert_eq!(reparsed.to_string(), printed);
     }
+
+    /// Generated expression-shaped strings, including ones the parser must
+    /// reject, still round-trip whenever they do parse.
+    #[test]
+    fn generated_attribute_expressions_survive_print_parse_print(
+        body in "[A-Za-z0-9_+*/.(){}, $ -]{1,80}"
+    ) {
+        let source = format!("{{{body}}}");
+        let number = Number::parse(&source);
+        if let Number::Expression { parsed: None, .. } = number {
+            return Ok(());
+        }
+        let printed = number.to_string();
+        let reparsed = Number::parse(&printed);
+        prop_assert_eq!(&reparsed, &number);
+        prop_assert_eq!(reparsed.to_string(), printed);
+    }
+
+    /// Commas inside quotes or braces never split fields: a quoted label and
+    /// a brace expression each stay one field no matter what they carry.
+    #[test]
+    fn commas_inside_quotes_or_braces_never_split(
+        outer_a in "[A-Za-z0-9_]{1,12}",
+        quoted in "[A-Za-z0-9_ =;]{1,20}",
+        braced in "[A-Za-z0-9_ =;]{1,20}",
+        outer_b in "[A-Za-z0-9_]{1,12}",
+    ) {
+        let value = format!("{outer_a}, \"{quoted}\", {{{braced}}}, {outer_b}");
+        let expected_quoted = format!("\"{quoted}\"");
+        let expected_braced = format!("{{{braced}}}");
+
+        let fields = oxtuner_ini::fields::split_fields(&value);
+
+        prop_assert_eq!(fields.len(), 4);
+        prop_assert_eq!(fields[0], outer_a.as_str());
+        prop_assert_eq!(fields[1], expected_quoted.as_str());
+        prop_assert_eq!(fields[2], expected_braced.as_str());
+        prop_assert_eq!(fields[3], outer_b.as_str());
+    }
+
+    /// Balanced nested braces of any depth never panic and never split: the
+    /// whole expression stays one field, however deep it nests.
+    #[test]
+    fn nested_braces_of_any_depth_keep_fields_intact(depth in 1usize..32) {
+        let mut expression = String::from("a, b");
+        for _ in 0..depth {
+            expression.insert(0, '{');
+            expression.push('}');
+        }
+        let value = format!("before, {expression}, after");
+
+        let fields = oxtuner_ini::fields::split_fields(&value);
+
+        prop_assert_eq!(fields.len(), 3);
+        prop_assert_eq!(fields[0], "before");
+        prop_assert_eq!(fields[1], expression.as_str());
+        prop_assert_eq!(fields[2], "after");
+    }
+
+    /// Empty fields are dropped by `split_fields` and kept by
+    /// `split_fields_preserving_empty`: the positions of the kept fields
+    /// must survive, gaps included.
+    #[test]
+    fn empty_fields_survive_only_when_kept(
+        first in "[A-Za-z0-9_]{1,10}",
+        last in "[A-Za-z0-9_]{1,10}",
+        gaps in 1usize..4,
+    ) {
+        let mut value = first.clone();
+        for _ in 0..gaps {
+            value.push(',');
+        }
+        value.push_str(&last);
+
+        let dropped = oxtuner_ini::fields::split_fields(&value);
+        let kept = oxtuner_ini::fields::split_fields_preserving_empty(&value);
+
+        prop_assert_eq!(dropped, vec![first.as_str(), last.as_str()]);
+        prop_assert_eq!(kept.len(), gaps + 1);
+        prop_assert_eq!(kept[0], first.as_str());
+        prop_assert_eq!(kept[kept.len() - 1], last.as_str());
+        prop_assert!(kept[1..kept.len() - 1].iter().all(|field| field.is_empty()));
+    }
+
+    /// `=` inside a quoted label or a brace expression never splits the name:
+    /// only the first top-level `=` separates the key from the value.
+    #[test]
+    fn equals_inside_quotes_or_braces_never_splits_the_name(
+        name in "[A-Za-z0-9_]{1,12}",
+        left in "[A-Za-z0-9_]{1,10}",
+        right in "[A-Za-z0-9_]{1,10}",
+    ) {
+        let quoted = format!("{name} = \"{left}={right}\"");
+        let expected_quoted = format!("\"{left}={right}\"");
+
+        let (key, value) = oxtuner_ini::fields::split_assignment(&quoted)
+            .expect("the top-level equals splits the line");
+
+        prop_assert_eq!(key, name.as_str());
+        prop_assert_eq!(value, expected_quoted.as_str());
+
+        let braced = format!("{name} = {{{left}={right}}}");
+        let expected_braced = format!("{{{left}={right}}}");
+
+        let (key, value) = oxtuner_ini::fields::split_assignment(&braced)
+            .expect("the top-level equals splits the line");
+
+        prop_assert_eq!(key, name.as_str());
+        prop_assert_eq!(value, expected_braced.as_str());
+    }
+
+    /// A `;` inside quotes is data, not a comment: a trailing comment is
+    /// stripped only outside quotes, while a key that intentionally contains
+    /// `;` keeps it.
+    #[test]
+    fn semicolons_inside_quotes_are_kept_while_trailing_comments_go(
+        name in "[A-Za-z0-9_]{1,12}",
+        inside in "[A-Za-z0-9_ =]{1,16}",
+        comment in "[A-Za-z0-9_ ]{1,16}",
+    ) {
+        let line = format!("{name} = \"{inside};still quoted\" ; {comment}");
+        let expected = format!("{name} = \"{inside};still quoted\" ");
+
+        prop_assert_eq!(
+            oxtuner_ini::fields::strip_comment(&line),
+            expected.as_str()
+        );
+
+        let quoted_key = format!("\"{inside};{name}\" = 1");
+
+        prop_assert_eq!(
+            oxtuner_ini::fields::strip_comment(&quoted_key),
+            quoted_key.as_str()
+        );
+    }
+
+    /// Every byte from `0x80` to `0xFF` decodes as Latin-1 without a
+    /// replacement character, and raises exactly one `non-utf8` note.
+    #[test]
+    fn latin1_bytes_decode_without_replacements(byte in 0x80u8..=0xFF) {
+        let decoded = oxtuner_ini::source::decode(&[byte]);
+        let expected = char::from(byte).to_string();
+
+        prop_assert_eq!(decoded.text.as_str(), expected.as_str());
+        prop_assert!(
+            !decoded.text.contains('\u{FFFD}'),
+            "byte {byte:#04X} must not become a replacement character"
+        );
+
+        let diagnostic = decoded.diagnostic.expect("one non-utf8 note per file");
+        let code = diagnostic.code.into_owned();
+
+        prop_assert_eq!(code.as_str(), "non-utf8");
+    }
+
+    /// Valid UTF-8 passes through untouched with no note: decoding tries
+    /// UTF-8 first and only falls back when it must.
+    #[test]
+    fn valid_utf8_passes_through_with_no_note(
+        text in "\\PC{0,200}".prop_filter("no leading BOM", |text: &String| !text.starts_with('\u{FEFF}'))
+    ) {
+        let decoded = oxtuner_ini::source::decode(text.as_bytes());
+
+        prop_assert_eq!(decoded.text.as_str(), text.as_str());
+        prop_assert!(decoded.diagnostic.is_none(), "valid UTF-8 needs no note");
+    }
+
+    /// A byte order mark is stripped before decoding, so it never becomes
+    /// part of the first line and never counts as a decoding failure.
+    #[test]
+    fn a_byte_order_mark_is_stripped_before_decoding(text in "[A-Za-z0-9_ ]{1,60}") {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+
+        let decoded = oxtuner_ini::source::decode(&bytes);
+
+        prop_assert_eq!(decoded.text.as_str(), text.as_str());
+        prop_assert!(decoded.diagnostic.is_none(), "a BOM alone is not a failure");
+    }
 }

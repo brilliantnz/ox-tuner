@@ -23,8 +23,10 @@ pub struct LoggerField {
     pub scale: Option<Number>,
     /// Units written to the log header.
     pub units: Text,
-    /// Update condition, kept symbolic.
+    /// Update condition of a `recordField`, kept symbolic.
     pub update_condition: Option<String>,
+    /// Derivation expression of a `calcField`, kept symbolic.
+    pub expression: Option<String>,
     /// Derived fields may be hidden from the log.
     pub hidden: bool,
     /// Source line.
@@ -62,6 +64,8 @@ pub struct LoggerDefinition {
     pub record_len: u32,
     /// Fields decoded from each record.
     pub fields: Vec<LoggerField>,
+    /// Constant fields stored once in the record header.
+    pub header_fields: Vec<LoggerField>,
     /// Derived fields, kept opaque.
     pub calculated: Vec<LoggerField>,
     /// Source line of the `loggerDef` entry.

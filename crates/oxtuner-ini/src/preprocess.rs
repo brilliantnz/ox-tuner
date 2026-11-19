@@ -173,19 +173,25 @@ impl<'a> Expander<'a> {
     /// Expanded fields plus the names that could not be resolved.
     pub fn expand_reporting<'s>(&'s self, fields: &'s [&'s str]) -> (Fields<'s>, Vec<String>) {
         let mut undefined = Vec::new();
-        let mut expanded = Vec::with_capacity(fields.len());
+        let mut expanded = Vec::with_capacity(fields.len().min(MAX_EXPANDED_FIELDS));
+        let mut bytes = 0usize;
         let mut index = 0usize;
         let mut tail: Option<&'s [&'a str]> = None;
 
         while index < fields.len() {
+            if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                break;
+            }
             let field = fields[index];
             index += 1;
 
             let Some(name) = field.strip_prefix('$').map(str::trim) else {
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
                 continue;
             };
             if name.is_empty() || name.contains(char::is_whitespace) {
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
                 continue;
             }
@@ -199,6 +205,7 @@ impl<'a> Expander<'a> {
                 // A trailing define with no per-index override stays borrowed.
                 if index == fields.len() && !has_override {
                     tail = Some(values);
+                    bytes += values.iter().map(|value| value.len()).sum::<usize>();
                     continue;
                 }
 
@@ -216,12 +223,25 @@ impl<'a> Expander<'a> {
                         }
                         index += 1;
                     }
-                    expanded.extend(values);
+                    for value in values {
+                        bytes += value.len();
+                        expanded.push(value);
+                        if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            break;
+                        }
+                    }
                 } else {
-                    expanded.extend(values.iter().copied().map(Cow::Borrowed));
+                    for value in values {
+                        bytes += value.len();
+                        expanded.push(Cow::Borrowed(*value));
+                        if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            break;
+                        }
+                    }
                 }
             } else {
                 undefined.push(name.to_owned());
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
             }
         }
@@ -288,16 +308,33 @@ fn resolve_fields<'a>(
     depth: usize,
 ) -> Option<Vec<&'a str>> {
     let source = defines.get(key)?;
-    let mut fields = Vec::with_capacity(source.len());
+    let mut fields = Vec::with_capacity(source.len().min(MAX_EXPANDED_FIELDS));
+    let mut bytes = 0usize;
     for field in source {
         match field.strip_prefix('$').map(str::trim) {
             Some(nested) if !nested.is_empty() => {
                 resolve(defines, resolved, nested, stack, depth + 1)?;
                 let (nested_key, _) = lookup(defines, nested)?;
                 let nested_fields = resolved.get(nested_key.as_str())?;
-                fields.extend(nested_fields.iter().copied());
+                for nested in nested_fields {
+                    if fields.len() >= MAX_EXPANDED_FIELDS
+                        || bytes.saturating_add(nested.len()) > MAX_EXPANDED_BYTES
+                    {
+                        return None;
+                    }
+                    bytes += nested.len();
+                    fields.push(*nested);
+                }
             }
-            _ => fields.push(field.as_str()),
+            _ => {
+                if fields.len() >= MAX_EXPANDED_FIELDS
+                    || bytes.saturating_add(field.len()) > MAX_EXPANDED_BYTES
+                {
+                    return None;
+                }
+                bytes += field.len();
+                fields.push(field.as_str());
+            }
         }
     }
     Some(fields)
@@ -334,6 +371,14 @@ pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
 /// this cap with another `#include` reports `include-depth-exceeded` with the
 /// chain so a cycle that escapes name detection cannot recurse forever.
 pub const MAX_INCLUDE_DEPTH: u32 = 8;
+
+/// Largest expanded field list one define or one entry may produce. A real
+/// CAN-address define has 65 536 fields, so this leaves ample room while
+/// stopping a hostile chain of references from exhausting memory.
+pub const MAX_EXPANDED_FIELDS: usize = 1 << 20;
+
+/// Largest total text one expanded field list may hold.
+pub const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
 
 /// The recursion state shared by one include chain.
 struct IncludeScope<'a> {

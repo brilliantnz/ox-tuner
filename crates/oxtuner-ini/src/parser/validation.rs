@@ -5,36 +5,101 @@
 //! note never changes the model: a call this build cannot fold stays exactly as
 //! it was written.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+
+use crate::model::Capabilities;
 
 use crate::error::{Diagnostic, Severity, extend_bounded};
 use crate::expr::Expr;
 use crate::model::{ChannelKind, Definition, Dimension, Number, Shape, Text};
 
-/// A reason to keep a call symbolic, keyed by its lowercase name.
-type Issues = BTreeMap<String, (u32, String, String)>;
+/// Total expression nodes one definition may hold. Each tree already has a
+/// depth and source cap; this bounds the sum across a whole hostile file.
+pub(crate) const MAX_TOTAL_AST_NODES: usize = 100_000;
+
+/// Reasons to keep calls symbolic, plus the file's total AST node count.
+struct Issues {
+    reasons: BTreeMap<String, (u32, String, String)>,
+    nodes: usize,
+}
+
+impl Issues {
+    fn new() -> Self {
+        Self {
+            reasons: BTreeMap::new(),
+            nodes: 0,
+        }
+    }
+}
+
+/// Resolves shape budgets from the constant extensions, groups tables that
+/// share a dashboard id, and derives capability flags from the frozen model.
+pub(crate) fn resolve_dynamic_shapes(definition: &mut Definition) {
+    let Definition {
+        tables,
+        extensions,
+        comms,
+        front_page,
+        ..
+    } = definition;
+
+    for (_, table) in tables.iter_mut() {
+        table.x_size = table.x_bins.as_ref().and_then(|axis| {
+            extensions
+                .maximum_elements
+                .get_ignore_case(&axis.array)
+                .copied()
+        });
+        table.y_size = table.y_bins.as_ref().and_then(|axis| {
+            extensions
+                .maximum_elements
+                .get_ignore_case(&axis.array)
+                .copied()
+        });
+    }
+
+    let mut map_ids: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, table) in tables.iter() {
+        if let Some(id) = &table.map_id {
+            *map_ids.entry(id.clone()).or_default() += 1;
+        }
+    }
+    for (_, table) in tables.iter_mut() {
+        if let Some(id) = &table.map_id
+            && map_ids.get(id).copied().unwrap_or(0) > 1
+        {
+            table.sibling_group = Some(id.clone());
+        }
+    }
+
+    definition.capabilities = Capabilities {
+        has_tables: !tables.is_empty(),
+        has_burst: comms.burst_get_command.is_some(),
+        has_frontpage: !front_page.slots().is_empty() || !front_page.indicators.is_empty(),
+    };
+}
 
 /// Records each view's live cursor once, from the axis that carries a tracking
 /// channel. The first `yBins` with a channel wins for multi-series curves.
 pub(crate) fn promote_live_cursors(definition: &mut Definition) {
     for (_, table) in definition.tables.iter_mut() {
-        if table.live_cursor.is_none() {
-            table.live_cursor = table
-                .x_bins
-                .as_ref()
-                .and_then(|axis| axis.channel.clone())
-                .or_else(|| table.y_bins.as_ref().and_then(|axis| axis.channel.clone()));
-        }
+        let y_channel = table.y_bins.as_ref().and_then(|axis| axis.channel.clone());
+        table.live_cursor_y.clone_from(&y_channel);
+        table.live_cursor = table
+            .x_bins
+            .as_ref()
+            .and_then(|axis| axis.channel.clone())
+            .or(y_channel);
     }
 
     for (_, curve) in definition.curves.iter_mut() {
-        if curve.live_cursor.is_none() {
-            curve.live_cursor = curve
-                .y_bins
-                .iter()
-                .find_map(|axis| axis.channel.clone())
-                .or_else(|| curve.x_bins.as_ref().and_then(|axis| axis.channel.clone()));
-        }
+        let y_channel = curve.y_bins.iter().find_map(|axis| axis.channel.clone());
+        curve.live_cursor_y.clone_from(&y_channel);
+        curve.live_cursor = curve
+            .x_bins
+            .as_ref()
+            .and_then(|axis| axis.channel.clone())
+            .or(y_channel);
     }
 }
 
@@ -46,14 +111,25 @@ pub(crate) fn validate_expression_calls(definition: &mut Definition) {
     walk_dashboard(definition, &mut issues);
     walk_dialogs(definition, &mut issues);
 
-    let mut seen = HashSet::new();
-    let diagnostics: Vec<Diagnostic> = issues
+    let mut diagnostics: Vec<Diagnostic> = issues
+        .reasons
         .into_values()
-        .filter(|(line, section, reason)| seen.insert((*line, section.clone(), reason.clone())))
         .map(|(line, section, reason)| {
             Diagnostic::new(Severity::Note, "fold-deferred", reason, line, &section)
         })
         .collect();
+
+    if issues.nodes > MAX_TOTAL_AST_NODES {
+        diagnostics.push(Diagnostic::whole_file(
+            Severity::Warning,
+            "ast-budget-exceeded",
+            format!(
+                "the definition holds {} expression nodes, over the {MAX_TOTAL_AST_NODES} budget",
+                issues.nodes
+            ),
+        ));
+    }
+
     extend_bounded(&mut definition.diagnostics, diagnostics);
 }
 
@@ -231,6 +307,7 @@ fn add_dimension(dimension: &Dimension, line: u32, section: &str, issues: &mut I
 }
 
 fn add_expr(expression: &Expr, line: u32, section: &str, issues: &mut Issues) {
+    issues.nodes += expression.node_count();
     for (name, arity) in expression.call_sites() {
         let reason = match crate::builtins::lookup(name) {
             None => format!("`{name}` is not a known builtin; the call is kept as data"),
@@ -246,8 +323,10 @@ fn add_expr(expression: &Expr, line: u32, section: &str, issues: &mut Issues) {
             }
             Some(_) => continue,
         };
-        issues
-            .entry(name.to_ascii_lowercase())
-            .or_insert((line, section.to_owned(), reason));
+        issues.reasons.entry(name.to_ascii_lowercase()).or_insert((
+            line,
+            section.to_owned(),
+            reason,
+        ));
     }
 }

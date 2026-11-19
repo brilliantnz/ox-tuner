@@ -182,6 +182,15 @@ pub fn parse_u32(value: &str) -> Option<u32> {
     value.parse().ok()
 }
 
+/// The dialect's boolean tokens. One owner keeps `continuousRead`,
+/// `writeBlocks` and `showTextValues` from drifting apart.
+pub(crate) fn is_true(value: &str) -> bool {
+    matches!(
+        value.trim_ascii().to_ascii_lowercase().as_str(),
+        "true" | "on" | "1" | "yes"
+    )
+}
+
 /// Parses a float, accepting integers, `0x` hex and a leading `+`.
 pub fn parse_f64(value: &str) -> Option<f64> {
     let value = value.trim_ascii();

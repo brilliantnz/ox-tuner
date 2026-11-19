@@ -37,6 +37,10 @@
 //! | `logFieldSelector` | `LogFieldSelector` | Deferred |
 //! | `userPassword` | `UserPassword` | Deferred |
 //! | anything else | `Unmodeled` | Verbatim (kept, reported once) |
+//!
+//! The compiler enforces the audit for [`RowKind::classification`], which
+//! matches every variant. A length test in the parser checks that [`RowKind::ALL`]
+//! has the same count, so neither half can drift on its own.
 
 /// How a row keyword is classified in the audit above.
 #[expect(

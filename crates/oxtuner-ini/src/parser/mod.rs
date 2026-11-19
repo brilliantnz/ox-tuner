@@ -88,6 +88,8 @@ fn assemble(
     includes: Option<IncludeResolver<'_>>,
     extra_diagnostics: Vec<Diagnostic>,
 ) -> Result<Definition, IniError> {
+    crate::model::clear_text_cache();
+
     let preprocessed = {
         let _span = tracing::debug_span!("ini_preprocess").entered();
         crate::preprocess::preprocess(text, settings, includes)?
@@ -165,7 +167,9 @@ struct RawSection<'a> {
     lines: Vec<(u32, &'a str)>,
     /// Extra headers with this name folded into this one. Real files use one
     /// block per section, but a second one must continue the first builder
-    /// instead of throwing its state away.
+    /// instead of throwing its state away. Lines after a repeated header are
+    /// therefore attached to whatever container the first block left open;
+    /// that is the "continue the list" behaviour, not an orphan row.
     repeats: usize,
 }
 
@@ -175,17 +179,19 @@ fn split_sections(lines: &[LogicalLine]) -> Vec<RawSection<'_>> {
         lines: Vec::new(),
         repeats: 0,
     }];
-    let mut by_name: HashMap<&str, usize> = HashMap::new();
+    // Dispatch matches the lowercase header, so merging must use the same key.
+    let mut by_name: HashMap<String, usize> = HashMap::new();
     let mut current = 0usize;
 
     for line in lines {
         if let Some(name) = section_header(&line.text) {
-            if let Some(&index) = by_name.get(name) {
+            let key = name.to_ascii_lowercase();
+            if let Some(&index) = by_name.get(&key) {
                 sections[index].repeats += 1;
                 current = index;
             } else {
                 let index = sections.len();
-                by_name.insert(name, index);
+                by_name.insert(key, index);
                 sections.push(RawSection {
                     name: name.to_owned(),
                     lines: Vec::new(),
@@ -420,11 +426,60 @@ pub(crate) fn entry_line<'a>(
 
 /// Cross-section validation and reference resolution.
 fn finalize(definition: &mut Definition) {
+    resolve_comms_keys(definition);
     apply_extension_flags(definition);
     validation::promote_live_cursors(definition);
+    validation::resolve_dynamic_shapes(definition);
     validate_pages(definition);
     validate_references(definition);
     validation::validate_expression_calls(definition);
+}
+
+/// Resolves communication keys that appear in more than one section.
+///
+/// A header declaration wins over a page-local one, whichever order the file
+/// wrote them in. The note names the winning key spelling and both locations so
+/// a changed `blockingFactor` can be traced without re-reading the whole file.
+fn resolve_comms_keys(definition: &mut Definition) {
+    let sources = std::mem::take(&mut definition.comms_sources);
+    let mut notes = Vec::new();
+
+    for (lower, candidates) in sources {
+        let Some(winner) = candidates
+            .iter()
+            .find(|source| {
+                source.section.eq_ignore_ascii_case("MegaTune")
+                    || source.section.eq_ignore_ascii_case("TunerStudio")
+            })
+            .or_else(|| candidates.first())
+        else {
+            continue;
+        };
+
+        if candidates.len() > 1 {
+            notes.push(Diagnostic::new(
+                Severity::Note,
+                "comms-key-winner",
+                format!(
+                    "`{}` from [{}] line {} wins over {} other declaration(s)",
+                    winner.key,
+                    winner.section,
+                    winner.line,
+                    candidates.len() - 1
+                ),
+                winner.line,
+                &winner.section,
+            ));
+        }
+
+        definition
+            .comms
+            .raw
+            .insert(lower.clone(), winner.value.clone());
+        constants::apply_comms_value(definition, &lower, &winner.value);
+    }
+
+    extend_bounded(&mut definition.diagnostics, notes);
 }
 
 fn apply_extension_flags(definition: &mut Definition) {
@@ -515,6 +570,20 @@ fn validate_pages(definition: &mut Definition) {
                 format!("`{name}` has a scale of 0, so no user value can be computed"),
                 constant.line,
                 "Constants",
+            ));
+        }
+    }
+
+    // A table may be completed by a later `[TableEditor]` block, so this check
+    // runs against the final model rather than a partially read one.
+    for (_, table) in definition.tables.iter() {
+        if table.z_bins.is_none() {
+            problems.push(Diagnostic::new(
+                Severity::Warning,
+                "table-without-cells",
+                format!("table `{}` has no `zBins` cell array", table.id),
+                table.line,
+                "TableEditor",
             ));
         }
     }
@@ -1239,6 +1308,72 @@ x = scalar, U08, 0, { bitStringValue(units, algo) }, 1, 0, 0, 255, 1
         assert_eq!(diagnostic.severity, Severity::Note);
         assert_eq!(diagnostic.line, Some(11));
         assert!(diagnostic.message.contains("missing.inc"));
+    }
+
+    #[test]
+    fn repeated_units_and_help_text_share_one_allocation() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, \"rpm\", 1, 0, 0, 255, 0
+b = scalar, U08, 1, \"rpm\", 1, 0, 0, 255, 0
+[SettingContextHelp]
+a = \"Shared help\"
+b = \"Shared help\"
+",
+        );
+
+        let crate::model::Text::Literal(first) = &definition.constant("a").expect("a").units else {
+            panic!("units are literal text");
+        };
+        let crate::model::Text::Literal(second) = &definition.constant("b").expect("b").units
+        else {
+            panic!("units are literal text");
+        };
+        assert!(std::sync::Arc::ptr_eq(first, second));
+
+        let first_help = definition.context_help.get("a").expect("a help");
+        let second_help = definition.context_help.get("b").expect("b help");
+        assert!(std::sync::Arc::ptr_eq(first_help, second_help));
+    }
+
+    #[test]
+    fn a_header_communication_key_wins_over_a_page_local_spelling() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+blockingFactor = 240
+[Constants]
+nPages = 1
+pageSize = 288
+page = 1
+blockingFactor = 251
+x = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+",
+        );
+
+        assert_eq!(definition.comms.blocking_factor, Some(240));
+        assert_eq!(
+            definition
+                .comms
+                .raw
+                .get("blockingfactor")
+                .map(String::as_str),
+            Some("240")
+        );
+        let note = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "comms-key-winner")
+            .expect("the conflicting spellings are reported");
+        assert!(note.message.contains("blockingFactor"));
+        assert_eq!(note.line, Some(3));
     }
 
     #[test]

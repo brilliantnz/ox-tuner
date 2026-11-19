@@ -56,6 +56,10 @@ pub(crate) fn parse_tables(
                 y_bins: None,
                 z_bins: None,
                 live_cursor: None,
+                live_cursor_y: None,
+                x_size: None,
+                y_size: None,
+                sibling_group: None,
                 xy_labels: Vec::new(),
                 up_down_label: Vec::new(),
                 grid_height: None,
@@ -75,49 +79,15 @@ pub(crate) fn parse_tables(
             continue;
         };
 
-        match lowered.as_str() {
-            "xbins" => table.x_bins = Some(parse_axis(&fields)),
-            "ybins" => table.y_bins = Some(parse_axis(&fields)),
-            "zbins" => {
-                table.z_bins = fields.first().map(|field| (*field).to_owned());
-            }
-            "xylabels" => table.xy_labels = fields.iter().map(|field| Text::parse(field)).collect(),
-            "updownlabel" => {
-                table.up_down_label = fields.iter().map(|field| Text::parse(field)).collect();
-            }
-            "gridheight" => {
-                table.grid_height = fields.first().map(|field| Number::parse(field));
-            }
-            "gridorient" => {
-                let values: Vec<Number> = fields.iter().map(|field| Number::parse(field)).collect();
-                if values.len() == 3 {
-                    table.grid_orient =
-                        Some([values[0].clone(), values[1].clone(), values[2].clone()]);
-                } else {
-                    section.warn(
-                        "bad-grid-orient",
-                        format!("`gridOrient` needs three angles, got {}", values.len()),
-                        *line,
-                    );
-                }
-            }
-            "topichelp" => {
-                table.topic_help = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned());
-            }
-            // Recognised but not modelled on the table itself: window
-            // protection, which belongs to the UI layer.
-            "userpassword" => {
-                definition
-                    .comms
-                    .raw
-                    .insert(format!("table.{}.userpassword", table.id), value.to_owned());
-            }
-            _ => {
-                section.unrecognized_key(key, *line);
-                continue;
-            }
+        let site = TableKey {
+            lowered: &lowered,
+            spelling: key,
+            value,
+            fields: &fields,
+            line: *line,
+        };
+        if !apply_table_key(definition, section, table, site) {
+            continue;
         }
         section.understand(*line);
     }
@@ -127,14 +97,74 @@ pub(crate) fn parse_tables(
     }
 }
 
-fn insert_table(definition: &mut Definition, section: &mut SectionParser, table: Table) {
-    if table.z_bins.is_none() {
-        section.warn(
-            "table-without-cells",
-            format!("table `{}` has no `zBins` cell array", table.id),
-            table.line,
-        );
+/// One key inside an open `table = id` block, bundled to keep the parser's
+/// signature short.
+#[derive(Clone, Copy)]
+struct TableKey<'a> {
+    lowered: &'a str,
+    spelling: &'a str,
+    value: &'a str,
+    fields: &'a [&'a str],
+    line: u32,
+}
+
+/// Applies one key inside an open `table = id` block.
+fn apply_table_key(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    table: &mut Table,
+    site: TableKey<'_>,
+) -> bool {
+    let TableKey {
+        lowered,
+        spelling: key,
+        value,
+        fields,
+        line,
+    } = site;
+    match lowered {
+        "xbins" => table.x_bins = Some(parse_axis(fields)),
+        "ybins" => table.y_bins = Some(parse_axis(fields)),
+        "zbins" => table.z_bins = fields.first().map(|field| (*field).to_owned()),
+        "xylabels" => table.xy_labels = fields.iter().map(|field| Text::parse(field)).collect(),
+        "updownlabel" => {
+            table.up_down_label = fields.iter().map(|field| Text::parse(field)).collect();
+        }
+        "gridheight" => table.grid_height = fields.first().map(|field| Number::parse(field)),
+        "gridorient" => {
+            let values: Vec<Number> = fields.iter().map(|field| Number::parse(field)).collect();
+            if values.len() == 3 {
+                table.grid_orient = Some([values[0].clone(), values[1].clone(), values[2].clone()]);
+            } else {
+                section.warn(
+                    "bad-grid-orient",
+                    format!("`gridOrient` needs three angles, got {}", values.len()),
+                    line,
+                );
+            }
+        }
+        "topichelp" => {
+            table.topic_help = fields
+                .first()
+                .map(|field| crate::fields::unquote(field).to_owned());
+        }
+        // Recognised but not modelled on the table itself: window protection,
+        // which belongs to the UI layer.
+        "userpassword" => {
+            definition
+                .comms
+                .raw
+                .insert(format!("table.{}.userpassword", table.id), value.to_owned());
+        }
+        _ => {
+            section.unrecognized_key(key, line);
+            return false;
+        }
     }
+    true
+}
+
+fn insert_table(definition: &mut Definition, section: &mut SectionParser, table: Table) {
     let id = table.id.clone();
     let line = table.line;
     if let Some(existing) = definition.tables.get_mut(&id) {
@@ -161,6 +191,10 @@ fn merge_table(existing: &mut Table, next: Table) {
         y_bins,
         z_bins,
         live_cursor: _,
+        live_cursor_y: _,
+        x_size: _,
+        y_size: _,
+        sibling_group: _,
         xy_labels,
         up_down_label,
         grid_height,
@@ -185,8 +219,14 @@ fn merge_table(existing: &mut Table, next: Table) {
     if z_bins.is_some() {
         existing.z_bins = z_bins;
     }
-    existing.xy_labels.extend(xy_labels);
-    existing.up_down_label.extend(up_down_label);
+    // A restated header replaces the lists rather than appending to them, so
+    // merging a block converges instead of duplicating labels.
+    if !xy_labels.is_empty() {
+        existing.xy_labels = xy_labels;
+    }
+    if !up_down_label.is_empty() {
+        existing.up_down_label = up_down_label;
+    }
     if grid_height.is_some() {
         existing.grid_height = grid_height;
     }
@@ -249,13 +289,14 @@ pub(crate) fn parse_curves(
                 title: fields
                     .get(1)
                     .map(|field| Text::parse(field))
-                    .unwrap_or(Text::Literal(name.to_owned())),
+                    .unwrap_or(Text::shared(name)),
                 column_labels: Vec::new(),
                 x_axis: Vec::new(),
                 y_axis: Vec::new(),
                 x_bins: None,
                 y_bins: Vec::new(),
                 live_cursor: None,
+                live_cursor_y: None,
                 line_labels: Vec::new(),
                 gauge: None,
                 show_text_values: false,
@@ -288,12 +329,12 @@ pub(crate) fn parse_curves(
                     .first()
                     .map(|field| crate::fields::unquote(field).to_owned());
             }
-            "showtextvalues" => curve.show_text_values = is_true(value),
-            "suppressgraph" => curve.suppress_graph = is_true(value),
+            "showtextvalues" => curve.show_text_values = crate::fields::is_true(value),
+            "suppressgraph" => curve.suppress_graph = crate::fields::is_true(value),
             "linelabel" => curve.line_labels.push(
                 fields
                     .first()
-                    .map_or(Text::Literal(String::new()), |field| Text::parse(field)),
+                    .map_or(Text::empty(), |field| Text::parse(field)),
             ),
             // Presentation keys the curve editor owns: window size and help
             // topic. Kept verbatim rather than dropped.
@@ -353,6 +394,7 @@ fn merge_curve(existing: &mut Curve, next: Curve) {
         x_bins,
         y_bins,
         live_cursor: _,
+        live_cursor_y: _,
         line_labels,
         gauge,
         show_text_values,
@@ -373,18 +415,18 @@ fn merge_curve(existing: &mut Curve, next: Curve) {
     if x_bins.is_some() {
         existing.x_bins = x_bins;
     }
-    existing.y_bins.extend(y_bins);
-    existing.line_labels.extend(line_labels);
+    // Repeated `yBins` inside one block declares distinct series. A repeated
+    // `curve =` header restates the series list, so it replaces rather than
+    // appending.
+    if !y_bins.is_empty() {
+        existing.y_bins = y_bins;
+    }
+    if !line_labels.is_empty() {
+        existing.line_labels = line_labels;
+    }
     if gauge.is_some() {
         existing.gauge = gauge;
     }
     existing.show_text_values |= show_text_values;
     existing.suppress_graph |= suppress_graph;
-}
-
-fn is_true(value: &str) -> bool {
-    matches!(
-        value.trim_ascii().to_ascii_lowercase().as_str(),
-        "true" | "on" | "1" | "yes"
-    )
 }

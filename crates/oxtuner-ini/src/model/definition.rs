@@ -11,6 +11,17 @@ use super::{
     UnsupportedSection,
 };
 
+/// Features the definition actually provides, for app-side gating.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    /// The definition declares at least one 2-D table.
+    pub has_tables: bool,
+    /// The definition declares a burst read command.
+    pub has_burst: bool,
+    /// The definition declares dashboard slots or indicators.
+    pub has_frontpage: bool,
+}
+
 /// The frozen result of parsing an INI file.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct Definition {
@@ -57,8 +68,8 @@ pub struct Definition {
     pub controller_commands: Ordered<ControllerCommand>,
     /// Setting groups whose options are `#if` flags.
     pub setting_groups: Ordered<SettingGroup>,
-    /// Per-constant help text.
-    pub context_help: Ordered<String>,
+    /// Per-constant help text. Repeated texts share one allocation.
+    pub context_help: Ordered<std::sync::Arc<str>>,
     /// Datalog fields.
     pub datalog_entries: Vec<DatalogEntry>,
     /// Constant metadata applied after declaration.
@@ -69,6 +80,11 @@ pub struct Definition {
     pub key_actions: Vec<KeyAction>,
     /// Sections kept as raw data.
     pub unsupported: Vec<UnsupportedSection>,
+    /// Features derived from the frozen model, for UI gating.
+    pub capabilities: Capabilities,
+    /// Every declaration of a communication key, keyed by lowercase name.
+    /// The parser uses this to let a header value win over a page-local one.
+    pub comms_sources: BTreeMap<String, Vec<crate::model::CommsSource>>,
     /// High-speed loggers from `[LoggerDefinition]`.
     pub loggers: Vec<LoggerDefinition>,
     /// Named configuration sections modelled as typed entry lists.
@@ -134,6 +150,8 @@ impl Definition {
             reference_tables: Ordered::new(),
             key_actions: Vec::new(),
             unsupported: Vec::new(),
+            capabilities: Capabilities::default(),
+            comms_sources: BTreeMap::new(),
             loggers: Vec::new(),
             config_sections: Vec::new(),
             unresolved_targets: Vec::new(),
@@ -173,6 +191,28 @@ impl Definition {
             && self
                 .spec_version
                 .is_none_or(|version| version <= crate::MAX_SPEC_VERSION)
+    }
+
+    /// Stable hash of the parts of a definition that affect how a project is
+    /// read. A migration prompt compares this against the hash stored with the
+    /// tune; a reordered comment does not change it, a new constant does.
+    pub fn structural_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.signature.hash(&mut hasher);
+        self.ini_version.hash(&mut hasher);
+        self.spec_version.map(f64::to_bits).hash(&mut hasher);
+        self.pages.len().hash(&mut hasher);
+        self.constants.len().hash(&mut hasher);
+        self.channels.len().hash(&mut hasher);
+        self.tables.len().hash(&mut hasher);
+        self.defines.len().hash(&mut hasher);
+        self.comms.envelope.hash(&mut hasher);
+        for section in &self.unsupported {
+            section.name.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// A table by id.

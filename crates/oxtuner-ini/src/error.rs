@@ -166,7 +166,19 @@ pub struct IniError {
 
 impl IniError {
     /// Wraps the diagnostics that stopped the parse.
-    pub fn new(diagnostics: Vec<Diagnostic>) -> Self {
+    ///
+    /// Structural failures are rare, but a hostile file can produce one per
+    /// line. The same bound as a successful parse keeps the error's `Display`
+    /// from growing without limit.
+    pub fn new(mut diagnostics: Vec<Diagnostic>) -> Self {
+        if diagnostics.len() > MAX_DIAGNOSTICS {
+            diagnostics.truncate(MAX_DIAGNOSTICS);
+            diagnostics.push(Diagnostic::whole_file(
+                Severity::Note,
+                "diagnostics-truncated",
+                format!("only the first {MAX_DIAGNOSTICS} diagnostics were kept"),
+            ));
+        }
         Self { diagnostics }
     }
 

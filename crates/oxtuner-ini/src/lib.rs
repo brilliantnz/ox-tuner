@@ -70,12 +70,13 @@ pub use fields::{
     CommandArguments, CommandEncodeError, CommandTemplate, Placeholder, Segment, WireOrder,
 };
 pub use model::{
-    Axis, BitOption, BitRange, Channel, ChannelKind, CommsSettings, ConfigEntry, ConfigSection,
-    Constant, ConstantClass, ConstantFlags, Coverage, Curve, DataType, DatalogEntry, Definition,
-    Dialog, DialogRow, Dimension, Endianness, Extensions, FrontPage, Gauge, Indicator, KeyAction,
-    LoggerDefinition, LoggerField, Menu, MenuItem, MenuTargetKind, Number, Offset, Ordered, Page,
-    PcVariable, ReferenceTable, RowClassification, RowKind, ScatteredConfig, SectionCoverage,
-    SettingGroup, SettingOption, Shape, Table, Text, UnsupportedSection,
+    Axis, BitOption, BitRange, Capabilities, Channel, ChannelKind, CommsSettings, CommsSource,
+    ConfigEntry, ConfigSection, Constant, ConstantClass, ConstantFlags, Coverage, Curve, DataType,
+    DatalogEntry, Definition, Dialog, DialogRow, Dimension, Endianness, Extensions, FrontPage,
+    Gauge, Indicator, KeyAction, LoggerDefinition, LoggerField, Menu, MenuItem, MenuTargetKind,
+    Number, Offset, Ordered, Page, PcVariable, ReferenceTable, RowClassification, RowKind,
+    ScatteredConfig, SectionCoverage, SettingGroup, SettingOption, Shape, Table, Text,
+    UnsupportedSection,
 };
 pub use parser::{
     MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,
