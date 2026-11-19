@@ -1,11 +1,11 @@
 //! The connect dialog: source, port, baud, framing, a signature test and the
 //! session state.
 //!
-//! The dialog is built once and **stays open**: the port scan fills the list in
-//! place and a test or a connection updates the status block, so a refresh
-//! never costs the user their selection or cursor. Its inputs live in a small
-//! model next to the builder; the state it reports comes from the core, read
-//! live on every frame.
+//! The dialog is built once and stays open while the user chooses: the port
+//! scan fills the list in place and a test updates the status block, so a
+//! refresh never costs the user their selection or cursor. It closes by itself
+//! when the session connects. Its inputs live in a small model next to the
+//! builder; the state it reports comes from the core, read live on every frame.
 //!
 //! Test Connection is a signature-only probe (the definition's `queryCommand`,
 //! nothing else). It proves the port, the baud and the framing before a session

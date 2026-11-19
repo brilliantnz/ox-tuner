@@ -1,6 +1,7 @@
 //! The event boundary: failure records, the status fold and its follow-up commands.
 
 use gpui_kit::App;
+use gpui_kit::component::WindowExt as _;
 use oxtuner_core::{Event, Failure, FailureCode, MAX_POLL_HZ, MIN_POLL_HZ, OpId, PortChoice};
 use rust_i18n::t;
 
@@ -361,6 +362,12 @@ pub(super) fn apply(event: Event, cx: &mut App) {
 
     // The project choice writes and burns after the resolution; decide the
     // next step before the update is folded into the status.
+    // A dialog that started an asynchronous task ends with it. Connection and
+    // project opening are the two that keep the window open while the core
+    // works; leaving them up would also block the review dialog that the read
+    // which follows a connect has to show.
+    let task_finished = matches!(&update, Update::Connected(_) | Update::Opened(_));
+
     let apply_step = if cx.global::<CoreService>().status.applying_project_tune {
         match &update {
             Update::ConflictsResolved => Some(ApplyStep::Write),
@@ -429,6 +436,11 @@ pub(super) fn apply(event: Event, cx: &mut App) {
             cx.global_mut::<CoreService>().status.applying_project_tune = false;
         }
         None => {}
+    }
+    if task_finished && let Some(window) = crate::app::window::main(cx) {
+        window
+            .update(cx, |_, window, cx| window.close_dialog(cx))
+            .ok();
     }
     if read_pages {
         // The session is read-only until proven otherwise; pulling the tune in
