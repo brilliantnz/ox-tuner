@@ -17,6 +17,10 @@
 //!   real definition spells out. It guards the memoized [`Expander`]: expanding
 //!   that list once per reference made `[Constants]` dominate the whole parse.
 //!
+//! The newer shapes cover the added sections and passes: logger records, named
+//! config sections, deferred-call validation, repeated headers, an include
+//! chain, nested conditionals, builtin lookup and expression normalisation.
+//!
 //! The fixtures are synthetic. Never commit a real vendor INI here; the
 //! clean-room rule applies to benchmarks too.
 
@@ -24,7 +28,10 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use oxtuner_ini::{Ordered, SettingsContext, expr::Expr, parse_str, preprocess::preprocess};
+use oxtuner_ini::{
+    Number, Ordered, SettingsContext, builtins, expr::Expr, parse_str, parse_str_with_includes,
+    preprocess::preprocess,
+};
 
 /// Two pages, 400 scalars, one 16x16 table, four channels, one menu.
 fn fixture() -> String {
@@ -339,6 +346,229 @@ fn bench_ordered_lookup(criterion: &mut Criterion) {
     });
 }
 
+/// A logger with a wide bit-level record and several derived fields.
+fn logger_fixture() -> String {
+    let mut text = String::from(
+        "\
+[MegaTune]
+signature = \"bench logger\"
+[LoggerDefinition]
+loggerDef = compositeLogger, \"Composite\", composite
+startCommand = \"J\"
+stopCommand = \"j\"
+dataReadCommand = \"T\"
+dataReadyCondition = { toothLogReady }
+recordDef = 0, 0, 8
+",
+    );
+
+    for index in 0..64 {
+        let _ = writeln!(
+            text,
+            "recordField = field_{index}, \"Field {index}\", {}, 1, 1.0, \"Flag\"",
+            index * 8
+        );
+    }
+    for index in 0..8 {
+        let _ = writeln!(
+            text,
+            "calcField = calc_{index}, \"Calc {index}\", \"ms\", {{ maxValue(refTime) }}"
+        );
+    }
+
+    text
+}
+
+/// Named configuration sections from the post-v1 modelling work.
+fn config_sections_fixture() -> String {
+    let mut text = String::from("[MegaTune]\nsignature = \"bench config\"\n");
+
+    for section in ["PortEditor", "FTPBrowser", "VeAnalyze", "DatalogViews"] {
+        let _ = writeln!(text, "[{section}]");
+        for index in 0..40 {
+            let _ = writeln!(
+                text,
+                "entry_{index} = \"{section}\", {index}, {{ rpm > {index} }}"
+            );
+        }
+    }
+
+    text
+}
+
+/// Expressions that the builtin registry keeps symbolic, for the validation
+/// pass that streams every frozen expression once at finalize.
+fn deferred_calls_fixture() -> String {
+    let mut text = String::from(
+        "\
+[MegaTune]
+signature = \"bench calls\"
+[Constants]
+nPages = 1
+pageSize = 512
+page = 1
+",
+    );
+
+    for index in 0..200 {
+        let _ = writeln!(
+            text,
+            "c_{index} = scalar, U08, 0, {{ bitStringValue(units, algo) }}, \
+             {{ someFutureBuiltin(1) }}, 0, 0, 255, 1"
+        );
+    }
+
+    text
+}
+
+/// Repeated headers that must merge into one builder.
+fn repeated_sections_fixture() -> String {
+    let mut text = String::from("[MegaTune]\nsignature = \"bench merge\"\n");
+
+    for block in 0..4 {
+        text.push_str("[Constants]\nnPages = 1\npageSize = 256\npage = 1\n");
+        for index in 0..40 {
+            let _ = writeln!(
+                text,
+                "c_{block}_{index} = scalar, U08, {}, \"\", 1, 0, 0, 255, 0",
+                index % 240
+            );
+        }
+        text.push_str("[UiDialogs]\ndialog = d, \"D\", yAxis\n");
+        for index in 0..10 {
+            let _ = writeln!(text, "field = \"F{index}\", c_{block}_{index}");
+        }
+    }
+
+    text
+}
+
+/// A three-deep include chain resolved through the public resolver entry.
+fn include_chain_fixture() -> &'static str {
+    "[MegaTune]\nsignature = \"bench include\"\n#include a.inc\n"
+}
+
+/// Nested conditional frames, with an `#else` branch on each.
+fn conditional_frames_fixture() -> String {
+    let mut text = String::from("[Constants]\n");
+
+    for index in 0..100 {
+        let _ = writeln!(text, "#if FLAG_{index}");
+        let _ = writeln!(text, "a_{index} = 1");
+        let _ = writeln!(text, "#else");
+        let _ = writeln!(text, "b_{index} = 2");
+        let _ = writeln!(text, "#endif");
+    }
+
+    text
+}
+
+fn bench_new_sections(criterion: &mut Criterion) {
+    let settings = SettingsContext::new();
+
+    let logger = logger_fixture();
+    criterion.bench_function("ini_parse_logger_definition", |bencher| {
+        bencher.iter(|| {
+            black_box(parse_str(black_box(&logger), black_box(&settings)).expect("parses"))
+        });
+    });
+
+    let config = config_sections_fixture();
+    criterion.bench_function("ini_parse_config_sections", |bencher| {
+        bencher.iter(|| {
+            black_box(parse_str(black_box(&config), black_box(&settings)).expect("parses"))
+        });
+    });
+}
+
+fn bench_deferred_validation(criterion: &mut Criterion) {
+    let text = deferred_calls_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_with_deferred_calls", |bencher| {
+        bencher
+            .iter(|| black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses")));
+    });
+}
+
+fn bench_builtin_registry(criterion: &mut Criterion) {
+    criterion.bench_function("ini_builtin_lookup_and_fold", |bencher| {
+        bencher.iter(|| {
+            let string_function = black_box(builtins::lookup(black_box("bitStringValue")));
+            let folded = black_box(builtins::fold(black_box("min"), black_box(&[3.0, 1.0])));
+            black_box((string_function.map(|builtin| builtin.kind), folded));
+        });
+    });
+}
+
+fn bench_number_normalized(criterion: &mut Criterion) {
+    let corpus: Vec<Number> = [
+        "2",
+        "{ 1 + 1 }",
+        "{ min(a, b) }",
+        "{ fuel_cols * 2 }",
+        "{ bitStringValue(units, algo) }",
+    ]
+    .iter()
+    .map(|source| Number::parse(source))
+    .collect();
+
+    criterion.bench_function("ini_number_normalized", |bencher| {
+        bencher.iter(|| {
+            for number in &corpus {
+                black_box(number.normalized());
+            }
+        });
+    });
+}
+
+fn bench_repeated_sections(criterion: &mut Criterion) {
+    let text = repeated_sections_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_parse_repeated_sections", |bencher| {
+        bencher
+            .iter(|| black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses")));
+    });
+}
+
+fn bench_include_chain(criterion: &mut Criterion) {
+    let text = include_chain_fixture();
+    let settings = SettingsContext::new();
+    let resolver = |path: &str| match path {
+        "a.inc" => Some("#include b.inc\n".to_owned()),
+        "b.inc" => Some("#include c.inc\n".to_owned()),
+        "c.inc" => Some("deep = 1\n".to_owned()),
+        _ => None,
+    };
+
+    criterion.bench_function("ini_parse_include_chain", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                parse_str_with_includes(
+                    black_box(text),
+                    black_box(&settings),
+                    black_box(&resolver),
+                )
+                .expect("parses"),
+            )
+        });
+    });
+}
+
+fn bench_conditional_frames(criterion: &mut Criterion) {
+    let text = conditional_frames_fixture();
+    let settings = SettingsContext::new();
+
+    criterion.bench_function("ini_preprocess_conditional_frames", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                preprocess(black_box(&text), black_box(&settings), None).expect("preprocesses"),
+            )
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_preprocess,
@@ -350,6 +580,13 @@ criterion_group!(
     bench_expander_build,
     bench_expand_reference,
     bench_expr,
-    bench_ordered_lookup
+    bench_ordered_lookup,
+    bench_new_sections,
+    bench_deferred_validation,
+    bench_builtin_registry,
+    bench_number_normalized,
+    bench_repeated_sections,
+    bench_include_chain,
+    bench_conditional_frames
 );
 criterion_main!(benches);
