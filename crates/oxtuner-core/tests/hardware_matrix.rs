@@ -24,6 +24,10 @@
 //! The first stage copies the project into `OX_TUNER_MATRIX_DIR` (a temp folder
 //! by default) and works there, so the source project is never opened for
 //! writing. Every stage keeps its CRC table in `<matrix>/evidence.json`.
+//!
+//! The folder is created and claimed by this test through a `.oxtuner-matrix-owned`
+//! marker. A rerun only deletes a folder that carries that marker, so pointing
+//! `OX_TUNER_MATRIX_DIR` at a user folder can never wipe it.
 
 #![expect(
     clippy::print_stdout,
@@ -321,6 +325,48 @@ fn matrix_dir() -> PathBuf {
     )
 }
 
+/// Names the folder as this test's own work, so a rerun may delete it.
+const OWNER_MARKER: &str = ".oxtuner-matrix-owned";
+
+/// The only accepted marker contents, so a stray file of the same name is not
+/// mistaken for ownership.
+const OWNER_TOKEN: &str = "oxtuner-hardware-matrix v1";
+
+/// Whether this test created `dir`, judged by the marker, never by its contents.
+fn owned_by_test(dir: &Path) -> bool {
+    fs::read_to_string(dir.join(OWNER_MARKER)).is_ok_and(|token| token.trim() == OWNER_TOKEN)
+}
+
+/// Writes the ownership marker before anything else lands in the folder.
+fn claim(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join(OWNER_MARKER), OWNER_TOKEN)
+}
+
+/// Panics unless `dir` is this test's folder or an empty one, so no stage ever
+/// writes into a folder the user pointed at by mistake.
+fn ensure_usable(dir: &Path) {
+    if !dir.exists() || owned_by_test(dir) {
+        return;
+    }
+
+    assert!(
+        fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none()),
+        "{} is not empty and carries no {OWNER_MARKER} marker; set OX_TUNER_MATRIX_DIR to a fresh folder",
+        dir.display()
+    );
+}
+
+/// Clears the previous run, and removes an empty folder, but never data this
+/// test did not claim.
+fn reset(dir: &Path) {
+    ensure_usable(dir);
+
+    if dir.exists() {
+        fs::remove_dir_all(dir).expect("the previous matrix folder is removed");
+    }
+}
+
 /// Whether the run is allowed to write at all.
 fn writing_allowed() -> bool {
     if env::var("OX_TUNER_WRITE").as_deref() != Ok("1") {
@@ -362,6 +408,11 @@ fn prepare_project() -> (PathBuf, PathBuf) {
     let dir = matrix_dir();
     let project = dir.join("project");
     let before = dir.join("tune-before.msq");
+
+    // Claim first, so a copy interrupted halfway through is still a folder this
+    // test may clean up on the next run.
+    ensure_usable(&dir);
+    claim(&dir).expect("the matrix folder is writable");
 
     if !project.join("CurrentTune.msq").exists() {
         let source = PathBuf::from(env_required("OX_TUNER_PROJECT"));
@@ -502,18 +553,8 @@ fn stage_format() {
 
     // A rerun starts from a clean copy: the previous run left the folder's tune
     // already saved, and the save stage must have something to rewrite. A
-    // folder this run did not create is never deleted.
-    let dir = matrix_dir();
-    if dir.join("evidence.json").exists() {
-        let _ = fs::remove_dir_all(&dir);
-    } else {
-        assert!(
-            !dir.exists() || fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_none()),
-            "{} is not empty and was not made by this test; set OX_TUNER_MATRIX_DIR to a fresh folder",
-            dir.display()
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
+    // folder this test did not claim is never deleted.
+    reset(&matrix_dir());
 
     let (project, _) = prepare_project();
     let definition = definition_of(&project);
@@ -924,4 +965,38 @@ fn stage_final_check() {
 
     assert_matches_project(&project, &port());
     println!("matrix complete: the ECU holds the project tune and every stage passed");
+}
+
+/// The cleanup gate, without an ECU: contents alone never claim a folder.
+#[test]
+fn ownership_marker_decides_cleanup() {
+    let dir = env::temp_dir().join(format!("oxtuner-matrix-owner-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(!owned_by_test(&dir), "a missing folder cannot be owned");
+
+    // Foreign files: never usable, and reset must refuse rather than delete.
+    fs::create_dir_all(&dir).expect("the test folder is created");
+    fs::write(dir.join("keep.txt"), "not ours").expect("the user file is written");
+    assert!(
+        !owned_by_test(&dir),
+        "contents alone must not claim the folder"
+    );
+    assert!(
+        std::panic::catch_unwind(|| reset(&dir)).is_err(),
+        "a folder with foreign files must not be reset"
+    );
+    assert!(dir.join("keep.txt").exists(), "the user file survives");
+
+    // A marker file carrying another token is not ownership either.
+    fs::write(dir.join(OWNER_MARKER), "somebody else").expect("a foreign marker is written");
+    assert!(!owned_by_test(&dir), "only the exact token owns the folder");
+    fs::remove_file(dir.join(OWNER_MARKER)).expect("the foreign marker is removed");
+    fs::remove_file(dir.join("keep.txt")).expect("the user file is removed");
+
+    // An empty folder is claimable, and once claimed reset clears it.
+    claim(&dir).expect("the test folder is claimed");
+    assert!(owned_by_test(&dir), "a claimed folder is owned");
+    reset(&dir);
+    assert!(!dir.exists(), "reset clears an owned folder");
 }
