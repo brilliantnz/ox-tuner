@@ -260,6 +260,31 @@ fn reconcile_pages(
             continue;
         }
 
+        // A file that states two values over the same bytes has no single
+        // answer to give. Rebuilding the page would pick one by the order the
+        // file lists them in, so its values stand as written and the caller
+        // decides what to do about them.
+        let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
+        if layout
+            .value_conflicts(page.page, tune)
+            .iter()
+            .any(|conflict| carried(&conflict.first) && carried(&conflict.second))
+        {
+            report.warn(
+                IssueKind::ValueSkipped,
+                format!(
+                    "page {}: the file states two values for bytes they share, so its values are \
+                     kept as written",
+                    page.page
+                ),
+            );
+            tracing::debug!(
+                page = page.page.get(),
+                "the file states conflicting values; the page is not reconciled"
+            );
+            continue;
+        }
+
         let outcome = (|| {
             let base = oxtuner_tune::encode_page(layout, page.page, tune)?;
             let patched = oxtuner_tune::patch_page(layout, page.page, &base, tune, &names)?;
@@ -271,8 +296,11 @@ fn reconcile_pages(
             oxtuner_tune::decode_page(layout, page.page, &patched, &mut decoded)?;
 
             // The values the file wrote, the owners whose bytes a view wrote,
-            // and every view on the page follow the decoded result.
-            let mut moved: Vec<&str> = names.clone();
+            // every view on the page, and every constant that shares bytes with
+            // any of those follow the decoded result. Moving one constant moves
+            // the bytes its neighbours also claim, and a neighbour left behind
+            // would hold a value the rebuild just replaced.
+            let mut moved: Vec<&str> = layout.names_sharing_bytes_with(&names);
             for name in &names {
                 if let Some(owner) = layout.alias_owner(name)
                     && !moved.contains(&owner)
@@ -1134,6 +1162,51 @@ fuelLoadRes = { ((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500 }
         PARSED.get_or_init(|| {
             parse_str(CHAINED_DEFINITION, &SettingsContext::new()).expect("definition parses")
         })
+    }
+
+    #[test]
+    fn a_file_that_states_two_values_for_one_byte_keeps_them_as_written() {
+        // `first` and `second` cover the same byte and the file gives them
+        // different values. Rebuilding the page would drop one of them in
+        // favour of the other by the order the file lists them in, so the page
+        // is left as the file wrote it and the caller decides what to do.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+second = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let msq = Msq::parse(
+            r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="8">
+        <constant name="first">100.0</constant>
+        <constant name="second">200.0</constant>
+    </page>
+</msq>"#
+                .as_bytes(),
+        )
+        .expect("the tune parses");
+
+        let loaded = load(&msq, &definition);
+
+        assert_eq!(
+            loaded.tune.raw_at("first", 0).expect("the file wrote it"),
+            100.0
+        );
+        assert_eq!(
+            loaded.tune.raw_at("second", 0).expect("the file wrote it"),
+            200.0
+        );
     }
 
     #[test]

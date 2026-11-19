@@ -715,7 +715,9 @@ impl TuneImages {
     /// # Errors
     ///
     /// Returns a [`TuneError`] when a page cannot be encoded, patched or
-    /// decoded, or when a value's shape does not fit the layout.
+    /// decoded, or when a value's shape does not fit the layout. A file that
+    /// states two values the bytes they share cannot both carry is refused
+    /// with [`TuneError::ConflictingValues`] before anything is merged.
     pub fn import_applied(&mut self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
         // The merge lands in a copy: a page that fails halfway must leave the
         // working image exactly as it was, like the whole-image import does.
@@ -731,11 +733,10 @@ impl TuneImages {
         let mut source: Option<Tune> = None;
 
         // A file is judged on what it states, not on what the codec settles
-        // afterwards. Two values that share bytes can only both stand when they
-        // agree, and a merge would otherwise pick a winner by declaration
-        // order, so the file is refused instead.
-        let stated = self.stated_values(&merged, tune, applied)?;
-        self.reject_conflicting_values(&pages, &stated)?;
+        // afterwards. Two values it carries over the same bytes can only both
+        // stand when they agree, and a merge would otherwise pick a winner by
+        // the order the file lists them in, so the file is refused instead.
+        self.reject_conflicting_values(tune, applied)?;
 
         for &page in &pages {
             // A page whose numeric constants share bytes with no owner keeps
@@ -794,9 +795,12 @@ impl TuneImages {
             let mut decoded = merged.snapshot();
             decode_page(&self.layout, page, &patched, &mut decoded)?;
 
-            // The values the file carried, the owners whose bytes a view
-            // wrote, and every view on the page follow the decoded result.
-            let mut moved: Vec<&str> = names.clone();
+            // The values the file carried, the owners whose bytes a view wrote,
+            // every view on the page, and every constant that shares bytes with
+            // any of those follow the decoded result. Moving one constant moves
+            // the bytes its neighbours also claim, and a neighbour left behind
+            // would hold a value the merge just replaced.
+            let mut moved: Vec<&str> = self.layout.names_sharing_bytes_with(&names);
             for name in &names {
                 if let Some(owner) = self.layout.alias_owner(name)
                     && !moved.contains(&owner)
@@ -843,11 +847,6 @@ impl TuneImages {
             resolved.push(spec.name.clone());
         }
 
-        // Two values that share bytes can only both stand when they agree. The
-        // page codec would settle such a pair by declaration order, so the
-        // merge is refused instead of quietly dropping one of them.
-        self.reject_conflicting_values(&pages, &merged)?;
-
         self.working.adopt_values(&merged)?;
         // The imported values are new; a decision about a value the merge
         // changed does not carry over. A difference it did not touch still
@@ -856,60 +855,30 @@ impl TuneImages {
         Ok(())
     }
 
-    /// The values as the file states them, laid over what the image holds.
+    /// Refuses a file that states two values the shared bytes cannot both carry.
     ///
-    /// Everything the file carried takes the file's own value, and anything it
-    /// left out keeps the one the image already has. That is what the merge
-    /// means before the page codec has settled anything, which is the only
-    /// moment where two values that share bytes can still be seen disagreeing.
-    fn stated_values(
-        &self,
-        image: &Tune,
-        tune: &Tune,
-        applied: &[String],
-    ) -> Result<Tune, TuneError> {
-        let mut stated = image.snapshot();
+    /// Only the values the file actually carried are judged, and only against
+    /// each other. A constant it left out keeps whatever the image holds, which
+    /// the merge reconciles with its neighbour, so the file states nothing
+    /// about it. A page the file says nothing about is not its business either.
+    fn reject_conflicting_values(&self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
+        let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
 
-        for name in applied {
-            if self.layout.variable(name).is_none() {
-                continue;
-            }
-
-            match tune.value(name) {
-                Some(Values::Numbers(numbers)) => {
-                    for (index, raw) in numbers.iter().enumerate() {
-                        stated.set_image_raw(name, index, *raw)?;
-                    }
-                }
-                Some(Values::Text(text)) => {
-                    stated.set_image_text(name, text)?;
-                }
-                // The file names a constant it carries no value for.
-                None => {}
-            }
-        }
-
-        Ok(stated)
-    }
-
-    /// Refuses a merge that leaves two values fighting over the same bits.
-    ///
-    /// Sharing bytes is legal, and the codec merges a bit field into a word
-    /// another constant fills. What it cannot do is carry two different values
-    /// for one bit, so a file that asks for that is refused whole instead of
-    /// being settled by the order the file happens to list its constants in.
-    fn reject_conflicting_values(&self, pages: &[IniPage], stated: &Tune) -> Result<(), TuneError> {
-        for &page in pages {
-            let Some(conflict) = self.layout.value_conflicts(page, stated).into_iter().next()
-            else {
-                continue;
-            };
-
-            return Err(TuneError::ConflictingValues {
-                page,
-                first: conflict.first,
-                second: conflict.second,
+        for page in self.layout.pages() {
+            let touched = applied.iter().any(|name| {
+                self.layout
+                    .variable(name)
+                    .is_some_and(|spec| spec.ini_page() == Some(page.page))
             });
+            if !touched {
+                continue;
+            }
+
+            for conflict in self.layout.value_conflicts(page.page, tune) {
+                if carried(&conflict.first) && carried(&conflict.second) {
+                    return Err(TuneError::ConflictingValues { conflict });
+                }
+            }
         }
 
         Ok(())

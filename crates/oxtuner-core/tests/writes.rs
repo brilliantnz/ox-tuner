@@ -82,6 +82,19 @@ const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 </msq>
 "#;
 
+/// A tune that gives two constants over the same bytes different values.
+const CONFLICTING_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <bibliography author="TunerStudio" tuneComment="fixture"/>
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant cols="2" digits="0" name="veTable" rows="2" units="%">10.0 20.0 30.0 40.0</constant>
+        <constant cols="2" digits="0" name="overlapA" rows="2" units="%">50.0 60.0 70.0 80.0</constant>
+    </page>
+    <settings Comment="fixture"/>
+</msq>
+"#;
+
 struct TempDir {
     path: PathBuf,
 }
@@ -252,6 +265,11 @@ impl Harness {
         self.wait(|event| event.op() == Some(op))
     }
 
+    fn import(&self, path: &Path) -> Event {
+        let op = self.handle.import_tune(path).expect("queued");
+        self.wait(|event| event.op() == Some(op))
+    }
+
     fn use_project_tune(&self) {
         match self.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject) {
             Event::ConflictsResolved { .. } => {}
@@ -395,11 +413,11 @@ fn a_page_with_overlapping_constants_is_never_written() {
 }
 
 #[test]
-fn a_page_whose_peers_disagree_is_never_written() {
+fn a_table_edit_moves_the_peer_that_shares_its_bytes() {
     // `overlapA` covers exactly the bytes `veTable` does, so the two are peers
-    // and one page image can hold only one of their values. Editing the table
-    // alone leaves the pair disagreeing, and a write would settle it by
-    // declaration order.
+    // and one page image holds a single value for both. An edit re-derives the
+    // peer from the page image, so the write carries one value instead of
+    // picking a winner by declaration order.
     let dir = TempDir::with_constants(
         "peers",
         "overlapA = array, U08, 0, [2x2], \"%\", 1, 0, 0, 255, 0\n",
@@ -411,43 +429,48 @@ fn a_page_whose_peers_disagree_is_never_written() {
     core.use_project_tune();
     core.edit_cell(77.0);
 
+    let event = core.write();
+    let Event::TuneWritten { report, .. } = event else {
+        panic!("expected a verified write, got {event:?}");
+    };
+    assert!(
+        report.verified,
+        "both names read back the one value the page carries"
+    );
+
+    // Nothing is left pending behind the write. Without the re-derivation the
+    // peer would keep its old value, and the next write would put those bytes
+    // back over the edit.
     let (kind, message) = failure(&core.write());
     assert_eq!(kind, FailureCode::WriteRefused);
     assert!(
-        message.contains("veTable") && message.contains("overlapA"),
-        "the refusal names the two constants: {message}"
+        message.contains("no values that differ"),
+        "the peer must not still be asking to be sent: {message}"
     );
 
-    // The refusal comes before the journal and the snapshot, so the write
-    // leaves neither behind. The conflict resolution above writes its own
-    // entries, which are not this write's.
-    let (_, entries) = core.journal();
-    assert!(
-        entries.iter().all(|entry| entry.operation != "write"),
-        "a refused write must not reach the journal: {entries:?}"
-    );
-    let write_snapshots = fs::read_dir(dir.snapshots()).map_or_else(
-        |_| 0,
-        |entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().contains("-write-"))
-                .count()
-        },
-    );
-    assert_eq!(
-        write_snapshots, 0,
-        "a refused write must not snapshot first"
-    );
+    core.close();
+}
 
-    // A burn cannot persist RAM while the working image holds two values for
-    // one byte either, and it names the pair instead of asking for a write
-    // that would always be refused.
-    let (kind, message) = failure(&core.burn());
-    assert_eq!(kind, FailureCode::BurnRefused);
+#[test]
+fn a_file_that_states_two_values_for_one_byte_is_refused() {
+    // `veTable` and `overlapA` cover the same bytes, and this tune gives them
+    // different values. Neither may be dropped in favour of the other by the
+    // order the file happens to list them in, so the import is refused whole.
+    let dir = TempDir::with_constants(
+        "peers-import",
+        "overlapA = array, U08, 0, [2x2], \"%\", 1, 0, 0, 255, 0\n",
+    );
+    let tune = dir.path().join("conflicting.msq");
+    fs::write(&tune, CONFLICTING_TUNE).expect("the tune is writable");
+
+    let core = Harness::start(true);
+    core.open(dir.path());
+
+    let (kind, message) = failure(&core.import(&tune));
+    assert_eq!(kind, FailureCode::ImportRejected);
     assert!(
         message.contains("hold different values"),
-        "a burn must name the reason: {message}"
+        "the refusal names the pair: {message}"
     );
 
     core.close();

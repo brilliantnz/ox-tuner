@@ -433,6 +433,66 @@ second = scalar, U08, 0, "", 1, 0, 0, 255, 0
         );
     }
 
+    /// A definition with the peers on one page and an unrelated constant on another.
+    const TWO_PAGES: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 8, 8
+page = 1
+first = scalar, U08, 0, "", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "", 1, 0, 0, 255, 0
+page = 2
+other = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    #[test]
+    fn a_file_that_says_nothing_about_a_page_leaves_its_peers_alone() {
+        // A disagreement on a page the file never names is not the file's
+        // answer to give, so the import goes ahead and that page keeps what it
+        // had.
+        let definition = parse_str(TWO_PAGES, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("first", 0, 100.0)
+            .expect("takes a value");
+        images
+            .working_mut()
+            .set_image_raw("second", 0, 200.0)
+            .expect("takes a value");
+
+        let file_definition = parse_str(TWO_PAGES, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        imported
+            .set_image_raw("other", 0, 5.0)
+            .expect("takes a value");
+
+        images
+            .import_applied(&imported, &["other".to_owned()])
+            .expect("the file names another page");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("other", 0)
+                .expect("the image reads"),
+            5.0
+        );
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            100.0,
+            "a page the file says nothing about keeps its values"
+        );
+    }
+
     #[test]
     fn a_page_a_text_field_overlaps_keeps_what_the_file_carried() {
         let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");

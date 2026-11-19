@@ -1426,6 +1426,20 @@ pub(super) fn apply_verified_write(
     project
         .images_mut()
         .clear_resolutions_for(&transaction.changed_variables);
+    // The read-back is the truth about the ECU image, but a constant that
+    // shares bytes with one that changed still holds whatever the working
+    // image said before the write. Re-derive those so the working image keeps
+    // one value per set of shared bytes and a burn is not refused over a
+    // sibling that the write already replaced.
+    for name in &transaction.changed_variables {
+        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
+            tracing::warn!(
+                %name,
+                %error,
+                "shared bytes could not be reconciled after a verified write"
+            );
+        }
+    }
     live.images.page_bytes.extend(
         transaction
             .readback

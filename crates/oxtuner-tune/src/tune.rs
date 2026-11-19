@@ -15,7 +15,10 @@ use std::time::SystemTime;
 
 use oxtuner_ini::Definition;
 
-use crate::{AttributeError, EntryShape, IniPage, RawConversion, TuneLayout, Values, VariableSpec};
+use crate::{
+    AttributeError, EntryShape, IniPage, RawConversion, TuneLayout, ValueConflict, Values,
+    VariableSpec,
+};
 
 /// One edited cell, for the edit log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,12 +117,8 @@ pub enum TuneError {
     },
     /// Two variables sharing bytes hold values the bytes cannot both carry.
     ConflictingValues {
-        /// The page holding the shared bytes.
-        page: IniPage,
-        /// The first variable.
-        first: String,
-        /// The second variable.
-        second: String,
+        /// The pair and the bytes they share.
+        conflict: ValueConflict,
     },
 }
 
@@ -156,15 +155,9 @@ impl std::fmt::Display for TuneError {
                 formatter,
                 "`{name}` contains {character:?}, which has no ISO-8859-1 byte"
             ),
-            Self::ConflictingValues {
-                page,
-                first,
-                second,
-            } => write!(
-                formatter,
-                "`{first}` and `{second}` hold different values for the bytes they share on \
-                 page {page}, and one value cannot carry both"
-            ),
+            Self::ConflictingValues { conflict } => {
+                write!(formatter, "{conflict}, and one value cannot carry both")
+            }
         }
     }
 }
@@ -297,6 +290,41 @@ impl Tune {
         }
 
         Ok(())
+    }
+
+    /// Re-derives every value that shares bytes with `name` from the page image.
+    ///
+    /// Two constants can sit over the same bytes, and editing one of them moves
+    /// bytes the other also claims. Left alone the two disagree, and a write
+    /// would settle them in declaration order. So the edited value is written
+    /// to the page image and every constant that shares its bytes is read back
+    /// from it, the same way a load reconciles a page. The edited value is the
+    /// one that survives, and the others follow the bytes.
+    ///
+    /// A view owns no bytes and follows the constant that does, so editing one
+    /// is left where it is instead of being re-derived here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the page cannot be encoded, patched or
+    /// decoded, or when a value's shape does not fit the layout.
+    pub fn reconcile_shared_bytes(&mut self, name: &str) -> Result<(), TuneError> {
+        let layout = Arc::clone(&self.layout);
+        if layout.variable(name).is_none() || layout.is_alias(name) {
+            return Ok(());
+        }
+        let Some(page) = layout.variable(name).and_then(VariableSpec::ini_page) else {
+            return Ok(());
+        };
+
+        let base = crate::wire::encode_page(&layout, page, self)?;
+        let patched = crate::wire::patch_page(&layout, page, &base, self, &[name])?;
+
+        let mut decoded = self.snapshot();
+        crate::wire::decode_page(&layout, page, &patched, &mut decoded)?;
+
+        let moved = layout.names_sharing_bytes(name);
+        self.adopt_named(&decoded, &moved)
     }
 
     /// A copy of this tune's values without edit timestamps.

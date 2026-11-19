@@ -460,6 +460,8 @@ impl Claim {
 
 /// What `variable` would write across its own span, and which bits it owns.
 ///
+/// `start` is where the codec places the variable in its page image, from
+/// [`offset_of`]; a claim over a variable the codec would skip is never built.
 /// Returns `None` for anything the page codec would not write: text, a
 /// variable with no resolved address, a bit field the codec refuses, a type
 /// the wire carries as something other than a number, or a value the tune does
@@ -467,6 +469,7 @@ impl Claim {
 /// disagree with a neighbour over what the bytes should say.
 pub(crate) fn claim_of(
     variable: &VariableSpec,
+    start: usize,
     endianness: Endianness,
     tune: &Tune,
 ) -> Option<Claim> {
@@ -478,7 +481,6 @@ pub(crate) fn claim_of(
     if width == 0 {
         return None;
     }
-    let start = usize::try_from(variable.address?).ok()?;
     let mut bytes = Vec::new();
     let mut mask = Vec::new();
 
@@ -535,7 +537,10 @@ pub(crate) fn claim_of(
 }
 
 /// A variable's byte offset in its page, when it can be placed.
-fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
+///
+/// This is the one place that maps a constant to a position in a page image,
+/// so a claim about which bytes a variable touches has to start here too.
+pub(crate) fn offset_of(variable: &VariableSpec, start_offset: u32) -> Option<usize> {
     let address = variable.address?;
     let offset = address.checked_sub(start_offset)?;
     usize::try_from(offset).ok()

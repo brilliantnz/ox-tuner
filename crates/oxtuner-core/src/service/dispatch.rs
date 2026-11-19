@@ -830,6 +830,19 @@ pub(super) fn handle(
                 }
             }
 
+            // Two constants can sit over the same bytes, and an edit moves the
+            // bytes both of them claim. The neighbours are re-derived from the
+            // page image so the edited value is the one that survives, and
+            // anything still left over is caught by the write gate.
+            if let Err(error) = project.tune_mut().reconcile_shared_bytes(&name) {
+                tracing::warn!(
+                    %op,
+                    table = %name,
+                    %error,
+                    "shared bytes could not be reconciled after a table edit"
+                );
+            }
+
             match TableView::from_project(project, &name) {
                 Ok(table) => {
                     tracing::debug!(
@@ -927,6 +940,19 @@ pub(super) fn handle(
                     );
                     return Outcome::Continue;
                 }
+            }
+
+            // Two constants can sit over the same bytes, and an edit moves the
+            // bytes both of them claim. The neighbours are re-derived from the
+            // page image so the edited value is the one that survives, and
+            // anything still left over is caught by the write gate.
+            if let Err(error) = project.tune_mut().reconcile_shared_bytes(&variable) {
+                tracing::warn!(
+                    %op,
+                    variable = %variable,
+                    %error,
+                    "shared bytes could not be reconciled after an axis edit"
+                );
             }
 
             match TableView::from_project(project, &table) {
@@ -1052,6 +1078,19 @@ pub(super) fn handle(
                     },
                 );
                 return Outcome::Continue;
+            }
+
+            // Two constants can sit over the same bytes, and an edit moves the
+            // bytes both of them claim. The neighbours are re-derived from the
+            // page image so the edited value is the one that survives, and
+            // anything still left over is caught by the write gate.
+            if let Err(error) = project.tune_mut().reconcile_shared_bytes(&name) {
+                tracing::warn!(
+                    %op,
+                    variable = %name,
+                    %error,
+                    "shared bytes could not be reconciled after a scalar edit"
+                );
             }
 
             let frame = latest.get();

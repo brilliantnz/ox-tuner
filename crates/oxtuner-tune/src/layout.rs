@@ -1031,6 +1031,60 @@ impl TuneLayout {
         (names.into_iter().take(MAX_OVERLAP_ISSUES).collect(), total)
     }
 
+    /// Every variable on `name`'s page whose bytes intersect its own.
+    ///
+    /// A view is included, because it reads the same bytes and has to follow
+    /// them, and so is a text field: the codec reads one as its whole length,
+    /// so a number under it is part of that text. The variable itself comes
+    /// first, and a variable with no resolvable bytes has no neighbour here.
+    #[must_use]
+    pub fn names_sharing_bytes(&self, name: &str) -> Vec<&str> {
+        let Some(index) = self.index(name) else {
+            return Vec::new();
+        };
+        let Some(spec) = self.variables.get(index) else {
+            return Vec::new();
+        };
+        let (Some(page), Some(span)) = (spec.ini_page(), span_of(index, spec)) else {
+            return Vec::new();
+        };
+        let Some(page_layout) = self.page(page) else {
+            return Vec::new();
+        };
+
+        page_layout
+            .variables
+            .iter()
+            .filter_map(|other| {
+                let spec = self.variables.get(*other)?;
+                let other_span = span_of(*other, spec)?;
+
+                span.intersects(other_span).then_some(spec.name.as_str())
+            })
+            .collect()
+    }
+
+    /// Every variable whose bytes intersect those of any of `names`.
+    ///
+    /// Moving one constant moves the bytes its neighbours also claim, so a
+    /// merge re-derives all of them from the decoded page instead of leaving a
+    /// neighbour on a value the merge just replaced.
+    #[must_use]
+    pub fn names_sharing_bytes_with(&self, names: &[&str]) -> Vec<&str> {
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+
+        for name in names {
+            for shared in self.names_sharing_bytes(name) {
+                if seen.insert(shared) {
+                    all.push(shared);
+                }
+            }
+        }
+
+        all
+    }
+
     /// The variable pairs on `page` whose values cannot both fit their shared bytes.
     ///
     /// Two constants may share storage and still be legal: a bit field merges
@@ -1043,7 +1097,9 @@ impl TuneLayout {
     /// A view is left out: its owner carries the value and the view follows the
     /// decoded page. A pair that neither covers the other is not reported here
     /// either, because [`Self::page_has_ambiguous_overlap`] already refuses
-    /// that page outright.
+    /// that page outright. Text is out of scope as well: the codec reads a text
+    /// field as one blob and [`Self::page_has_text_overlap`] leaves such a page
+    /// as it stands, so there is no per-bit claim to compare.
     #[must_use]
     pub fn value_conflicts(&self, page: IniPage, tune: &Tune) -> Vec<ValueConflict> {
         let Some(page_layout) = self.page(page) else {
@@ -1051,6 +1107,21 @@ impl TuneLayout {
         };
 
         let spans = page_spans(&self.variables, page_layout);
+        // One claim per variable, built once: the pairs below are many and the
+        // claim is the expensive part.
+        let claims: Vec<Option<crate::wire::Claim>> = spans
+            .iter()
+            .map(|span| {
+                let spec = self.variables.get(span.index)?;
+                // The codec places a constant at `address - start_offset`, and
+                // one it cannot place is never written. A claim has to say the
+                // same, or it would report bytes no write touches.
+                let start = crate::wire::offset_of(spec, page_layout.start_offset)?;
+
+                crate::wire::claim_of(spec, start, self.endianness, tune)
+            })
+            .collect();
+
         let mut conflicts = Vec::new();
 
         for (position, span) in spans.iter().enumerate() {
@@ -1058,7 +1129,7 @@ impl TuneLayout {
                 continue;
             }
 
-            for other in &spans[position + 1..] {
+            for (other_position, other) in spans.iter().enumerate().skip(position + 1) {
                 if self.is_alias_at(other.index) {
                     continue;
                 }
@@ -1068,21 +1139,21 @@ impl TuneLayout {
                     continue;
                 }
 
-                let (first, second) = (&self.variables[span.index], &self.variables[other.index]);
-                let (Some(first_claim), Some(second_claim)) = (
-                    crate::wire::claim_of(first, self.endianness, tune),
-                    crate::wire::claim_of(second, self.endianness, tune),
-                ) else {
+                let (Some(first), Some(second)) =
+                    (claims[position].as_ref(), claims[other_position].as_ref())
+                else {
                     continue;
                 };
-                if first_claim.agrees_with(&second_claim) {
+                if first.agrees_with(second) {
                     continue;
                 }
 
+                let (first_spec, second_spec) =
+                    (&self.variables[span.index], &self.variables[other.index]);
                 conflicts.push(ValueConflict {
                     page,
-                    first: first.name.clone(),
-                    second: second.name.clone(),
+                    first: first_spec.name.clone(),
+                    second: second_spec.name.clone(),
                     start: span.start.max(other.start),
                     end: span.end().min(other.end()),
                 });
@@ -2006,6 +2077,87 @@ data0 = bits, U08, 0, [0:7]
         assert!(
             layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
             "the view is never written, so the owner decides those bytes"
+        );
+    }
+
+    #[test]
+    fn a_bit_field_and_its_word_agree_on_a_big_endian_link() {
+        // The ownership mask is laid out in the codec's byte order, so on a
+        // big-endian word the field is compared on the byte the codec writes
+        // it to rather than on the one a little-endian mask would pick.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = big
+nPages = 1
+pageSize = 16
+page = 1
+wide = scalar, U16, 0, \"x\", 1, 0
+low = bits, U16, 0, [0:3]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(TuneLayout::build(&definition, &|_| None)));
+
+        // 0x0001 holds 1 in bits 0..3, so the field agrees with the word.
+        tune.set_image_raw("wide", 0, 1.0).expect("takes a value");
+        tune.set_image_raw("low", 0, 1.0).expect("takes a value");
+        assert!(
+            layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
+            "the field reads the bits the word already carries"
+        );
+
+        tune.set_image_raw("low", 0, 2.0).expect("takes a value");
+        assert_eq!(
+            layout.value_conflicts(IniPage::FIRST, &tune).len(),
+            1,
+            "the word says 1 where the field says 2"
+        );
+    }
+
+    #[test]
+    fn a_bit_field_over_the_sign_bit_of_a_signed_word_agrees_with_it() {
+        // A signed word is stored as its two's-complement pattern, and the
+        // ownership mask has to keep that pattern instead of being clamped to
+        // the signed range the way a value would be.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+wide = scalar, S16, 0, \"x\", 1, 0
+top = bits, S16, 0, [15:15]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let mut tune = Tune::new(Arc::new(TuneLayout::build(&definition, &|_| None)));
+
+        // 0x8000 is the field's bit set, and as a signed word it is -32768.
+        tune.set_image_raw("wide", 0, -32_768.0)
+            .expect("takes a value");
+        tune.set_image_raw("top", 0, 1.0).expect("takes a value");
+        assert!(
+            layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
+            "the field reads the sign bit the word already carries"
+        );
+
+        tune.set_image_raw("top", 0, 0.0).expect("takes a value");
+        assert_eq!(
+            layout.value_conflicts(IniPage::FIRST, &tune).len(),
+            1,
+            "the word has its sign bit set where the field says it is clear"
         );
     }
 
