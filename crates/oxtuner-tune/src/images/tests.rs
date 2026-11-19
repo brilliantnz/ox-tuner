@@ -210,6 +210,127 @@ inside = scalar, U08, 4, "", 1, 0, 0, 255, 0
 outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
 "#;
 
+    const AMBIGUOUS: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+"#;
+
+    #[test]
+    fn an_ambiguous_page_keeps_both_peers_when_imported() {
+        let definition = parse_str(AMBIGUOUS, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        // A file builds its own layout allocation, as a real import does.
+        let file_definition = parse_str(AMBIGUOUS, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            imported
+                .set_image_raw("wide", index, value)
+                .expect("wide takes a value");
+        }
+        for (index, value) in [5.0, 6.0, 7.0, 8.0].into_iter().enumerate() {
+            imported
+                .set_image_raw("straddle", index, value)
+                .expect("straddle takes a value");
+        }
+
+        images
+            .import_applied(&imported, &["wide".to_owned(), "straddle".to_owned()])
+            .expect("import");
+
+        assert_eq!(
+            images.working().raw_at("wide", 3).unwrap(),
+            4.0,
+            "the file's own tail survives"
+        );
+        assert_eq!(images.working().raw_at("straddle", 0).unwrap(), 5.0);
+    }
+
+    const AMBIGUOUS_VIEW: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+wide0 = bits, U08, 0, [0:7]
+straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+"#;
+
+    #[test]
+    fn a_file_that_omits_an_ambiguous_page_leaves_its_views_alone() {
+        let definition = parse_str(AMBIGUOUS_VIEW, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("wide0", 0, 7.0)
+            .expect("the view takes a value");
+
+        let file_definition = parse_str(AMBIGUOUS_VIEW, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        imported
+            .set_image_raw("wide", 0, 1.0)
+            .expect("the owner takes a value");
+
+        images.import_applied(&imported, &[]).expect("import");
+
+        assert_eq!(
+            images.working().raw_at("wide0", 0).unwrap(),
+            7.0,
+            "a file that says nothing about the page must not move its views"
+        );
+    }
+
+    #[test]
+    fn a_view_carried_alone_keeps_the_files_value_on_an_ambiguous_page() {
+        let definition = parse_str(AMBIGUOUS_VIEW, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        let file_definition = parse_str(AMBIGUOUS_VIEW, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        imported
+            .set_image_raw("wide0", 0, 9.0)
+            .expect("the view takes a value");
+
+        images
+            .import_applied(&imported, &["wide0".to_owned()])
+            .expect("import");
+
+        assert_eq!(images.working().raw_at("wide0", 0).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn an_ambiguous_page_raises_no_conflict() {
+        let definition = parse_str(AMBIGUOUS, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        let mut ram = Tune::new(Arc::clone(&layout));
+        ram.set_image_raw("wide", 0, 9.0)
+            .expect("the ECU holds a different value");
+
+        let conflicts = images.reconcile_read(ram).expect("a read reconciles");
+
+        assert!(
+            conflicts.is_empty(),
+            "a page no write can carry must not ask for a decision: {conflicts:?}"
+        );
+    }
+
     #[test]
     fn a_page_a_text_field_overlaps_keeps_what_the_file_carried() {
         let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");

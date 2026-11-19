@@ -6,7 +6,8 @@
 use super::dispatch::{refuse, send, send_status};
 use super::ecu::connection_lost;
 use super::tune::{
-    clamp_working_changes, unresolved_conflicts, unsent_changes, unsent_edits, unsent_for_pages,
+    ambiguous_write_page, clamp_working_changes, unresolved_conflicts, unsent_ambiguous_page,
+    unsent_changes, unsent_edits, unsent_for_pages,
 };
 use super::*;
 
@@ -340,6 +341,28 @@ pub(super) fn write_to_ram(
             "the selected pages have no values that differ from ECU RAM",
         );
     }
+    if let Some(page) = ambiguous_write_page(project, &targets) {
+        let (names, total) = project.layout().ambiguous_names(page);
+        let listed: Vec<String> = names.into_iter().map(|name| format!("`{name}`")).collect();
+        let more = total.saturating_sub(listed.len());
+        let unlisted = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::WriteRefused,
+            format!(
+                "page {page} has constants whose shared bytes no single value owns: {}{unlisted}; \
+                 fix the definition before writing",
+                listed.join(", ")
+            ),
+        );
+    }
     let (changed_variables, cells) = unsent_for_pages(project, &targets);
     if changed_variables.is_empty() {
         return refuse(
@@ -526,8 +549,21 @@ pub(super) fn burn_to_flash(
     if let Some(reason) = unresolved_conflicts(project) {
         return refuse(events, report, op, FailureCode::BurnRefused, &reason);
     }
-    let (unsent, _) = unsent_edits(project);
+    let (unsent_variables, _, unsent) = unsent_changes(project);
     if unsent > 0 {
+        if let Some(page) = unsent_ambiguous_page(project, &unsent_variables) {
+            return refuse(
+                events,
+                report,
+                op,
+                FailureCode::BurnRefused,
+                format!(
+                    "page {page} cannot be written because its definition shares bytes with no \
+                     owner; revert those values or adopt the ECU tune before burning"
+                ),
+            );
+        }
+
         return refuse(
             events,
             report,
