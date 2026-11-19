@@ -1,6 +1,6 @@
 # Fuzzing `oxtuner-ini`
 
-Five targets: three entry points and two that keep the input on a single
+Six targets: three entry points and three that keep the input on a single
 entry line, where the full pipeline would rarely generate a valid one.
 
 | Target         | Surface                                         |
@@ -10,9 +10,12 @@ entry line, where the full pipeline would rarely generate a valid one.
 | `preprocess`   | conditionals, `#define` expansion, `#include`   |
 | `bit_options`  | a `bits` option list: labels, `=`, `".`         |
 | `pc_variables` | one `[PcVariables]` entry: shape and attributes |
+| `sections`     | logger record fields and named config sections  |
 
-Run them with `cargo +nightly fuzz run <target>`. Corpus and artifact folders
-are git-ignored; seed the corpus with the reference definitions when they are
+Run them with `cargo +nightly fuzz run <target>`. The keyword dictionary lives
+in `ini.dict`; pass it with `-dict=ini.dict` so mutations reach the section
+dispatch instead of stalling on random headers. Corpus and artifact folders are
+git-ignored; seed the corpus with the reference definitions when they are
 available locally:
 
 ```sh
