@@ -1363,7 +1363,9 @@ pub(super) fn apply_verified_write(
         .images_mut()
         .set_ecu_ram(image)
         .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
-    project.images_mut().clear_write_failures();
+    project
+        .images_mut()
+        .clear_write_failures_for(&transaction.changed_variables);
     project
         .images_mut()
         .clear_resolutions_for(&transaction.changed_variables);

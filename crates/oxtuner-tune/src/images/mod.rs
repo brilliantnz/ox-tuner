@@ -294,6 +294,21 @@ impl TuneImages {
             .retain(|_, overlay| *overlay != Overlay::WriteFailed);
     }
 
+    /// Clears the failure marks on the named variables only.
+    ///
+    /// A verified write observed the pages it wrote; a failure on a page it
+    /// did not touch still stands.
+    pub fn clear_write_failures_for(&mut self, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            self.overlays.retain(|key, overlay| {
+                key.variable != variable || *overlay != Overlay::WriteFailed
+            });
+        }
+    }
+
     /// Clears a conflict overlay once the user has decided about the cell.
     ///
     /// # Errors

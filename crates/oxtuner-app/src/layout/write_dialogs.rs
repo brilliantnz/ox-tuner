@@ -160,7 +160,7 @@ fn burn_body(flash_known: bool, pending: usize, pages: usize) -> SharedString {
             cells = pending.to_string()
         )
     } else {
-        t!("app.burn.body_unknown", pages = pages.to_string())
+        t!("app.burn.body_unknown")
     }
 }
 

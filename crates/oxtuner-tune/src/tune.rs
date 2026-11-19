@@ -604,7 +604,10 @@ impl Tune {
         self.edits.get(&Cell { variable, index }).copied()
     }
 
-    /// Whether the variable is offered for editing by the definition.
+    /// Whether the variable can be edited and will be sent.
+    ///
+    /// A controller-owned value and a `noMsqSave` value are refused because
+    /// the write plan and the tune file both exclude them.
     pub fn is_writable(&self, name: &str) -> bool {
         self.layout
             .variable(name)

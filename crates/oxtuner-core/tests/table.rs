@@ -98,6 +98,29 @@ dialog = engineDialog, "Engine"
   field = "Cell 0", veCell0
 "#;
 
+/// A definition whose one constant is not saved to a tune file.
+const RUNTIME_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+runtime = scalar, U08, 0, "%", 1, 0, 0, 255, 0, noMsqSave
+
+[UserDefined]
+dialog = engineDialog, "Engine"
+  field = "Runtime", runtime
+"#;
+
+const RUNTIME_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16"/>
+</msq>
+"#;
+
 const VIEW_TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
     <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
@@ -884,6 +907,28 @@ fn a_scalar_edit_rejects_an_array_variable() {
         panic!("expected a rejection");
     };
     assert_eq!(failure.code, FailureCode::DialogEditRejected);
+}
+
+#[test]
+fn a_scalar_edit_of_a_no_msq_save_value_is_rejected() {
+    let dir = TempDir::with_definition("runtime-edit", RUNTIME_DEFINITION, RUNTIME_TUNE);
+    let core = Harness::start();
+    core.open(dir.path());
+
+    let _ = core
+        .handle
+        .edit_scalar("engineDialog", "runtime", 1.0)
+        .expect("the edit is queued");
+    let Event::Failed { failure, .. } = core.next() else {
+        panic!("expected a rejection");
+    };
+
+    assert_eq!(failure.code, FailureCode::DialogEditRejected);
+    assert!(
+        failure.message.contains("not saved in a tune file"),
+        "{}",
+        failure.message
+    );
 }
 
 #[test]

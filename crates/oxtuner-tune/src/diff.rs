@@ -27,6 +27,9 @@ pub struct TuneDiff {
 impl TuneDiff {
     /// Compares `baseline` with `other`.
     ///
+    /// A view and a `noMsqSave` value are excluded: neither can reach the wire
+    /// or the file.
+    ///
     /// # Errors
     ///
     /// Returns [`TuneError::LayoutMismatch`] when the tunes use different

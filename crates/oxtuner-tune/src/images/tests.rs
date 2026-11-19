@@ -540,7 +540,7 @@ f = scalar, F32, 0, \"\", 100.0, 0
     }
 
     #[test]
-    fn storing_a_partial_read_keeps_another_cells_failure() {
+    fn storing_a_ram_image_keeps_a_failed_write_mark() {
         let mut images = images();
         images.set_ecu_ram(tune()).unwrap();
         images.mark_write_failed("a", 0, 0).unwrap();
@@ -552,6 +552,23 @@ f = scalar, F32, 0, \"\", 100.0, 0
         assert_eq!(
             images.cell_state("a", 0, 0).unwrap(),
             CellState::WriteFailed
+        );
+    }
+
+    #[test]
+    fn a_verified_write_clears_only_the_failures_it_wrote() {
+        let mut images = images();
+        images.set_ecu_ram(tune()).unwrap();
+        images.mark_write_failed("a", 0, 0).unwrap();
+        images.mark_write_failed("b", 0, 0).unwrap();
+
+        images.clear_write_failures_for(&["a".to_owned()]);
+
+        assert_eq!(images.cell_state("a", 0, 0).unwrap(), CellState::InRam);
+        assert_eq!(
+            images.cell_state("b", 0, 0).unwrap(),
+            CellState::WriteFailed,
+            "the page this write did not cover still failed"
         );
     }
 
@@ -623,7 +640,7 @@ wide = bits, U16, 0, [40:47]
     }
 
     #[test]
-    fn a_no_msq_save_value_is_never_sent_or_reported() {
+    fn a_no_msq_save_value_is_never_reported() {
         let definition = parse_str(
             "\
 [MegaTune]
