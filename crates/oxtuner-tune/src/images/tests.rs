@@ -204,6 +204,8 @@ nPages = 1
 pageSize = 16
 page = 1
 note = string, ASCII, 8
+data = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+data0 = bits, U08, 0, [0:7]
 inside = scalar, U08, 4, "", 1, 0, 0, 255, 0
 outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
 "#;
@@ -242,6 +244,78 @@ outside = scalar, U08, 12, "", 1, 0, 0, 255, 0
             4.0,
             "a value the file did not carry keeps its value"
         );
+    }
+
+    #[test]
+    fn a_view_without_its_owner_moves_the_owners_bytes_on_an_overlap_page() {
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("data", 1, 7.0)
+            .expect("a byte to keep");
+
+        let mut imported = separate_file_tune();
+        imported
+            .set_image_raw("data0", 0, 5.0)
+            .expect("the view takes a value");
+
+        images
+            .import_applied(&imported, &["data0".to_owned()])
+            .expect("import");
+
+        assert_eq!(
+            images.working().raw_at("data", 0).unwrap(),
+            5.0,
+            "the owner takes the byte the view wrote"
+        );
+        assert_eq!(
+            images.working().raw_at("data", 1).unwrap(),
+            7.0,
+            "the rest of the owner keeps its value"
+        );
+        assert_eq!(images.working().scalar_raw("data0").unwrap(), 5.0);
+    }
+
+    #[test]
+    fn a_view_the_file_carries_beside_its_owner_is_adopted() {
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(layout));
+
+        let mut imported = separate_file_tune();
+        for (index, value) in [9.0, 8.0, 7.0, 6.0].into_iter().enumerate() {
+            imported
+                .set_image_raw("data", index, value)
+                .expect("the array takes a value");
+        }
+        imported
+            .set_image_raw("data0", 0, 9.0)
+            .expect("the view takes a value");
+
+        images
+            .import_applied(&imported, &["data".to_owned(), "data0".to_owned()])
+            .expect("import");
+
+        assert_eq!(
+            images.working().raw_at("data", 0).unwrap(),
+            9.0,
+            "the owner keeps the file's value"
+        );
+        assert_eq!(
+            images.working().scalar_raw("data0").unwrap(),
+            9.0,
+            "the view follows the value the file carried"
+        );
+    }
+
+    /// A tune built the way a project load builds one: its own layout
+    /// allocation, not the image's.
+    fn separate_file_tune() -> Tune {
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        Tune::new(layout)
     }
 
     #[test]

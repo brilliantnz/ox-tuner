@@ -430,6 +430,78 @@ impl TuneImages {
         Ok(())
     }
 
+    /// Merges one page whose text field overlaps a number.
+    ///
+    /// Such a page cannot be decoded back without reading the overlap as text,
+    /// so the values the file carried are adopted as they are. A view whose
+    /// owner the file did not carry still moves the owner's bytes, because the
+    /// owner's value in the file's tune is only the definition default.
+    fn merge_overlapping_page(
+        &self,
+        merged: &mut Tune,
+        source: &mut Option<Tune>,
+        page: IniPage,
+        tune: &Tune,
+        applied: &[String],
+    ) -> Result<(), TuneError> {
+        let names = self.layout.page_patch_names(applied, page);
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let source = match source {
+            Some(source) => source,
+            None => source.insert({
+                let mut copy = merged.snapshot();
+                copy.adopt_values(tune)?;
+                copy
+            }),
+        };
+
+        let mut moved: Vec<&str> = names.clone();
+        // A view the file carried beside its owner: `page_patch_names` dropped
+        // it, so the file's own value is the one to keep.
+        for name in applied {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            if spec.ini_page() == Some(page)
+                && self.layout.alias_owner(name).is_some()
+                && !moved.contains(&spec.name.as_str())
+            {
+                moved.push(&spec.name);
+            }
+        }
+        merged.adopt_named(source, &moved)?;
+
+        // A view the file carried without its owner moves the owner's bytes.
+        let views: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| self.layout.alias_owner(name).is_some())
+            .collect();
+        if views.is_empty() {
+            return Ok(());
+        }
+
+        let base = encode_page(&self.layout, page, merged)?;
+        let patched = patch_page(&self.layout, page, &base, tune, &views)?;
+        let mut decoded = merged.snapshot();
+        decode_page(&self.layout, page, &patched, &mut decoded)?;
+
+        let mut moved = views.clone();
+        for name in &views {
+            if let Some(owner) = self.layout.alias_owner(name)
+                && !moved.contains(&owner)
+            {
+                moved.push(owner);
+            }
+        }
+        merged.adopt_named(&decoded, &moved)?;
+
+        Ok(())
+    }
+
     /// Merges the variables a tune file carried onto the working image.
     ///
     /// A file is not a whole image: it writes the constants it knows, and it
@@ -447,32 +519,17 @@ impl TuneImages {
         // working image exactly as it was, like the whole-image import does.
         let mut merged = self.working.snapshot();
         let pages: Vec<IniPage> = self.layout.pages().iter().map(|page| page.page).collect();
+        // The file's tune has its own layout allocation, and a value copy needs
+        // the destination's layout. This copy holds the file's values under the
+        // image's layout; the file does not change while pages are merged.
+        let mut source: Option<Tune> = None;
 
         for page in pages {
             // A page that overlaps text with numbers cannot be decoded back
             // without reading the overlap as text. The values the file carried
             // are adopted as they stand, so nothing the file wrote is dropped.
             if self.layout.page_has_text_overlap(page) {
-                let names = self.layout.page_patch_names(applied, page);
-                if names.is_empty() {
-                    continue;
-                }
-
-                // The file's tune has its own layout allocation, and a value
-                // copy needs the destination's layout. Copy into one that
-                // shares this image's layout before adopting the names.
-                let mut source = merged.snapshot();
-                source.adopt_values(tune)?;
-
-                let mut moved: Vec<&str> = names.clone();
-                for name in &names {
-                    if let Some(owner) = self.layout.alias_owner(name)
-                        && !moved.contains(&owner)
-                    {
-                        moved.push(owner);
-                    }
-                }
-                merged.adopt_named(&source, &moved)?;
+                self.merge_overlapping_page(&mut merged, &mut source, page, tune, applied)?;
 
                 continue;
             }
