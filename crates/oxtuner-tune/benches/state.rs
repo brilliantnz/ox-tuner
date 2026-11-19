@@ -128,6 +128,22 @@ fn budget(criterion: &mut Criterion) {
     criterion.bench_function("status_summary", |bencher| {
         bencher.iter(|| black_box(images.status()));
     });
+
+    // One edit re-derives the constants whose bytes it moved. This is what a
+    // table keystroke and a dialog change cost on top of the edit itself.
+    criterion.bench_function("reconcile_shared_bytes_15_pages", |bencher| {
+        let mut edited = images.working().snapshot();
+        edited
+            .set_raw_at("scalar_1_0", 0, 11.0)
+            .expect("the fixture variable exists");
+        bencher.iter(|| {
+            black_box(
+                edited
+                    .reconcile_shared_bytes(black_box("scalar_1_0"))
+                    .expect("the page reconciles"),
+            )
+        });
+    });
 }
 
 criterion_group!(benches, budget);
