@@ -605,36 +605,7 @@ impl TuneImages {
         applied: &[String],
         resolved: &mut Vec<String>,
     ) -> Result<(), TuneError> {
-        let names = self.layout.page_patch_names(applied, page);
-        if names.is_empty() {
-            return Ok(());
-        }
-        resolved.extend(names.iter().map(|name| (*name).to_owned()));
-
-        let source = match source {
-            Some(source) => source,
-            None => source.insert({
-                let mut copy = merged.snapshot();
-                copy.adopt_values(tune)?;
-                copy
-            }),
-        };
-
-        let mut moved: Vec<&str> = names.clone();
-        // A view the file carried beside its owner: `page_patch_names` dropped
-        // it, so the file's own value is the one to keep.
-        for name in applied {
-            let Some(spec) = self.layout.variable(name) else {
-                continue;
-            };
-            if spec.ini_page() == Some(page)
-                && self.layout.alias_owner(name).is_some()
-                && !moved.contains(&spec.name.as_str())
-            {
-                moved.push(&spec.name);
-            }
-        }
-        merged.adopt_named(source, &moved)?;
+        let names = self.adopt_carried(merged, source, page, tune, applied, resolved)?;
 
         // A view the file carried without its owner moves the owner's bytes.
         let views: Vec<&str> = names
@@ -664,6 +635,75 @@ impl TuneImages {
         Ok(())
     }
 
+    /// Adopts the values a file carried on a page the codec cannot rebuild.
+    ///
+    /// The page keeps the file's values as written: encoding it would let
+    /// declaration order pick a winner for the shared bytes. A view the file
+    /// did not carry still follows the bytes of the variable that owns them.
+    fn adopt_ambiguous_page(
+        &self,
+        merged: &mut Tune,
+        source: &mut Option<Tune>,
+        page: IniPage,
+        tune: &Tune,
+        applied: &[String],
+        resolved: &mut Vec<String>,
+    ) -> Result<(), TuneError> {
+        self.adopt_carried(merged, source, page, tune, applied, resolved)?;
+
+        self.layout.derive_views(page, merged, applied)
+    }
+
+    /// Adopts the names the file carried on `page`, views included.
+    ///
+    /// Returns the names `page_patch_names` kept, which the text-overlap view
+    /// patch needs. A page whose values are only adopted ignores them.
+    fn adopt_carried<'a>(
+        &self,
+        merged: &mut Tune,
+        source: &mut Option<Tune>,
+        page: IniPage,
+        tune: &Tune,
+        applied: &'a [String],
+        resolved: &mut Vec<String>,
+    ) -> Result<Vec<&'a str>, TuneError> {
+        let names = self.layout.page_patch_names(applied, page);
+
+        let mut moved: Vec<&str> = names.clone();
+        // A view the file carried beside its owner: `page_patch_names` dropped
+        // it, so the file's own value is kept here. The text-overlap caller
+        // stops there; the ambiguous caller lets `derive_views` re-derive the
+        // view when the file carried the owner too.
+        for name in applied {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            if spec.ini_page() == Some(page)
+                && self.layout.alias_owner(name).is_some()
+                && !moved.contains(&spec.name.as_str())
+            {
+                moved.push(spec.name.as_str());
+            }
+        }
+        if moved.is_empty() {
+            return Ok(names);
+        }
+
+        resolved.extend(names.iter().map(|name| (*name).to_owned()));
+
+        let source = match source {
+            Some(source) => source,
+            None => source.insert({
+                let mut copy = merged.snapshot();
+                copy.adopt_values(tune)?;
+                copy
+            }),
+        };
+        merged.adopt_named(source, &moved)?;
+
+        Ok(names)
+    }
+
     /// Merges the variables a tune file carried onto the working image.
     ///
     /// A file is not a whole image: it writes the constants it knows, and it
@@ -691,6 +731,32 @@ impl TuneImages {
         let mut source: Option<Tune> = None;
 
         for page in pages {
+            // A page whose numeric constants share bytes with no owner keeps
+            // the file's values as written, and its views follow their owners.
+            // A file that says nothing about the page leaves it alone, like the
+            // regular path below.
+            if self.layout.page_has_ambiguous_overlap(page) {
+                let mentioned = applied.iter().any(|name| {
+                    self.layout
+                        .variable(name)
+                        .is_some_and(|spec| spec.ini_page() == Some(page))
+                });
+                if !mentioned {
+                    continue;
+                }
+
+                self.adopt_ambiguous_page(
+                    &mut merged,
+                    &mut source,
+                    page,
+                    tune,
+                    applied,
+                    &mut resolved,
+                )?;
+
+                continue;
+            }
+
             // A page that overlaps text with numbers cannot be decoded back
             // without reading the overlap as text. The values the file carried
             // are adopted as they stand, so nothing the file wrote is dropped.
@@ -872,12 +938,14 @@ impl TuneImages {
         }
     }
 
-    /// Whether the write plan could send this variable's values.
+    /// Whether the write plan could carry this variable's values on its own.
     ///
-    /// Conflict detection covers exactly what a write could change: PC-side
-    /// values, controller-owned values, a value with no page address, a view
-    /// and a bit field the codec refuses are never sent, so a difference in
-    /// one is not something the user can decide to overwrite.
+    /// Conflict detection covers what a write could carry by itself: PC-side
+    /// values, controller-owned values, a value with no page address, a view, a
+    /// variable in an ambiguous pair, and a bit field the codec refuses are
+    /// never sent, so a difference in one is not something the user can decide
+    /// to overwrite. A safe variable beside an ambiguous pair still takes part
+    /// in a decision; refusing that page is the write path's job.
     fn is_sendable(&self, variable: usize) -> bool {
         let Some(spec) = self.layout.variables().get(variable) else {
             return false;
@@ -890,6 +958,7 @@ impl TuneImages {
             && spec.scale.is_some()
             && spec.translate.is_some()
             && !self.layout.is_alias_at(variable)
+            && !self.layout.is_ambiguous_at(variable)
             && spec.bit_field_round_trips()
     }
 

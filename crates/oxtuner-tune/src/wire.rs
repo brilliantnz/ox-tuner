@@ -491,7 +491,7 @@ fn bit_mask(low: u8, high: u8) -> u32 {
     clippy::as_conversions,
     reason = "the value is checked finite before the bit-field cast, and negative words use their two's-complement pattern"
 )]
-fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
+pub(crate) fn extract_bits(raw: f64, low: u8, high: u8) -> Option<u32> {
     if high >= 32 {
         return None;
     }

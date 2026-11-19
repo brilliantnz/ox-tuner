@@ -106,6 +106,17 @@ impl TempDir {
         &self.path
     }
 
+    /// A project whose definition carries extra constants.
+    fn with_constants(label: &str, constants: &str) -> Self {
+        let dir = Self::new(label);
+        let definition =
+            DEFINITION.replace("[TableEditor]", &format!("{constants}\n[TableEditor]"));
+        fs::write(dir.path.join("projectCfg/mainController.ini"), definition)
+            .expect("the definition is writable");
+
+        dir
+    }
+
     fn journal(&self) -> PathBuf {
         self.path.join(SIDECAR_DIR).join("write-journal.log")
     }
@@ -316,6 +327,72 @@ mod burn;
 mod conflict;
 #[path = "writes/controller_action.rs"]
 mod controller_action;
+
+#[test]
+fn a_page_with_overlapping_constants_is_never_written() {
+    // `overlapA` covers the same bytes as `veTable`, so the two are peers;
+    // `overlapB` starts inside `veTable` and runs past it, so neither owns the
+    // shared bytes.
+    let dir = TempDir::with_constants(
+        "ambiguous",
+        "overlapA = array, U08, 0, [4]\noverlapB = array, U08, 2, [4]\n",
+    );
+    let core = Harness::start(true);
+    let view = core.open(dir.path());
+    assert!(
+        view.warnings
+            .iter()
+            .any(|warning| warning.contains("shares bytes")),
+        "the layout warning reaches the project view: {:?}",
+        view.warnings
+    );
+
+    core.connect(SimConfig::default());
+    core.read_all();
+    core.use_project_tune();
+    core.edit_cell(77.0);
+
+    let (kind, message) = failure(&core.write());
+    assert_eq!(kind, FailureCode::WriteRefused);
+    assert!(message.contains("shared bytes"), "{message}");
+    assert!(
+        message.contains("overlapB"),
+        "the refusal names the constants: {message}"
+    );
+
+    // The refusal comes before the journal and the snapshot, so the write
+    // leaves neither behind. The conflict resolution above writes its own
+    // entries, which are not this write's.
+    let (_, entries) = core.journal();
+    assert!(
+        entries.iter().all(|entry| entry.operation != "write"),
+        "a refused write must not reach the journal: {entries:?}"
+    );
+    let write_snapshots = fs::read_dir(dir.snapshots()).map_or_else(
+        |_| 0,
+        |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains("-write-"))
+                .count()
+        },
+    );
+    assert_eq!(
+        write_snapshots, 0,
+        "a refused write must not snapshot first"
+    );
+
+    // A burn cannot persist RAM that still holds a value no write may carry,
+    // and the refusal names the page instead of asking for the impossible.
+    let (kind, message) = failure(&core.burn());
+    assert_eq!(kind, FailureCode::BurnRefused);
+    assert!(
+        message.contains("shares bytes with no owner"),
+        "a burn on an unwritable page must name the reason: {message}"
+    );
+
+    core.close();
+}
 
 #[test]
 fn a_write_round_trips_and_reads_back_verified() {

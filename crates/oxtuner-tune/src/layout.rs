@@ -23,7 +23,7 @@ use std::fmt;
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ConstantClass, DataType, Definition, Endianness, Number, Shape};
 
-use crate::IniPage;
+use crate::{IniPage, Tune, TuneError};
 
 /// An [`EvalContext`] over a plain name lookup.
 struct FnContext<'a> {
@@ -198,83 +198,227 @@ pub struct VariableSpec {
     pub default_raw: f64,
 }
 
+/// One numeric constant's byte range on a page.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    /// Index into the layout's variables.
+    index: usize,
+    /// First byte, inclusive.
+    start: u32,
+    /// Number of bytes covered.
+    len: u32,
+}
+
+impl Span {
+    /// First byte past the end.
+    fn end(self) -> u32 {
+        self.start.saturating_add(self.len)
+    }
+
+    /// Whether this span holds every byte of `other`.
+    fn covers(self, other: Self) -> bool {
+        self.start <= other.start && other.end() <= self.end()
+    }
+
+    /// Whether the two spans share at least one byte.
+    fn intersects(self, other: Self) -> bool {
+        self.start < other.end() && other.start < self.end()
+    }
+}
+
+/// The byte range every numeric constant on `page` occupies.
+///
+/// Text is left out on purpose: [`TuneLayout::page_has_text_overlap`] treats a
+/// text field as a blob that owns its bytes, not as a numeric constant that can
+/// be merged with a neighbor.
+fn page_spans(variables: &[VariableSpec], page: &PageLayout) -> Vec<Span> {
+    page.variables
+        .iter()
+        .filter_map(|index| {
+            let variable = variables.get(*index)?;
+            if matches!(variable.shape, EntryShape::Text { .. }) {
+                return None;
+            }
+
+            span_of(*index, variable)
+        })
+        .collect()
+}
+
+/// The bytes one variable occupies on its page, text included.
+fn span_of(index: usize, variable: &VariableSpec) -> Option<Span> {
+    let start = variable.address?;
+    let width = variable.data_type.size();
+    let len = match variable.shape {
+        EntryShape::Scalar | EntryShape::Bits { .. } => width,
+        EntryShape::Array { .. } => {
+            width.checked_mul(u32::try_from(variable.element_count()).ok()?)?
+        }
+        EntryShape::Text { len } => u32::try_from(len).ok()?,
+    };
+
+    (len > 0).then_some(Span { index, start, len })
+}
+
 /// Marks the variables whose bytes another variable on the same page covers.
 ///
 /// The wider span wins, and containment must be strict. Two constants over
 /// exactly the same bytes are peers, not an owner and a view, so the one
-/// declared later can still write them. A partial overlap is left alone too:
-/// two variables that share only some bytes cannot be ordered safely, and
-/// treating one as the truth would silently drop the other.
+/// declared later can still write them. A partial overlap is not an alias and
+/// is reported by [`mark_ambiguous`] instead.
 ///
 /// This is deliberately not the dialect's load order: a file applies constants
 /// in the order it lists them, while here the wider constant owns the bytes
 /// whatever the declaration order. The narrower constant is a view either way,
 /// and the definitions this build reads always declare the owner first.
-fn mark_aliases(variables: &[VariableSpec], pages: &[PageLayout]) -> Vec<Option<usize>> {
-    let mut aliases = vec![None; variables.len()];
+fn mark_aliases(mut spans: Vec<Span>, variables: &[VariableSpec], aliases: &mut [Option<usize>]) {
+    // Wider first, declaration order on a tie.
+    spans.sort_by(|left, right| right.len.cmp(&left.len).then(left.index.cmp(&right.index)));
 
-    for page in pages {
-        let mut spans: Vec<(usize, u32, u32)> = page
-            .variables
-            .iter()
-            .filter_map(|index| {
-                let variable = variables.get(*index)?;
-                // Text is a blob of its own; a numeric variable that happens
-                // to sit inside a text field is not a view of that text.
-                if matches!(variable.shape, EntryShape::Text { .. }) {
-                    return None;
-                }
-                let start = variable.address?;
-                let width = variable.data_type.size();
-                let len = match variable.shape {
-                    EntryShape::Scalar | EntryShape::Bits { .. } => width,
-                    EntryShape::Array { .. } => {
-                        width.checked_mul(u32::try_from(variable.element_count()).ok()?)?
-                    }
-                    EntryShape::Text { .. } => return None,
-                };
+    for position in 0..spans.len() {
+        let span = spans[position];
+        let variable = &variables[span.index];
+        // A bit field that covers only part of its word is a real control of
+        // those bits, not a duplicate: writing it must still merge into the
+        // word. Only a field that spans the whole word duplicates it.
+        let duplicate = match variable.shape {
+            EntryShape::Bits { low, high, .. } => {
+                let bits = variable.data_type.size().saturating_mul(8);
+                low == 0 && u32::from(high).saturating_add(1) >= bits && bits > 0
+            }
+            _ => true,
+        };
+        if !duplicate {
+            continue;
+        }
 
-                (len > 0).then_some((*index, start, len))
-            })
-            .collect();
+        // Strict containment: two variables over the same bytes are peers, and
+        // the one declared later must still be able to write them.
+        let owner = spans[..position].iter().find(|outer| {
+            outer.len > span.len && outer.start <= span.start && span.end() <= outer.end()
+        });
+        if let Some(owner) = owner {
+            aliases[span.index] = Some(owner.index);
+        }
+    }
+}
 
-        // Wider first, declaration order on a tie.
-        spans.sort_by(|left, right| right.2.cmp(&left.2).then(left.0.cmp(&right.0)));
+/// How many overlapping pairs one page lists before the summary takes over.
+const MAX_OVERLAP_ISSUES: usize = 8;
 
-        for position in 0..spans.len() {
-            let (index, start, len) = spans[position];
-            let variable = &variables[index];
-            // A bit field that covers only part of its word is a real control
-            // of those bits, not a duplicate: writing it must still merge into
-            // the word. Only a field that spans the whole word duplicates it.
-            let duplicate = match variable.shape {
-                EntryShape::Bits { low, high, .. } => {
-                    let bits = variable.data_type.size().saturating_mul(8);
-                    low == 0 && u32::from(high).saturating_add(1) >= bits && bits > 0
-                }
-                _ => true,
-            };
-            if !duplicate {
+/// Marks variables whose bytes overlap a peer with no safe owner.
+///
+/// A pair is genuine ambiguity when the ranges intersect, neither covers the
+/// other, and neither is a view. Bit fields are covered by the containment
+/// rule: a field over the same word has the same span, and a field whose word
+/// is contained in a wider constant is a merge. A bit word that reaches into a
+/// neighbor's bytes is still reported, because the codec would decide those
+/// bytes by declaration order.
+///
+/// A page can hold many such pairs when a definition is badly formed, so the
+/// issues stop after [`MAX_OVERLAP_ISSUES`] and one summary line follows.
+fn mark_ambiguous(
+    variables: &[VariableSpec],
+    mut spans: Vec<Span>,
+    page: &PageLayout,
+    aliases: &[Option<usize>],
+    ambiguous: &mut [bool],
+    issues: &mut Vec<LayoutIssue>,
+) {
+    // Sorted by start, the inner loop can stop at the first span that begins
+    // past this one's end.
+    spans.sort_by_key(|span| span.start);
+    let mut listed = 0usize;
+    let mut unlisted = 0usize;
+
+    for (position, span) in spans.iter().enumerate() {
+        for other in &spans[position + 1..] {
+            if other.start >= span.end() {
+                break;
+            }
+            if !span.intersects(*other) {
+                continue;
+            }
+            // A view is never written; its owner's span is what a write
+            // touches, and that pair is checked on its own.
+            if aliases.get(span.index).is_some_and(Option::is_some)
+                || aliases.get(other.index).is_some_and(Option::is_some)
+            {
+                continue;
+            }
+            // Containment is the owner/view or the bit-field merge case.
+            if span.covers(*other) || other.covers(*span) {
                 continue;
             }
 
-            let end = start.saturating_add(len);
-            // Strict containment: two variables over the same bytes are peers,
-            // and the one declared later must still be able to write them.
-            let owner = spans[..position]
-                .iter()
-                .find(|(_, outer_start, outer_len)| {
-                    *outer_len > len
-                        && *outer_start <= start
-                        && end <= outer_start.saturating_add(*outer_len)
-                });
-            if let Some((owner, _, _)) = owner {
-                aliases[index] = Some(*owner);
+            ambiguous[span.index] = true;
+            ambiguous[other.index] = true;
+            if listed == MAX_OVERLAP_ISSUES {
+                unlisted += 1;
+                continue;
             }
+            listed += 1;
+
+            let first = &variables[span.index];
+            let second = &variables[other.index];
+            issues.push(LayoutIssue::new(
+                IssueSeverity::Warning,
+                LayoutIssueKind::AmbiguousOverlap,
+                Some(&first.name),
+                format!(
+                    "shares bytes {}..{} with `{}` on page {} and neither covers the other; \
+                     writing page {} is refused until the definition changes",
+                    span.start.max(other.start),
+                    span.end().min(other.end()),
+                    second.name,
+                    page.page,
+                    page.page,
+                ),
+            ));
         }
     }
 
-    aliases
+    if unlisted > 0 {
+        issues.push(LayoutIssue::new(
+            IssueSeverity::Warning,
+            LayoutIssueKind::AmbiguousOverlap,
+            None,
+            format!(
+                "page {} has {unlisted} more overlapping pair(s), not listed",
+                page.page
+            ),
+        ));
+    }
+}
+
+/// What one layout build decided about shared bytes.
+struct OverlapCheck {
+    aliases: Vec<Option<usize>>,
+    ambiguous: Vec<bool>,
+    issues: Vec<LayoutIssue>,
+}
+
+fn check_overlaps(variables: &[VariableSpec], pages: &[PageLayout]) -> OverlapCheck {
+    let mut check = OverlapCheck {
+        aliases: vec![None; variables.len()],
+        ambiguous: vec![false; variables.len()],
+        issues: Vec::new(),
+    };
+
+    for page in pages {
+        let spans = page_spans(variables, page);
+        mark_aliases(spans.clone(), variables, &mut check.aliases);
+        mark_ambiguous(
+            variables,
+            spans,
+            page,
+            &check.aliases,
+            &mut check.ambiguous,
+            &mut check.issues,
+        );
+    }
+
+    check
 }
 
 /// Whether a bit field survives the page codec's read-modify-write round trip.
@@ -384,7 +528,7 @@ pub enum IssueSeverity {
 /// Why a definition entry did not become a usable layout entry.
 #[expect(
     clippy::exhaustive_enums,
-    reason = "layout issues are a closed set of resolution failures"
+    reason = "layout issues are a closed set of definition findings"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutIssueKind {
@@ -399,6 +543,9 @@ pub enum LayoutIssueKind {
     UnresolvedAttribute,
     /// A constant names a page the definition never declared.
     UnknownPage,
+    /// Two numeric constants share bytes and neither covers the other, so no
+    /// single value owns them.
+    AmbiguousOverlap,
 }
 
 /// One problem found while building the layout.
@@ -456,6 +603,9 @@ pub struct TuneLayout {
     /// the bytes, so it is not persisted to a tune file and not written to the
     /// ECU on its own; the variable that covers it carries the value.
     aliases: Vec<Option<usize>>,
+    /// One flag per variable, set when it shares bytes with a peer in a way no
+    /// owner resolves. A page carrying such a variable is never written.
+    ambiguous: Vec<bool>,
 }
 
 impl TuneLayout {
@@ -484,6 +634,7 @@ impl TuneLayout {
             pages: Vec::new(),
             issues: Vec::new(),
             aliases: Vec::new(),
+            ambiguous: Vec::new(),
         };
 
         for (name, constant) in definition.constants.iter() {
@@ -495,7 +646,10 @@ impl TuneLayout {
         }
 
         layout.build_pages(definition);
-        layout.aliases = mark_aliases(&layout.variables, &layout.pages);
+        let overlap = check_overlaps(&layout.variables, &layout.pages);
+        layout.aliases = overlap.aliases;
+        layout.ambiguous = overlap.ambiguous;
+        layout.issues.extend(overlap.issues);
         layout
     }
 
@@ -804,6 +958,145 @@ impl TuneLayout {
         self.variables.get(owner).map(|spec| spec.name.as_str())
     }
 
+    /// Whether the variable at `index` shares bytes no owner resolves.
+    pub fn is_ambiguous_at(&self, index: usize) -> bool {
+        self.ambiguous.get(index).copied().unwrap_or(false)
+    }
+
+    /// Whether `page` holds constants whose shared bytes have no safe owner.
+    ///
+    /// Such a page is still read and decoded, and a file's values are adopted
+    /// as they stand. The core refuses to write the page: the codec would fill
+    /// the shared bytes in declaration order, and only a read-back would show
+    /// which value survived.
+    pub fn page_has_ambiguous_overlap(&self, page: IniPage) -> bool {
+        self.page(page).is_some_and(|page_layout| {
+            page_layout
+                .variables
+                .iter()
+                .any(|index| self.is_ambiguous_at(*index))
+        })
+    }
+
+    /// The names on `page` that share bytes with no owner, and how many exist
+    /// before the list is cut to [`MAX_OVERLAP_ISSUES`].
+    ///
+    /// The list is bounded so a refusal message stays readable on a badly
+    /// formed definition; subtract its length from the count to say how many
+    /// names the message leaves out.
+    pub fn ambiguous_names(&self, page: IniPage) -> (Vec<&str>, usize) {
+        let Some(page_layout) = self.page(page) else {
+            return (Vec::new(), 0);
+        };
+
+        let names: Vec<&str> = page_layout
+            .variables
+            .iter()
+            .filter(|index| self.is_ambiguous_at(**index))
+            .filter_map(|index| self.variables.get(*index))
+            .map(|spec| spec.name.as_str())
+            .collect();
+        let total = names.len();
+
+        (names.into_iter().take(MAX_OVERLAP_ISSUES).collect(), total)
+    }
+
+    /// Copies each view's value on `page` from the variable that owns its bytes.
+    ///
+    /// Used for a page the codec cannot rebuild: without a decode the view has
+    /// no chance to follow its owner and would keep its definition default. A
+    /// view the file wrote while its owner stayed home keeps the file's value;
+    /// when the file carries the owner, the owner decides and the view follows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when `tune` was built from another
+    /// layout, and [`TuneError`] when a mapped value cannot be stored.
+    pub fn derive_views(
+        &self,
+        page: IniPage,
+        tune: &mut Tune,
+        carried: &[String],
+    ) -> Result<(), TuneError> {
+        if !std::ptr::eq(tune.layout().as_ref(), self) {
+            return Err(TuneError::LayoutMismatch);
+        }
+        let Some(page_layout) = self.page(page) else {
+            return Ok(());
+        };
+
+        for index in &page_layout.variables {
+            let Some(owner) = self.alias_owner_at(*index) else {
+                continue;
+            };
+            let (Some(view), Some(owner_spec)) =
+                (self.variables.get(*index), self.variables.get(owner))
+            else {
+                continue;
+            };
+            // A view mirrors the owner only when both store the same kind of
+            // value; a different width or signedness has no cell-to-cell map.
+            if view.data_type != owner_spec.data_type {
+                continue;
+            }
+            let view_carried = carried
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&view.name));
+            let owner_carried = carried
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&owner_spec.name));
+            if view_carried && !owner_carried {
+                continue;
+            }
+
+            let (Some(view_start), Some(owner_start)) = (view.address, owner_spec.address) else {
+                continue;
+            };
+            let width = view.data_type.size();
+            if width == 0 {
+                continue;
+            }
+            // An unaligned start has no owner element to mirror.
+            let Some(base) = view_start.checked_sub(owner_start) else {
+                continue;
+            };
+            if base % width != 0 {
+                continue;
+            }
+            let Some(first) = usize::try_from(base / width).ok() else {
+                continue;
+            };
+
+            for element in 0..view.element_count() {
+                let Some(owner_index) = first.checked_add(element) else {
+                    continue;
+                };
+                if owner_index >= owner_spec.element_count() {
+                    continue;
+                }
+                let Ok(raw) = tune.raw_at(&owner_spec.name, owner_index) else {
+                    continue;
+                };
+                // A bit field reads its word's two's-complement pattern, not the
+                // owner's signed value.
+                let raw = match view.shape {
+                    EntryShape::Bits { low, high, .. } => {
+                        let Some(bits) = crate::wire::extract_bits(raw, low, high) else {
+                            continue;
+                        };
+
+                        f64::from(bits)
+                    }
+                    _ => raw,
+                };
+
+                tune.set_image_raw(&view.name, element, raw)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Whether a text field on `page` shares bytes with another variable.
     ///
     /// The page codec reads a text field as its whole length. A number that
@@ -814,33 +1107,22 @@ impl TuneLayout {
             return false;
         };
 
-        let spans: Vec<(usize, bool, u32, u32)> = page_layout
+        let spans: Vec<(Span, bool)> = page_layout
             .variables
             .iter()
             .filter_map(|index| {
                 let spec = self.variables.get(*index)?;
-                let start = spec.address?;
-                let width = spec.data_type.size();
-                let len = match spec.shape {
-                    EntryShape::Text { len } => u32::try_from(len).ok()?,
-                    EntryShape::Scalar | EntryShape::Bits { .. } => width,
-                    EntryShape::Array { .. } => {
-                        width.checked_mul(u32::try_from(spec.element_count()).ok()?)?
-                    }
-                };
-                let text = matches!(spec.shape, EntryShape::Text { .. });
+                let span = span_of(*index, spec)?;
 
-                Some((*index, text, start, len))
+                Some((span, matches!(spec.shape, EntryShape::Text { .. })))
             })
             .collect();
 
-        spans.iter().any(|(index, text, start, len)| {
+        spans.iter().any(|(span, text)| {
             *text
-                && spans.iter().any(|(other, _, other_start, other_len)| {
-                    index != other
-                        && *other_start < start.saturating_add(*len)
-                        && *start < other_start.saturating_add(*other_len)
-                })
+                && spans
+                    .iter()
+                    .any(|(other, _)| span.index != other.index && span.intersects(*other))
         })
     }
 
@@ -1037,6 +1319,11 @@ fn default_raw(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+    use std::sync::Arc;
+
+    use super::*;
+    use oxtuner_ini::{SettingsContext, parse_str};
 
     #[test]
     fn a_number_inside_a_text_field_flags_the_page() {
@@ -1089,6 +1376,289 @@ after = scalar, U08, 8, \"x\", 1, 0
     }
 
     #[test]
+    fn overlapping_numeric_constants_are_reported_and_refuse_the_page() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4]
+straddle = array, U08, 2, [4]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let wide = layout.index("wide").expect("wide is declared");
+        let straddle = layout.index("straddle").expect("straddle is declared");
+
+        assert!(layout.page_has_ambiguous_overlap(IniPage::FIRST));
+        assert!(layout.is_ambiguous_at(wide));
+        assert!(layout.is_ambiguous_at(straddle));
+        assert!(!layout.is_alias_at(wide), "neither range covers the other");
+        assert!(!layout.is_alias_at(straddle));
+        assert!(
+            layout.issues().iter().any(|issue| {
+                issue.kind == LayoutIssueKind::AmbiguousOverlap
+                    && issue.name.as_deref() == Some("wide")
+            }),
+            "the overlap names the variable: {:?}",
+            layout.issues()
+        );
+    }
+
+    #[test]
+    fn overlapping_views_do_not_freeze_their_page() {
+        // Two views of one owner share bytes with each other but neither is
+        // ever written, so the pair cannot make the page unsafe.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+owner = array, U08, 0, [10]
+left = array, U08, 4, [3]
+right = array, U08, 6, [3]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(layout.is_alias("left"));
+        assert!(layout.is_alias("right"));
+        assert!(
+            !layout.page_has_ambiguous_overlap(IniPage::FIRST),
+            "a view is never sent, so its pair is not a write hazard: {:?}",
+            layout.issues()
+        );
+    }
+
+    #[test]
+    fn many_overlapping_pairs_report_a_bounded_list() {
+        let mut text = String::from(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 32
+page = 1
+",
+        );
+        for start in 0..20 {
+            text.write_str(&format!("cell_{start} = array, U08, {start}, [4]\n"))
+                .expect("the test string is writable");
+        }
+        let definition = parse_str(&text, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        let listed = layout
+            .issues()
+            .iter()
+            .filter(|issue| issue.kind == LayoutIssueKind::AmbiguousOverlap)
+            .count();
+        assert_eq!(
+            listed,
+            MAX_OVERLAP_ISSUES + 1,
+            "the pairs stop at the cap and one summary line follows"
+        );
+        assert!(
+            layout
+                .issues()
+                .iter()
+                .any(|issue| issue.message.contains("more overlapping")),
+            "the summary counts what it did not list"
+        );
+        assert!(layout.page_has_ambiguous_overlap(IniPage::FIRST));
+
+        let (names, total) = layout.ambiguous_names(IniPage::FIRST);
+        assert_eq!(names.len(), MAX_OVERLAP_ISSUES, "the list is bounded");
+        assert_eq!(total, 20, "the count still reports every ambiguous cell");
+    }
+
+    const VIEWS_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+data = array, U08, 0, [4]
+tail = array, U08, 2, [2]
+"#;
+
+    #[test]
+    fn derive_views_maps_each_element_to_its_owner_cell() {
+        let definition = parse_str(VIEWS_DEFINITION, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut tune = Tune::new(Arc::clone(&layout));
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            tune.set_image_raw("data", index, value)
+                .expect("the owner takes a value");
+        }
+
+        layout
+            .derive_views(IniPage::FIRST, &mut tune, &[])
+            .expect("views derive");
+
+        assert_eq!(tune.raw_at("tail", 0).expect("the view reads"), 3.0);
+        assert_eq!(tune.raw_at("tail", 1).expect("the view reads"), 4.0);
+    }
+
+    #[test]
+    fn a_carried_view_keeps_the_files_value_only_without_its_owner() {
+        let definition = parse_str(VIEWS_DEFINITION, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut tune = Tune::new(Arc::clone(&layout));
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            tune.set_image_raw("data", index, value)
+                .expect("the owner takes a value");
+        }
+        tune.set_image_raw("tail", 0, 9.0)
+            .expect("the view takes a value");
+        tune.set_image_raw("tail", 1, 9.0)
+            .expect("the view takes a value");
+
+        layout
+            .derive_views(IniPage::FIRST, &mut tune, &["tail".to_owned()])
+            .expect("views derive");
+        assert_eq!(
+            tune.raw_at("tail", 0).expect("the view reads"),
+            9.0,
+            "the file wrote the view alone, so its value stands"
+        );
+
+        // With the owner carried too, the owner owns the bytes and the view
+        // follows, exactly as a writable page does.
+        layout
+            .derive_views(
+                IniPage::FIRST,
+                &mut tune,
+                &["data".to_owned(), "tail".to_owned()],
+            )
+            .expect("views derive");
+        assert_eq!(tune.raw_at("tail", 0).expect("the view reads"), 3.0);
+        assert_eq!(tune.raw_at("tail", 1).expect("the view reads"), 4.0);
+    }
+
+    #[test]
+    fn derive_views_refuses_a_tune_from_another_layout() {
+        let first = parse_str(VIEWS_DEFINITION, &SettingsContext::new()).expect("parses");
+        let second = parse_str(VIEWS_DEFINITION, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&first, &|_| None);
+        let other = Arc::new(TuneLayout::build(&second, &|_| None));
+        let mut tune = Tune::new(other);
+
+        assert!(matches!(
+            layout.derive_views(IniPage::FIRST, &mut tune, &[]),
+            Err(TuneError::LayoutMismatch)
+        ));
+    }
+
+    #[test]
+    fn a_bit_word_straddling_a_neighbor_is_ambiguous() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+value = array, U08, 2, [4]
+flag = bits, U16, 1, [0:1]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(
+            layout.page_has_ambiguous_overlap(IniPage::FIRST),
+            "the bit word covers bytes 1..3 and the array 2..6: {:?}",
+            layout.issues()
+        );
+    }
+
+    #[test]
+    fn bit_fields_sharing_a_word_are_not_ambiguous() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+status = scalar, U08, 4, \"bits\", 1, 0
+fan = bits, U08, 4, [0:1]
+launch = bits, U08, 4, [2:3]
+wide = scalar, U16, 6, \"x\", 1, 0
+flag = bits, U16, 6, [3:3]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(
+            !layout.page_has_ambiguous_overlap(IniPage::FIRST),
+            "the codec merges these fields: {:?}",
+            layout.issues()
+        );
+        assert!(!layout.is_alias("fan"), "a partial bit field is a control");
+    }
+
+    #[test]
+    fn bit_fields_sharing_a_bit_are_a_merge_not_a_conflict() {
+        // A real definition may leave an unused field overlapping a live one on
+        // the same byte. The codec merges both in declaration order, so the
+        // pair has a defined outcome.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+unused = bits, U08, 0, [0:2]
+selector = bits, U08, 0, [2:3]
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(
+            !layout.page_has_ambiguous_overlap(IniPage::FIRST),
+            "shared bits merge in declaration order: {:?}",
+            layout.issues()
+        );
+    }
+
+    #[test]
     fn a_full_width_bit_alias_is_a_view_and_a_partial_one_is_not() {
         let definition = oxtuner_ini::Definition::parse(
             "\
@@ -1120,8 +1690,6 @@ status = scalar, U08, 4, \"bits\", 1, 0
         );
         assert!(!layout.is_alias("status"), "a peer of the bit field");
     }
-    use super::*;
-    use oxtuner_ini::{SettingsContext, parse_str};
 
     #[test]
     fn an_oversized_shape_drops_the_variable_with_an_issue() {

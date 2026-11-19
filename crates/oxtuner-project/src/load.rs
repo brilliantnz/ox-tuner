@@ -234,6 +234,22 @@ fn reconcile_pages(
         if names.is_empty() && !has_alias {
             continue;
         }
+        if layout.page_has_ambiguous_overlap(page.page) {
+            // The page cannot be rebuilt without declaration order choosing a
+            // winner, so the file's values stand. A view the file did not carry
+            // still follows the bytes its owner holds.
+            if let Err(error) = layout.derive_views(page.page, tune, applied) {
+                report.warn(
+                    IssueKind::ValueSkipped,
+                    format!("page {}: {error}", page.page),
+                );
+            }
+            tracing::debug!(
+                page = page.page.get(),
+                "constants share bytes with no owner; the page is not reconciled"
+            );
+            continue;
+        }
         if layout.page_has_text_overlap(page.page) {
             // A definition quirk, not a user problem: the page keeps the file's
             // values instead of being rebuilt through the overlap.
@@ -1462,6 +1478,33 @@ viaIndex = array, U08, 8, [3], "", { alpha[1] }, 0, 0, 255, 0
         );
     }
 
+    #[test]
+    fn an_ambiguous_page_still_reports_a_wrong_page_data_size() {
+        // 15 bytes against a pageSize of 16. The value-by-value comparison is
+        // skipped for an ambiguous page, but the size itself is still a defect.
+        const MSQ: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <pageData page="0">000102030405060708090a0b0c0d0e</pageData>
+    <page number="0" size="16">
+        <constant cols="1" digits="0" name="wide" rows="4">1.0 2.0 3.0 4.0</constant>
+        <constant cols="1" digits="0" name="straddle" rows="4">5.0 6.0 7.0 8.0</constant>
+    </page>
+</msq>
+"#;
+        let definition = parse_str(AMBIGUOUS_DEFINITION, &SettingsContext::new())
+            .expect("the definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        assert!(
+            loaded.report.warnings.iter().any(|issue| {
+                issue.kind == IssueKind::PageDataMismatch
+                    && issue.message.contains("page-data bytes")
+            }),
+            "a short block is still reported: {:?}",
+            loaded.report.warnings
+        );
+    }
+
     fn definition() -> &'static Definition {
         static PARSED: OnceLock<Definition> = OnceLock::new();
         PARSED.get_or_init(|| {
@@ -1756,6 +1799,19 @@ data2 = bits, U08, 2, [0:7]
 data3 = bits, U08, 3, [0:7]
 "#;
 
+    const AMBIGUOUS_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+wide0 = bits, U08, 0, [0:7]
+straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+"#;
+
     #[test]
     fn a_file_without_its_alias_leaves_the_view_to_the_array() {
         // The array only, the way TunerStudio writes it; the aliases are absent.
@@ -1809,6 +1865,48 @@ data3 = bits, U08, 3, [0:7]
             loaded.tune.raw_at("data", 0).unwrap(),
             0.0,
             "a byte the file did not write stays at the definition default"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_page_keeps_the_values_the_file_carried() {
+        // The two arrays share bytes 2..4 with no owner. Rebuilding the page
+        // would overwrite `wide`'s tail with `straddle`'s values, in
+        // declaration order.
+        const MSQ: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.7" nPages="1" signature="speeduino 202501"/>
+    <page>
+        <constant cols="1" digits="0" name="wide" rows="4">1.0 2.0 3.0 4.0</constant>
+        <constant cols="1" digits="0" name="straddle" rows="4">5.0 6.0 7.0 8.0</constant>
+    </page>
+</msq>
+"#;
+        let definition = parse_str(AMBIGUOUS_DEFINITION, &SettingsContext::new())
+            .expect("the definition parses");
+        let loaded = load(&Msq::parse(MSQ.as_bytes()).unwrap(), &definition);
+
+        let wide: Vec<f64> = (0..4)
+            .map(|index| loaded.tune.raw_at("wide", index).unwrap())
+            .collect();
+        let straddle: Vec<f64> = (0..4)
+            .map(|index| loaded.tune.raw_at("straddle", index).unwrap())
+            .collect();
+        assert_eq!(wide, [1.0, 2.0, 3.0, 4.0], "the file's own tail survives");
+        assert_eq!(straddle, [5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(
+            loaded.tune.scalar_raw("wide0").unwrap(),
+            1.0,
+            "a view the file did not carry follows its owner"
+        );
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .any(|issue| issue.message.contains("shares bytes")),
+            "the overlap is explained: {:?}",
+            loaded.report.warnings
         );
     }
 

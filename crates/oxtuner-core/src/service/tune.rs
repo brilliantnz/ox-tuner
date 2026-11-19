@@ -144,6 +144,34 @@ pub(super) fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>,
     (kept, cells)
 }
 
+/// The first target page whose constants share bytes with no safe owner.
+///
+/// The refusal is page-wide on purpose. Writing the safe half of an ambiguous
+/// pair would move bytes the pair shares, leave the other value unsent, and the
+/// next write would put them back. The page stays unwritable until the
+/// definition names one owner for those bytes.
+pub(super) fn ambiguous_write_page(project: &Project, targets: &[u8]) -> Option<IniPage> {
+    let layout = project.layout();
+
+    targets.iter().find_map(|page| {
+        let page = IniPage::new(*page)?;
+        layout.page_has_ambiguous_overlap(page).then_some(page)
+    })
+}
+
+/// The first page among `variables` whose shared bytes have no owner.
+///
+/// A burn is refused before it can point the user at a write that would always
+/// be refused for the same page.
+pub(super) fn unsent_ambiguous_page(project: &Project, variables: &[String]) -> Option<IniPage> {
+    let layout = project.layout();
+
+    variables.iter().find_map(|name| {
+        let page = layout.variable(name)?.ini_page()?;
+        layout.page_has_ambiguous_overlap(page).then_some(page)
+    })
+}
+
 /// Counts edits that have not reached ECU RAM.
 ///
 /// A burn persists whatever RAM holds, so an edit that is only in the working

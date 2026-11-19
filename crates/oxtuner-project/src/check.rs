@@ -593,6 +593,13 @@ pub(crate) fn check_page_data(
             continue;
         }
 
+        // A page with no single owner for its shared bytes keeps the file's
+        // values, so its block cannot be compared value by value. A wrong byte
+        // count is still a defect and was reported above.
+        if layout.page_has_ambiguous_overlap(ini) {
+            continue;
+        }
+
         if oxtuner_tune::decode_page(layout, ini, &bytes, &mut scratch).is_err() {
             continue;
         }
