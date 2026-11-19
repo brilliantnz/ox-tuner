@@ -40,7 +40,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::fs;
 use std::hint::black_box;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1194,6 +1196,61 @@ fn bench_ab_share_arc(criterion: &mut Criterion) {
     });
 }
 
+/// Local-only real-file check. The files live outside the repository and are
+/// never committed; when they are absent the bench simply does not register.
+/// It reports wall time and peak temporary heap against the INI.md budgets.
+#[expect(
+    clippy::print_stdout,
+    reason = "a bench-only local report of the real-file budgets"
+)]
+fn bench_real_files(criterion: &mut Criterion) {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let settings = SettingsContext::new();
+    let files = [
+        ("speeduino", "docs/tmp/local/ini/speeduino-202501.7.ini"),
+        ("rusefi", "docs/tmp/local/ini/rusefi.ini"),
+        ("fome", "docs/tmp/local/ini/fome_proteus_h7.ini"),
+    ];
+
+    for (label, relative) in files {
+        let path = workspace.join(relative);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+
+        reset_peak();
+        let definition =
+            parse_str(black_box(&text), black_box(&settings)).expect("real file parses");
+        let peak = probe_peak_bytes();
+        println!(
+            "real {label}: bytes={} constants={} tables={} diagnostics={} peak={:.2} MiB",
+            bytes.len(),
+            definition.constants.len(),
+            definition.tables.len(),
+            definition.diagnostics.len(),
+            f64::from(u32::try_from(peak).unwrap_or(u32::MAX)) / (1024.0 * 1024.0)
+        );
+        assert!(
+            peak <= PEAK_LIMIT_BYTES,
+            "real {label} used {peak} bytes of temporary heap, over the 30 MiB bench limit"
+        );
+
+        criterion.bench_function(&format!("ini_parse_real_{label}"), |bencher| {
+            bencher.iter(|| {
+                black_box(parse_str(black_box(&text), black_box(&settings)).expect("parses"))
+            });
+        });
+        criterion.bench_function(&format!("ini_preprocess_real_{label}"), |bencher| {
+            bencher.iter(|| {
+                black_box(
+                    preprocess(black_box(&text), black_box(&settings), None).expect("preprocesses"),
+                )
+            });
+        });
+    }
+}
+
 criterion_group!(
     benches,
     bench_preprocess,
@@ -1222,6 +1279,7 @@ criterion_group!(
     bench_number_normalized,
     bench_repeated_sections,
     bench_include_chain,
-    bench_conditional_frames
+    bench_conditional_frames,
+    bench_real_files
 );
 criterion_main!(benches);

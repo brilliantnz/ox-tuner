@@ -384,8 +384,36 @@ fn load_definition(
     Ok((definition, DefinitionSource::Parsed))
 }
 
-/// Reads an `#include` file from `base`, refusing to leave it.
+/// Canonicalizes an include base once, so a project open does not repeat the
+/// same syscall for every include and every cache fingerprint check.
+pub(crate) fn canonical_base(base: &Path) -> Option<PathBuf> {
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    match fs::canonicalize(base) {
+        Ok(base) => Some(base),
+        Err(error) => {
+            tracing::debug!(
+                base = %base.display(),
+                %error,
+                "the include base directory could not be resolved"
+            );
+            None
+        }
+    }
+}
+
+/// Reads an `#include` file from `base`, refusing to leave it. Use
+/// [`canonical_base`] once and [`read_include_canonical`] for repeated reads.
 pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
+    let base = canonical_base(base)?;
+    read_include_canonical(&base, name)
+}
+
+/// Reads an `#include` from an already-canonical base.
+pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<String> {
     let path = Path::new(name);
     if path.components().any(|component| {
         matches!(
@@ -400,24 +428,6 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     // backslash is not a separator on Unix, so lexical checks alone do not
     // keep the read inside `base`. Resolve both sides and compare.
     //
-    // A bare filename has an empty parent, which is the working directory.
-    // `canonicalize` rejects the empty path, so spell it out.
-    let base = if base.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        base
-    };
-    let base = match fs::canonicalize(base) {
-        Ok(base) => base,
-        Err(error) => {
-            tracing::debug!(
-                base = %base.display(),
-                %error,
-                "the include base directory could not be resolved"
-            );
-            return None;
-        }
-    };
     let path = match fs::canonicalize(base.join(path)) {
         Ok(path) => path,
         Err(error) => {
@@ -425,7 +435,7 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
             return None;
         }
     };
-    if !path.starts_with(&base) {
+    if !path.starts_with(base) {
         return None;
     }
 

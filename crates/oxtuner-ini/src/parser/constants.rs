@@ -923,8 +923,10 @@ fn parse_bit_attributes(
         );
         return None;
     };
+    // The option list can hold 65k expanded fields. Storage keywords are
+    // written literally after it, so read them from the short raw fields.
     apply_keyword_fields(
-        context.fields.iter().skip(context.index),
+        context.raw_fields.iter().copied().skip(context.index),
         &mut context.flags,
     );
     let options = option_tables.table(
@@ -1235,7 +1237,7 @@ pub(crate) fn parse_pc_variables(
         // parser skips them.
         let mut flags = ConstantFlags::default();
         if matches!(class, ConstantClass::Bits | ConstantClass::String) {
-            apply_keyword_fields(fields.iter().skip(index), &mut flags);
+            apply_keyword_fields(raw_fields.iter().copied().skip(index), &mut flags);
         }
 
         let options: Arc<[BitOption]> = if class == ConstantClass::Bits {

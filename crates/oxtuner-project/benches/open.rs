@@ -307,6 +307,52 @@ fn bench_project_save_noop(criterion: &mut Criterion) {
     });
 }
 
+/// Local-only real-project open. The project lives outside the repository and
+/// is never committed; the bench does not register when the path is absent.
+/// Set `OXTUNER_REAL_PROJECT` to point at a different folder.
+fn bench_real_project_open(criterion: &mut Criterion) {
+    let root = std::env::var_os("OXTUNER_REAL_PROJECT").map_or_else(
+        || {
+            std::path::PathBuf::from(
+                "/Users/brilliantnz/Documents/LibreTuneProjects/Speeduino Test 1",
+            )
+        },
+        std::path::PathBuf::from,
+    );
+    if !root.is_dir() {
+        return;
+    }
+
+    criterion.bench_function("project_open_real_cold", |bencher| {
+        bencher.iter(|| black_box(Project::open(black_box(&root)).expect("real project opens")));
+    });
+
+    let cache = tempfile::tempdir().expect("cache dir");
+    let first = Project::open_with_cache(&root, Some(cache.path())).expect("real project opens");
+    assert_eq!(
+        first.definition_source(),
+        DefinitionSource::Parsed,
+        "cold open must parse"
+    );
+    drop(first);
+    let warm = Project::open_with_cache(&root, Some(cache.path())).expect("real project opens");
+    assert_eq!(
+        warm.definition_source(),
+        DefinitionSource::Cache,
+        "warm bench must hit cache"
+    );
+    drop(warm);
+
+    criterion.bench_function("project_open_real_warm", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                Project::open_with_cache(black_box(&root), Some(cache.path()))
+                    .expect("real project opens"),
+            )
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_msq_parse,
@@ -315,6 +361,7 @@ criterion_group!(
     bench_project_open_reference,
     bench_project_open_reference_warm,
     bench_project_open_pc_variables,
-    bench_project_save_noop
+    bench_project_save_noop,
+    bench_real_project_open
 );
 criterion_main!(benches);

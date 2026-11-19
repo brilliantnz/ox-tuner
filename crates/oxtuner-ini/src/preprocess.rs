@@ -204,8 +204,9 @@ impl<'a> Expander<'a> {
 
                 // A trailing define with no per-index override stays borrowed.
                 if index == fields.len() && !has_override {
+                    // The tail stays borrowed, so it costs no allocation and
+                    // does not need a byte-count pass over a large define.
                     tail = Some(values);
-                    bytes += values.iter().map(|value| value.len()).sum::<usize>();
                     continue;
                 }
 

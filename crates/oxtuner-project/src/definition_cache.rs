@@ -48,7 +48,7 @@ use oxtuner_ini::{BitOption, Definition, PARSER_VERSION, SettingsContext};
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
-use crate::project::read_include;
+use crate::project::{canonical_base, read_include_canonical};
 
 /// Bump when the envelope layout or the serialized definition model changes.
 ///
@@ -113,7 +113,7 @@ impl IncludeFingerprint {
 
     /// Whether the file still resolves to the same content.
     fn matches(&self, base: &Path) -> bool {
-        read_include(base, &self.name)
+        read_include_canonical(base, &self.name)
             .as_deref()
             .map(|text| hash::sha256(text.as_bytes()))
             == self.sha256
@@ -329,28 +329,8 @@ impl DefinitionCache {
     /// Every rejection is a normal miss: the caller parses and may overwrite
     /// the file. Nothing here is allowed to make opening a project fail.
     pub(crate) fn load(&self) -> Option<Definition> {
-        let metadata = match fs::metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!(
-                        %error,
-                        path = %self.path.display(),
-                        "the definition cache could not be inspected"
-                    );
-                }
-                return None;
-            }
-        };
-        if metadata.len() > MAX_CACHE_BYTES {
-            tracing::debug!(
-                path = %self.path.display(),
-                bytes = metadata.len(),
-                "the definition cache file is implausibly large"
-            );
-            return None;
-        }
-
+        // One read instead of a metadata probe followed by a read: the length
+        // cap is checked on the bytes we already have.
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -364,6 +344,14 @@ impl DefinitionCache {
                 return None;
             }
         };
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CACHE_BYTES {
+            tracing::debug!(
+                path = %self.path.display(),
+                bytes = bytes.len(),
+                "the definition cache file is implausibly large"
+            );
+            return None;
+        }
 
         let Some((header, payload)) = decode(&bytes) else {
             tracing::debug!(path = %self.path.display(), "the definition cache is malformed");
@@ -582,13 +570,14 @@ fn prune(directory: &Path) {
 }
 
 /// Collects the `#include` answers while the preprocessor resolves them.
-pub(crate) struct IncludeRecorder<'a> {
-    base: &'a Path,
+pub(crate) struct IncludeRecorder {
+    base: PathBuf,
     includes: RefCell<Vec<IncludeFingerprint>>,
 }
 
-impl<'a> IncludeRecorder<'a> {
-    pub(crate) fn new(base: &'a Path) -> Self {
+impl IncludeRecorder {
+    pub(crate) fn new(base: &Path) -> Self {
+        let base = canonical_base(base).unwrap_or_else(|| base.to_owned());
         Self {
             base,
             includes: RefCell::new(Vec::new()),
@@ -597,7 +586,7 @@ impl<'a> IncludeRecorder<'a> {
 
     /// Resolves one include and records what it saw.
     pub(crate) fn resolve(&self, name: &str) -> Option<String> {
-        let content = read_include(self.base, name);
+        let content = read_include_canonical(&self.base, name);
         let fingerprint = IncludeFingerprint::new(name, content.as_deref());
 
         let mut includes = self.includes.borrow_mut();
