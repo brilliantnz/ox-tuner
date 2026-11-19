@@ -201,8 +201,10 @@ impl TuneImages {
     /// The first read of a session and a later one behave the same: a cell
     /// where the ECU differs from the working image is a conflict waiting for
     /// the user's decision, and a cell the user already decided to overwrite
-    /// keeps that decision. No read ever changes the working image, so an
-    /// unsaved edit is never lost (ADR-0010).
+    /// keeps that decision. A value the user can edit never moves here, so an
+    /// unsaved edit is never lost (ADR-0010). The one exception is a
+    /// controller-owned value: the ECU always owns it, so the read replaces
+    /// the offline copy.
     ///
     /// # Errors
     ///
@@ -364,6 +366,33 @@ impl TuneImages {
     pub fn clear_resolutions(&mut self) {
         self.overlays
             .retain(|_, overlay| !matches!(overlay, Overlay::Conflict | Overlay::Superseded));
+    }
+
+    /// Clears the decisions a merge changed the value of.
+    ///
+    /// A file names nearly every constant, so "the file carried it" is not the
+    /// same as "the merge moved it". Only a changed cell loses its decision.
+    pub fn clear_resolutions_changed_since(&mut self, before: &Tune, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            if self.layout.is_alias_at(variable) {
+                continue;
+            }
+            let spec = &self.layout.variables()[variable];
+            let (Some(before_values), Some(after_values)) =
+                (before.value(name), self.working.value(name))
+            else {
+                continue;
+            };
+            for index in 0..spec.element_count() {
+                if Self::same_sent_value(spec, before_values, after_values, index) {
+                    continue;
+                }
+                self.overlays.remove(&CellRef { variable, index });
+            }
+        }
     }
 
     /// Clears the decisions about the named variables only.
@@ -650,6 +679,7 @@ impl TuneImages {
     pub fn import_applied(&mut self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
         // The merge lands in a copy: a page that fails halfway must leave the
         // working image exactly as it was, like the whole-image import does.
+        let before = self.working.snapshot();
         let mut merged = self.working.snapshot();
         // Only the variables this file actually moved lose their decision; a
         // difference it never touched is still the user's to resolve.
@@ -741,9 +771,10 @@ impl TuneImages {
         }
 
         self.working.adopt_values(&merged)?;
-        // The imported values are new; a decision about those values does not
-        // carry over. A difference the file did not touch still stands.
-        self.clear_resolutions_for(&resolved);
+        // The imported values are new; a decision about a value the merge
+        // changed does not carry over. A difference it did not touch still
+        // stands, even when the file named the variable.
+        self.clear_resolutions_changed_since(&before, &resolved);
         Ok(())
     }
 

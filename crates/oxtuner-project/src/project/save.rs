@@ -106,12 +106,18 @@ impl Project {
             // Counted before the write: `values` borrows the images and the
             // document copy is mutated next.
             let changed = baseline.changed_cells(values);
-            let text = load::format_values(spec, &self.definition, values).map_err(|source| {
-                ProjectError::Unrepresentable {
-                    name: name.clone(),
-                    source,
+            let text = match load::format_values(spec, &self.definition, values) {
+                Ok(text) => text,
+                // The ECU owns this value and the file cannot express it; the
+                // file's own text stays rather than wedging every later save.
+                Err(_) if spec.is_controller_owned() => continue,
+                Err(source) => {
+                    return Err(ProjectError::Unrepresentable {
+                        name: name.clone(),
+                        source,
+                    });
                 }
-            })?;
+            };
 
             let (page, kind) = match spec.ini_page() {
                 Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
@@ -193,8 +199,8 @@ impl Project {
             Ok(bytes) => Msq::parse(&bytes).map_err(ProjectError::Msq)?,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let template = format!(
-                    "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<msq xmlns=\"http://www.msefi.com/:msq\">\n    <versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"{}\"/>\n    <page number=\"-1\"/>\n</msq>\n",
-                    self.definition.signature
+                    "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<msq xmlns=\"http://www.msefi.com/:msq\">\n    <versionInfo fileFormat=\"4.0\" signature=\"{}\"/>\n    <page number=\"-1\"/>\n</msq>\n",
+                    crate::xml::escape_attribute(&self.definition.signature)
                 );
                 Msq::parse(template.as_bytes()).map_err(ProjectError::Msq)?
             }

@@ -732,6 +732,28 @@ controllerPriority = owned
     }
 
     #[test]
+    fn importing_a_variable_it_did_not_change_keeps_its_decision() {
+        let mut images = images();
+        let mut ram = tune();
+        ram.set_user("a", 9.0).unwrap();
+        ram.set_user("b", 9.0).unwrap();
+        images.reconcile_read(ram.clone()).unwrap();
+        images.keep_working();
+
+        let mut imported = Tune::new(Arc::clone(images.layout()));
+        imported.set_user("a", 4.0).unwrap();
+        // The file names `b` but carries the value it already had.
+        imported.set_user("b", 0.0).unwrap();
+        images
+            .import_applied(&imported, &["a".to_owned(), "b".to_owned()])
+            .expect("import");
+
+        let conflicts = images.reconcile_read(ram).unwrap();
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].name, "a");
+    }
+
+    #[test]
     fn a_value_with_no_presentation_is_never_sent_or_reported() {
         let definition = parse_str(
             "\

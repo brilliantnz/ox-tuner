@@ -749,6 +749,18 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
         return;
     }
 
+    // A read-only project cannot save either choice, so the dialog would be a
+    // modal with both buttons disabled; the status bar carries the reason.
+    let blocked = status
+        .project
+        .as_ref()
+        .is_some_and(|project| project.read_only)
+        || status.project_missing;
+    if blocked {
+        CoreService::status_mut(cx).review_pending = false;
+        return;
+    }
+
     // The review is the only path that satisfies the core's write gate. It
     // replaces whatever dialog is in the way instead of being dropped.
     if window.has_active_dialog(cx) {

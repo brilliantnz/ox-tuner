@@ -606,13 +606,16 @@ impl Tune {
 
     /// Whether the variable can be edited and will be sent.
     ///
-    /// A controller-owned value and a `noMsqSave` value are refused because
-    /// the write plan and the tune file both exclude them.
+    /// A controller-owned value, a `noMsqSave` value and one whose scale or
+    /// translate is unresolved are refused: none can reach the wire or the
+    /// file, so an edit would be lost.
     pub fn is_writable(&self, name: &str) -> bool {
-        self.layout
-            .variable(name)
-            .is_some_and(|variable| !variable.is_controller_owned() && !variable.no_msq_save)
-            && !self.layout.is_alias(name)
+        self.layout.variable(name).is_some_and(|variable| {
+            !variable.is_controller_owned()
+                && !variable.no_msq_save
+                && variable.scale.is_some()
+                && variable.translate.is_some()
+        }) && !self.layout.is_alias(name)
     }
 
     /// One variable by name, with the normalised error for a miss.
