@@ -35,6 +35,7 @@ gpui_kit::actions!(
         WriteToRam,
         BurnToFlash,
         AdoptEcuTune,
+        ReviewTuneDifferences,
         RevertTune,
         EnableWrites,
         ImportTune,

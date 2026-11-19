@@ -27,7 +27,8 @@ pub enum CellState {
     /// The working value equals the file but the ECU holds something else, or a
     /// reconnect found the ECU changed. Needs a decision, never an auto-write.
     Conflict,
-    /// A PC-side variable: stored only in the tune file, never sent.
+    /// A PC-side variable, or a value the write plan cannot send: it has no
+    /// sync state to show.
     NotApplicable,
 }
 
@@ -80,6 +81,11 @@ pub struct TuneStatus {
     pub pending_burn: TuneDiff,
     /// Cells marked as conflicts.
     pub conflicts: usize,
+    /// Whether ECU flash is confirmed in this session.
+    ///
+    /// A full verified burn is the only confirmation; an empty `pending_burn`
+    /// means "nothing to burn" only when this is true.
+    pub flash_known: bool,
 }
 
 impl fmt::Display for TuneStatus {

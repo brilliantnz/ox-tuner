@@ -27,6 +27,9 @@ pub struct TuneDiff {
 impl TuneDiff {
     /// Compares `baseline` with `other`.
     ///
+    /// A view and a `noMsqSave` value are excluded: neither can reach the wire
+    /// or the file.
+    ///
     /// # Errors
     ///
     /// Returns [`TuneError::LayoutMismatch`] when the tunes use different
@@ -71,10 +74,25 @@ pub(crate) fn diff_values(layout: &TuneLayout, baseline: &[Values], other: &[Val
     let mut diff = TuneDiff::default();
 
     for (index, variable) in layout.variables().iter().enumerate() {
+        if layout.is_alias_at(index) {
+            // A view follows its owner and is never written to a file.
+            continue;
+        }
+        if variable.no_msq_save || variable.scale.is_none() || variable.translate.is_none() {
+            // The file cannot carry it, so it can never be an unsaved change.
+            continue;
+        }
         let (Some(left), Some(right)) = (baseline.get(index), other.get(index)) else {
             continue;
         };
-        let changed = left.changed_cells(right);
+        let changed = match (left, right) {
+            // A cell that goes on the wire is compared as the wire stores it;
+            // a PC-side value and text compare exactly.
+            (Values::Numbers(_), Values::Numbers(_)) if variable.ini_page().is_some() => {
+                left.changed_wire_cells(right, variable)
+            }
+            _ => left.changed_cells(right),
+        };
         if changed == 0 {
             continue;
         }

@@ -32,7 +32,7 @@ page = 1
 reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
 aeMode = bits, U08, 1, [0:7], "TPS", "MAP", "Alpha-N"
 note = string, ASCII, 8
-table = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+table = array, U08, 16, [2x2], "", 1, 0, 0, 255, 0
 #include page2.ini
 
 [PcVariables]
@@ -2168,4 +2168,91 @@ fn creation_without_a_baud_keeps_the_definition_rate() {
 
     assert_eq!(project.state().connection.last_port, None);
     assert_eq!(project.state().connection.baud_override, None);
+}
+
+const ALIAS_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+data = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+data0 = bits, U08, 0, [0:7]
+"#;
+
+#[test]
+fn a_view_that_carries_its_owners_bytes_survives_a_save() {
+    const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant name="data0">5.0</constant>
+    </page>
+</msq>
+"#;
+    let dir = TempDir::new("alias-only-save");
+    dir.write("projectCfg/mainController.ini", ALIAS_DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert_eq!(project.tune().raw_at("data", 0).unwrap(), 5.0);
+
+    project.save().expect("an unedited project saves");
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert_eq!(
+        reopened.tune().raw_at("data", 0).unwrap(),
+        5.0,
+        "removing the view would lose the only entry that carried the byte"
+    );
+}
+
+#[test]
+fn a_saved_view_is_not_reported_missing_on_reopen() {
+    const TUNE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant cols="1" name="data" rows="4">5.0 6.0 7.0 8.0</constant>
+    </page>
+</msq>
+"#;
+    let dir = TempDir::new("alias-save-warning");
+    dir.write("projectCfg/mainController.ini", ALIAS_DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project.save().expect("the project saves");
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+
+    let missing: Vec<&str> = reopened
+        .report()
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::MissingValue)
+        .map(|issue| issue.message.as_str())
+        .collect();
+    assert!(missing.is_empty(), "{missing:?}");
+    assert_eq!(reopened.tune().scalar_raw("data0").unwrap(), 5.0);
+}
+
+#[test]
+fn a_pc_edit_lands_where_the_project_reads_it() {
+    let dir = project_dir("pc-save");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_user("rpmhigh", 10_000.0)
+        .expect("the PC value is editable");
+
+    project.save().expect("the project saves");
+
+    assert!(
+        dir.path().join("projectCfg/pcVariableValues.msq").exists(),
+        "a PC edit is written to the sidecar the project reads"
+    );
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert_eq!(reopened.tune().scalar_user("rpmhigh").unwrap(), 10_000.0);
 }

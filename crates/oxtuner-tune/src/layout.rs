@@ -17,7 +17,7 @@
 //! loaded, and reports any it cannot resolve instead of guessing. Re-evaluating
 //! them live as the user edits is M4 work.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use oxtuner_ini::expr::EvalContext;
@@ -198,6 +198,85 @@ pub struct VariableSpec {
     pub default_raw: f64,
 }
 
+/// Marks the variables whose bytes another variable on the same page covers.
+///
+/// The wider span wins, and containment must be strict. Two constants over
+/// exactly the same bytes are peers, not an owner and a view, so the one
+/// declared later can still write them. A partial overlap is left alone too:
+/// two variables that share only some bytes cannot be ordered safely, and
+/// treating one as the truth would silently drop the other.
+///
+/// This is deliberately not the dialect's load order: a file applies constants
+/// in the order it lists them, while here the wider constant owns the bytes
+/// whatever the declaration order. The narrower constant is a view either way,
+/// and the definitions this build reads always declare the owner first.
+fn mark_aliases(variables: &[VariableSpec], pages: &[PageLayout]) -> Vec<Option<usize>> {
+    let mut aliases = vec![None; variables.len()];
+
+    for page in pages {
+        let mut spans: Vec<(usize, u32, u32)> = page
+            .variables
+            .iter()
+            .filter_map(|index| {
+                let variable = variables.get(*index)?;
+                // Text is a blob of its own; a numeric variable that happens
+                // to sit inside a text field is not a view of that text.
+                if matches!(variable.shape, EntryShape::Text { .. }) {
+                    return None;
+                }
+                let start = variable.address?;
+                let width = variable.data_type.size();
+                let len = match variable.shape {
+                    EntryShape::Scalar | EntryShape::Bits { .. } => width,
+                    EntryShape::Array { .. } => {
+                        width.checked_mul(u32::try_from(variable.element_count()).ok()?)?
+                    }
+                    EntryShape::Text { .. } => return None,
+                };
+
+                (len > 0).then_some((*index, start, len))
+            })
+            .collect();
+
+        // Wider first, declaration order on a tie.
+        spans.sort_by(|left, right| right.2.cmp(&left.2).then(left.0.cmp(&right.0)));
+
+        for position in 0..spans.len() {
+            let (index, start, len) = spans[position];
+            let variable = &variables[index];
+            // A bit field that covers only part of its word is a real control
+            // of those bits, not a duplicate: writing it must still merge into
+            // the word. Only a field that spans the whole word duplicates it.
+            let duplicate = match variable.shape {
+                EntryShape::Bits { low, high, .. } => {
+                    let bits = variable.data_type.size().saturating_mul(8);
+                    low == 0 && u32::from(high).saturating_add(1) >= bits && bits > 0
+                }
+                _ => true,
+            };
+            if !duplicate {
+                continue;
+            }
+
+            let end = start.saturating_add(len);
+            // Strict containment: two variables over the same bytes are peers,
+            // and the one declared later must still be able to write them.
+            let owner = spans[..position]
+                .iter()
+                .find(|(_, outer_start, outer_len)| {
+                    *outer_len > len
+                        && *outer_start <= start
+                        && end <= outer_start.saturating_add(*outer_len)
+                });
+            if let Some((owner, _, _)) = owner {
+                aliases[index] = Some(*owner);
+            }
+        }
+    }
+
+    aliases
+}
+
 /// Whether a bit field survives the page codec's read-modify-write round trip.
 ///
 /// The word must be an integer that `f64` holds exactly (at most 4 bytes), and
@@ -370,6 +449,13 @@ pub struct TuneLayout {
     lookup: HashMap<u64, usize>,
     pages: Vec<PageLayout>,
     issues: Vec<LayoutIssue>,
+    /// One owner per variable, when another variable's bytes contain all of its
+    /// own.
+    ///
+    /// A derived bit alias is the common shape. Such a variable is a view of
+    /// the bytes, so it is not persisted to a tune file and not written to the
+    /// ECU on its own; the variable that covers it carries the value.
+    aliases: Vec<Option<usize>>,
 }
 
 impl TuneLayout {
@@ -397,6 +483,7 @@ impl TuneLayout {
             lookup: HashMap::new(),
             pages: Vec::new(),
             issues: Vec::new(),
+            aliases: Vec::new(),
         };
 
         for (name, constant) in definition.constants.iter() {
@@ -408,6 +495,7 @@ impl TuneLayout {
         }
 
         layout.build_pages(definition);
+        layout.aliases = mark_aliases(&layout.variables, &layout.pages);
         layout
     }
 
@@ -692,6 +780,92 @@ impl TuneLayout {
         self.page(page)
     }
 
+    /// Whether the variable at `index` is covered by another variable's bytes.
+    pub fn is_alias_at(&self, index: usize) -> bool {
+        self.aliases.get(index).is_some_and(Option::is_some)
+    }
+
+    /// Whether `name` is covered by another variable's bytes.
+    pub fn is_alias(&self, name: &str) -> bool {
+        self.index(name)
+            .is_some_and(|index| self.is_alias_at(index))
+    }
+
+    /// The index of the variable that owns `index`'s bytes, when it is a view.
+    pub fn alias_owner_at(&self, index: usize) -> Option<usize> {
+        self.aliases.get(index).copied().flatten()
+    }
+
+    /// The variable that owns `name`'s bytes, when it is a view.
+    pub fn alias_owner(&self, name: &str) -> Option<&str> {
+        let index = self.index(name)?;
+        let owner = self.alias_owner_at(index)?;
+
+        self.variables.get(owner).map(|spec| spec.name.as_str())
+    }
+
+    /// Whether a text field on `page` shares bytes with another variable.
+    ///
+    /// The page codec reads a text field as its whole length. A number that
+    /// overlaps it would be read as part of the text, so such a page is left as
+    /// the file wrote it instead of being rebuilt.
+    pub fn page_has_text_overlap(&self, page: IniPage) -> bool {
+        let Some(page_layout) = self.page(page) else {
+            return false;
+        };
+
+        let spans: Vec<(usize, bool, u32, u32)> = page_layout
+            .variables
+            .iter()
+            .filter_map(|index| {
+                let spec = self.variables.get(*index)?;
+                let start = spec.address?;
+                let width = spec.data_type.size();
+                let len = match spec.shape {
+                    EntryShape::Text { len } => u32::try_from(len).ok()?,
+                    EntryShape::Scalar | EntryShape::Bits { .. } => width,
+                    EntryShape::Array { .. } => {
+                        width.checked_mul(u32::try_from(spec.element_count()).ok()?)?
+                    }
+                };
+                let text = matches!(spec.shape, EntryShape::Text { .. });
+
+                Some((*index, text, start, len))
+            })
+            .collect();
+
+        spans.iter().any(|(index, text, start, len)| {
+            *text
+                && spans.iter().any(|(other, _, other_start, other_len)| {
+                    index != other
+                        && *other_start < start.saturating_add(*len)
+                        && *start < other_start.saturating_add(*other_len)
+                })
+        })
+    }
+
+    /// The names `page` patches when a file carried `applied`.
+    ///
+    /// A view is included only when the file did not carry its owner: the owner
+    /// writes the bytes and the view follows the decoded page. Keeping this in
+    /// one place means a load and an import cannot disagree.
+    pub fn page_patch_names<'a>(&self, applied: &'a [String], page: IniPage) -> Vec<&'a str> {
+        let applied_names: HashSet<&str> = applied.iter().map(String::as_str).collect();
+
+        applied
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                self.variable(name)
+                    .is_some_and(|spec| spec.ini_page() == Some(page))
+            })
+            .filter(|name| {
+                self.alias_owner(name)
+                    .is_none_or(|owner| !applied_names.contains(owner))
+            })
+            .collect()
+    }
+
     /// Every problem found while building the layout.
     pub fn issues(&self) -> &[LayoutIssue] {
         &self.issues
@@ -863,6 +1037,89 @@ fn default_raw(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_number_inside_a_text_field_flags_the_page() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, \"x\", 1, 0
+outside = scalar, U08, 12, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(
+            layout.page_has_text_overlap(IniPage::FIRST),
+            "the scalar at 4 sits inside the eight text bytes"
+        );
+    }
+
+    #[test]
+    fn a_text_field_beside_a_number_is_not_an_overlap() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+after = scalar, U08, 8, \"x\", 1, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(!layout.page_has_text_overlap(IniPage::FIRST));
+    }
+
+    #[test]
+    fn a_full_width_bit_alias_is_a_view_and_a_partial_one_is_not() {
+        let definition = oxtuner_ini::Definition::parse(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 8
+page = 1
+data = array, U08, 0, [4], \"\", 1, 0, 0, 255, 0
+data0 = bits, U08, 0, [0:7]
+data1 = bits, U08, 1, [0:7]
+fan = bits, U08, 4, [1:1]
+status = scalar, U08, 4, \"bits\", 1, 0
+",
+            &oxtuner_ini::SettingsContext::new(),
+        )
+        .expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+
+        assert!(layout.is_alias("data0"), "a whole byte inside the array");
+        assert!(layout.is_alias("data1"));
+        assert!(!layout.is_alias("data"), "the array owns its bytes");
+        assert!(
+            !layout.is_alias("fan"),
+            "a partial bit field is a control, not a view"
+        );
+        assert!(!layout.is_alias("status"), "a peer of the bit field");
+    }
     use super::*;
     use oxtuner_ini::{SettingsContext, parse_str};
 

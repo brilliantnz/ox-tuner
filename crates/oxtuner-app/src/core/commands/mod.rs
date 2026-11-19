@@ -53,17 +53,15 @@ pub(super) fn send<T>(
     code: FailureCode,
     command: &'static str,
     send: impl FnOnce(CoreHandle) -> Result<T, oxtuner_core::CoreError>,
-) -> bool {
-    let Some(handle) = handle_or_report(cx, code) else {
-        return false;
-    };
+) -> Option<T> {
+    let handle = handle_or_report(cx, code)?;
 
     match send(handle) {
-        Ok(_) => true,
+        Ok(value) => Some(value),
         Err(error) => {
             tracing::warn!(%error, command, "the core refused the command");
             report_failure(cx, code, error.to_string());
-            false
+            None
         }
     }
 }

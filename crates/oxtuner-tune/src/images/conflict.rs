@@ -74,13 +74,23 @@ pub(super) fn diff_writable_values(
 ) -> TuneDiff {
     let mut diff = TuneDiff::default();
     for (index, variable) in layout.variables().iter().enumerate() {
-        if variable.is_controller_owned() || variable.address.is_none() {
+        if variable.is_controller_owned()
+            || variable.no_msq_save
+            || variable.address.is_none()
+            || variable.scale.is_none()
+            || variable.translate.is_none()
+            || !variable.bit_field_round_trips()
+        {
+            continue;
+        }
+        if layout.is_alias_at(index) {
+            // Another variable owns these bytes; the view follows them.
             continue;
         }
         let (Some(left), Some(right)) = (left.get(index), right.get(index)) else {
             continue;
         };
-        let changed = left.changed_cells(right);
+        let changed = left.changed_wire_cells(right, variable);
         if changed == 0 {
             continue;
         }

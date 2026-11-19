@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::diff::diff_values;
-use crate::{EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout};
+use crate::wire::{decode_page, encode_page, patch_page};
+use crate::{
+    EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout, Values, VariableSpec,
+};
 
 mod conflict;
 mod state;
@@ -35,6 +38,9 @@ struct CellRef {
 enum Overlay {
     WriteFailed,
     Conflict,
+    /// The user chose the working value over the ECU's. The cell is a normal
+    /// unsent change until a verified write makes the two agree.
+    Superseded,
 }
 
 impl TuneImages {
@@ -133,7 +139,10 @@ impl TuneImages {
         self.ecu_unknown
     }
 
-    /// Records a confirmed RAM image (verified write or a page read).
+    /// Records a confirmed RAM image from a partial observation.
+    ///
+    /// A complete read goes through [`Self::reconcile_read`], which also
+    /// compares and clears failure marks; this setter stores the image only.
     ///
     /// # Errors
     ///
@@ -147,8 +156,6 @@ impl TuneImages {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
         self.ecu_unknown = false;
-        self.overlays
-            .retain(|_, overlay| *overlay != Overlay::WriteFailed);
         Ok(())
     }
 
@@ -168,23 +175,36 @@ impl TuneImages {
         Ok(())
     }
 
+    /// Forgets what flash holds without touching the RAM image.
+    ///
+    /// A partial burn changes some pages and leaves the rest, so the cached
+    /// flash image no longer describes the chip.
+    pub fn mark_flash_unknown(&mut self) {
+        self.ecu_flash = None;
+    }
+
     /// Drops both ECU images and marks every cell unknown (connection lost).
     ///
     /// A write failure survives: it is the one thing the user must still see
-    /// when the link comes back.
+    /// when the link comes back. A decision the user already made about a
+    /// differing cell survives too, because it is about the working image.
     pub fn mark_unknown(&mut self) {
         self.ecu_ram = None;
         self.ecu_flash = None;
         self.ecu_unknown = true;
         self.overlays
-            .retain(|_, overlay| *overlay == Overlay::WriteFailed);
+            .retain(|_, overlay| matches!(overlay, Overlay::WriteFailed | Overlay::Superseded));
     }
 
-    /// Replaces the RAM image after a reconnect read and reports conflicts.
+    /// Records the RAM image a read produced and reports every difference.
     ///
-    /// Every cell where the ECU differs from the working image is marked, for
-    /// the conflict dialog (ADR-0010: "on reconnect, compare the ECU with
-    /// `working` → conflict dialog; no automatic write").
+    /// The first read of a session and a later one behave the same: a cell
+    /// where the ECU differs from the working image is a conflict waiting for
+    /// the user's decision, and a cell the user already decided to overwrite
+    /// keeps that decision. A value the user can edit never moves here, so an
+    /// unsaved edit is never lost (ADR-0010). The one exception is a
+    /// controller-owned value: the ECU always owns it, so the read replaces
+    /// the offline copy.
     ///
     /// # Errors
     ///
@@ -192,25 +212,51 @@ impl TuneImages {
     /// layout.
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "taking the image by value lets the reconnect read hand it over without a clone"
+        reason = "taking the image by value lets the read hand it over without a clone"
     )]
-    pub fn reconnect(&mut self, ram: Tune) -> Result<Vec<Conflict>, TuneError> {
+    pub fn reconcile_read(&mut self, ram: Tune) -> Result<Vec<Conflict>, TuneError> {
         self.check_layout(&ram)?;
         self.ecu_ram = Some(ram.snapshot());
         self.ecu_unknown = false;
+        // A complete read observes every cell, so it is the verified read-back
+        // a failed write waits for.
         self.overlays
             .retain(|_, overlay| *overlay != Overlay::WriteFailed);
 
+        // A controller-owned value is the ECU's, not the project's: the
+        // reference behavior overwrites the offline copy on every connect.
+        for (variable, spec) in self.layout.variables().iter().enumerate() {
+            if !spec.is_controller_owned() || spec.ini_page().is_none() {
+                continue;
+            }
+            let Some(values) = ram.values().get(variable) else {
+                continue;
+            };
+            for index in 0..spec.element_count() {
+                if let Some(raw) = values.number(index) {
+                    let _ = self.working.set_image_raw(&spec.name, index, raw);
+                }
+            }
+        }
+
         let mut conflicts = Vec::new();
         for (variable, spec) in self.layout.variables().iter().enumerate() {
-            if spec.owner == Owner::Pc {
+            if !self.is_sendable(variable) {
                 continue;
             }
             for index in 0..spec.element_count() {
+                let key = CellRef { variable, index };
                 let (working_value, ecu_value) = {
                     let working = &self.working.values()[variable];
                     let ecu = &ram.values()[variable];
-                    if working.same_at(ecu, index) {
+                    if Self::same_sent_value(spec, working, ecu, index) {
+                        // Equal again: a decision about the difference is moot.
+                        if matches!(
+                            self.overlays.get(&key),
+                            Some(Overlay::Conflict | Overlay::Superseded)
+                        ) {
+                            self.overlays.remove(&key);
+                        }
                         continue;
                     }
                     (
@@ -219,8 +265,17 @@ impl TuneImages {
                     )
                 };
 
-                self.overlays
-                    .insert(CellRef { variable, index }, Overlay::Conflict);
+                // A failed write and a decision to keep the working value both
+                // stand: the difference is known, and neither asks for a new
+                // choice.
+                if matches!(
+                    self.overlays.get(&key),
+                    Some(Overlay::WriteFailed | Overlay::Superseded)
+                ) {
+                    continue;
+                }
+
+                self.overlays.insert(key, Overlay::Conflict);
                 let (row, column) = cell_position(spec.shape, index);
                 conflicts.push(Conflict {
                     name: spec.name.clone(),
@@ -257,6 +312,21 @@ impl TuneImages {
             .retain(|_, overlay| *overlay != Overlay::WriteFailed);
     }
 
+    /// Clears the failure marks on the named variables only.
+    ///
+    /// A verified write observed the pages it wrote; a failure on a page it
+    /// did not touch still stands.
+    pub fn clear_write_failures_for(&mut self, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            self.overlays.retain(|key, overlay| {
+                key.variable != variable || *overlay != Overlay::WriteFailed
+            });
+        }
+    }
+
     /// Clears a conflict overlay once the user has decided about the cell.
     ///
     /// # Errors
@@ -270,16 +340,75 @@ impl TuneImages {
     ) -> Result<(), TuneError> {
         let (variable, index) = self.cell(name, row, column)?;
         let key = CellRef { variable, index };
-        if self.overlays.get(&key) == Some(&Overlay::Conflict) {
+        if matches!(
+            self.overlays.get(&key),
+            Some(Overlay::Conflict | Overlay::Superseded)
+        ) {
             self.overlays.remove(&key);
         }
         Ok(())
     }
 
-    /// Clears every conflict overlay after the user decided.
-    pub fn clear_conflicts(&mut self) {
+    /// Records the user's decision to keep the working values.
+    ///
+    /// Every undecided conflict becomes an unsent change: the cell shows the
+    /// working value is not in ECU RAM, and a later read keeps the decision
+    /// instead of asking again.
+    pub fn keep_working(&mut self) {
+        for overlay in self.overlays.values_mut() {
+            if *overlay == Overlay::Conflict {
+                *overlay = Overlay::Superseded;
+            }
+        }
+    }
+
+    /// Clears every conflict and every decision about one.
+    pub fn clear_resolutions(&mut self) {
         self.overlays
-            .retain(|_, overlay| *overlay != Overlay::Conflict);
+            .retain(|_, overlay| !matches!(overlay, Overlay::Conflict | Overlay::Superseded));
+    }
+
+    /// Clears the decisions a merge changed the value of.
+    ///
+    /// A file names nearly every constant, so "the file carried it" is not the
+    /// same as "the merge moved it". Only a changed cell loses its decision.
+    pub(crate) fn clear_resolutions_changed_since(&mut self, before: &Tune, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            if self.layout.is_alias_at(variable) {
+                continue;
+            }
+            let spec = &self.layout.variables()[variable];
+            let (Some(before_values), Some(after_values)) =
+                (before.value(name), self.working.value(name))
+            else {
+                continue;
+            };
+            for index in 0..spec.element_count() {
+                if Self::same_sent_value(spec, before_values, after_values, index) {
+                    continue;
+                }
+                self.overlays.remove(&CellRef { variable, index });
+            }
+        }
+    }
+
+    /// Clears the decisions about the named variables only.
+    ///
+    /// A page-scoped write makes its own variables agree with RAM; a decision
+    /// about a cell it did not send still stands.
+    pub fn clear_resolutions_for(&mut self, names: &[String]) {
+        for name in names {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            self.overlays.retain(|key, overlay| {
+                key.variable != variable
+                    || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
+            });
+        }
     }
 
     /// Every currently marked conflict, in layout order.
@@ -287,8 +416,7 @@ impl TuneImages {
         let mut conflicts = Vec::new();
         for (variable, spec) in self.layout.variables().iter().enumerate() {
             for index in 0..spec.element_count() {
-                let key = CellRef { variable, index };
-                if self.overlays.get(&key) != Some(&Overlay::Conflict) {
+                if !self.conflict_is_live(variable, index) {
                     continue;
                 }
                 let working = &self.working.values()[variable];
@@ -311,7 +439,34 @@ impl TuneImages {
 
     /// Accepts the RAM image as the new baseline (after a save).
     pub fn commit_baseline(&mut self) {
+        // Save writes the variables that changed, and those values become the
+        // chosen tune. An untouched difference stays an open question: saving
+        // a different variable is not a decision about it.
+        let saved = diff_values(&self.layout, self.baseline.values(), self.working.values());
         self.baseline = self.working.snapshot();
+
+        let Some(ram) = self.ecu_ram.clone() else {
+            return;
+        };
+        for name in &saved.changed_variables {
+            let Some(variable) = self.layout.index(name) else {
+                continue;
+            };
+            if !self.is_sendable(variable) {
+                continue;
+            }
+            let spec = &self.layout.variables()[variable];
+            for index in 0..spec.element_count() {
+                let working = &self.working.values()[variable];
+                if Self::same_sent_value(spec, working, &ram.values()[variable], index) {
+                    continue;
+                }
+                let key = CellRef { variable, index };
+                if !matches!(self.overlays.get(&key), Some(Overlay::WriteFailed)) {
+                    self.overlays.insert(key, Overlay::Superseded);
+                }
+            }
+        }
     }
 
     /// Discards local edits for the named variables, returning each value to
@@ -343,6 +498,7 @@ impl TuneImages {
                 continue;
             };
             let mut failed = false;
+            let mut moved = false;
 
             if matches!(spec.shape, EntryShape::Text { .. }) {
                 let saved = self.baseline.text(name).ok().map(str::to_owned);
@@ -351,6 +507,7 @@ impl TuneImages {
                     if saved != current {
                         if self.working.set_text(name, &saved).is_ok() {
                             reverted += 1;
+                            moved = true;
                         } else {
                             failed = true;
                         }
@@ -383,6 +540,7 @@ impl TuneImages {
                     }
 
                     reverted += 1;
+                    moved = true;
                 }
             }
 
@@ -391,9 +549,13 @@ impl TuneImages {
             // too, the way a whole-tune revert drops every conflict. A failed
             // write leaves the mark in place: it would otherwise point at a
             // value that did not move.
-            if !failed && let Some(variable) = self.layout.index(name) {
+            if !failed
+                && moved
+                && let Some(variable) = self.layout.index(name)
+            {
                 self.overlays.retain(|key, overlay| {
-                    key.variable != variable || *overlay != Overlay::Conflict
+                    key.variable != variable
+                        || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
                 });
             }
         }
@@ -404,8 +566,7 @@ impl TuneImages {
     /// Discards every local edit.
     pub fn revert_to_baseline(&mut self) {
         self.working = self.baseline.snapshot();
-        self.overlays
-            .retain(|_, overlay| *overlay != Overlay::Conflict);
+        self.clear_resolutions();
     }
 
     /// Replaces the working image (an import). The caller owns consent policy.
@@ -424,8 +585,196 @@ impl TuneImages {
     )]
     pub fn import(&mut self, tune: Tune) -> Result<(), TuneError> {
         self.working.adopt_values(&tune)?;
-        self.overlays
-            .retain(|_, overlay| *overlay != Overlay::Conflict);
+        self.clear_resolutions();
+        self.clear_write_failures();
+        Ok(())
+    }
+
+    /// Merges one page whose text field overlaps a number.
+    ///
+    /// Such a page cannot be decoded back without reading the overlap as text,
+    /// so the values the file carried are adopted as they are. A view whose
+    /// owner the file did not carry still moves the owner's bytes, because the
+    /// owner's value in the file's tune is only the definition default.
+    fn merge_overlapping_page(
+        &self,
+        merged: &mut Tune,
+        source: &mut Option<Tune>,
+        page: IniPage,
+        tune: &Tune,
+        applied: &[String],
+        resolved: &mut Vec<String>,
+    ) -> Result<(), TuneError> {
+        let names = self.layout.page_patch_names(applied, page);
+        if names.is_empty() {
+            return Ok(());
+        }
+        resolved.extend(names.iter().map(|name| (*name).to_owned()));
+
+        let source = match source {
+            Some(source) => source,
+            None => source.insert({
+                let mut copy = merged.snapshot();
+                copy.adopt_values(tune)?;
+                copy
+            }),
+        };
+
+        let mut moved: Vec<&str> = names.clone();
+        // A view the file carried beside its owner: `page_patch_names` dropped
+        // it, so the file's own value is the one to keep.
+        for name in applied {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            if spec.ini_page() == Some(page)
+                && self.layout.alias_owner(name).is_some()
+                && !moved.contains(&spec.name.as_str())
+            {
+                moved.push(&spec.name);
+            }
+        }
+        merged.adopt_named(source, &moved)?;
+
+        // A view the file carried without its owner moves the owner's bytes.
+        let views: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| self.layout.alias_owner(name).is_some())
+            .collect();
+        if views.is_empty() {
+            return Ok(());
+        }
+
+        let base = encode_page(&self.layout, page, merged)?;
+        let patched = patch_page(&self.layout, page, &base, tune, &views)?;
+        let mut decoded = merged.snapshot();
+        decode_page(&self.layout, page, &patched, &mut decoded)?;
+
+        let mut moved = views.clone();
+        for name in &views {
+            if let Some(owner) = self.layout.alias_owner(name)
+                && !moved.contains(&owner)
+            {
+                moved.push(owner);
+            }
+        }
+        merged.adopt_named(&decoded, &moved)?;
+
+        Ok(())
+    }
+
+    /// Merges the variables a tune file carried onto the working image.
+    ///
+    /// A file is not a whole image: it writes the constants it knows, and it
+    /// leaves derived ones out. The values it carries are patched into each
+    /// page's bytes and the page is decoded back, so constants that share
+    /// bytes end up agreeing. A constant the file omits keeps its current
+    /// value, which for a derived bit alias is the one the ECU gave it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`TuneError`] when a page cannot be encoded, patched or
+    /// decoded, or when a value's shape does not fit the layout.
+    pub fn import_applied(&mut self, tune: &Tune, applied: &[String]) -> Result<(), TuneError> {
+        // The merge lands in a copy: a page that fails halfway must leave the
+        // working image exactly as it was, like the whole-image import does.
+        let before = self.working.snapshot();
+        let mut merged = self.working.snapshot();
+        // Only the variables this file actually moved lose their decision; a
+        // difference it never touched is still the user's to resolve.
+        let mut resolved: Vec<String> = Vec::new();
+        let pages: Vec<IniPage> = self.layout.pages().iter().map(|page| page.page).collect();
+        // The file's tune has its own layout allocation, and a value copy needs
+        // the destination's layout. This copy holds the file's values under the
+        // image's layout; the file does not change while pages are merged.
+        let mut source: Option<Tune> = None;
+
+        for page in pages {
+            // A page that overlaps text with numbers cannot be decoded back
+            // without reading the overlap as text. The values the file carried
+            // are adopted as they stand, so nothing the file wrote is dropped.
+            if self.layout.page_has_text_overlap(page) {
+                self.merge_overlapping_page(
+                    &mut merged,
+                    &mut source,
+                    page,
+                    tune,
+                    applied,
+                    &mut resolved,
+                )?;
+
+                continue;
+            }
+
+            let names = self.layout.page_patch_names(applied, page);
+            if names.is_empty() {
+                continue;
+            }
+
+            let base = encode_page(&self.layout, page, &merged)?;
+            let patched = patch_page(&self.layout, page, &base, tune, &names)?;
+
+            // Decode into a scratch that already holds the image: a value the
+            // file did not mention, or one the codec refuses, keeps its value
+            // instead of falling to zero.
+            let mut decoded = merged.snapshot();
+            decode_page(&self.layout, page, &patched, &mut decoded)?;
+
+            // The values the file carried, the owners whose bytes a view
+            // wrote, and every view on the page follow the decoded result.
+            let mut moved: Vec<&str> = names.clone();
+            for name in &names {
+                if let Some(owner) = self.layout.alias_owner(name)
+                    && !moved.contains(&owner)
+                {
+                    moved.push(owner);
+                }
+            }
+            if let Some(page_layout) = self.layout.page(page) {
+                for index in &page_layout.variables {
+                    let spec = &self.layout.variables()[*index];
+                    if self.layout.is_alias_at(*index) && !moved.contains(&spec.name.as_str()) {
+                        moved.push(&spec.name);
+                    }
+                }
+            }
+
+            merged.adopt_named(&decoded, &moved)?;
+            resolved.extend(moved.iter().map(|name| (*name).to_owned()));
+        }
+
+        // Settings with no page are not on the wire; they are copied as they
+        // are, and a file that omits them keeps the current value.
+        for name in applied {
+            let Some(spec) = self.layout.variable(name) else {
+                continue;
+            };
+            if spec.ini_page().is_some() {
+                continue;
+            }
+            let Some(values) = tune.value(&spec.name) else {
+                continue;
+            };
+
+            match values {
+                Values::Numbers(numbers) => {
+                    for (index, raw) in numbers.iter().enumerate() {
+                        merged.set_image_raw(&spec.name, index, *raw)?;
+                    }
+                }
+                Values::Text(text) => {
+                    merged.set_image_text(&spec.name, text)?;
+                }
+            }
+            resolved.push(spec.name.clone());
+        }
+
+        self.working.adopt_values(&merged)?;
+        // The imported values are new; a decision about a value the merge
+        // changed does not carry over. A difference it did not touch still
+        // stands, even when the file named the variable.
+        self.clear_resolutions_changed_since(&before, &resolved);
         Ok(())
     }
 
@@ -463,6 +812,37 @@ impl TuneImages {
         aggregate(states)
     }
 
+    /// Whether two images store the same value at one cell.
+    ///
+    /// The write plan compares wire bytes, so detection and the derived state
+    /// must too: a raw `f64` a page narrows to `f32` is equal to what the page
+    /// decodes even when the two `f64` values differ.
+    fn same_sent_value(spec: &VariableSpec, left: &Values, right: &Values, index: usize) -> bool {
+        match (left.number(index), right.number(index)) {
+            (Some(left), Some(right)) => spec.same_wire_value(left, right),
+            _ => left.same_at(right, index),
+        }
+    }
+
+    /// Whether `index` of `variable` is an undecided difference that still exists.
+    fn conflict_is_live(&self, variable: usize, index: usize) -> bool {
+        let key = CellRef { variable, index };
+        if self.overlays.get(&key) != Some(&Overlay::Conflict) {
+            return false;
+        }
+        let (Some(spec), Some(working), Some(ecu)) = (
+            self.layout.variables().get(variable),
+            self.working.values().get(variable),
+            self.ecu_ram
+                .as_ref()
+                .and_then(|ram| ram.values().get(variable)),
+        ) else {
+            return false;
+        };
+
+        !Self::same_sent_value(spec, working, ecu, index)
+    }
+
     /// The status bar's summary.
     pub fn status(&self) -> TuneStatus {
         let unsaved = diff_values(&self.layout, self.baseline.values(), self.working.values());
@@ -478,8 +858,8 @@ impl TuneImages {
         };
         let conflicts = self
             .overlays
-            .values()
-            .filter(|overlay| **overlay == Overlay::Conflict)
+            .keys()
+            .filter(|key| self.conflict_is_live(key.variable, key.index))
             .count();
 
         TuneStatus {
@@ -488,7 +868,29 @@ impl TuneImages {
             pending_write,
             pending_burn,
             conflicts,
+            flash_known: self.ecu_flash.is_some(),
         }
+    }
+
+    /// Whether the write plan could send this variable's values.
+    ///
+    /// Conflict detection covers exactly what a write could change: PC-side
+    /// values, controller-owned values, a value with no page address, a view
+    /// and a bit field the codec refuses are never sent, so a difference in
+    /// one is not something the user can decide to overwrite.
+    fn is_sendable(&self, variable: usize) -> bool {
+        let Some(spec) = self.layout.variables().get(variable) else {
+            return false;
+        };
+
+        spec.owner != Owner::Pc
+            && !spec.is_controller_owned()
+            && !spec.no_msq_save
+            && spec.address.is_some()
+            && spec.scale.is_some()
+            && spec.translate.is_some()
+            && !self.layout.is_alias_at(variable)
+            && spec.bit_field_round_trips()
     }
 
     fn check_layout(&self, tune: &Tune) -> Result<(), TuneError> {
@@ -523,27 +925,57 @@ impl TuneImages {
             return CellState::NotApplicable;
         }
 
-        match self.overlays.get(&CellRef { variable, index }) {
-            Some(Overlay::WriteFailed) => return CellState::WriteFailed,
-            Some(Overlay::Conflict) => return CellState::Conflict,
-            None => {}
+        // A view has no state of its own: the element its bytes carry is the
+        // cell the user must look at.
+        if let Some(owner) = self.layout.alias_owner_at(variable) {
+            let Some(owner_spec) = self.layout.variables().get(owner) else {
+                return CellState::Unknown;
+            };
+            let width = usize::try_from(owner_spec.data_type.size()).unwrap_or(0);
+            let offset = spec
+                .address
+                .zip(owner_spec.address)
+                .and_then(|(alias, start)| alias.checked_sub(start));
+
+            return match offset.and_then(|offset| offset.checked_div(u32::try_from(width).ok()?)) {
+                Some(mapped) => self.state_at(owner, usize::try_from(mapped).unwrap_or(0)),
+                None => CellState::Unknown,
+            };
+        }
+
+        // A value the write plan cannot send has no sync state to show.
+        if spec.is_controller_owned()
+            || spec.no_msq_save
+            || spec.address.is_none()
+            || spec.scale.is_none()
+            || spec.translate.is_none()
+            || !spec.bit_field_round_trips()
+        {
+            return CellState::NotApplicable;
+        }
+
+        if self.overlays.get(&CellRef { variable, index }) == Some(&Overlay::WriteFailed) {
+            return CellState::WriteFailed;
         }
         if self.ecu_unknown {
             return CellState::Unknown;
         }
 
         let working = &self.working.values()[variable];
-        let baseline = &self.baseline.values()[variable];
         let Some(ram) = &self.ecu_ram else {
             return CellState::Unknown;
         };
         let ram = &ram.values()[variable];
+        let equal = Self::same_sent_value(spec, working, ram, index);
 
-        if working.same_at(ram, index) {
-            let burned = self
-                .ecu_flash
-                .as_ref()
-                .is_some_and(|flash| working.same_at(&flash.values()[variable], index));
+        if self.overlays.get(&CellRef { variable, index }) == Some(&Overlay::Conflict) && !equal {
+            return CellState::Conflict;
+        }
+
+        if equal {
+            let burned = self.ecu_flash.as_ref().is_some_and(|flash| {
+                Self::same_sent_value(spec, working, &flash.values()[variable], index)
+            });
             return if burned {
                 CellState::Synced
             } else {
@@ -551,11 +983,10 @@ impl TuneImages {
             };
         }
 
-        if working.same_at(baseline, index) {
-            CellState::Conflict
-        } else {
-            CellState::LocalDirty
-        }
+        // The working value is not in ECU RAM. Whether it was edited just now
+        // or saved earlier does not matter: it is an unsent change, and only
+        // the read that found an undecided difference marks a conflict.
+        CellState::LocalDirty
     }
 
     pub(super) fn state_of_page(&self, page: &crate::PageLayout) -> CellState {

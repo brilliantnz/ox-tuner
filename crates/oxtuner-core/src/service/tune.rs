@@ -6,27 +6,6 @@
 use super::dispatch::{record_local_journal, refuse, send, send_status};
 use super::*;
 
-/// working image. Used for an imported tune, whose layout is a separate
-/// allocation but describes the same definition.
-pub(super) fn changed_against(project: &Project, other: &Tune) -> (usize, usize) {
-    let mut cells = 0usize;
-    let mut variables = 0usize;
-    for spec in project.layout().variables() {
-        let Some(current) = project.tune().value(&spec.name) else {
-            continue;
-        };
-        let Some(imported) = other.value(&spec.name) else {
-            continue;
-        };
-        let changed = current.changed_cells(imported);
-        if changed > 0 {
-            cells += changed;
-            variables += 1;
-        }
-    }
-    (cells, variables)
-}
-
 /// Clamps every non-controller tune value that is about to be written.
 ///
 /// Edits are already clamped when they enter the core. An imported tune or a
@@ -36,10 +15,6 @@ pub(super) fn changed_against(project: &Project, other: &Tune) -> (usize, usize)
 /// turn "leave the ECU's tune alone" into a write of a different number — a
 /// definition's range is not the firmware's limit. Controller-owned values are
 /// not part of the write plan either. Returns how many cells changed.
-#[expect(
-    clippy::float_cmp,
-    reason = "a value needs sending only when the ECU's stored raw value differs exactly"
-)]
 pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
     let mut clamped: Vec<(String, usize, f64)> = Vec::new();
     {
@@ -48,17 +23,21 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
             return 0;
         };
         for spec in project.layout().variables() {
-            if spec.is_controller_owned() {
+            if spec.is_controller_owned() || project.layout().is_alias(&spec.name) {
                 continue;
             }
             for index in 0..spec.element_count() {
                 let Ok(value) = images.working().user_at(&spec.name, index) else {
                     continue;
                 };
-                if ram
-                    .user_at(&spec.name, index)
-                    .is_ok_and(|sent| sent == value)
-                {
+                let same_at_wire = match (
+                    images.working().raw_at(&spec.name, index),
+                    ram.raw_at(&spec.name, index),
+                ) {
+                    (Ok(wanted), Ok(sent)) => spec.same_wire_value(wanted, sent),
+                    _ => false,
+                };
+                if same_at_wire {
                     // The ECU holds this value; there is nothing to send.
                     continue;
                 }
@@ -94,7 +73,15 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
     let mut pages = std::collections::BTreeSet::new();
     let mut cells = 0usize;
     for spec in project.layout().variables() {
-        if spec.is_controller_owned() {
+        if spec.is_controller_owned() || spec.no_msq_save {
+            continue;
+        }
+        if spec.scale.is_none() || spec.translate.is_none() {
+            // No presentation, so no file form and no value to send.
+            continue;
+        }
+        if project.layout().is_alias(&spec.name) {
+            // A view of bytes another variable owns; it follows that value.
             continue;
         }
         let Some(page) = spec.ini_page() else {
@@ -114,7 +101,7 @@ pub(super) fn unsent_changes(project: &Project) -> (Vec<String>, Vec<u8>, usize)
         let (Some(after), Some(sent)) = (working.value(&spec.name), ram.value(&spec.name)) else {
             continue;
         };
-        let remaining = after.changed_cells(sent);
+        let remaining = after.changed_wire_cells(sent, spec);
         if remaining == 0 {
             continue;
         }
@@ -147,7 +134,7 @@ pub(super) fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>,
         let (Some(after), Some(sent)) = (working.value(&name), ram.value(&name)) else {
             continue;
         };
-        let remaining = after.changed_cells(sent);
+        let remaining = after.changed_wire_cells(sent, spec);
         if remaining == 0 {
             continue;
         }
@@ -165,6 +152,20 @@ pub(super) fn unsent_for_pages(project: &Project, pages: &[u8]) -> (Vec<String>,
 pub(super) fn unsent_edits(project: &Project) -> (usize, usize) {
     let (variables, _, cells) = unsent_changes(project);
     (cells, variables.len())
+}
+
+/// Refuses a write or burn while a difference has no decision yet.
+///
+/// Writing would overwrite the ECU's tune and burning would persist it, so the
+/// operation stops until the user chooses. Reading never writes, so the state
+/// is safe to leave like this.
+pub(super) fn unresolved_conflicts(project: &Project) -> Option<String> {
+    let count = project.images().status().conflicts;
+    (count > 0).then(|| {
+        format!(
+            "{count} cell(s) differ between the project tune and the ECU tune; choose which to keep before writing or burning"
+        )
+    })
 }
 
 /// Makes the ECU image the working tune.
@@ -212,7 +213,19 @@ pub(super) fn adopt_ecu_image(
     Outcome::Continue
 }
 
+/// Saves the chosen tune and returns its path.
+fn save_resolution(project: &mut Project) -> Result<std::path::PathBuf, String> {
+    project
+        .save()
+        .map(|outcome| outcome.path)
+        .map_err(|error| error.to_string())
+}
+
 /// Resolves cells that differ between the working image and the ECU.
+///
+/// Both choices leave the project file holding the chosen tune. `UseEcu`
+/// adopts the read-back and saves it; `UseProject` saves the project's tune and
+/// the caller follows with the write and burn the choice promises.
 pub(super) fn resolve_conflicts(
     op: OpId,
     session: &mut Session,
@@ -239,6 +252,20 @@ pub(super) fn resolve_conflicts(
             "read the ECU before resolving a conflict",
         );
     };
+    // Both choices save the project. A read-only project would adopt values it
+    // cannot keep, so refuse before touching the working image.
+    if project.is_read_only() {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::TuneSaveFailed,
+            format!(
+                "the project is read-only: {}",
+                project.report().read_only_reasons().join("; ")
+            ),
+        );
+    }
 
     match resolution {
         ConflictResolution::UseEcu => {
@@ -248,6 +275,9 @@ pub(super) fn resolve_conflicts(
                     return refuse(events, report, op, FailureCode::SnapshotFailed, error);
                 }
             };
+            // Adopting changes the working image; a save that fails must not
+            // leave it adopted and the project file behind.
+            let backup = project.images().clone();
             if let Err(error) = project.images_mut().import(ram) {
                 return refuse(
                     events,
@@ -257,7 +287,13 @@ pub(super) fn resolve_conflicts(
                     error.to_string(),
                 );
             }
-            project.images_mut().clear_conflicts();
+            let saved = match save_resolution(project) {
+                Ok(path) => path,
+                Err(error) => {
+                    *project.images_mut() = backup;
+                    return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
+                }
+            };
             record_local_journal(
                 session,
                 journal_dir,
@@ -265,11 +301,23 @@ pub(super) fn resolve_conflicts(
                 0,
                 0,
                 "ok",
-                &format!("kept ECU values; snapshot {}", snapshot.display()),
+                &format!(
+                    "kept ECU values; snapshot {}; saved {}",
+                    snapshot.display(),
+                    saved.display()
+                ),
             );
         }
-        ConflictResolution::KeepWorking => {
-            project.images_mut().clear_conflicts();
+        ConflictResolution::UseProject => {
+            // Save first: a save that fails must leave the difference undecided
+            // so the write gate still refuses it.
+            let saved = match save_resolution(project) {
+                Ok(path) => path,
+                Err(error) => {
+                    return refuse(events, report, op, FailureCode::TuneSaveFailed, error);
+                }
+            };
+            project.images_mut().keep_working();
             record_local_journal(
                 session,
                 journal_dir,
@@ -277,7 +325,7 @@ pub(super) fn resolve_conflicts(
                 0,
                 0,
                 "ok",
-                "kept working values",
+                &format!("kept the project tune; saved {}", saved.display()),
             );
         }
     }
@@ -559,14 +607,17 @@ pub(super) fn import_tune(
     }
 
     let loaded = oxtuner_project::load::load(&msq, project.definition());
-    let (cells, variables) = changed_against(project, &loaded.tune);
+    let before = project.images().working().snapshot();
     let snapshot = match snapshot::write(project, operation) {
         Ok(path) => path,
         Err(error) => {
             return refuse(events, report, op, FailureCode::SnapshotFailed, error);
         }
     };
-    if let Err(error) = project.images_mut().import(loaded.tune) {
+    if let Err(error) = project
+        .images_mut()
+        .import_applied(&loaded.tune, &loaded.applied)
+    {
         return refuse(
             events,
             report,
@@ -575,6 +626,22 @@ pub(super) fn import_tune(
             error.to_string(),
         );
     }
+
+    // What the merge actually moved, not a second derivation of it.
+    let (cells, variables) =
+        match oxtuner_tune::TuneDiff::between(&before, project.images().working()) {
+            Ok(diff) => (diff.cells, diff.changed_variables.len()),
+            Err(error) => {
+                return refuse(
+                    events,
+                    report,
+                    op,
+                    FailureCode::ImportRejected,
+                    error.to_string(),
+                );
+            }
+        };
+
     tracing::info!(
         %op,
         path = %path.display(),

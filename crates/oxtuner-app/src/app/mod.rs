@@ -86,6 +86,9 @@ pub fn init(cx: &mut App) {
         with_main_window(cx, layout::write_dialogs::show_burn);
     });
     cx.on_action(|_: &actions::AdoptEcuTune, cx| core::adopt_ecu_tune(cx));
+    cx.on_action(|_: &actions::ReviewTuneDifferences, cx| {
+        with_main_window(cx, layout::write_dialogs::show_conflicts);
+    });
     cx.on_action(|_: &actions::RevertTune, cx| {
         with_main_window(cx, layout::write_dialogs::show_revert);
     });

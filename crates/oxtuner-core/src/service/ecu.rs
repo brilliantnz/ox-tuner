@@ -865,13 +865,14 @@ pub(super) fn commit_pages(
                 summary.constants += report.decoded;
                 summary.skipped += report.skipped;
             }
-            let images = project.images_mut();
-            if images.ecu_ram().is_some() {
-                let conflicts = images.reconnect(ram).map_err(|error| error.to_string())?;
-                summary.conflicts = conflicts.into_iter().map(conflict_report).collect();
-            } else {
-                images.set_ecu_ram(ram).map_err(|error| error.to_string())?;
-            }
+            // A first read and a later one both compare the ECU with the
+            // working image: the decision belongs to the user, not to whether
+            // the link is new (ADR-0010).
+            let conflicts = project
+                .images_mut()
+                .reconcile_read(ram)
+                .map_err(|error| error.to_string())?;
+            summary.conflicts = conflicts.into_iter().map(conflict_report).collect();
         }
         Session::Definition(_) => {
             let tune = live

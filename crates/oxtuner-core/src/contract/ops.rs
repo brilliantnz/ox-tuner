@@ -20,6 +20,12 @@ impl OpId {
     /// The first id a fresh core hands out.
     pub(crate) const FIRST: u64 = 1;
 
+    /// The first id, as a value a test can hold.
+    ///
+    /// Clients never create an id; a test that compares chain steps needs one.
+    #[doc(hidden)]
+    pub const FIRST_ID: Self = Self(1);
+
     pub(crate) const fn new(raw: u64) -> Self {
         Self(raw)
     }
@@ -577,10 +583,10 @@ pub enum TuneCommand {
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictResolution {
-    /// Replace the working values with the ECU read-back.
+    /// Take the ECU's tune: adopt the read-back and save it into the project.
     UseEcu,
-    /// Keep the working values and clear the conflict marks.
-    KeepWorking,
+    /// Keep the project's tune: save it. The client then writes and burns it.
+    UseProject,
 }
 
 /// ECU and link requests.

@@ -242,6 +242,45 @@ impl Tune {
         Ok(())
     }
 
+    /// Copies the named variables' values from `other`, leaving the rest.
+    ///
+    /// Used when a page was rebuilt and only some of its variables should move:
+    /// the values a file carried, and the alias views that follow them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError::LayoutMismatch`] when the tunes were built from
+    /// different layouts, and [`TuneError::UnknownVariable`] when a name is not
+    /// in the layout.
+    pub fn adopt_named(&mut self, other: &Self, names: &[&str]) -> Result<(), TuneError> {
+        if !self.same_layout(other) {
+            return Err(TuneError::LayoutMismatch);
+        }
+
+        for name in names {
+            let Some(spec) = self.layout.variable(name) else {
+                return Err(TuneError::UnknownVariable((*name).to_owned()));
+            };
+            let Some(values) = other.value(&spec.name) else {
+                return Err(TuneError::UnknownVariable(spec.name.clone()));
+            };
+            let copied = spec.name.clone();
+
+            match values {
+                Values::Numbers(numbers) => {
+                    for (index, raw) in numbers.iter().enumerate() {
+                        self.set_image_raw(&copied, index, *raw)?;
+                    }
+                }
+                Values::Text(text) => {
+                    self.set_image_text(&copied, text)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// A copy of this tune's values without edit timestamps.
     ///
     /// This is what becomes the baseline image: "as persisted" is about values,
@@ -520,6 +559,28 @@ impl Tune {
     /// Returns [`TuneError`] when the variable is unknown or stores numbers.
     pub fn set_text(&mut self, name: &str, text: &str) -> Result<(), TuneError> {
         let index = self.index_of(name)?;
+        self.set_image_text(name, text)?;
+        self.edits.insert(
+            Cell {
+                variable: index,
+                index: 0,
+            },
+            SystemTime::now(),
+        );
+        Ok(())
+    }
+
+    /// Replaces a string variable's text without recording an edit.
+    ///
+    /// A value that arrived from a file or a page is not a user edit, so it
+    /// must not claim a slot in the edit log. Dirty state is a value diff and
+    /// does not read that log, but a later reader of the log would.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuneError`] when the variable is unknown or stores numbers.
+    pub fn set_image_text(&mut self, name: &str, text: &str) -> Result<(), TuneError> {
+        let index = self.index_of(name)?;
         match &mut self.values[index] {
             Values::Text(current) => {
                 text.clone_into(current);
@@ -531,13 +592,6 @@ impl Tune {
                 });
             }
         }
-        self.edits.insert(
-            Cell {
-                variable: index,
-                index: 0,
-            },
-            SystemTime::now(),
-        );
         Ok(())
     }
 
@@ -550,11 +604,18 @@ impl Tune {
         self.edits.get(&Cell { variable, index }).copied()
     }
 
-    /// Whether the variable is offered for editing by the definition.
+    /// Whether the variable can be edited and will be sent.
+    ///
+    /// A controller-owned value, a `noMsqSave` value and one whose scale or
+    /// translate is unresolved are refused: none can reach the wire or the
+    /// file, so an edit would be lost.
     pub fn is_writable(&self, name: &str) -> bool {
-        self.layout
-            .variable(name)
-            .is_some_and(|variable| !variable.is_controller_owned())
+        self.layout.variable(name).is_some_and(|variable| {
+            !variable.is_controller_owned()
+                && !variable.no_msq_save
+                && variable.scale.is_some()
+                && variable.translate.is_some()
+        }) && !self.layout.is_alias(name)
     }
 
     /// One variable by name, with the normalised error for a miss.

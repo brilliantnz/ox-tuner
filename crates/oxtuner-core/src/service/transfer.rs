@@ -5,7 +5,9 @@
 
 use super::dispatch::{refuse, send, send_status};
 use super::ecu::connection_lost;
-use super::tune::{clamp_working_changes, unsent_changes, unsent_edits, unsent_for_pages};
+use super::tune::{
+    clamp_working_changes, unresolved_conflicts, unsent_changes, unsent_edits, unsent_for_pages,
+};
 use super::*;
 
 #[expect(
@@ -274,6 +276,9 @@ pub(super) fn write_to_ram(
             "read every page before writing; an incomplete ECU image cannot be edited safely",
         );
     }
+    if let Some(reason) = unresolved_conflicts(project) {
+        return refuse(events, report, op, FailureCode::WriteRefused, &reason);
+    }
     let clamped = clamp_working_changes(project);
     if clamped > 0 {
         tracing::info!(%op, clamped, "out-of-range values clamped before writing");
@@ -482,7 +487,7 @@ pub(super) fn burn_to_flash(
             "a controller command is running; burn after it finishes",
         );
     }
-    let Some(project) = session.project() else {
+    let Some(project) = session.project_mut() else {
         return refuse(
             events,
             report,
@@ -517,6 +522,9 @@ pub(super) fn burn_to_flash(
             FailureCode::BurnRefused,
             "the ECU image is unknown; read it first",
         );
+    }
+    if let Some(reason) = unresolved_conflicts(project) {
+        return refuse(events, report, op, FailureCode::BurnRefused, &reason);
     }
     let (unsent, _) = unsent_edits(project);
     if unsent > 0 {
@@ -565,6 +573,21 @@ pub(super) fn burn_to_flash(
         chosen.dedup();
         chosen
     };
+
+    // A burn makes the tune durable, so the project file records it too.
+    // Every check that can refuse the burn has passed; a save that fails stops
+    // it instead of leaving the file behind.
+    if !project.images().status().unsaved.is_empty()
+        && let Err(error) = project.save()
+    {
+        return refuse(
+            events,
+            report,
+            op,
+            FailureCode::TuneSaveFailed,
+            format!("the burn needs the project saved first: {error}"),
+        );
+    }
 
     let snapshot = match snapshot::write(project, "burn") {
         Ok(path) => path,
@@ -1340,7 +1363,12 @@ pub(super) fn apply_verified_write(
         .images_mut()
         .set_ecu_ram(image)
         .map_err(|error| format!("the verified ECU image could not be stored: {error}"))?;
-    project.images_mut().clear_write_failures();
+    project
+        .images_mut()
+        .clear_write_failures_for(&transaction.changed_variables);
+    project
+        .images_mut()
+        .clear_resolutions_for(&transaction.changed_variables);
     live.images.page_bytes.extend(
         transaction
             .readback
@@ -1367,7 +1395,8 @@ pub(super) fn apply_verified_burn(
     if transaction.pages.len() < burnable {
         // Only some pages were burned; the flash image of the rest is still
         // whatever it was, so claiming the whole image is verified would be a
-        // lie. The journal and the summary still record the verified pages.
+        // lie. The cached flash no longer describes the chip either.
+        project.images_mut().mark_flash_unknown();
         return Ok(());
     }
     let Some(ram) = project.images().ecu_ram().cloned() else {
@@ -1421,6 +1450,14 @@ pub(super) fn fail_transaction(
         if link_lost {
             session.mark_unknown();
         }
+    }
+    if transaction.kind == TxnKind::Burn
+        && (transaction.burned > 0 || transaction.phase == TxnPhase::Burn)
+        && let Some(project) = session.project_mut()
+    {
+        // At least one page may already be in flash, and a failing verify
+        // proved some of it differs; nothing about the chip is known now.
+        project.images_mut().mark_flash_unknown();
     }
     safety.halt(reason.clone());
     report.failures = report.failures.saturating_add(1);

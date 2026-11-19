@@ -13,11 +13,56 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{App, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui_kit::{
+    App, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px,
+};
 
 use crate::app::dialog;
 use crate::core::{self, CoreService};
 use crate::i18n::t;
+
+/// The reasons a write or burn cannot start, in one place.
+///
+/// Both dialogs name the same blockers; only the conflict sentence differs, so
+/// the caller passes it already translated.
+fn safety_warnings(
+    cx: &App,
+    conflict: Option<SharedString>,
+    writes_enabled: bool,
+    connected: bool,
+    halted: Option<String>,
+) -> impl IntoElement {
+    let danger = cx.theme().danger;
+    v_flex()
+        .gap_1()
+        .when_some(conflict, |this, text| {
+            this.child(div().text_xs().text_color(danger).child(text))
+        })
+        .when(!writes_enabled, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.writes_off")),
+            )
+        })
+        .when(!connected, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.not_connected")),
+            )
+        })
+        .when_some(halted, |this, reason| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .child(t!("app.write.halted", reason = reason)),
+            )
+        })
+}
 
 /// Confirms syncing tune values that differ from ECU RAM.
 pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
@@ -27,13 +72,17 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
         .tune_status
         .as_ref()
         .map_or(0, |status| status.pending_write.cells);
+    let conflicts = status
+        .tune_status
+        .as_ref()
+        .map_or(0, |status| status.conflicts);
     let halted = status.write_halted.clone();
     let connected = status.connection.is_some();
 
     dialog::open(window, cx, move |dialog, _, cx| {
-        let danger = cx.theme().danger;
         let muted = cx.theme().muted_foreground;
-        let ready = writes_enabled && connected && halted.is_none() && pending > 0;
+        let ready =
+            writes_enabled && connected && halted.is_none() && conflicts == 0 && pending > 0;
         dialog
             .title(t!("app.write.title"))
             .width(px(540.))
@@ -51,42 +100,24 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
                             .text_color(muted)
                             .child(t!("app.write.snapshot")),
                     )
-                    .when(!writes_enabled, |this| {
+                    .child(safety_warnings(
+                        cx,
+                        (conflicts > 0)
+                            .then(|| t!("app.write.conflicts", cells = conflicts.to_string())),
+                        writes_enabled,
+                        connected,
+                        halted.clone(),
+                    ))
+                    .when_some(halted.clone(), |this, _| {
                         this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.writes_off")),
-                        )
-                    })
-                    .when(!connected, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.not_connected")),
-                        )
-                    })
-                    .when_some(halted.clone(), |this, reason| {
-                        this.child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(danger)
-                                        .child(t!("app.write.halted", reason = reason)),
-                                )
-                                .child(
-                                    Button::new("write-acknowledge")
-                                        .label(t!("app.write.acknowledge"))
-                                        .small()
-                                        .ghost()
-                                        .on_click(|_, window, cx| {
-                                            core::acknowledge_write_failure(cx);
-                                            window.close_dialog(cx);
-                                        }),
-                                ),
+                            Button::new("write-acknowledge")
+                                .label(t!("app.write.acknowledge"))
+                                .small()
+                                .ghost()
+                                .on_click(|_, window, cx| {
+                                    core::acknowledge_write_failure(cx);
+                                    window.close_dialog(cx);
+                                }),
                         )
                     })
                     .child(
@@ -120,6 +151,19 @@ pub(crate) fn show_write(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// The burn confirmation's main sentence.
+fn burn_body(flash_known: bool, pending: usize, pages: usize) -> SharedString {
+    if flash_known {
+        t!(
+            "app.burn.body",
+            pages = pages.to_string(),
+            cells = pending.to_string()
+        )
+    } else {
+        t!("app.burn.body_unknown")
+    }
+}
+
 /// Confirms burning RAM to flash.
 pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
     let status = CoreService::status(cx);
@@ -132,6 +176,14 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
         .tune_status
         .as_ref()
         .map_or(0, |status| status.pending_write.cells);
+    let conflicts = status
+        .tune_status
+        .as_ref()
+        .map_or(0, |status| status.conflicts);
+    let flash_known = status
+        .tune_status
+        .as_ref()
+        .is_some_and(|status| status.flash_known);
     let connected = status.connection.is_some();
     let halted = status.write_halted.clone();
     let pages = status
@@ -142,7 +194,8 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
     dialog::open(window, cx, move |dialog, _, cx| {
         let danger = cx.theme().danger;
         let muted = cx.theme().muted_foreground;
-        let ready = writes_enabled && connected && halted.is_none() && unsent == 0;
+        let ready =
+            writes_enabled && connected && halted.is_none() && conflicts == 0 && unsent == 0;
         dialog
             .title(t!("app.burn.title"))
             .width(px(560.))
@@ -156,11 +209,19 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
                             .font_weight(FontWeight::MEDIUM)
                             .child(t!("app.burn.warning")),
                     )
-                    .child(div().text_sm().child(t!(
-                        "app.burn.body",
-                        pages = pages.to_string(),
-                        cells = pending.to_string()
-                    )))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(burn_body(flash_known, pending, pages)),
+                    )
+                    .child(safety_warnings(
+                        cx,
+                        (conflicts > 0)
+                            .then(|| t!("app.burn.conflicts", cells = conflicts.to_string())),
+                        writes_enabled,
+                        connected,
+                        halted.clone(),
+                    ))
                     .when(unsent > 0, |this| {
                         this.child(
                             div()
@@ -169,28 +230,12 @@ pub(crate) fn show_burn(window: &mut Window, cx: &mut App) {
                                 .child(t!("app.burn.unsent", cells = unsent.to_string())),
                         )
                     })
-                    .when(!writes_enabled, |this| {
+                    .when(connected && !flash_known, |this| {
                         this.child(
                             div()
                                 .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.writes_off")),
-                        )
-                    })
-                    .when(!connected, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.not_connected")),
-                        )
-                    })
-                    .when_some(halted.clone(), |this, reason| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(danger)
-                                .child(t!("app.write.halted", reason = reason)),
+                                .text_color(muted)
+                                .child(t!("app.burn.flash_unknown")),
                         )
                     })
                     .child(
@@ -590,65 +635,224 @@ pub(crate) fn show_import_consent(window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Shows the cells that differ between the working image and a fresh ECU read.
-pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
-    let Some(read) = CoreService::status(cx).pages_read.clone() else {
+/// The project-versus-ECU comparison table.
+fn conflict_table(
+    cx: &App,
+    rows: Vec<oxtuner_core::ConflictReport>,
+    hidden: usize,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    let border = cx.theme().border;
+    let mono = cx.theme().mono_font_family.clone();
+
+    v_flex()
+        .border_1()
+        .border_color(border)
+        .rounded(cx.theme().radius)
+        .overflow_hidden()
+        .child(
+            h_flex()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .text_color(muted)
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .w(px(200.))
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("app.conflict.column_variable")),
+                )
+                .child(
+                    div()
+                        .w(px(64.))
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("app.conflict.column_cell")),
+                )
+                .child(div().flex_1().child(t!("app.conflict.column_project")))
+                .child(div().flex_1().child(t!("app.conflict.column_ecu"))),
+        )
+        .children(rows.into_iter().map(move |row| {
+            h_flex()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .child(div().w(px(200.)).min_w_0().child(row.name))
+                .child(div().w(px(64.)).text_xs().text_color(muted).child(
+                    if row.row == 0 && row.column == 0 {
+                        "—".to_owned()
+                    } else {
+                        format!("[{}:{}]", row.row, row.column)
+                    },
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(mono.clone())
+                        .child(row.working),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(mono.clone())
+                        .child(row.ecu),
+                )
+        }))
+        .when(hidden > 0, |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(t!("app.conflict.more", count = hidden.to_string())),
+            )
+        })
+}
+
+/// Opens the queued review prompt, if one is still owed.
+pub(crate) fn retry_pending_review(cx: &mut App) {
+    if !CoreService::status(cx).review_pending {
+        return;
+    }
+    let Some(window) = crate::app::window::main(cx) else {
         return;
     };
+    window
+        .update(cx, |_, window, cx| show_conflicts(window, cx))
+        .ok();
+}
+
+/// Shows the cells that differ between the project tune and the ECU tune.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dialog reads its live gates, table and two choices in one builder"
+)]
+pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
+    let status = CoreService::status(cx);
+    let Some(read) = status.pages_read.clone() else {
+        CoreService::status_mut(cx).review_pending = false;
+        return;
+    };
+    // A dialog for a difference the core has already decided would offer
+    // choices that no longer apply; every operation that decides clears the
+    // list. The status can lag the read by one refresh, so it is not consulted.
     if read.conflicts.is_empty() {
+        CoreService::status_mut(cx).review_pending = false;
         return;
     }
 
-    let total = read.conflicts.len();
-    let rows: Vec<String> = read
-        .conflicts
-        .iter()
-        .take(8)
-        .map(|conflict| {
-            format!(
-                "{} [{}:{}]  {}  ->  {}",
-                conflict.name, conflict.row, conflict.column, conflict.working, conflict.ecu
-            )
-        })
-        .collect();
+    // A read-only project cannot save either choice, so the dialog would be a
+    // modal with both buttons disabled; the status bar carries the reason.
+    let blocked = status
+        .project
+        .as_ref()
+        .is_some_and(|project| project.read_only)
+        || status.project_missing;
+    if blocked {
+        CoreService::status_mut(cx).review_pending = false;
+        return;
+    }
 
-    dialog::open(window, cx, move |dialog, _, cx| {
+    // The review is the only path that satisfies the core's write gate. It
+    // replaces whatever dialog is in the way instead of being dropped.
+    if window.has_active_dialog(cx) {
+        window.close_dialog(cx);
+    }
+
+    let total = read.conflicts.len();
+    let rows: Vec<oxtuner_core::ConflictReport> = read.conflicts.iter().take(10).cloned().collect();
+    let hidden = total.saturating_sub(rows.len());
+
+    let opened = dialog::open(window, cx, move |dialog, _, cx| {
+        let status = CoreService::status(cx);
         let muted = cx.theme().muted_foreground;
+        let danger = cx.theme().danger;
+        let connected = status.connection.is_some() && status.link_lost.is_none();
+        let read_only = status
+            .project
+            .as_ref()
+            .is_some_and(|project| project.read_only)
+            || status.project_missing;
+        let signature_ok = status.connection.as_ref().is_some_and(|connection| {
+            !connection.read_only && connection.verdict == oxtuner_core::SignatureVerdict::Match
+        });
+        let ready = status.writes_enabled
+            && connected
+            && signature_ok
+            && !read_only
+            && status.write_halted.is_none();
+        let ecu_ready = connected && !read_only;
+
         dialog
             .title(t!("app.conflict.title"))
-            .width(px(620.))
+            .width(px(680.))
             .child(
                 v_flex()
                     .gap_2()
+                    .child(div().text_sm().child(if total == 1 {
+                        t!("app.conflict.body_one")
+                    } else {
+                        t!("app.conflict.body", count = total.to_string())
+                    }))
+                    .child(conflict_table(cx, rows.clone(), hidden))
                     .child(
                         div()
-                            .text_sm()
-                            .child(t!("app.conflict.body", count = total.to_string())),
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t!("app.conflict.keep_hint")),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child(t!("app.conflict.sample")),
+                            .child(t!("app.conflict.use_ecu_hint")),
                     )
-                    .children(rows.clone().into_iter().map(|row| {
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_xs()
-                            .child(row)
-                    })),
+                    .when(read_only, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(t!("app.conflict.read_only")),
+                        )
+                    })
+                    .when(!read_only, |this| {
+                        this.child(safety_warnings(
+                            cx,
+                            None,
+                            status.writes_enabled,
+                            connected,
+                            status.write_halted.clone(),
+                        ))
+                    })
+                    .when(connected && !signature_ok, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(t!("app.conflict.signature")),
+                        )
+                    }),
             )
             .footer(
                 h_flex()
                     .gap_2()
                     .justify_end()
                     .child(
-                        Button::new("conflict-keep")
+                        Button::new("conflict-project")
                             .label(t!("app.conflict.keep"))
-                            .ghost()
+                            .outline()
+                            .disabled(!ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
-                                    oxtuner_core::ConflictResolution::KeepWorking,
+                                    oxtuner_core::ConflictResolution::UseProject,
                                     cx,
                                 );
                                 window.close_dialog(cx);
@@ -658,6 +862,7 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                         Button::new("conflict-ecu")
                             .label(t!("app.conflict.use_ecu"))
                             .primary()
+                            .disabled(!ecu_ready)
                             .on_click(|_, window, cx| {
                                 core::resolve_conflicts(
                                     oxtuner_core::ConflictResolution::UseEcu,
@@ -668,4 +873,6 @@ pub(crate) fn show_conflicts(window: &mut Window, cx: &mut App) {
                     ),
             )
     });
+
+    CoreService::status_mut(cx).review_pending = !opened;
 }

@@ -1,5 +1,8 @@
-use oxtuner_tune::TuneDiff;
+use std::io::ErrorKind;
 
+use oxtuner_tune::{Owner, TuneDiff};
+
+use crate::Msq;
 use crate::atomic;
 use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
@@ -8,11 +11,51 @@ use crate::sidecar::{ProjectLayout, ProjectState};
 use super::{Project, ProjectError, SaveOutcome};
 
 impl Project {
+    /// Drops the views a reopen can derive from their owner.
+    ///
+    /// A view is not a value a file carries, but a file that holds a view and
+    /// not its owner is the only carrier of those bytes: the loader reads the
+    /// owner's value from it. Such a view is kept, because removing it would
+    /// lose the value on the next open. `written` names the owners the caller
+    /// is about to write; `None` means the caller writes every value, as a
+    /// snapshot does.
+    fn remove_alias_entries(&self, document: &mut Msq, written: Option<&[String]>) {
+        for spec in self.layout().variables() {
+            if !self.layout().is_alias(&spec.name) {
+                continue;
+            }
+            let Some(owner) = self.layout().alias_owner(&spec.name) else {
+                continue;
+            };
+            let Some(owner_spec) = self.layout().variable(owner) else {
+                continue;
+            };
+            if owner_spec.no_msq_save {
+                // The owner never reaches a file; the view is its carrier.
+                continue;
+            }
+            // A view is always a page constant: `mark_aliases` only looks at
+            // a page's variables, so there is no PC entry to remove.
+            let Some(page) = spec.ini_page() else {
+                continue;
+            };
+            let page = EntryPage::Numbered(page.to_msq());
+            let owner_written = written
+                .is_none_or(|names| names.iter().any(|name| name.eq_ignore_ascii_case(owner)));
+            if !owner_written && !document.has_entry(page, EntryKind::Constant, owner) {
+                continue;
+            }
+            document.remove_entry(page, EntryKind::Constant, &spec.name);
+        }
+    }
+
     /// Writes changed values back to the tune file.
     ///
     /// Only variables whose values differ from the baseline are touched, so an
-    /// unedited project keeps its file byte-for-byte; unknown elements,
-    /// comments and entries this build does not model are never rewritten.
+    /// unedited project keeps its file byte-for-byte apart from one thing: a
+    /// constant whose bytes another constant covers is removed, because a view
+    /// is not a value a file carries. Unknown elements, comments and entries
+    /// this build does not model are never rewritten.
     ///
     /// # Errors
     ///
@@ -35,6 +78,7 @@ impl Project {
         // formatted) must leave the session's document exactly as it was, so a
         // later revert cannot save text from the failed attempt.
         let mut document = self.msq.clone();
+        self.remove_alias_entries(&mut document, Some(&diff.changed_variables));
         let mut written: Vec<String> = Vec::new();
         let mut cells = 0;
         for name in &diff.changed_variables {
@@ -42,6 +86,15 @@ impl Project {
                 continue;
             };
             if spec.no_msq_save {
+                continue;
+            }
+            if spec.scale.is_none() || spec.translate.is_none() {
+                // The file's own text is its only representation; the loader
+                // skipped it and no edit can change it.
+                continue;
+            }
+            if self.layout().is_alias(name) {
+                // Already removed from the document above; nothing to write.
                 continue;
             }
             let Some(values) = self.tune().value(name) else {
@@ -53,12 +106,21 @@ impl Project {
             // Counted before the write: `values` borrows the images and the
             // document copy is mutated next.
             let changed = baseline.changed_cells(values);
-            let text = load::format_values(spec, &self.definition, values).map_err(|source| {
-                ProjectError::Unrepresentable {
-                    name: name.clone(),
-                    source,
+            let text = match load::format_values(spec, &self.definition, values) {
+                Ok(text) => text,
+                // The ECU owns this value and the file cannot express it; the
+                // file's own text stays rather than wedging every later save.
+                Err(error) if spec.is_controller_owned() => {
+                    tracing::debug!(%name, %error, "a controller-owned value stays as the file had it");
+                    continue;
                 }
-            })?;
+                Err(source) => {
+                    return Err(ProjectError::Unrepresentable {
+                        name: name.clone(),
+                        source,
+                    });
+                }
+            };
 
             let (page, kind) = match spec.ini_page() {
                 Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
@@ -84,6 +146,8 @@ impl Project {
         // if the sidecar below fails, so a retry cannot write an older tune.
         self.msq = document;
 
+        self.save_pc_values(&diff)?;
+
         if self.in_folder {
             self.state.set_definition(
                 super::sidecar_definition_path(&self.root, &self.definition_path),
@@ -108,11 +172,82 @@ impl Project {
         })
     }
 
+    /// Writes the changed PC variables where the project reads them from.
+    ///
+    /// A PC value lives in `pcVariableValues.msq` and overrides the tune page
+    /// on open; saving the tune alone would lose the edit on the next open.
+    /// Only changed PC values are touched, so an unedited project keeps its
+    /// sidecar byte-for-byte.
+    fn save_pc_values(&self, diff: &TuneDiff) -> Result<(), ProjectError> {
+        if !self.in_folder {
+            return Ok(());
+        }
+        let names: Vec<&str> = diff
+            .changed_variables
+            .iter()
+            .filter_map(|name| {
+                let spec = self.layout().variable(name)?;
+                (spec.owner == Owner::Pc).then_some(name.as_str())
+            })
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let path = self
+            .root
+            .join(super::CONFIG_DIR)
+            .join(super::PC_VALUES_FILE);
+        let mut document = match std::fs::read(&path) {
+            Ok(bytes) => Msq::parse(&bytes).map_err(ProjectError::Msq)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let template = format!(
+                    "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<msq xmlns=\"http://www.msefi.com/:msq\">\n    <versionInfo fileFormat=\"4.0\" signature=\"{}\"/>\n    <page number=\"-1\"/>\n</msq>\n",
+                    crate::xml::escape_attribute(&self.definition.signature)
+                );
+                Msq::parse(template.as_bytes()).map_err(ProjectError::Msq)?
+            }
+            Err(source) => {
+                return Err(ProjectError::Io { path, source });
+            }
+        };
+
+        for name in names {
+            let Some(spec) = self.layout().variable(name) else {
+                continue;
+            };
+            if spec.is_controller_owned() || spec.scale.is_none() || spec.translate.is_none() {
+                // The ECU owns it, or the definition has no presentation for
+                // it; the sidecar keeps its text rather than wedging a save.
+                continue;
+            }
+            let Some(values) = self.tune().value(name) else {
+                continue;
+            };
+            let text = load::format_values(spec, &self.definition, values).map_err(|source| {
+                ProjectError::Unrepresentable {
+                    name: name.to_owned(),
+                    source,
+                }
+            })?;
+            document
+                .put_entry_text(EntryPage::Pc, EntryKind::PcVariable, name, &text)
+                .map_err(ProjectError::Msq)?;
+        }
+
+        let bytes = document.save().map_err(ProjectError::Msq)?;
+        atomic::write(&path, &bytes).map_err(|source| ProjectError::Io { path, source })?;
+        Ok(())
+    }
+
     /// Renders the **working** image as a complete `.msq` document.
     ///
     /// Unlike [`Self::save`], which touches only changed values in the file it
     /// owns, this writes every representable variable into a copy of the
-    /// document. It is the snapshot used before a risky operation (ADR-0011 S4)
+    /// document, except a constant whose bytes another constant covers: that
+    /// entry is removed, and a reload on a page without a text overlap derives
+    /// it from the owner. It is the snapshot used before a risky operation
+    /// (ADR-0011 S4)
     /// and is never written over the project's tune. A value the file cannot
     /// represent keeps the text the document already had: a variable with no
     /// label, a broken text constant, or a `scale` expression this build could
@@ -125,8 +260,9 @@ impl Project {
     /// Returns [`ProjectError`] when the tune cannot be serialized.
     pub fn snapshot_msq(&self) -> Result<Vec<u8>, ProjectError> {
         let mut document = self.msq.clone();
+        self.remove_alias_entries(&mut document, None);
         for spec in self.layout().variables() {
-            if spec.no_msq_save {
+            if spec.no_msq_save || self.layout().is_alias(&spec.name) {
                 continue;
             }
             let Some(values) = self.tune().value(&spec.name) else {

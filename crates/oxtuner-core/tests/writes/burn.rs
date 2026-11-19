@@ -14,10 +14,15 @@ fn a_burn_follows_a_verified_write_and_is_journaled() {
     core.open(dir.path());
     core.connect(config);
     core.read_all();
+    core.use_project_tune();
     core.edit_cell(66.0);
 
     let event = core.write();
     assert!(matches!(event, Event::TuneWritten { .. }), "{event:?}");
+    assert!(
+        core.status().unsaved.cells > 0,
+        "the write leaves the file behind; only the burn saves it"
+    );
 
     let started = Instant::now();
     let event = core.burn();
@@ -33,6 +38,11 @@ fn a_burn_follows_a_verified_write_and_is_journaled() {
     );
     assert!(summary.verified);
     assert!(summary.snapshot.as_ref().is_some_and(|path| path.exists()));
+    assert_eq!(
+        core.status().unsaved.cells,
+        0,
+        "a burn saves the project first"
+    );
 
     let (_, entries) = core.journal();
     let burns: Vec<&JournalEntry> = entries
@@ -57,11 +67,17 @@ fn burning_before_writing_the_edit_is_refused() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
+    core.use_project_tune();
     core.edit_cell(55.0);
 
     let (kind, message) = failure(&core.burn());
     assert_eq!(kind, FailureCode::BurnRefused);
     assert!(message.contains("not in ECU RAM"), "{message}");
+
+    assert!(
+        core.status().unsaved.cells > 0,
+        "a refused burn must not save the project"
+    );
 
     // No burn reached the wire, so the journal has no burn entry.
     let (_, entries) = core.journal();
@@ -77,12 +93,17 @@ fn no_edit_or_read_ever_burns() {
     core.open(dir.path());
     core.connect(SimConfig::default());
     core.read_all();
+    core.use_project_tune();
     core.edit_cell(22.0);
     let _ = core.write();
     let _ = core.table();
 
     let (_, entries) = core.journal();
-    assert!(entries.iter().all(|entry| entry.operation == "write"));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| matches!(entry.operation.as_str(), "write" | "conflict"))
+    );
     assert!(
         entries.iter().all(|entry| entry.operation != "burn"),
         "nothing but an explicit burn command may burn (S5)"
