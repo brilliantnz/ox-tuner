@@ -118,3 +118,72 @@ fn an_edit_after_the_decision_is_not_a_new_conflict() {
 
     core.close();
 }
+
+#[test]
+fn the_project_choice_leaves_the_file_ram_and_flash_on_the_same_tune() {
+    let dir = TempDir::new("conflict-project-flow");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(drifted());
+    assert_ne!(core.read_all().conflicts.len(), 0);
+
+    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::UseProject);
+    assert!(
+        matches!(event, Event::ConflictsResolved { .. }),
+        "{event:?}"
+    );
+    assert_eq!(core.status().unsaved.cells, 0, "the choice saved the file");
+
+    let Event::TuneWritten { report, .. } = core.write() else {
+        panic!("the project write must verify");
+    };
+    assert!(report.verified);
+    assert_eq!(core.status().pending_write.cells, 0);
+    assert!(!core.status().flash_known, "no burn has confirmed flash");
+
+    let Event::TuneBurned { report, .. } = core.burn() else {
+        panic!("the project burn must verify");
+    };
+    assert!(report.verified);
+    assert!(core.status().flash_known);
+    assert_eq!(core.status().pending_burn.cells, 0);
+    assert_eq!(core.status().state, oxtuner_core::CellState::Synced);
+
+    assert_eq!(
+        core.read_all().conflicts.len(),
+        0,
+        "every source now holds the same tune"
+    );
+
+    core.close();
+
+    // Reopen from disk: the file itself holds the project tune.
+    let reopened = Harness::start(true);
+    reopened.open(dir.path());
+    assert_eq!(reopened.table().cells[0], 10.0);
+    reopened.close();
+}
+
+#[test]
+fn the_ecu_choice_saves_the_ecu_tune_into_the_project() {
+    let dir = TempDir::new("conflict-ecu-flow");
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(drifted());
+    assert_ne!(core.read_all().conflicts.len(), 0);
+
+    let event = core.resolve_conflicts(oxtuner_core::ConflictResolution::UseEcu);
+    assert!(
+        matches!(event, Event::ConflictsResolved { .. }),
+        "{event:?}"
+    );
+    assert_eq!(core.status().unsaved.cells, 0, "the choice saved the file");
+    assert_eq!(core.status().pending_write.cells, 0);
+
+    core.close();
+
+    let reopened = Harness::start(true);
+    reopened.open(dir.path());
+    assert_eq!(reopened.table().cells[0], 77.0);
+    reopened.close();
+}
