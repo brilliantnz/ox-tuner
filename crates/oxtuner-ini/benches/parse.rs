@@ -175,6 +175,10 @@ fn size_class(definition: &Definition) -> String {
     reason = "bench output carries the size class per the performance plan"
 )]
 fn report_shape(label: &str, text: &str, definition: &Definition) {
+    assert!(
+        definition.errors().next().is_none(),
+        "{label}: a synthetic benchmark fixture must not produce errors"
+    );
     println!(
         "{label}: {} bytes of INI, {}",
         text.len(),
@@ -405,9 +409,16 @@ nPages = 15
 ",
     );
 
-    for _ in 0..PAGES {
-        text.push_str("pageSize = 4096\n");
+    // One list, the way the real files write it. A repeated `pageSize` would
+    // replace the list and leave later pages with no declared size.
+    text.push_str("pageSize = ");
+    for index in 0..PAGES {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str("4096");
     }
+    text.push('\n');
 
     for page in 1..=PAGES {
         let _ = writeln!(text, "page = {page}");
@@ -452,8 +463,16 @@ nPages = 15
     }
 
     text.push_str(
-        "\n[TableEditor]\ntable = spd_table_1, spd_table_1, \"Bench Table\"\nxBins = spd_table_2, spd_chan_0\nyBins = spd_table_2, spd_chan_1\nzBins = spd_table_1\n\n[Menu]\nmenu = \"Fuel\"\nsubMenu = spd_table_1, \"Bench Table\"\n",
+        "\n[TableEditor]\ntable = spd_table_1, spd_table_1, \"Bench Table\"\nxBins = spd_table_2, spd_chan_0\nyBins = spd_table_2, spd_chan_1\nzBins = spd_table_1\n",
     );
+    for table in 2..=TABLES {
+        let _ = writeln!(
+            text,
+            "table = spd_table_{table}, spd_table_{table}, \"Bench Table {table}\"\n\
+             xBins = spd_table_2, spd_chan_0\nyBins = spd_table_2, spd_chan_1\nzBins = spd_table_{table}\n"
+        );
+    }
+    text.push_str("\n[Menu]\nmenu = \"Fuel\"\nsubMenu = spd_table_1, \"Bench Table\"\n");
 
     text
 }
@@ -481,9 +500,16 @@ nPages = 20
 ",
     );
 
-    for _ in 0..PAGES {
-        text.push_str("pageSize = 4096\n");
+    // One list, the way the real files write it. A repeated `pageSize` would
+    // replace the list and leave later pages with no declared size.
+    text.push_str("pageSize = ");
+    for index in 0..PAGES {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str("4096");
     }
+    text.push('\n');
 
     for page in 1..=PAGES {
         let _ = writeln!(text, "page = {page}");
@@ -552,9 +578,16 @@ nPages = 16
 ",
     );
 
-    for _ in 0..PAGES {
-        text.push_str("pageSize = 4096\n");
+    // One list, the way the real files write it. A repeated `pageSize` would
+    // replace the list and leave later pages with no declared size.
+    text.push_str("pageSize = ");
+    for index in 0..PAGES {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str("4096");
     }
+    text.push('\n');
 
     for page in 1..=PAGES {
         let _ = writeln!(text, "page = {page}");
@@ -630,8 +663,7 @@ queryCommand = \"Q\"
 
 [Constants]
 nPages = 2
-pageSize = 4096
-pageSize = 4096
+pageSize = 4096, 4096
 page = 1
 ",
     );
@@ -1106,10 +1138,11 @@ fn bench_parse_wide_tables(criterion: &mut Criterion) {
     });
 }
 
-/// Frozen-cache load through postcard, the encoding the definition cache
-/// stores, against the same 15 ms budget as the raw parse. Setup parses one
-/// Speeduino-shape text and serializes it once; the bench measures
-/// `from_bytes` only. Bench public API only.
+/// Plain postcard round-trip of a `Definition`, against the same 15 ms budget
+/// as the raw parse. Setup parses one Speeduino-shape text and serializes it
+/// once; the bench measures `from_bytes` only. This is not the project cache's
+/// lifted-table envelope, so the byte count is not that cache's file size;
+/// `project_open_reference_shape_warm` measures the real cache path.
 fn bench_cached_load(criterion: &mut Criterion) {
     let text = speeduino_shape_fixture();
     let settings = SettingsContext::new();
@@ -1198,7 +1231,7 @@ fn bench_ab_share_arc(criterion: &mut Criterion) {
 
 /// Local-only real-file check. The files live outside the repository and are
 /// never committed; when they are absent the bench simply does not register.
-/// It reports wall time and peak temporary heap against the INI.md budgets.
+/// It reports wall time and peak temporary heap against the 20 ms raw-parse and 15 ms cached-open budgets.
 #[expect(
     clippy::print_stdout,
     reason = "a bench-only local report of the real-file budgets"

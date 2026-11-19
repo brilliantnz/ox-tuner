@@ -77,7 +77,10 @@ pub(crate) fn parse_loggers(
             "recordfield" => logger.fields.push(record_field(&fields, *line)),
             "headerfield" => logger.header_fields.push(record_field(&fields, *line)),
             "calcfield" => logger.calculated.push(calculated_field(&fields, *line)),
-            _ => section.unrecognized_key(key, *line),
+            _ => {
+                section.unrecognized_key(key, *line);
+                continue;
+            }
         }
         section.understand(*line);
     }

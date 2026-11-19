@@ -358,16 +358,6 @@ pub(crate) fn parse_curves(
 }
 
 fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve: Curve) {
-    if curve.x_bins.is_none() || curve.y_bins.is_empty() {
-        section.warn(
-            "curve-without-arrays",
-            format!(
-                "curve `{}` needs an X array and at least one Y array",
-                curve.name
-            ),
-            curve.line,
-        );
-    }
     let name = curve.name.clone();
     let line = curve.line;
     if let Some(existing) = definition.curves.get_mut(&name) {
@@ -402,7 +392,11 @@ fn merge_curve(existing: &mut Curve, next: Curve) {
         line: _,
     } = next;
 
-    existing.title = title;
+    // A bare repeated header defaults its title to the id; that default must
+    // not erase a title an earlier block wrote.
+    if title.literal() != Some(existing.name.as_str()) {
+        existing.title = title;
+    }
     if !column_labels.is_empty() {
         existing.column_labels = column_labels;
     }

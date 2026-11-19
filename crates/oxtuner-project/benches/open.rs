@@ -308,17 +308,11 @@ fn bench_project_save_noop(criterion: &mut Criterion) {
 }
 
 /// Local-only real-project open. The project lives outside the repository and
-/// is never committed; the bench does not register when the path is absent.
-/// Set `OXTUNER_REAL_PROJECT` to point at a different folder.
+/// is never committed; the bench registers only when a path is supplied.
 fn bench_real_project_open(criterion: &mut Criterion) {
-    let root = std::env::var_os("OXTUNER_REAL_PROJECT").map_or_else(
-        || {
-            std::path::PathBuf::from(
-                "/Users/brilliantnz/Documents/LibreTuneProjects/Speeduino Test 1",
-            )
-        },
-        std::path::PathBuf::from,
-    );
+    let Some(root) = std::env::var_os("OXTUNER_REAL_PROJECT").map(std::path::PathBuf::from) else {
+        return;
+    };
     if !root.is_dir() {
         return;
     }

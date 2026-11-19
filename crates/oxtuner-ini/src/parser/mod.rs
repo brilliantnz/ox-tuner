@@ -82,13 +82,24 @@ pub fn parse_str_with_includes(
     assemble(text, settings, Some(resolver), Vec::new())
 }
 
+/// Drops this parse's literal intern table when `assemble` leaves, on both the
+/// success and error paths. The `Arc<str>` values it handed out stay alive in
+/// the returned definition.
+struct TextScope;
+
+impl Drop for TextScope {
+    fn drop(&mut self) {
+        crate::model::clear_text_cache();
+    }
+}
+
 fn assemble(
     text: &str,
     settings: &SettingsContext,
     includes: Option<IncludeResolver<'_>>,
     extra_diagnostics: Vec<Diagnostic>,
 ) -> Result<Definition, IniError> {
-    crate::model::clear_text_cache();
+    let _text_scope = TextScope;
 
     let preprocessed = {
         let _span = tracing::debug_span!("ini_preprocess").entered();
@@ -108,6 +119,16 @@ fn assemble(
     );
 
     let expander = Expander::new(&preprocessed.defines);
+    for name in expander.truncated_defines() {
+        push_bounded(
+            &mut definition.diagnostics,
+            Diagnostic::whole_file(
+                Severity::Warning,
+                "fields-truncated",
+                format!("`#define {name}` expands past the field cap; the list is kept short"),
+            ),
+        );
+    }
 
     {
         let _span = tracing::debug_span!("ini_parse_sections").entered();
@@ -574,8 +595,8 @@ fn validate_pages(definition: &mut Definition) {
         }
     }
 
-    // A table may be completed by a later `[TableEditor]` block, so this check
-    // runs against the final model rather than a partially read one.
+    // A table or curve may be completed by a later block, so these checks run
+    // against the final model rather than a partially read one.
     for (_, table) in definition.tables.iter() {
         if table.z_bins.is_none() {
             problems.push(Diagnostic::new(
@@ -584,6 +605,21 @@ fn validate_pages(definition: &mut Definition) {
                 format!("table `{}` has no `zBins` cell array", table.id),
                 table.line,
                 "TableEditor",
+            ));
+        }
+    }
+
+    for (_, curve) in definition.curves.iter() {
+        if curve.x_bins.is_none() || curve.y_bins.is_empty() {
+            problems.push(Diagnostic::new(
+                Severity::Warning,
+                "curve-without-arrays",
+                format!(
+                    "curve `{}` needs an X array and at least one Y array",
+                    curve.name
+                ),
+                curve.line,
+                "CurveEditor",
             ));
         }
     }

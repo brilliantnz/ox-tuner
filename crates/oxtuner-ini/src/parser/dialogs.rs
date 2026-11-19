@@ -327,9 +327,10 @@ pub(crate) fn parse_menu(
                 });
                 // A group header opens a group and a child keeps it open; a
                 // plain subMenu ends it.
-                group = match lowered.as_str() {
-                    "groupmenu" => Some(position),
-                    "groupchildmenu" => group,
+                group = match (lowered.as_str(), kind) {
+                    (_, MenuTargetKind::Separator) => None,
+                    ("groupmenu", _) => Some(position),
+                    ("groupchildmenu", _) => group,
                     _ => None,
                 };
                 section.understand(*line);

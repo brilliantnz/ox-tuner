@@ -40,6 +40,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -48,7 +49,7 @@ use oxtuner_ini::{BitOption, Definition, PARSER_VERSION, SettingsContext};
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
-use crate::project::{canonical_base, read_include_canonical};
+use crate::project::read_include_canonical;
 
 /// Bump when the envelope layout or the serialized definition model changes.
 ///
@@ -289,7 +290,9 @@ pub(crate) struct DefinitionCache {
 
 impl DefinitionCache {
     /// Builds the lookup for one definition, or `None` when the key cannot be
-    /// encoded (which would mean a bug in a fixed-size key).
+    /// encoded (which would mean a bug in a fixed-size key). Used by tests
+    /// that hand over a non-canonical path.
+    #[cfg(test)]
     pub(crate) fn new(
         directory: &Path,
         base: &Path,
@@ -297,6 +300,17 @@ impl DefinitionCache {
         settings: &SettingsContext,
     ) -> Option<Self> {
         let base = fs::canonicalize(base).unwrap_or_else(|_| base.to_owned());
+        Self::with_canonical_base(directory, &base, definition_digest, settings)
+    }
+
+    /// Same as [`Self::new`] when the caller already has the canonical base,
+    /// so one project open resolves the path only once.
+    pub(crate) fn with_canonical_base(
+        directory: &Path,
+        base: &Path,
+        definition_digest: [u8; 32],
+        settings: &SettingsContext,
+    ) -> Option<Self> {
         let key = CacheKey {
             definition: definition_digest,
             settings: settings_digest(settings)?,
@@ -313,7 +327,7 @@ impl DefinitionCache {
         Some(Self {
             directory: directory.to_owned(),
             path,
-            base,
+            base: base.to_owned(),
             key,
         })
     }
@@ -329,10 +343,10 @@ impl DefinitionCache {
     /// Every rejection is a normal miss: the caller parses and may overwrite
     /// the file. Nothing here is allowed to make opening a project fail.
     pub(crate) fn load(&self) -> Option<Definition> {
-        // One read instead of a metadata probe followed by a read: the length
-        // cap is checked on the bytes we already have.
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
+        // One open and one bounded read instead of a metadata probe followed
+        // by an unbounded read: a stray large file is never held in memory.
+        let file = match fs::File::open(&self.path) {
+            Ok(file) => file,
             Err(error) => {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::debug!(
@@ -344,6 +358,15 @@ impl DefinitionCache {
                 return None;
             }
         };
+        let mut bytes = Vec::with_capacity(4 * 1024 * 1024);
+        if file
+            .take(MAX_CACHE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            tracing::debug!(path = %self.path.display(), "the definition cache could not be read");
+            return None;
+        }
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CACHE_BYTES {
             tracing::debug!(
                 path = %self.path.display(),
@@ -576,10 +599,11 @@ pub(crate) struct IncludeRecorder {
 }
 
 impl IncludeRecorder {
+    /// The caller passes an already-canonical base, so one project open
+    /// resolves the directory only once.
     pub(crate) fn new(base: &Path) -> Self {
-        let base = canonical_base(base).unwrap_or_else(|| base.to_owned());
         Self {
-            base,
+            base: base.to_owned(),
             includes: RefCell::new(Vec::new()),
         }
     }
@@ -726,7 +750,8 @@ mod tests {
         let cache =
             DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
 
-        let recorder = IncludeRecorder::new(&base);
+        let canonical_base = fs::canonicalize(&base).expect("canonical base");
+        let recorder = IncludeRecorder::new(&canonical_base);
         assert!(recorder.resolve("extra.inc").is_some());
         assert!(recorder.resolve("missing.inc").is_none());
         let includes = recorder.finish();

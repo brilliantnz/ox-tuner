@@ -319,6 +319,13 @@ pub(crate) fn parse_constants(
 
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; its list is kept short"),
+                *line,
+            );
+        }
         if is_constant_entry(&fields) {
             let entry = Entry {
                 line: *line,
@@ -1154,6 +1161,42 @@ fn parse_pc_shape(class: ConstantClass, fields: &Fields<'_>, index: usize) -> (S
 }
 
 /// `[PcVariables]`: the same syntax as constants, without an offset.
+/// The two PC entries that bind a live channel instead of declaring storage.
+fn insert_channel_value(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    key: &str,
+    value: &str,
+    fields: &Fields<'_>,
+    lowered: &str,
+    line: u32,
+) {
+    let channel = fields
+        .get(1)
+        .map(|field| crate::fields::unquote(field).to_owned())
+        .unwrap_or_default();
+    let is_connect = lowered == "channelvalueonconnect";
+    let variable = PcVariable {
+        name: key.to_owned(),
+        class: ConstantClass::Scalar,
+        data_type: DataType::F32,
+        shape: Shape::Scalar,
+        units: Text::empty(),
+        scale: None,
+        translate: None,
+        minimum: None,
+        maximum: None,
+        digits: None,
+        options: Arc::from([]),
+        flags: ConstantFlags::default(),
+        channel_value_on_connect: is_connect.then(|| channel.clone()),
+        continuous_channel_value: (!is_connect).then_some(channel),
+        line,
+        raw: value.to_owned(),
+    };
+    insert_variable(definition, section, variable, line);
+}
+
 pub(crate) fn parse_pc_variables(
     definition: &mut Definition,
     section: &mut SectionParser,
@@ -1168,6 +1211,13 @@ pub(crate) fn parse_pc_variables(
         };
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; its list is kept short"),
+                *line,
+            );
+        }
         if fields.is_empty() {
             continue;
         }
@@ -1178,30 +1228,7 @@ pub(crate) fn parse_pc_variables(
             .trim_ascii()
             .to_ascii_lowercase();
         if lowered == "channelvalueonconnect" || lowered == "continuouschannelvalue" {
-            let channel = fields
-                .get(1)
-                .map(|field| crate::fields::unquote(field).to_owned())
-                .unwrap_or_default();
-            let is_connect = lowered == "channelvalueonconnect";
-            let variable = PcVariable {
-                name: key.to_owned(),
-                class: ConstantClass::Scalar,
-                data_type: DataType::F32,
-                shape: Shape::Scalar,
-                units: Text::empty(),
-                scale: None,
-                translate: None,
-                minimum: None,
-                maximum: None,
-                digits: None,
-                options: Arc::from([]),
-                flags: ConstantFlags::default(),
-                channel_value_on_connect: is_connect.then(|| channel.clone()),
-                continuous_channel_value: (!is_connect).then_some(channel),
-                line: *line,
-                raw: value.to_owned(),
-            };
-            insert_variable(definition, section, variable, *line);
+            insert_channel_value(definition, section, key, value, &fields, &lowered, *line);
             section.understand(*line);
             continue;
         }

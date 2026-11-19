@@ -68,7 +68,8 @@ pub struct Definition {
     pub controller_commands: Ordered<ControllerCommand>,
     /// Setting groups whose options are `#if` flags.
     pub setting_groups: Ordered<SettingGroup>,
-    /// Per-constant help text. Repeated texts share one allocation.
+    /// Per-constant help text. Repeated texts share one allocation in a parsed
+    /// definition; a definition reloaded from the cache has its own copies.
     pub context_help: Ordered<std::sync::Arc<str>>,
     /// Datalog fields.
     pub datalog_entries: Vec<DatalogEntry>,
@@ -82,9 +83,10 @@ pub struct Definition {
     pub unsupported: Vec<UnsupportedSection>,
     /// Features derived from the frozen model, for UI gating.
     pub capabilities: Capabilities,
-    /// Every declaration of a communication key, keyed by lowercase name.
-    /// The parser uses this to let a header value win over a page-local one.
-    pub comms_sources: BTreeMap<String, Vec<crate::model::CommsSource>>,
+    /// Parser scratch: declarations collected while reading, drained by
+    /// `resolve_comms_keys` before the model is returned.
+    #[serde(skip)]
+    pub(crate) comms_sources: BTreeMap<String, Vec<crate::model::CommsSource>>,
     /// High-speed loggers from `[LoggerDefinition]`.
     pub loggers: Vec<LoggerDefinition>,
     /// Named configuration sections modelled as typed entry lists.
@@ -195,24 +197,48 @@ impl Definition {
 
     /// Stable hash of the parts of a definition that affect how a project is
     /// read. A migration prompt compares this against the hash stored with the
-    /// tune; a reordered comment does not change it, a new constant does.
+    /// tune; a reordered comment does not change it, a renamed constant or a
+    /// moved address does. FNV-1a is spelled out here because a standard
+    /// library `DefaultHasher` may change between toolchains.
     pub fn structural_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.signature.hash(&mut hasher);
-        self.ini_version.hash(&mut hasher);
-        self.spec_version.map(f64::to_bits).hash(&mut hasher);
-        self.pages.len().hash(&mut hasher);
-        self.constants.len().hash(&mut hasher);
-        self.channels.len().hash(&mut hasher);
-        self.tables.len().hash(&mut hasher);
-        self.defines.len().hash(&mut hasher);
-        self.comms.envelope.hash(&mut hasher);
-        for section in &self.unsupported {
-            section.name.hash(&mut hasher);
+        fn feed(hash: &mut u64, bytes: &[u8]) {
+            for &byte in bytes {
+                *hash ^= u64::from(byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
         }
-        hasher.finish()
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        feed(&mut hash, self.signature.as_bytes());
+        feed(
+            &mut hash,
+            self.ini_version.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hash,
+            &self.spec_version.map_or(0, f64::to_bits).to_le_bytes(),
+        );
+        for page in &self.pages {
+            feed(&mut hash, &page.number.to_le_bytes());
+            feed(&mut hash, &page.size.to_le_bytes());
+            feed(&mut hash, &page.start_offset.to_le_bytes());
+        }
+        for (_, constant) in self.constants.iter() {
+            feed(&mut hash, constant.name.as_bytes());
+            feed(&mut hash, &constant.page.to_le_bytes());
+            feed(
+                &mut hash,
+                &constant.address.unwrap_or(u32::MAX).to_le_bytes(),
+            );
+            feed(&mut hash, format!("{:?}", constant.shape).as_bytes());
+        }
+        for (name, values) in &self.defines {
+            feed(&mut hash, name.as_bytes());
+            for value in values {
+                feed(&mut hash, value.as_bytes());
+            }
+        }
+        hash
     }
 
     /// A table by id.

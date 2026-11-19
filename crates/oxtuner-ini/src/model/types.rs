@@ -299,7 +299,7 @@ pub enum Text {
 
 impl Text {
     /// Shared literal text, for callers that already have a plain string.
-    pub fn shared(value: impl AsRef<str>) -> Self {
+    pub(crate) fn shared(value: impl AsRef<str>) -> Self {
         Self::Literal(intern_text(value.as_ref()))
     }
 

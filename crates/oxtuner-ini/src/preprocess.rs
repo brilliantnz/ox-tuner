@@ -19,7 +19,7 @@
 //! the line the user will find in their editor.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::expr::bump_depth;
@@ -89,6 +89,8 @@ impl Preprocessed {
 pub struct Fields<'a> {
     prefix: Vec<Cow<'a, str>>,
     tail: Option<&'a [&'a str]>,
+    /// Set when an expansion cap stopped the list before its declared end.
+    pub truncated: bool,
 }
 
 impl Fields<'_> {
@@ -125,7 +127,11 @@ impl Fields<'static> {
     /// A list made only of owned fields, for tests that build the expected
     /// expansion by hand.
     pub fn from_owned(prefix: Vec<Cow<'static, str>>) -> Self {
-        Self { prefix, tail: None }
+        Self {
+            prefix,
+            tail: None,
+            truncated: false,
+        }
     }
 }
 
@@ -145,6 +151,8 @@ impl Fields<'static> {
 pub struct Expander<'a> {
     /// Each define's fully expanded fields, keyed lowercase.
     resolved: BTreeMap<String, Vec<&'a str>>,
+    /// Defines whose expansion hit a cap and was left short.
+    truncated: BTreeSet<String>,
 }
 
 impl<'a> Expander<'a> {
@@ -157,12 +165,21 @@ impl<'a> Expander<'a> {
     /// dominate the whole parse.
     pub fn new(defines: &'a BTreeMap<String, Vec<String>>) -> Self {
         let mut resolved: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
+        let mut truncated = BTreeSet::new();
         let mut stack = Vec::new();
         for name in defines.keys() {
             stack.clear();
-            resolve(defines, &mut resolved, name, &mut stack, 0);
+            resolve(defines, &mut resolved, name, &mut stack, 0, &mut truncated);
         }
-        Self { resolved }
+        Self {
+            resolved,
+            truncated,
+        }
+    }
+
+    /// Defines whose declared list did not survive the expansion caps.
+    pub fn truncated_defines(&self) -> &BTreeSet<String> {
+        &self.truncated
     }
 
     /// Expanded fields.
@@ -177,9 +194,11 @@ impl<'a> Expander<'a> {
         let mut bytes = 0usize;
         let mut index = 0usize;
         let mut tail: Option<&'s [&'a str]> = None;
+        let mut truncated = false;
 
         while index < fields.len() {
             if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                truncated = true;
                 break;
             }
             let field = fields[index];
@@ -228,6 +247,7 @@ impl<'a> Expander<'a> {
                         bytes += value.len();
                         expanded.push(value);
                         if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            truncated = true;
                             break;
                         }
                     }
@@ -236,6 +256,7 @@ impl<'a> Expander<'a> {
                         bytes += value.len();
                         expanded.push(Cow::Borrowed(*value));
                         if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            truncated = true;
                             break;
                         }
                     }
@@ -251,6 +272,7 @@ impl<'a> Expander<'a> {
             Fields {
                 prefix: expanded,
                 tail,
+                truncated,
             },
             undefined,
         )
@@ -271,6 +293,7 @@ fn resolve<'a>(
     name: &str,
     stack: &mut Vec<&'a String>,
     depth: usize,
+    truncated: &mut BTreeSet<String>,
 ) -> Option<()> {
     if depth > MAX_DEFINE_NESTING {
         return None;
@@ -285,7 +308,7 @@ fn resolve<'a>(
     }
 
     stack.push(key);
-    let fields = resolve_fields(defines, resolved, key, stack, depth);
+    let fields = resolve_fields(defines, resolved, key, stack, depth, truncated);
     // Pop even when resolution failed: `stack` is the chain of names being
     // resolved, and a failure deeper in the chain must not leave this name on
     // it for the caller to trip over.
@@ -307,6 +330,7 @@ fn resolve_fields<'a>(
     key: &str,
     stack: &mut Vec<&'a String>,
     depth: usize,
+    truncated: &mut BTreeSet<String>,
 ) -> Option<Vec<&'a str>> {
     let source = defines.get(key)?;
     let mut fields = Vec::with_capacity(source.len().min(MAX_EXPANDED_FIELDS));
@@ -314,13 +338,14 @@ fn resolve_fields<'a>(
     for field in source {
         match field.strip_prefix('$').map(str::trim) {
             Some(nested) if !nested.is_empty() => {
-                resolve(defines, resolved, nested, stack, depth + 1)?;
+                resolve(defines, resolved, nested, stack, depth + 1, truncated)?;
                 let (nested_key, _) = lookup(defines, nested)?;
                 let nested_fields = resolved.get(nested_key.as_str())?;
                 for nested in nested_fields {
                     if fields.len() >= MAX_EXPANDED_FIELDS
                         || bytes.saturating_add(nested.len()) > MAX_EXPANDED_BYTES
                     {
+                        truncated.insert(key.to_owned());
                         return None;
                     }
                     bytes += nested.len();
@@ -331,6 +356,7 @@ fn resolve_fields<'a>(
                 if fields.len() >= MAX_EXPANDED_FIELDS
                     || bytes.saturating_add(field.len()) > MAX_EXPANDED_BYTES
                 {
+                    truncated.insert(key.to_owned());
                     return None;
                 }
                 bytes += field.len();

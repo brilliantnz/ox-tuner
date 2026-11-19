@@ -72,7 +72,7 @@ pub struct Table {
     pub y_bins: Option<Axis>,
     /// Cell array.
     pub z_bins: Option<String>,
-    /// Channel promoted from the X axis as this view's live cursor, if any.
+    /// First tracking channel on these axes, X before Y, if any.
     pub live_cursor: Option<String>,
     /// Y-axis tracking channel, for the two-axis intersection.
     pub live_cursor_y: Option<String>,
@@ -113,8 +113,8 @@ pub struct Curve {
     pub x_bins: Option<Axis>,
     /// One entry per plotted curve.
     pub y_bins: Vec<Axis>,
-    /// Channel promoted from the X axis, so the UI does not have to re-derive
-    /// the live cursor from the axes.
+    /// First tracking channel, X before the first Y series, so the UI does not
+    /// have to re-derive the live cursor from the axes.
     pub live_cursor: Option<String>,
     /// First Y series' tracking channel, for the intersection.
     pub live_cursor_y: Option<String>,

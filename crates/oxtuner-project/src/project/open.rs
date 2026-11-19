@@ -63,6 +63,7 @@ impl Project {
 
         let config = root.join(CONFIG_DIR);
         let definition_path = find_definition(&config)?;
+        let base = canonical_base(&config).unwrap_or_else(|| config.clone());
         let tune_path = root.join(TUNE_FILE);
 
         let definition_bytes = {
@@ -103,7 +104,7 @@ impl Project {
                 &definition_bytes,
                 definition_digest,
                 &settings,
-                &config,
+                &base,
                 cache_dir,
             )
         }?;
@@ -357,8 +358,9 @@ fn load_definition(
     base: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<(Definition, DefinitionSource), ProjectError> {
-    let cache = cache_dir
-        .and_then(|directory| DefinitionCache::new(directory, base, definition_digest, settings));
+    let cache = cache_dir.and_then(|directory| {
+        DefinitionCache::with_canonical_base(directory, base, definition_digest, settings)
+    });
 
     if let Some(cache) = &cache
         && let Some(definition) = cache.load()
@@ -427,7 +429,6 @@ pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<String> 
     // A symlink inside the definition directory can point anywhere, and a
     // backslash is not a separator on Unix, so lexical checks alone do not
     // keep the read inside `base`. Resolve both sides and compare.
-    //
     let path = match fs::canonicalize(base.join(path)) {
         Ok(path) => path,
         Err(error) => {

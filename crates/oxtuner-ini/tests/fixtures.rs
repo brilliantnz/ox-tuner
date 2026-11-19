@@ -425,7 +425,7 @@ second = scalar, U08, \"x\", 1.0, 0.0, 0.0, 255.0, 1
     );
 }
 
-/// A single report covering the four golden cases INI.md asks for: repeated
+/// A single report covering the four golden cases for: repeated
 /// sections, a deep include chain, expression display round-trips, and the
 /// row-kind audit. Kept as a snapshot so a change in any of them is reviewable.
 #[test]

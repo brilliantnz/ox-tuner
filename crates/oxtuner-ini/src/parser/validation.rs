@@ -13,8 +13,9 @@ use crate::error::{Diagnostic, Severity, extend_bounded};
 use crate::expr::Expr;
 use crate::model::{ChannelKind, Definition, Dimension, Number, Shape, Text};
 
-/// Total expression nodes one definition may hold. Each tree already has a
-/// depth and source cap; this bounds the sum across a whole hostile file.
+/// Node count above which a definition is reported as over budget. Each tree
+/// already has a hard depth and source cap; this is a whole-file report, not an
+/// additional allocation bound.
 pub(crate) const MAX_TOTAL_AST_NODES: usize = 100_000;
 
 /// Reasons to keep calls symbolic, plus the file's total AST node count.

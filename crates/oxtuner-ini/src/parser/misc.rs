@@ -13,7 +13,6 @@ use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Referenc
 
 use super::SectionParser;
 
-/// `[ConstantsExtensions]` (rusEFI spells it in the plural) and `[Defaults]`.
 /// Applies one `defaultValue` or `rawValue` entry, returning whether it had a
 /// value to apply. Array defaults are kept separately from scalar ones.
 fn apply_default(
@@ -48,6 +47,7 @@ fn apply_default(
     true
 }
 
+/// `[ConstantsExtensions]` (rusEFI spells it in the plural) and `[Defaults]`.
 pub(crate) fn parse_extensions(
     definition: &mut Definition,
     section: &mut SectionParser,
