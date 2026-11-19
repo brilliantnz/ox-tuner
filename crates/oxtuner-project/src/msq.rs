@@ -182,6 +182,9 @@ pub enum MsqError {
     },
     /// The definition's defaults could not be settled onto one value per set of
     /// shared bytes.
+    ///
+    /// The cause is kept as text because this error compares for equality and
+    /// [`TuneError`] holds floats, so it cannot be carried as a source here.
     UnsettledDefaults {
         /// Why the settle failed.
         reason: String,
@@ -438,8 +441,11 @@ impl Msq {
     /// # Errors
     ///
     /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
-    /// page the definition does not declare, and [`MsqError::Encoding`] when
-    /// a written value cannot be represented in ISO-8859-1.
+    /// page the definition does not declare, [`MsqError::Encoding`] when a
+    /// written value cannot be represented in ISO-8859-1,
+    /// [`MsqError::UnsettledDefaults`] when the defaults cannot be settled onto
+    /// one value per set of shared bytes, and [`MsqError::ConflictingDefaults`]
+    /// when what the scaffold writes holds two values for bytes they share.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,

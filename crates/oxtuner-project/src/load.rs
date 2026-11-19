@@ -199,13 +199,6 @@ pub fn load(msq: &Msq, definition: &Definition) -> LoadedTune {
         }
     }
 
-    // A clamp moves each constant on its own, and two over the same bytes can
-    // end up apart even where the file said one thing to both. Where the peers
-    // agree they are pulled onto a value the tightest of them can store, so a
-    // clamp cannot invent a disagreement the file never stated. A pair that
-    // really did state two values is left apart for the caller to judge.
-    tune.clamp_shared_bytes();
-
     reconcile_pages(&layout, &mut tune, &applied, &mut report);
     check_page_data(msq, definition, &layout, &tune, &mut report);
 
@@ -267,27 +260,30 @@ fn reconcile_pages(
             continue;
         }
 
-        // A file that states two values over the same bytes has no single
-        // answer to give. Rebuilding the page would pick one by the order the
-        // file lists them in, so its values stand as written and the caller
-        // decides what to do about them.
+        // Two values for one set of bytes have no single answer to give.
+        // Rebuilding the page would pick one by the order the file lists them
+        // in, so its values stand as written and the caller decides what to do
+        // about them. That can be the file stating two answers, or the declared
+        // ranges clamping one value into two, and the message says which of the
+        // two it is.
         let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
-        if layout
+        let clashes: Vec<_> = layout
             .value_conflicts(page.page, tune)
-            .iter()
-            .any(|conflict| carried(&conflict.first) && carried(&conflict.second))
-        {
+            .into_iter()
+            .filter(|conflict| carried(&conflict.first) && carried(&conflict.second))
+            .collect();
+        if let Some(conflict) = clashes.first() {
             report.warn(
                 IssueKind::ValueSkipped,
                 format!(
-                    "page {}: the file states two values for bytes they share, so its values are \
-                     kept as written",
-                    page.page
+                    "page {}: the values for `{}` and `{}` cannot both fit the bytes they share \
+                     within their declared ranges, so its values are kept as written",
+                    page.page, conflict.first, conflict.second
                 ),
             );
             tracing::debug!(
                 page = page.page.get(),
-                "the file states conflicting values; the page is not reconciled"
+                "the file carries values the shared bytes cannot both hold; the page is not reconciled"
             );
             continue;
         }

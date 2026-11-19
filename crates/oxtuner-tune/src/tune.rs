@@ -350,20 +350,27 @@ impl Tune {
 
     /// The variables storing the same quantity as `name` over the same bytes.
     ///
-    /// A word and a bit field inside it share bytes but hold different numbers,
-    /// each read against its own range. Only peers of the same shape store one
-    /// quantity, so only those can be clamped or judged against each other.
+    /// Two constants are peers here only when they start at the same address
+    /// and hold the same kind of value, which is what makes one number of them
+    /// comparable. A word and a bit field inside it share bytes but hold
+    /// different numbers, each read against its own range, and a text value
+    /// holds none of either, so neither takes part.
     fn same_value_peers(&self, name: &str) -> Vec<String> {
         let Some(spec) = self.layout.variable(name) else {
             return Vec::new();
         };
+        if !spec.shape.is_numeric() {
+            return Vec::new();
+        }
 
         self.layout
             .names_sharing_bytes(name)
             .into_iter()
             .filter(|peer| {
                 self.layout.variable(peer).is_some_and(|other| {
-                    other.data_type == spec.data_type && other.shape == spec.shape
+                    other.address == spec.address
+                        && other.data_type == spec.data_type
+                        && other.shape == spec.shape
                 })
             })
             .map(str::to_owned)
@@ -429,6 +436,19 @@ impl Tune {
                             .variable(peer)
                             .map_or(acc, |other| other.clamp_raw(acc))
                     });
+                    // Two ranges can have no value in common at all, and the
+                    // fold then lands somewhere one of them rejects. Writing it
+                    // would leave the tune holding something its own clamp
+                    // turns down and hide the disagreement from the write gate.
+                    let storable = peers.iter().all(|peer| {
+                        self.layout.variable(peer).is_some_and(|other| {
+                            other.same_wire_value(other.clamp_raw(common), common)
+                        })
+                    });
+                    if !storable {
+                        continue;
+                    }
+
                     for peer in &peers {
                         let _ = self.set_image_raw(peer, cell, common);
                     }
@@ -1061,6 +1081,89 @@ tight = scalar, U08, 0, "x", 1, 0, 0, 5, 0
             1,
             "the gate still sees the disagreement"
         );
+    }
+
+    /// Peers over one byte whose declared ranges do not reach each other.
+    const NARROW: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "x", 1, 0, 0, 5, 0
+"#;
+
+    fn narrow() -> Tune {
+        let definition = parse_str(NARROW, &SettingsContext::new()).expect("parses");
+        Tune::from_definition(&definition)
+    }
+
+    #[test]
+    fn a_group_that_agrees_is_pulled_onto_the_tightest_range() {
+        let mut tune = narrow();
+        tune.set_image_raw("first", 0, 12.0).unwrap();
+        tune.set_image_raw("second", 0, 12.0).unwrap();
+
+        tune.clamp_shared_bytes();
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 5.0);
+        assert!(
+            tune.layout()
+                .value_conflicts(IniPage::FIRST, &tune)
+                .is_empty(),
+            "one byte holds one value now"
+        );
+    }
+
+    #[test]
+    fn a_group_that_disagrees_is_left_alone() {
+        let mut tune = narrow();
+        tune.set_image_raw("first", 0, 12.0).unwrap();
+        tune.set_image_raw("second", 0, 3.0).unwrap();
+
+        tune.clamp_shared_bytes();
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 12.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 3.0);
+        assert_eq!(
+            tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
+            1,
+            "a real disagreement belongs to the caller, not to a clamp"
+        );
+    }
+
+    #[test]
+    fn a_group_with_no_common_value_keeps_its_values() {
+        // `first` cannot store anything from 11 up and `second` cannot store
+        // anything below 20, so no value fits both and nothing is moved: the
+        // write gate has to be able to see that.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "x", 1, 0, 0, 10, 0
+second = scalar, U08, 0, "x", 1, 0, 20, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.set_image_raw("first", 0, 5.0).unwrap();
+        tune.set_image_raw("second", 0, 20.0).unwrap();
+        tune.clamp_shared_bytes();
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 20.0);
     }
 
     #[test]
