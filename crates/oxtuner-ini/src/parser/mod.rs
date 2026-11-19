@@ -15,6 +15,7 @@ mod dashboard;
 mod dialogs;
 mod editors;
 mod misc;
+mod validation;
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -418,6 +419,7 @@ fn finalize(definition: &mut Definition) {
     apply_extension_flags(definition);
     validate_pages(definition);
     validate_references(definition);
+    validation::validate_expression_calls(definition);
 }
 
 fn apply_extension_flags(definition: &mut Definition) {
@@ -590,6 +592,10 @@ mod tests {
 
     fn minimal() -> String {
         "[MegaTune]\nsignature = \"test 1\"\nqueryCommand = \"Q\"\n\n[Constants]\nnPages = 1\npageSize = 288\npage = 1\nx = scalar, U08, 0, \"ms\", 1.0, 0, 0, 255, 0\n".to_owned()
+    }
+
+    fn parse(text: &str) -> Definition {
+        parse_str(text, &SettingsContext::new()).expect("parses")
     }
 
     #[test]
@@ -1118,6 +1124,82 @@ after = scalar, U08, nextOffset, \"u\", 1, 0, 0, 255, 0
             .filter_map(|diagnostic| diagnostic.line)
             .collect();
         assert_eq!(bad_offsets, vec![7, 8]);
+    }
+
+    #[test]
+    fn pure_builtins_fold_while_the_expression_source_is_kept() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+x = scalar, U08, 0, \"u\", { min(4, 2) }, 0, 0, 255, { abs(-3) }
+",
+        );
+
+        let constant = definition.constant("x").expect("the constant parses");
+        let scale = constant.scale.as_ref().expect("scale");
+        assert_eq!(scale.evaluate(&|_| None), Some(2.0));
+        assert_eq!(scale.normalized(), "2");
+        assert_eq!(scale.to_string(), "{min(4, 2)}");
+        let digits = constant.digits.as_ref().expect("digits");
+        assert_eq!(digits.evaluate(&|_| None), Some(3.0));
+    }
+
+    #[test]
+    fn an_unknown_call_keeps_its_source_and_gets_a_fold_deferred_note() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+x = scalar, U08, 0, \"u\", { someFutureBuiltin(1) }, 0, 0, 255, 1
+",
+        );
+
+        let scale = definition
+            .constant("x")
+            .and_then(|constant| constant.scale.as_ref())
+            .expect("scale");
+        assert_eq!(scale.to_string(), "{someFutureBuiltin(1)}");
+        let note = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "fold-deferred")
+            .expect("the unknown call is reported");
+        assert!(note.message.contains("someFutureBuiltin"));
+    }
+
+    #[test]
+    fn string_functions_parse_into_the_expression_ast() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+x = scalar, U08, 0, { bitStringValue(units, algo) }, 1, 0, 0, 255, 1
+",
+        );
+
+        let units = &definition.constant("x").expect("the constant parses").units;
+        let crate::model::Text::Expression {
+            parsed: Some(crate::expr::Expr::Call(name, arguments)),
+            ..
+        } = units
+        else {
+            panic!("the string function is parsed as a call");
+        };
+        assert_eq!(name, "bitStringValue");
+        assert_eq!(arguments.len(), 2);
     }
 
     #[test]

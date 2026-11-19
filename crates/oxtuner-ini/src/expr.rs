@@ -440,6 +440,41 @@ impl Expr {
 
         found
     }
+
+    /// Every call in the tree with its argument count, for builtin validation.
+    ///
+    /// Iterative like [`Self::identifiers`], so a long flat expression cannot
+    /// exhaust the stack while the definition is being checked.
+    pub fn call_sites(&self) -> Vec<(&str, usize)> {
+        let mut found = Vec::new();
+        let mut pending = vec![self];
+
+        while let Some(expression) = pending.pop() {
+            match expression {
+                Self::Call(name, arguments) => {
+                    found.push((name.as_str(), arguments.len()));
+                    pending.extend(arguments.iter());
+                }
+                Self::Number(_) | Self::Ident(_) => {}
+                Self::Unary(_, operand) => pending.push(operand),
+                Self::Binary(_, left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                Self::Ternary(condition, when_true, when_false) => {
+                    pending.push(when_false);
+                    pending.push(when_true);
+                    pending.push(condition);
+                }
+                Self::Index(base, index) => {
+                    pending.push(index);
+                    pending.push(base);
+                }
+            }
+        }
+
+        found
+    }
 }
 
 /// A value in the 64-bit integer view the bitwise operators work on.
@@ -496,25 +531,11 @@ fn apply_binary(operator: BinaryOp, left: f64, right: f64) -> Option<f64> {
     }
 }
 
-/// The pure functions the evaluator implements. Everything else stays a
-/// [`Expr::Call`] and simply does not fold.
+/// Folds a call through the crate's builtin registry. Everything else stays an
+/// [`Expr::Call`] and simply does not fold; the caller supplies runtime values
+/// for functions that need them through [`EvalContext::function`].
 fn evaluate_call(name: &str, arguments: &[f64]) -> Option<f64> {
-    let lowered = name.to_ascii_lowercase();
-    match lowered.as_str() {
-        "abs" => Some(arguments.first()?.abs()),
-        "sqrt" => Some(arguments.first()?.sqrt()),
-        "round" => Some(arguments.first()?.round()),
-        "floor" => Some(arguments.first()?.floor()),
-        "ceil" => Some(arguments.first()?.ceil()),
-        "exp" => Some(arguments.first()?.exp()),
-        "log" => Some(arguments.first()?.ln()),
-        "log10" => Some(arguments.first()?.log10()),
-        "recip" => Some(1.0 / arguments.first()?),
-        "pow" => Some(arguments.first()?.powf(*arguments.get(1)?)),
-        "min" => arguments.iter().copied().reduce(f64::min),
-        "max" => arguments.iter().copied().reduce(f64::max),
-        _ => None,
-    }
+    crate::builtins::fold(name, arguments)
 }
 
 /// Why an expression could not be parsed.

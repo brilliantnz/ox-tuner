@@ -54,6 +54,7 @@
 //! assert_eq!(definition.constant("reqFuel").map(|c| c.page), Some(1));
 //! ```
 
+pub mod builtins;
 pub mod error;
 pub mod expr;
 pub mod fields;
@@ -63,6 +64,7 @@ pub mod preprocess;
 pub mod settings;
 pub mod source;
 
+pub use builtins::{Arity, BUILTINS, Builtin, BuiltinKind};
 pub use error::{Diagnostic, IniError, MAX_DIAGNOSTICS, Severity, extend_bounded, push_bounded};
 pub use fields::{
     CommandArguments, CommandEncodeError, CommandTemplate, Placeholder, Segment, WireOrder,
