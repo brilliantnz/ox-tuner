@@ -412,19 +412,29 @@ fn new_sink(name: &str, key: &str) -> Box<dyn SectionSink> {
         "porteditor" | "ftpbrowser" | "veanalyze" | "wueanalyze" | "gammae" | "datalogviews"
         | "tools" => Box::new(sections::ConfigSectionSink::new(name)),
         "" => Box::new(FnSink(parse_preamble)),
-        "megatune" | "tunerstudio" => Box::new(FnSink(|d, s, l, _| {
-            constants::parse_identification(d, s, l);
+        "megatune" | "tunerstudio" => Box::new(FnSink(|definition, section, lines, _| {
+            constants::parse_identification(definition, section, lines);
         })),
         "constantsextensions" | "constantextensions" | "defaults" => {
-            Box::new(FnSink(|d, s, l, _| misc::parse_extensions(d, s, l)))
+            Box::new(FnSink(|definition, section, lines, _| {
+                misc::parse_extensions(definition, section, lines);
+            }))
         }
         "outputchannels" => Box::new(FnSink(channels::parse_channels)),
-        "burstmode" => Box::new(FnSink(|d, s, l, _| channels::parse_burst_mode(d, s, l))),
-        "frontpage" => Box::new(FnSink(|d, s, l, _| dashboard::parse_front_page(d, s, l))),
-        "settingcontexthelp" => Box::new(FnSink(|d, s, l, _| dialogs::parse_context_help(d, s, l))),
-        "keyactions" => Box::new(FnSink(|d, s, l, _| dialogs::parse_key_actions(d, s, l))),
-        "controllercommands" => Box::new(FnSink(|d, s, l, _| {
-            misc::parse_controller_commands(d, s, l);
+        "burstmode" => Box::new(FnSink(|definition, section, lines, _| {
+            channels::parse_burst_mode(definition, section, lines);
+        })),
+        "frontpage" => Box::new(FnSink(|definition, section, lines, _| {
+            dashboard::parse_front_page(definition, section, lines);
+        })),
+        "settingcontexthelp" => Box::new(FnSink(|definition, section, lines, _| {
+            dialogs::parse_context_help(definition, section, lines);
+        })),
+        "keyactions" => Box::new(FnSink(|definition, section, lines, _| {
+            dialogs::parse_key_actions(definition, section, lines);
+        })),
+        "controllercommands" => Box::new(FnSink(|definition, section, lines, _| {
+            misc::parse_controller_commands(definition, section, lines);
         })),
         _ => Box::new(UnknownSink {
             name: name.to_owned(),
@@ -1857,6 +1867,28 @@ host = \"192.168.0.1\"
         assert_eq!(ports.entries[1].fields[1], ">");
         assert_eq!(definition.config_sections[1].name, "FTPBrowser");
         assert_eq!(definition.unsupported.len(), 0);
+    }
+
+    #[test]
+    fn a_repeated_config_header_appends_to_one_section() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[PortEditor]
+pins = 1, 2, 3
+[OutputChannels]
+[PortEditor]
+watched = { rpm }, >, 3000
+",
+        );
+
+        assert_eq!(definition.config_sections.len(), 1);
+        let ports = &definition.config_sections[0];
+        assert_eq!(ports.name, "PortEditor");
+        assert_eq!(ports.entries.len(), 2);
+        assert_eq!(ports.entries[0].fields, vec!["1", "2", "3"]);
+        assert_eq!(ports.entries[1].fields[1], ">");
     }
 
     #[test]
