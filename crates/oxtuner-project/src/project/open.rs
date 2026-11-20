@@ -103,6 +103,7 @@ impl Project {
                 &definition_bytes,
                 definition_digest,
                 &settings,
+                &definition_path,
                 &config,
                 cache_dir,
             )
@@ -227,6 +228,7 @@ impl Project {
                 &definition_bytes,
                 definition_digest,
                 &settings,
+                definition_path,
                 base,
                 cache_dir,
             )
@@ -354,6 +356,7 @@ fn load_definition(
     bytes: &[u8],
     definition_digest: [u8; 32],
     settings: &SettingsContext,
+    definition_path: &Path,
     base: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<(Definition, DefinitionSource), ProjectError> {
@@ -378,9 +381,14 @@ fn load_definition(
 
     let text = oxtuner_ini::source::decode(bytes).text;
     let recorder = IncludeRecorder::new(base);
-    let resolver = |name: &str| recorder.resolve(name);
-    let mut definition = oxtuner_ini::parse_str_with_includes(&text, settings, &resolver)
-        .map_err(ProjectError::Ini)?;
+    let resolver = |request: oxtuner_ini::IncludeRequest<'_>| recorder.resolve(request);
+    let mut definition = oxtuner_ini::parse_str_with_source(
+        &text,
+        settings,
+        &definition_path.to_string_lossy(),
+        &resolver,
+    )
+    .map_err(ProjectError::Ini)?;
     let includes = recorder.finish();
 
     if let Some(cache) = &cache {
@@ -415,11 +423,15 @@ pub(crate) fn canonical_base(base: &Path) -> Option<PathBuf> {
 /// [`canonical_base`] once and [`read_include_canonical`] for repeated reads.
 pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     let base = canonical_base(base)?;
-    read_include_canonical(&base, name)
+    read_include_canonical(&base, name).map(|(_, text)| text)
 }
 
 /// Reads an `#include` from an already-canonical base.
-pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<String> {
+///
+/// Returns the resolved identity (base-relative, `/`-separated) alongside the
+/// decoded text. The identity is what cycle detection and cache fingerprints
+/// use; two spellings of one file produce the same key.
+pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<(String, String)> {
     let path = Path::new(name);
     if path.components().any(|component| {
         matches!(
@@ -455,7 +467,13 @@ pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<String> 
             return None;
         }
     };
-    Some(oxtuner_ini::source::decode(&bytes).text)
+    let relative = path.strip_prefix(base).ok()?;
+    let identity = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some((identity, oxtuner_ini::source::decode(&bytes).text))
 }
 
 /// The settings context a tune's `<settings>` snapshot describes.

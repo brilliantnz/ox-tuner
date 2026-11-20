@@ -358,9 +358,12 @@ fn build_scaffold(
     // never resolve there, and recording the name is what refuses it.
     let includes = RefCell::new(Vec::new());
     let config = request.root().join(CONFIG_DIR);
-    let resolver = |name: &str| {
-        includes.borrow_mut().push(name.to_owned());
-        super::read_include(&config, name)
+    let resolver = |request: oxtuner_ini::IncludeRequest<'_>| {
+        includes.borrow_mut().push(request.path.to_owned());
+        super::read_include(&config, request.path).map(|text| oxtuner_ini::Include {
+            path: request.path.to_owned(),
+            text,
+        })
     };
     let definition = oxtuner_ini::parse_str_with_includes(&text, &settings, &resolver)
         .map_err(ProjectError::Ini)?;

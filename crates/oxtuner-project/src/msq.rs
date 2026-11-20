@@ -1686,8 +1686,12 @@ b = scalar, U08, 0, "", 1, 0, 0, 255, 0
 [PcVariables]
 rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
 "#;
-        oxtuner_ini::parse_str_with_includes(text, &SettingsContext::new(), &|_: &str| None)
-            .expect("the fixture parses")
+        oxtuner_ini::parse_str_with_includes(
+            text,
+            &SettingsContext::new(),
+            &|_: oxtuner_ini::IncludeRequest<'_>| None,
+        )
+        .expect("the fixture parses")
     }
 
     #[test]
