@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ChannelKind, Definition, SettingsContext, Shape};
-use oxtuner_tune::{EntryShape, IniPage, MsqPage, Tune, TuneLayout, Values, VariableSpec};
+use oxtuner_tune::{
+    EntryShape, IniPage, MsqPage, Tune, TuneLayout, ValueConflict, Values, VariableSpec,
+};
 
 use crate::flags;
 use crate::load;
@@ -178,6 +180,24 @@ pub enum MsqError {
         /// The page number with no definition page.
         page: u16,
     },
+    /// The definition's defaults could not be settled onto one value per set of
+    /// shared bytes.
+    ///
+    /// The cause is kept as text because this error compares for equality and
+    /// [`TuneError`](oxtuner_tune::TuneError) holds floats, so it cannot be
+    /// carried as a source here.
+    UnsettledDefaults {
+        /// Why the settle failed.
+        reason: String,
+    },
+    /// What the scaffold wrote holds two values for bytes they share.
+    ///
+    /// A clamp or the user-unit rounding can move one peer and not the other
+    /// after the settle, so what lands on disk is judged rather than assumed.
+    ConflictingDefaults {
+        /// The pair and the bytes they share.
+        conflict: ValueConflict,
+    },
 }
 
 impl fmt::Display for MsqError {
@@ -197,6 +217,15 @@ impl fmt::Display for MsqError {
                     "the definition declares no page for the values found on page {page}"
                 )
             }
+            Self::UnsettledDefaults { reason } => {
+                write!(formatter, "the defaults cannot be settled: {reason}")
+            }
+            Self::ConflictingDefaults { conflict } => {
+                write!(
+                    formatter,
+                    "{conflict}, so a new tune would open holding two values for one byte"
+                )
+            }
         }
     }
 }
@@ -206,9 +235,11 @@ impl std::error::Error for MsqError {
         match self {
             Self::Xml(error) => Some(error),
             Self::Encoding(error) => Some(error),
-            Self::RootIsNotMsq { .. } | Self::EntryNotFound { .. } | Self::UnknownPage { .. } => {
-                None
-            }
+            Self::RootIsNotMsq { .. }
+            | Self::EntryNotFound { .. }
+            | Self::UnknownPage { .. }
+            | Self::ConflictingDefaults { .. }
+            | Self::UnsettledDefaults { .. } => None,
         }
     }
 }
@@ -411,8 +442,11 @@ impl Msq {
     /// # Errors
     ///
     /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
-    /// page the definition does not declare, and [`MsqError::Encoding`] when
-    /// a written value cannot be represented in ISO-8859-1.
+    /// page the definition does not declare, [`MsqError::Encoding`] when a
+    /// written value cannot be represented in ISO-8859-1,
+    /// [`MsqError::UnsettledDefaults`] when the defaults cannot be settled onto
+    /// one value per set of shared bytes, and [`MsqError::ConflictingDefaults`]
+    /// when what the scaffold writes holds two values for bytes they share.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
@@ -428,6 +462,14 @@ impl Msq {
         let layout = TuneLayout::build_with_context(definition, &mut defaults);
         let mut tune = Tune::new(Arc::new(layout));
         apply_definition_defaults(&mut tune, definition);
+        // A definition can give two constants the same bytes and disagree with
+        // itself about what those bytes should hold. A new project must not be
+        // born with a pair no write would carry, so the defaults are settled
+        // through the page image before any of them is written out.
+        tune.settle_shared_bytes()
+            .map_err(|error| MsqError::UnsettledDefaults {
+                reason: error.to_string(),
+            })?;
         let layout = Arc::clone(tune.layout());
 
         let mut pc_entries: Vec<Element> = Vec::new();
@@ -516,7 +558,32 @@ impl Msq {
                 Node::Text("\n".to_owned()),
             ],
         };
-        Ok(Self { document })
+        let scaffold = Self { document };
+        Self::check_defaults(&scaffold, definition)?;
+
+        Ok(scaffold)
+    }
+
+    /// Refuses a scaffold whose written values hold two for one byte.
+    ///
+    /// The clamp and the user-unit rounding are part of what lands on disk, and
+    /// either can move one peer and not the other after the settle. What the
+    /// file says is what a project opens on, so that is what is judged: a tune
+    /// that would open holding two values for one byte is refused here instead
+    /// of being created broken.
+    fn check_defaults(scaffold: &Self, definition: &Definition) -> Result<(), MsqError> {
+        let bytes = scaffold.save()?;
+        let reparsed = Self::parse(&bytes)?;
+        let loaded = load::load(&reparsed, definition);
+
+        for page in loaded.layout.pages() {
+            let conflicts = loaded.layout.value_conflicts(page.page, &loaded.tune);
+            if let Some(conflict) = conflicts.into_iter().next() {
+                return Err(MsqError::ConflictingDefaults { conflict });
+            }
+        }
+
+        Ok(())
     }
 
     /// Parses `.msq` bytes (ISO-8859-1) into the document model.
@@ -1138,6 +1205,7 @@ mod tests {
         reason = "unit tests may unwrap; a failed call is a failed test"
     )]
     use super::*;
+    use oxtuner_ini::parse_str;
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
@@ -1393,6 +1461,210 @@ mod tests {
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         assert_eq!(reparsed.version_info().expect("the header survives"), info);
+    }
+
+    #[test]
+    fn a_scaffolded_tune_keeps_peers_over_one_byte_in_step() {
+        // A definition can give two constants the same bytes and disagree with
+        // itself about what those bytes should hold: `second` cannot read back
+        // as zero inside its range, so its default is seven while `first` stays
+        // at zero. A new project must not be born holding two values for one
+        // byte, and it has to read its own save back without a complaint.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let settings = SettingsContext::new();
+
+        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert!(
+            loaded
+                .layout
+                .value_conflicts(IniPage::FIRST, &loaded.tune)
+                .is_empty(),
+            "a project must not start with two values over one byte: {:?}",
+            loaded.layout.value_conflicts(IniPage::FIRST, &loaded.tune)
+        );
+    }
+
+    #[test]
+    fn a_scaffold_whose_peers_have_no_common_value_is_refused() {
+        // `first` cannot store anything from 11 up and `second` cannot store
+        // anything below 20, so no value fits both and a new tune would open
+        // holding two of them for one byte.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 0, 10, 0
+second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let error = Msq::scaffold(&definition, &SettingsContext::new())
+            .expect_err("no value fits both ranges");
+
+        assert!(
+            matches!(error, MsqError::ConflictingDefaults { .. }),
+            "the refusal names the pair: {error}"
+        );
+    }
+
+    #[test]
+    fn a_scaffold_whose_peers_round_apart_is_refused() {
+        // Both peers settle onto seven and both can store it, but `second`
+        // writes it in user units as 0.07 and rounds that to one digit. The
+        // file then says 0.1, which reads back as ten next to `first`'s seven.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
+second = scalar, U08, 0, \"y\", 0.01, 0, 0, 255, 1
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let error = Msq::scaffold(&definition, &SettingsContext::new())
+            .expect_err("the rounding pulls the two apart");
+
+        assert!(
+            matches!(error, MsqError::ConflictingDefaults { .. }),
+            "what lands on disk is what is judged: {error}"
+        );
+    }
+
+    #[test]
+    fn a_scaffold_keeps_the_values_of_a_page_it_cannot_rebuild() {
+        // `wide` runs 0..4 and `straddle` runs 2..6, so no value owns what they
+        // share and the page cannot go through the codec. A scaffold writes the
+        // defaults as they are rather than settling one over the other.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], \"\", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        for cell in 0..4 {
+            assert_eq!(loaded.tune.raw_at("wide", cell).expect("it is there"), 0.0);
+            assert_eq!(
+                loaded.tune.raw_at("straddle", cell).expect("it is there"),
+                7.0,
+                "cell {cell} must not be written over by a rebuild"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scaffold_keeps_a_text_page_it_cannot_rebuild() {
+        // The codec reads `note` as its whole eight bytes, so a rebuild would
+        // hand the middle of it to the number underneath and read it back as
+        // text. The scaffold writes both as they are instead.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert_eq!(loaded.tune.text("note").expect("it is there"), "");
+        assert_eq!(loaded.tune.raw_at("inside", 0).expect("it is there"), 7.0);
+    }
+
+    #[test]
+    fn a_scaffolded_view_follows_its_owner_on_a_text_page() {
+        // `view` reads `owner`'s second byte, and `note` is a text field over
+        // the owner's remaining bytes, so the page cannot go through the codec.
+        // A scaffold never writes a view, so opening the file back has to derive
+        // it from its owner rather than leave it on its definition default.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+owner = array, U08, 0, [4], \"\", 1, 0, 7, 255, 0
+view = scalar, U08, 1, \"\", 1, 0, 0, 255, 0
+note = string, ASCII, 8
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+        assert!(
+            !loaded.layout.page_can_be_rebuilt(IniPage::FIRST),
+            "this is the derive fallback only when the page is refused"
+        );
+
+        assert_eq!(
+            loaded.tune.raw_at("view", 0).expect("it is there"),
+            7.0,
+            "the view reads the byte its owner holds when the file is opened back"
+        );
     }
 
     fn scaffold_definition() -> Definition {

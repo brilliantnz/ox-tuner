@@ -49,11 +49,17 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
         }
     }
     let count = clamped.len();
+    let mut touched: Vec<String> = Vec::new();
     for (name, index, value) in clamped {
         if let Err(error) = project.tune_mut().set_user_at(&name, index, value) {
             tracing::warn!(%name, %error, "a clamped value could not be stored");
         }
+        touched.push(name);
     }
+
+    // A clamp moves bytes a neighbour may also claim, and this runs just before
+    // the gate that looks for two values over one set of them.
+    reconcile_groups(project, &touched, "a clamp");
     count
 }
 
@@ -170,6 +176,71 @@ pub(super) fn unsent_ambiguous_page(project: &Project, variables: &[String]) -> 
         let page = layout.variable(name)?.ini_page()?;
         layout.page_has_ambiguous_overlap(page).then_some(page)
     })
+}
+
+/// The first target page holding values the shared bytes cannot both carry.
+///
+/// The refusal is page-wide, like the ambiguous one. The codec runs non-bits
+/// first and bits after, so one of the two would be dropped and stay pending
+/// until a later write put its bytes back. The page stays unwritable until the
+/// two agree.
+pub(super) fn conflicting_value_page(project: &Project, targets: &[u8]) -> Option<ValueConflict> {
+    let layout = project.layout();
+    let working = project.images().working();
+
+    targets.iter().find_map(|page| {
+        let page = IniPage::new(*page)?;
+        layout.value_conflicts(page, working).into_iter().next()
+    })
+}
+
+/// The first page among `variables` holding values the shared bytes cannot both
+/// carry.
+///
+/// A burn is refused before it can point the user at a write that would always
+/// be refused for the same page. Each page is checked once, however many of its
+/// variables are still unsent.
+pub(super) fn unsent_conflicting_value(
+    project: &Project,
+    variables: &[String],
+) -> Option<ValueConflict> {
+    let layout = project.layout();
+    let working = project.images().working();
+    let mut checked = std::collections::BTreeSet::new();
+
+    variables.iter().find_map(|name| {
+        let page = layout.variable(name)?.ini_page()?;
+        if !checked.insert(page.get()) {
+            return None;
+        }
+
+        layout.value_conflicts(page, working).into_iter().next()
+    })
+}
+
+/// Re-derives the constants whose bytes any of `names` moved.
+///
+/// Two constants can sit over the same bytes and moving one moves the bytes
+/// both of them claim, so the neighbours are re-derived from the page image and
+/// the moved value is the one that survives. Anything still left disagreeing is
+/// caught by the write gate before it reaches the ECU. One constant per sharing
+/// group is enough, since re-deriving it settles the whole group.
+pub(super) fn reconcile_groups(project: &mut Project, names: &[String], what: &str) {
+    let mut settled = std::collections::BTreeSet::new();
+
+    for name in names {
+        if settled.contains(name.as_str()) {
+            continue;
+        }
+
+        if let Err(error) = project.tune_mut().reconcile_shared_bytes(name) {
+            tracing::warn!(%what, %name, %error, "shared bytes could not be reconciled");
+            continue;
+        }
+        for shared in project.layout().names_sharing_bytes(name) {
+            settled.insert(shared.to_owned());
+        }
+    }
 }
 
 /// Counts edits that have not reached ECU RAM.
@@ -458,6 +529,10 @@ pub(super) fn revert_target(
     };
 
     let reverted = project.images_mut().revert_variables(&variables);
+    // A revert moves bytes a neighbour may still claim from an edit, so the
+    // neighbours are re-derived here too or the page would hold two values and
+    // refuse every write until someone edits one of them again.
+    reconcile_groups(project, &variables, "a revert");
     tracing::info!(
         %op,
         target = %name,

@@ -84,8 +84,8 @@ pub use images::{
     CellState, CellValue, Conflict, PageState, StateTable, TuneImages, TuneStatus, conflict_names,
 };
 pub use layout::{
-    EntryShape, IssueSeverity, LayoutIssue, LayoutIssueKind, Owner, PageLayout, TuneLayout,
-    VariableSpec,
+    EntryShape, IssueSeverity, LayoutIssue, LayoutIssueKind, Owner, PageLayout, PageRebuild,
+    TuneLayout, ValueConflict, VariableSpec,
 };
 pub use page::{IniPage, MsqPage};
 pub use tune::{EditOutcome, Tune, TuneError};

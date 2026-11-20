@@ -331,6 +331,203 @@ straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
         );
     }
 
+    const PEERS: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    fn peer_images() -> (TuneImages, Tune) {
+        let definition = parse_str(PEERS, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+
+        // A file builds its own layout allocation, as a real import does.
+        let file_definition = parse_str(PEERS, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+
+        (images, Tune::new(file_layout))
+    }
+
+    #[test]
+    fn a_file_carrying_two_values_for_one_byte_is_refused() {
+        let (mut images, mut imported) = peer_images();
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 200.0)
+            .expect("the second takes a value");
+
+        let error = images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect_err("one byte cannot carry both values");
+
+        assert!(
+            matches!(error, TuneError::ConflictingValues { .. }),
+            "the refusal names the pair: {error}"
+        );
+    }
+
+    #[test]
+    fn a_refused_file_leaves_the_working_image_alone() {
+        let (mut images, mut imported) = peer_images();
+        images
+            .working_mut()
+            .set_image_raw("first", 0, 7.0)
+            .expect("the image holds a value");
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 200.0)
+            .expect("the second takes a value");
+
+        let _ = images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect_err("the import is refused");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            7.0,
+            "a refused import must not move a single cell"
+        );
+    }
+
+    #[test]
+    fn a_file_whose_peers_agree_merges() {
+        let (mut images, mut imported) = peer_images();
+        imported
+            .set_image_raw("first", 0, 100.0)
+            .expect("the first takes a value");
+        imported
+            .set_image_raw("second", 0, 100.0)
+            .expect("the second takes a value");
+
+        images
+            .import_applied(&imported, &["first".to_owned(), "second".to_owned()])
+            .expect("the two values agree");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            100.0
+        );
+        assert_eq!(
+            images
+                .working()
+                .raw_at("second", 0)
+                .expect("the image reads"),
+            100.0
+        );
+    }
+
+    #[test]
+    fn a_view_follows_its_owner_on_an_overlap_page_when_the_file_names_only_the_owner() {
+        // `data0` reads the first byte of `data`, and `note` is a text field
+        // over the rest of the owner, so the page is left standing instead of
+        // rebuilt. The file names only the owner, and a view is not a value of
+        // its own: it follows the byte the file carried rather than sitting on
+        // the stale value it had.
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("data0", 0, 9.0)
+            .expect("a stale view");
+
+        let file_definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            imported
+                .set_image_raw("data", index, value)
+                .expect("the array takes a value");
+        }
+
+        images
+            .import_applied(&imported, &["data".to_owned()])
+            .expect("the import goes through");
+
+        assert_eq!(
+            images.working().raw_at("data0", 0).expect("it is there"),
+            1.0,
+            "the view follows the owner's byte the file carried"
+        );
+    }
+
+    /// A definition with the peers on one page and an unrelated constant on another.
+    const TWO_PAGES: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 8, 8
+page = 1
+first = scalar, U08, 0, "", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "", 1, 0, 0, 255, 0
+page = 2
+other = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    #[test]
+    fn a_file_that_says_nothing_about_a_page_leaves_its_peers_alone() {
+        // A disagreement on a page the file never names is not the file's
+        // answer to give, so the import goes ahead and that page keeps what it
+        // had.
+        let definition = parse_str(TWO_PAGES, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("first", 0, 100.0)
+            .expect("takes a value");
+        images
+            .working_mut()
+            .set_image_raw("second", 0, 200.0)
+            .expect("takes a value");
+
+        let file_definition = parse_str(TWO_PAGES, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        imported
+            .set_image_raw("other", 0, 5.0)
+            .expect("takes a value");
+
+        images
+            .import_applied(&imported, &["other".to_owned()])
+            .expect("the file names another page");
+
+        assert_eq!(
+            images
+                .working()
+                .raw_at("other", 0)
+                .expect("the image reads"),
+            5.0
+        );
+        assert_eq!(
+            images
+                .working()
+                .raw_at("first", 0)
+                .expect("the image reads"),
+            100.0,
+            "a page the file says nothing about keeps its values"
+        );
+    }
+
     #[test]
     fn a_page_a_text_field_overlaps_keeps_what_the_file_carried() {
         let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
