@@ -237,11 +237,8 @@ fn parse_sections(
     }
 
     for key in &order {
-        slots
-            .get(key)
-            .expect("every ordered name has a slot")
-            .parser
-            .finish_coverage(&mut coverage);
+        let slot = slots.get(key).expect("every ordered name has a slot");
+        slot.parser.finish_coverage(&mut coverage);
     }
 
     coverage
