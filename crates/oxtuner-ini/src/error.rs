@@ -9,6 +9,10 @@
 //!   recorded as a [`Diagnostic`] on the frozen [`crate::Definition`] and the
 //!   entry is dropped or kept as data. Nothing panics, and one bad line never
 //!   costs the user the whole file.
+//!
+//! A diagnostic may name the source file it came from. [`Diagnostic::at`] sets
+//! that path; the older constructors leave it unset so unnamed text keeps the
+//! original `line: severity:` display.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -60,14 +64,31 @@ pub struct Diagnostic {
     pub line: Option<u32>,
     /// Section the entry was in (`Constants`, `TableEditor`, …), when known.
     pub section: Option<String>,
+    /// Resolved path of the file the line belongs to, when the caller named it.
+    ///
+    /// An unnamed top-level file leaves this as `None`, so old diagnostic text
+    /// keeps its `line: severity:` shape.
+    pub source: Option<String>,
 }
 
 impl Diagnostic {
-    /// A message tied to a line inside a section.
+    /// A message tied to a line inside a section of the unnamed top file.
     pub fn new(
         severity: Severity,
         code: &'static str,
         message: impl Into<String>,
+        line: u32,
+        section: &str,
+    ) -> Self {
+        Self::at(severity, code, message, None, line, section)
+    }
+
+    /// A message tied to a line in a named source file.
+    pub fn at(
+        severity: Severity,
+        code: &'static str,
+        message: impl Into<String>,
+        source: Option<&str>,
         line: u32,
         section: &str,
     ) -> Self {
@@ -77,6 +98,7 @@ impl Diagnostic {
             message: message.into(),
             line: Some(line),
             section: Some(section.to_owned()),
+            source: source.map(str::to_owned),
         }
     }
 
@@ -93,6 +115,7 @@ impl Diagnostic {
             message: message.into(),
             line: None,
             section: Some(section.to_owned()),
+            source: None,
         }
     }
 
@@ -104,6 +127,7 @@ impl Diagnostic {
             message: message.into(),
             line: None,
             section: None,
+            source: None,
         }
     }
 }
@@ -144,10 +168,15 @@ pub fn extend_bounded(
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(formatter, "{line}: {}: ", self.severity),
-            None => write!(formatter, "{}: ", self.severity),
-        }?;
+        if let Some(source) = &self.source {
+            write!(formatter, "{source}:")?;
+        }
+        if let Some(line) = self.line {
+            write!(formatter, "{line}: ")?;
+        } else if self.source.is_some() {
+            write!(formatter, " ")?;
+        }
+        write!(formatter, "{}: ", self.severity)?;
         if let Some(section) = &self.section {
             write!(formatter, "[{section}] ")?;
         }

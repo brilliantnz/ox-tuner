@@ -80,8 +80,12 @@ pub use model::{
 };
 pub use parser::{
     MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,
+    parse_str_with_source,
 };
-pub use preprocess::{LogicalLine, MAX_INCLUDE_DEPTH, Preprocessed, preprocess};
+pub use preprocess::{
+    Include, IncludeRequest, IncludeResolver, LogicalLine, MAX_INCLUDE_DEPTH, Preprocessed,
+    SourceFile, SourceId, SourcePos, preprocess, preprocess_with_source,
+};
 pub use settings::SettingsContext;
 
 impl Definition {

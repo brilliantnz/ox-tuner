@@ -10,6 +10,8 @@ use crate::model::{
     ConfigEntry, ConfigSection, Definition, LoggerDefinition, LoggerField, Number, Text,
 };
 
+use crate::preprocess::SourcePos;
+
 use super::{SectionParser, SectionSink};
 
 /// `[LoggerDefinition]`: named loggers with a bit-level record layout. The open
@@ -25,7 +27,7 @@ impl SectionSink for LoggersSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -81,9 +83,9 @@ impl SectionSink for LoggersSink {
                         .and_then(|field| crate::fields::parse_u32(field))
                         .unwrap_or(0);
                 }
-                "recordfield" => logger.fields.push(record_field(&fields, *line)),
-                "headerfield" => logger.header_fields.push(record_field(&fields, *line)),
-                "calcfield" => logger.calculated.push(calculated_field(&fields, *line)),
+                "recordfield" => logger.fields.push(record_field(&fields, line.line)),
+                "headerfield" => logger.header_fields.push(record_field(&fields, line.line)),
+                "calcfield" => logger.calculated.push(calculated_field(&fields, line.line)),
                 _ => {
                     section.unrecognized_key(key, *line);
                     continue;
@@ -103,7 +105,7 @@ impl SectionSink for LoggersSink {
 /// Opens one `loggerDef = name, "Title", type` block.
 fn open_logger(
     fields: &[&str],
-    line: u32,
+    line: SourcePos,
     section: &mut SectionParser,
     names: &mut std::collections::BTreeSet<String>,
 ) -> Option<LoggerDefinition> {
@@ -134,7 +136,7 @@ fn open_logger(
         fields: Vec::new(),
         header_fields: Vec::new(),
         calculated: Vec::new(),
-        line,
+        line: line.line,
     })
 }
 
@@ -208,7 +210,7 @@ impl SectionSink for ConfigSectionSink {
         &mut self,
         _definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -221,7 +223,7 @@ impl SectionSink for ConfigSectionSink {
                 key: key.to_owned(),
                 value: value.to_owned(),
                 fields: split_fields(value).into_iter().map(str::to_owned).collect(),
-                line: *line,
+                line: line.line,
             });
             section.understand(*line);
         }

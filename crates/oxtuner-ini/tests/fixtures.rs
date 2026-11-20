@@ -15,8 +15,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use oxtuner_ini::{
-    CommandArguments, Dimension, Number, Offset, RowClassification, RowKind, SettingsContext, Text,
-    parse_str, parse_str_with_includes,
+    CommandArguments, Dimension, Include, IncludeRequest, Number, Offset, RowClassification,
+    RowKind, SettingsContext, Text, parse_str, parse_str_with_includes,
 };
 
 fn fixture(name: &str) -> String {
@@ -450,10 +450,19 @@ b = scalar, U08, 1, \"u\", 1, 0, 0, 255, 0
     .expect("merges");
 
     let text = "[MegaTune]\nsignature = \"golden\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include a.inc\n";
-    let resolver = |name: &str| match name {
-        "a.inc" => Some("#include b.inc\n".to_owned()),
-        "b.inc" => Some("#include c.inc\n".to_owned()),
-        "c.inc" => Some("deep = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0\n".to_owned()),
+    let resolver = |request: IncludeRequest<'_>| match request.path {
+        "a.inc" => Some(Include {
+            path: "a.inc".to_owned(),
+            text: "#include b.inc\n".to_owned(),
+        }),
+        "b.inc" => Some(Include {
+            path: "b.inc".to_owned(),
+            text: "#include c.inc\n".to_owned(),
+        }),
+        "c.inc" => Some(Include {
+            path: "c.inc".to_owned(),
+            text: "deep = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0\n".to_owned(),
+        }),
         _ => None,
     };
     let included = parse_str_with_includes(text, &SettingsContext::new(), &resolver)
@@ -471,9 +480,13 @@ b = scalar, U08, 1, \"u\", 1, 0, 0, 255, 0
         included.constant("deep").is_some()
     );
 
-    let deep_resolver = |name: &str| {
-        let number = name.strip_suffix(".inc")?.parse::<u32>().ok()?;
-        Some(format!("#include {}.inc\n", number + 1))
+    let deep_resolver = |request: IncludeRequest<'_>| {
+        let number = request.path.strip_suffix(".inc")?.parse::<u32>().ok()?;
+        let next = format!("{}.inc", number + 1);
+        Some(Include {
+            path: next.clone(),
+            text: format!("#include {next}\n"),
+        })
     };
     let too_deep = parse_str_with_includes(
         "[MegaTune]\nsignature = \"golden\"\n#include 0.inc\n",

@@ -7,6 +7,8 @@
 use crate::fields::split_fields;
 use crate::model::{Definition, Gauge, Indicator, Number, Text};
 
+use crate::preprocess::SourcePos;
+
 use super::{SectionParser, SectionSink};
 
 /// `[GaugeConfigurations]`. The category survives a repeated section header.
@@ -20,7 +22,7 @@ impl SectionSink for GaugesSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -77,7 +79,7 @@ impl SectionSink for GaugesSink {
                     .get(11)
                     .and_then(|field| crate::fields::expression_body(field))
                     .map(str::to_owned),
-                line: *line,
+                line: line.line,
             };
 
             if !definition.channels.contains(&gauge.channel) {
@@ -100,7 +102,7 @@ impl SectionSink for GaugesSink {
 pub(crate) fn parse_front_page(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -138,7 +140,7 @@ pub(crate) fn parse_front_page(
                 on_label: crate::fields::unquote(fields[2]).to_owned(),
                 colours: fields[3..].iter().map(|f| (*f).to_owned()).collect(),
                 template_only: lowered == "indicatortemplate",
-                line: *line,
+                line: line.line,
             });
             section.understand(*line);
             continue;

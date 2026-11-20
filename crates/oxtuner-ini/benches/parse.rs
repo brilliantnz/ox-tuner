@@ -48,8 +48,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use oxtuner_ini::{
-    BitOption, ConstantClass, Definition, Number, Ordered, SettingsContext, builtins, expr::Expr,
-    parse_str, parse_str_with_includes, preprocess::preprocess,
+    BitOption, ConstantClass, Definition, Include, IncludeRequest, Number, Ordered,
+    SettingsContext, builtins, expr::Expr, parse_str, parse_str_with_includes,
+    preprocess::preprocess,
 };
 
 /// Peak temporary memory for the wide-table bench.
@@ -1040,10 +1041,19 @@ fn bench_repeated_sections(criterion: &mut Criterion) {
 fn bench_include_chain(criterion: &mut Criterion) {
     let text = include_chain_fixture();
     let settings = SettingsContext::new();
-    let resolver = |path: &str| match path {
-        "a.inc" => Some("#include b.inc\n".to_owned()),
-        "b.inc" => Some("#include c.inc\n".to_owned()),
-        "c.inc" => Some("deep = 1\n".to_owned()),
+    let resolver = |request: IncludeRequest<'_>| match request.path {
+        "a.inc" => Some(Include {
+            path: "a.inc".to_owned(),
+            text: "#include b.inc\n".to_owned(),
+        }),
+        "b.inc" => Some(Include {
+            path: "b.inc".to_owned(),
+            text: "#include c.inc\n".to_owned(),
+        }),
+        "c.inc" => Some(Include {
+            path: "c.inc".to_owned(),
+            text: "deep = 1\n".to_owned(),
+        }),
         _ => None,
     };
 

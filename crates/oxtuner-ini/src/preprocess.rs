@@ -11,12 +11,19 @@
 //! - inlined `#include` files when a resolver is supplied.
 //!
 //! Includes are resolved recursively up to [`MAX_INCLUDE_DEPTH`] levels, and a
-//! logical name already on the include stack reports `circular-include` instead
+//! resolved path already on the include stack reports `circular-include` instead
 //! of recursing again. `from_str` keeps refusing includes: there is no base to
 //! resolve a path against, so only the resolver entry point follows them.
 //!
-//! The output keeps 1-based line numbers so every later diagnostic can point at
-//! the line the user will find in their editor.
+//! Resolution is root-relative, never relative to the including file. The
+//! resolver returns the resolved path alongside the text; that path is the
+//! identity for cycles, include chains and cache fingerprints. The written
+//! spelling stays only in user-facing messages.
+//!
+//! Every logical line carries a [`SourcePos`]: a file id and a 1-based line in
+//! that file. Included files keep their own line numbering, and all files in one
+//! parse share a [`SourceFile`] table so a diagnostic can name the right file
+//! without the parser carrying a path on every entry.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,11 +33,50 @@ use crate::expr::bump_depth;
 use crate::fields::{assignment_index, has_assignment, split_fields, strip_comment};
 use crate::settings::SettingsContext;
 
+/// Identifies one source file in a single parse.
+///
+/// The number indexes [`Preprocessed::sources`]. An included file gets its own
+/// id, shared by every logical line that came from it, so a diagnostic can name
+/// the file without the parser carrying a path per entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceId(u32);
+
+impl SourceId {
+    /// Index into [`Preprocessed::sources`].
+    pub fn index(self) -> usize {
+        usize::try_from(self.0).unwrap_or(usize::MAX)
+    }
+}
+
+/// A 1-based line in a specific source file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourcePos {
+    /// File this line came from.
+    pub source: SourceId,
+    /// 1-based line within that file.
+    pub line: u32,
+}
+
+impl SourcePos {
+    /// Position of the first line of a source.
+    pub fn new(source: SourceId, line: u32) -> Self {
+        Self { source, line }
+    }
+}
+
+/// One file that contributed lines to a parse. Index 0 is the top file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFile {
+    /// Resolved path as supplied by the caller or include resolver. `None` for
+    /// unnamed text, which keeps diagnostics in their original shape.
+    pub path: Option<String>,
+}
+
 /// One entry after preprocessing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalLine {
-    /// 1-based line where the entry started.
-    pub line: u32,
+    /// Which file and line the entry started at.
+    pub pos: SourcePos,
     /// The entry with comments removed, continuations joined and whitespace
     /// collapsed at the join points.
     pub text: String,
@@ -41,6 +87,8 @@ pub struct LogicalLine {
 pub struct Preprocessed {
     /// Logical lines in document order, conditionals already applied.
     pub lines: Vec<LogicalLine>,
+    /// Every source file that contributed lines. Indexed by [`SourceId`].
+    pub sources: Vec<SourceFile>,
     /// `#define NAME = …` string lists, keyed lowercase.
     pub defines: BTreeMap<String, Vec<String>>,
     /// The settings context after the file's own `#set` / `#unset` declarations
@@ -395,9 +443,32 @@ fn parse_index_override(field: &str) -> Option<(usize, String)> {
     }
 }
 
-/// Resolves an `#include path` to text. Return `None` when the file cannot be
-/// found; the caller turns that into a diagnostic instead of failing.
-pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
+/// One `#include` request.
+#[derive(Debug, Clone, Copy)]
+pub struct IncludeRequest<'a> {
+    /// Path as written in the directive, unquoted.
+    pub path: &'a str,
+    /// Resolved path of the file containing the directive, `None` for the top
+    /// file. Informational: resolution is root-relative, never includer-relative.
+    pub from: Option<&'a str>,
+    /// Depth of the containing file; the top file is 0.
+    pub depth: u32,
+}
+
+/// One include that resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    /// Resolved identity, relative to the resolver's base. This drives cycle
+    /// detection, chain messages and the cache fingerprint; the written spelling
+    /// is only kept for user-facing messages.
+    pub path: String,
+    /// File contents.
+    pub text: String,
+}
+
+/// Resolves an `#include` request. Return `None` when the file cannot be found;
+/// the caller turns that into a diagnostic instead of failing.
+pub type IncludeResolver<'a> = &'a dyn Fn(IncludeRequest<'_>) -> Option<Include>;
 
 /// Deepest include chain this pass follows. The top file is depth 0; reaching
 /// this cap with another `#include` reports `include-depth-exceeded` with the
@@ -412,10 +483,44 @@ pub const MAX_EXPANDED_FIELDS: usize = 1 << 20;
 /// Largest total text one expanded field list may hold.
 pub const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
 
-/// The recursion state shared by one include chain.
+/// The recursion state shared by one include chain. The stack holds resolved
+/// include paths, so two spellings of the same file cannot slip past the cycle
+/// check.
 struct IncludeScope<'a> {
     depth: u32,
     stack: &'a [String],
+    source: SourceId,
+}
+
+/// The path a source id was registered with, when it has one.
+fn source_path(sources: &[SourceFile], source: SourceId) -> Option<&str> {
+    sources
+        .get(source.index())
+        .and_then(|file| file.path.as_deref())
+}
+
+/// A source index that cannot be represented is clamped. Reaching four billion
+/// distinct files in one parse is not a reachable input; the clamp just keeps
+/// the conversion total.
+fn id_from_index(index: usize) -> SourceId {
+    SourceId(u32::try_from(index).unwrap_or(u32::MAX))
+}
+
+/// Registers a file in the shared source table, reusing an earlier id for the
+/// same path so a repeated include does not grow the table.
+fn register_source(sources: &mut Vec<SourceFile>, path: Option<&str>) -> SourceId {
+    if let Some(path) = path
+        && let Some(index) = sources
+            .iter()
+            .position(|file| file.path.as_deref() == Some(path))
+    {
+        return id_from_index(index);
+    }
+    let index = sources.len();
+    sources.push(SourceFile {
+        path: path.map(str::to_owned),
+    });
+    id_from_index(index)
 }
 
 /// The include chain ending at `last`, for a diagnostic that names the cycle.
@@ -555,7 +660,39 @@ pub fn preprocess(
     settings: &SettingsContext,
     includes: Option<IncludeResolver<'_>>,
 ) -> Result<Preprocessed, IniError> {
-    preprocess_inner(text, settings, includes, 0, &[])
+    preprocess_with_source(text, settings, None, includes)
+}
+
+/// Runs pass 1, naming the top file in diagnostics and using `source_name` as
+/// its identity in the shared source table.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when a conditional block is left open or closed
+/// without a matching `#if`.
+pub fn preprocess_with_source(
+    text: &str,
+    settings: &SettingsContext,
+    source_name: Option<&str>,
+    includes: Option<IncludeResolver<'_>>,
+) -> Result<Preprocessed, IniError> {
+    let mut sources = vec![SourceFile {
+        path: source_name.map(str::to_owned),
+    }];
+    // Seed the stack with the top file so an include that resolves back to it
+    // is a cycle even though no include has been followed yet.
+    let stack: Vec<String> = source_name.into_iter().map(str::to_owned).collect();
+    let mut preprocessed = preprocess_inner(
+        text,
+        settings,
+        includes,
+        0,
+        &stack,
+        SourceId(0),
+        &mut sources,
+    )?;
+    preprocessed.sources = sources;
+    Ok(preprocessed)
 }
 
 fn preprocess_inner(
@@ -564,6 +701,8 @@ fn preprocess_inner(
     includes: Option<IncludeResolver<'_>>,
     depth: u32,
     stack: &[String],
+    source: SourceId,
+    sources: &mut Vec<SourceFile>,
 ) -> Result<Preprocessed, IniError> {
     let mut preprocessed = Preprocessed {
         settings: settings.clone(),
@@ -614,7 +753,12 @@ fn preprocess_inner(
                 &mut conditionals,
                 includes,
                 &mut fatal,
-                &IncludeScope { depth, stack },
+                &IncludeScope {
+                    depth,
+                    stack,
+                    source,
+                },
+                sources,
             );
             continue;
         }
@@ -643,7 +787,7 @@ fn preprocess_inner(
         }
 
         preprocessed.lines.push(LogicalLine {
-            line: line_number,
+            pos: SourcePos::new(source, line_number),
             text: content.to_owned(),
         });
     }
@@ -651,10 +795,11 @@ fn preprocess_inner(
     if let Some(line) = block_comment.open {
         push_bounded(
             &mut preprocessed.diagnostics,
-            Diagnostic::new(
+            Diagnostic::at(
                 Severity::Warning,
                 "unterminated-block-comment",
                 "this `/*` comment has no matching `*/`; the rest of the file is ignored",
+                source_path(sources, source),
                 line,
                 "Preprocessor",
             ),
@@ -681,10 +826,11 @@ fn preprocess_inner(
         .find(|frame| frame.depth_line.is_some())
         && let Some(line) = frame.depth_line
     {
-        fatal.push(Diagnostic::new(
+        fatal.push(Diagnostic::at(
             Severity::Error,
             "unterminated-if",
             "this `#if` has no matching `#endif`",
+            source_path(sources, source),
             line,
             "Preprocessor",
         ));
@@ -724,6 +870,10 @@ struct Conditional {
     depth_line: Option<u32>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "directive handling shares one preprocessor state bundle across recursion"
+)]
 fn handle_directive(
     directive: &str,
     line_number: u32,
@@ -732,6 +882,7 @@ fn handle_directive(
     includes: Option<IncludeResolver<'_>>,
     fatal: &mut Vec<Diagnostic>,
     scope: &IncludeScope<'_>,
+    sources: &mut Vec<SourceFile>,
 ) {
     let (name, rest) = match directive.split_once(char::is_whitespace) {
         Some((name, rest)) => (name, rest.trim_ascii()),
@@ -747,6 +898,7 @@ fn handle_directive(
             preprocessed,
             conditionals,
             fatal,
+            source_path(sources, scope.source),
         ),
         "define" | "set" | "unset" | "include" => {
             if conditionals.iter().all(|frame| frame.active) {
@@ -758,6 +910,7 @@ fn handle_directive(
                     includes,
                     fatal,
                     scope,
+                    sources,
                 );
             }
         }
@@ -776,13 +929,14 @@ fn handle_conditional_directive(
     preprocessed: &mut Preprocessed,
     conditionals: &mut Vec<Conditional>,
     fatal: &mut Vec<Diagnostic>,
+    source: Option<&str>,
 ) {
     let enclosing_active = conditionals.iter().all(|frame| frame.active);
 
     match name {
         "if" => {
             let result = evaluate_condition(rest, &mut preprocessed.settings);
-            let taken = resolve_condition(result, preprocessed, fatal, line_number);
+            let taken = resolve_condition(result, preprocessed, fatal, line_number, source);
             let taken = taken && enclosing_active;
             conditionals.push(Conditional {
                 parent_active: enclosing_active,
@@ -793,33 +947,36 @@ fn handle_conditional_directive(
             });
         }
         "elif" => match conditionals.last_mut() {
-            Some(frame) if frame.saw_else => fatal.push(Diagnostic::new(
+            Some(frame) if frame.saw_else => fatal.push(Diagnostic::at(
                 Severity::Error,
                 "elif-after-else",
                 "`#elif` after `#else` in the same `#if` block",
+                source,
                 line_number,
                 "Preprocessor",
             )),
             Some(frame) => {
                 let result = evaluate_condition(rest, &mut preprocessed.settings);
-                let taken = resolve_condition(result, preprocessed, fatal, line_number);
+                let taken = resolve_condition(result, preprocessed, fatal, line_number, source);
                 let taken = taken && !frame.branch_taken && frame.parent_active;
                 frame.active = taken;
                 frame.branch_taken |= taken;
             }
-            None => fatal.push(Diagnostic::new(
+            None => fatal.push(Diagnostic::at(
                 Severity::Error,
                 "stray-elif",
                 "`#elif` without an open `#if`",
+                source,
                 line_number,
                 "Preprocessor",
             )),
         },
         "else" => match conditionals.last_mut() {
-            Some(frame) if frame.saw_else => fatal.push(Diagnostic::new(
+            Some(frame) if frame.saw_else => fatal.push(Diagnostic::at(
                 Severity::Error,
                 "duplicate-else",
                 "this `#if` block already has an `#else`",
+                source,
                 line_number,
                 "Preprocessor",
             )),
@@ -829,19 +986,21 @@ fn handle_conditional_directive(
                 frame.branch_taken |= taken;
                 frame.saw_else = true;
             }
-            None => fatal.push(Diagnostic::new(
+            None => fatal.push(Diagnostic::at(
                 Severity::Error,
                 "stray-else",
                 "`#else` without an open `#if`",
+                source,
                 line_number,
                 "Preprocessor",
             )),
         },
         "endif" if conditionals.pop().is_none() => {
-            fatal.push(Diagnostic::new(
+            fatal.push(Diagnostic::at(
                 Severity::Error,
                 "stray-endif",
                 "`#endif` without an open `#if`",
+                source,
                 line_number,
                 "Preprocessor",
             ));
@@ -850,6 +1009,10 @@ fn handle_conditional_directive(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "directive handling shares one preprocessor state bundle across recursion"
+)]
 fn handle_active_directive(
     name: &str,
     rest: &str,
@@ -858,6 +1021,7 @@ fn handle_active_directive(
     includes: Option<IncludeResolver<'_>>,
     fatal: &mut Vec<Diagnostic>,
     scope: &IncludeScope<'_>,
+    sources: &mut Vec<SourceFile>,
 ) {
     match name {
         "define" => {
@@ -868,10 +1032,11 @@ fn handle_active_directive(
             if define_name.is_empty() {
                 push_bounded(
                     &mut preprocessed.diagnostics,
-                    Diagnostic::new(
+                    Diagnostic::at(
                         Severity::Warning,
                         "empty-define",
                         "`#define` without a name",
+                        source_path(sources, scope.source),
                         line_number,
                         "Preprocessor",
                     ),
@@ -888,7 +1053,15 @@ fn handle_active_directive(
                 preprocessed.settings.declare(flag, name == "set");
             }
         }
-        "include" => handle_include(rest, line_number, preprocessed, includes, fatal, scope),
+        "include" => handle_include(
+            rest,
+            line_number,
+            preprocessed,
+            includes,
+            fatal,
+            scope,
+            sources,
+        ),
         _ => {}
     }
 }
@@ -901,51 +1074,27 @@ fn handle_include(
     includes: Option<IncludeResolver<'_>>,
     fatal: &mut Vec<Diagnostic>,
     scope: &IncludeScope<'_>,
+    sources: &mut Vec<SourceFile>,
 ) {
-    let path = crate::fields::unquote(rest).to_owned();
-    let chain = chain_text(scope.stack, &path);
+    let written = crate::fields::unquote(rest);
+    let from = source_path(sources, scope.source).map(str::to_owned);
+    let request = IncludeRequest {
+        path: written,
+        from: from.as_deref(),
+        depth: scope.depth,
+    };
 
-    if scope.depth >= MAX_INCLUDE_DEPTH {
+    let Some(include) = includes.and_then(|resolver| resolver(request)) else {
+        let parent = from.as_deref().unwrap_or("the top-level file");
         push_bounded(
             &mut preprocessed.diagnostics,
-            Diagnostic::new(
-                Severity::Error,
-                "include-depth-exceeded",
-                format!(
-                    "`#include {path}` would go past the include depth cap of \
-                     {MAX_INCLUDE_DEPTH}: {chain}"
-                ),
-                line_number,
-                "Preprocessor",
-            ),
-        );
-        return;
-    }
-    if scope.stack.iter().any(|name| name == &path) {
-        push_bounded(
-            &mut preprocessed.diagnostics,
-            Diagnostic::new(
-                Severity::Error,
-                "circular-include",
-                format!("`#include {path}` closes an include cycle: {chain}"),
-                line_number,
-                "Preprocessor",
-            ),
-        );
-        return;
-    }
-
-    let Some(nested_text) = includes.and_then(|resolver| resolver(&path)) else {
-        let parent = scope
-            .stack
-            .last()
-            .map_or("the top-level file", String::as_str);
-        push_bounded(
-            &mut preprocessed.diagnostics,
-            Diagnostic::new(
+            Diagnostic::at(
                 Severity::Note,
                 "include-not-found",
-                format!("could not resolve `#include {path}` from {parent}; the entry is ignored"),
+                format!(
+                    "could not resolve `#include {written}` from {parent}; the entry is ignored"
+                ),
+                from.as_deref(),
                 line_number,
                 "Preprocessor",
             ),
@@ -953,14 +1102,53 @@ fn handle_include(
         return;
     };
 
+    // The resolved path is the identity for cycles, chains and source ids. Two
+    // different spellings of one file must be the same include.
+    let resolved = include.path.as_str();
+    let chain = chain_text(scope.stack, resolved);
+    if scope.depth >= MAX_INCLUDE_DEPTH {
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::at(
+                Severity::Error,
+                "include-depth-exceeded",
+                format!(
+                    "`#include {written}` would go past the include depth cap of \
+                     {MAX_INCLUDE_DEPTH}: {chain}"
+                ),
+                from.as_deref(),
+                line_number,
+                "Preprocessor",
+            ),
+        );
+        return;
+    }
+    if scope.stack.iter().any(|name| name == resolved) {
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::at(
+                Severity::Error,
+                "circular-include",
+                format!("`#include {written}` closes an include cycle: {chain}"),
+                from.as_deref(),
+                line_number,
+                "Preprocessor",
+            ),
+        );
+        return;
+    }
+
+    let source = register_source(sources, Some(resolved));
     let mut nested_stack = scope.stack.to_vec();
-    nested_stack.push(path);
+    nested_stack.push(resolved.to_owned());
     match preprocess_inner(
-        &nested_text,
+        &include.text,
         &preprocessed.settings,
         includes,
         scope.depth + 1,
         &nested_stack,
+        source,
+        sources,
     ) {
         Ok(nested) => {
             preprocessed.lines.extend(nested.lines);
@@ -1009,14 +1197,16 @@ fn resolve_condition(
     preprocessed: &mut Preprocessed,
     fatal: &mut Vec<Diagnostic>,
     line_number: u32,
+    source: Option<&str>,
 ) -> bool {
     match result {
         Ok(taken) => taken,
         Err(ConditionError::TooDeep) => {
-            fatal.push(Diagnostic::new(
+            fatal.push(Diagnostic::at(
                 Severity::Error,
                 "condition-too-deep",
                 format!("a condition nests too deeply (limit {MAX_CONDITION_NESTING})"),
+                source,
                 line_number,
                 "Preprocessor",
             ));
@@ -1025,10 +1215,11 @@ fn resolve_condition(
         Err(ConditionError::Syntax(message)) => {
             push_bounded(
                 &mut preprocessed.diagnostics,
-                Diagnostic::new(
+                Diagnostic::at(
                     Severity::Warning,
                     "bad-condition",
                     message,
+                    source,
                     line_number,
                     "Preprocessor",
                 ),
@@ -1190,6 +1381,13 @@ mod tests {
         preprocess(text, &SettingsContext::new(), None).expect("preprocesses")
     }
 
+    fn inc(path: &str, text: &str) -> Include {
+        Include {
+            path: path.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
     fn nesting_cap() -> usize {
         usize::try_from(MAX_CONDITION_NESTING).expect("the nesting cap fits in usize")
     }
@@ -1200,7 +1398,7 @@ mod tests {
 
         assert_eq!(output.lines.len(), 3);
         assert_eq!(output.lines[1].text, "pageSize = 128, 288,192, 256");
-        assert_eq!(output.lines[1].line, 2);
+        assert_eq!(output.lines[1].pos.line, 2);
     }
 
     #[test]
@@ -1545,7 +1743,12 @@ mod tests {
 
     #[test]
     fn an_include_is_inlined_when_the_resolver_finds_it() {
-        let resolver = |path: &str| (path == "extra.inc").then(|| "included = 1\n".to_owned());
+        let resolver = |request: IncludeRequest<'_>| {
+            (request.path == "extra.inc").then(|| Include {
+                path: "extra.inc".to_owned(),
+                text: "included = 1\n".to_owned(),
+            })
+        };
 
         let output = preprocess(
             "[X]\na = 1\n#include extra.inc\n",
@@ -1560,7 +1763,7 @@ mod tests {
 
     #[test]
     fn a_missing_include_is_reported_and_never_fatal() {
-        let resolver = |_: &str| None;
+        let resolver = |_: IncludeRequest<'_>| None;
 
         let output = preprocess(
             "[X]\na = 1\n#include nope.inc\n",
@@ -1575,10 +1778,19 @@ mod tests {
 
     #[test]
     fn a_three_deep_include_chain_is_followed() {
-        let resolver = |path: &str| match path {
-            "a.inc" => Some("#include b.inc\n".to_owned()),
-            "b.inc" => Some("#include c.inc\n".to_owned()),
-            "c.inc" => Some("deep = 1\n".to_owned()),
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "a.inc" => Some(Include {
+                path: "a.inc".to_owned(),
+                text: "#include b.inc\n".to_owned(),
+            }),
+            "b.inc" => Some(Include {
+                path: "b.inc".to_owned(),
+                text: "#include c.inc\n".to_owned(),
+            }),
+            "c.inc" => Some(Include {
+                path: "c.inc".to_owned(),
+                text: "deep = 1\n".to_owned(),
+            }),
             _ => None,
         };
 
@@ -1601,9 +1813,15 @@ mod tests {
 
     #[test]
     fn a_circular_include_names_the_chain() {
-        let resolver = |path: &str| match path {
-            "a.inc" => Some("#include b.inc\n".to_owned()),
-            "b.inc" => Some("#include a.inc\n".to_owned()),
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "a.inc" => Some(Include {
+                path: "a.inc".to_owned(),
+                text: "#include b.inc\n".to_owned(),
+            }),
+            "b.inc" => Some(Include {
+                path: "b.inc".to_owned(),
+                text: "#include a.inc\n".to_owned(),
+            }),
             _ => None,
         };
 
@@ -1624,9 +1842,13 @@ mod tests {
 
     #[test]
     fn an_include_past_the_depth_cap_is_reported() {
-        let resolver = |path: &str| {
-            let number = path.strip_suffix(".inc")?.parse::<u32>().ok()?;
-            Some(format!("#include {}.inc\n", number + 1))
+        let resolver = |request: IncludeRequest<'_>| {
+            let number = request.path.strip_suffix(".inc")?.parse::<u32>().ok()?;
+            let next = format!("{}.inc", number + 1);
+            Some(Include {
+                path: next.clone(),
+                text: format!("#include {next}\n"),
+            })
         };
 
         let output = preprocess(
@@ -1742,5 +1964,80 @@ mod tests {
             fields.iter().collect::<Vec<_>>(),
             ["bits", "\"a\"", "\"B\""]
         );
+    }
+
+    #[test]
+    fn nested_includes_resolve_from_the_project_root() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(inc("engine/config.inc", "#include engine/pins.inc\n")),
+            "engine/pins.inc" => Some(inc("engine/pins.inc", "pin = 1\n")),
+            _ => None,
+        };
+        let output = preprocess_with_source(
+            "[X]\n#include engine/config.inc\n",
+            &SettingsContext::new(),
+            Some("main.ini"),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        assert_eq!(output.lines[1].text, "pin = 1");
+        let paths: Vec<&str> = output
+            .sources
+            .iter()
+            .map(|source| source.path.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(paths, ["main.ini", "engine/config.inc", "engine/pins.inc"]);
+    }
+
+    #[test]
+    fn a_nested_include_is_not_relative_to_its_own_directory() {
+        // `pins.inc` is written inside engine/config.inc, but only
+        // engine/pins.inc exists. Resolution is root-relative, so it must fail.
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(inc("engine/config.inc", "#include pins.inc\n")),
+            "engine/pins.inc" => Some(inc("engine/pins.inc", "pin = 1\n")),
+            _ => None,
+        };
+        let output = preprocess_with_source(
+            "[X]\n#include engine/config.inc\n",
+            &SettingsContext::new(),
+            Some("main.ini"),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        let diagnostic = output
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "include-not-found")
+            .expect("the missing root-relative include is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/config.inc"));
+        assert_eq!(diagnostic.line, Some(1));
+    }
+
+    #[test]
+    fn an_include_cycle_is_detected_by_resolved_path() {
+        // The spelling changes on the second reference but the resolved path
+        // does not, so the cycle must still be caught.
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "a.inc" | "./a.inc" => Some(inc("a.inc", "#include ./a.inc\n")),
+            _ => None,
+        };
+        let output = preprocess_with_source(
+            "[X]\n#include a.inc\n",
+            &SettingsContext::new(),
+            Some("main.ini"),
+            Some(&resolver),
+        )
+        .expect("the cycle is reported, not fatal");
+
+        let diagnostic = output
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "circular-include")
+            .expect("the cycle is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("a.inc"));
+        assert!(diagnostic.message.contains("a.inc -> a.inc"));
     }
 }

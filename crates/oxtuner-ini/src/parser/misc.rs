@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, ReferenceTable};
 
+use crate::preprocess::SourcePos;
+
 use super::{SectionParser, SectionSink};
 
 /// Applies one `defaultValue` or `rawValue` entry, returning whether it had a
@@ -21,7 +23,7 @@ fn apply_default(
     rest: Option<&str>,
     raw: bool,
     section: &mut SectionParser,
-    line: u32,
+    line: SourcePos,
 ) -> bool {
     let Some(rest) = rest else {
         return false;
@@ -51,7 +53,7 @@ fn apply_default(
 pub(crate) fn parse_extensions(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -164,7 +166,7 @@ fn number_list(value: &str) -> Option<Vec<f64>> {
 pub(crate) fn parse_controller_commands(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -206,7 +208,7 @@ pub(crate) fn parse_controller_commands(
                 name: key.to_owned(),
                 commands,
                 description: None,
-                line: *line,
+                line: line.line,
             },
         );
         section.understand(*line);
@@ -224,7 +226,7 @@ impl SectionSink for ReferenceTablesSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -250,7 +252,7 @@ impl SectionSink for ReferenceTablesSink {
                         title: fields
                             .get(1)
                             .map(|field| crate::fields::unquote(field).to_owned()),
-                        line: *line,
+                        line: line.line,
                         ..ReferenceTable::default()
                     },
                 );
@@ -400,7 +402,7 @@ impl SectionSink for DatalogSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -436,7 +438,7 @@ impl SectionSink for DatalogSink {
                         enable: fields.get(4).map(|f| (*f).to_owned()),
                         lag: fields.get(5).map(|f| (*f).to_owned()),
                         category: self.category.clone(),
-                        line: *line,
+                        line: line.line,
                     });
                     section.understand(*line);
                 }

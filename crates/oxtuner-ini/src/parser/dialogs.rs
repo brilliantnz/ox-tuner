@@ -12,6 +12,8 @@ use crate::model::{
     RowKind, SettingGroup, SettingOption,
 };
 
+use crate::preprocess::SourcePos;
+
 use super::{SectionParser, SectionSink};
 
 /// `std_*` targets with an app-owned renderer. Anything else stays parseable
@@ -30,7 +32,7 @@ impl SectionSink for SettingGroupsSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -139,7 +141,7 @@ impl SectionSink for DialogsSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -165,7 +167,7 @@ impl SectionSink for DialogsSink {
                         .map(|field| crate::fields::unquote(field).to_owned()),
                     layout: fields.get(2).map(|field| field.to_ascii_lowercase()),
                     rows: Vec::new(),
-                    line: *line,
+                    line: line.line,
                 };
                 self.current = Some(name.to_owned());
                 if let Some(existing) = definition.dialogs.get_mut(name) {
@@ -212,7 +214,7 @@ impl SectionSink for DialogsSink {
                         .map(|field| crate::fields::unquote(field).to_owned()),
                     layout: Some(keyword.to_ascii_lowercase()),
                     rows: Vec::new(),
-                    line: *line,
+                    line: line.line,
                 };
                 self.current = Some(name.clone());
                 definition.dialogs.insert(name, container);
@@ -247,7 +249,7 @@ impl SectionSink for DialogsSink {
                     kind,
                     keyword,
                     fields: fields.iter().map(|field| (*field).to_owned()).collect(),
-                    line: *line,
+                    line: line.line,
                 });
             }
             section.understand(*line);
@@ -271,7 +273,7 @@ impl SectionSink for MenuSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -288,7 +290,7 @@ impl SectionSink for MenuSink {
                         conditions: Vec::new(),
                         group: None,
                         supported: true,
-                        line: *line,
+                        line: line.line,
                     });
                     self.group = None;
                     section.understand(*line);
@@ -356,7 +358,7 @@ impl SectionSink for MenuSink {
                         conditions,
                         group: owner,
                         supported,
-                        line: *line,
+                        line: line.line,
                     });
                     // A group header opens a group and a child keeps it open; a
                     // plain subMenu ends it.
@@ -494,7 +496,7 @@ fn parse_menu_item(fields: &[&str]) -> (String, String, Vec<String>) {
 pub(crate) fn parse_context_help(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -512,7 +514,7 @@ pub(crate) fn parse_context_help(
 pub(crate) fn parse_key_actions(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -535,7 +537,7 @@ pub(crate) fn parse_key_actions(
         definition.key_actions.push(KeyAction {
             keys: keys.join(","),
             dialog: crate::fields::unquote(dialog).to_owned(),
-            line: *line,
+            line: line.line,
         });
         section.understand(*line);
     }
