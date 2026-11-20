@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ChannelKind, DataType, Definition};
-use oxtuner_tune::{EntryShape, Owner, Tune, TuneLayout, Values, VariableSpec};
+use oxtuner_tune::{EntryShape, Owner, PageRebuild, Tune, TuneLayout, Values, VariableSpec};
 
 use crate::check::{IssueKind, LoadReport, check_page_data};
 use crate::msq::{Entry, Msq};
@@ -235,30 +235,30 @@ fn reconcile_pages(
             continue;
         }
         // The one answer to "can the codec rebuild this page at all", shared
-        // with the settle path. The two branches below only differ in what to
-        // say about it and in the views a lost page still owes its owner.
+        // with the settle path. Such a page keeps the values it has, but a view
+        // is not a value of its own: it follows the bytes its owner holds, so
+        // it is derived either way and only the numbers and text stand still.
         if !layout.page_can_be_rebuilt(page.page) {
-            if layout.page_has_ambiguous_overlap(page.page) {
+            if let Err(error) = layout.derive_views(page.page, tune, applied) {
+                report.warn(
+                    IssueKind::ValueSkipped,
+                    format!("page {}: {error}", page.page),
+                );
+            }
+            match layout.page_rebuild(page.page) {
                 // The page cannot be rebuilt without declaration order choosing
-                // a winner, so the file's values stand. A view the file did not
-                // carry still follows the bytes its owner holds.
-                if let Err(error) = layout.derive_views(page.page, tune, applied) {
-                    report.warn(
-                        IssueKind::ValueSkipped,
-                        format!("page {}: {error}", page.page),
-                    );
-                }
-                tracing::debug!(
+                // a winner, so the file's values stand.
+                PageRebuild::Ambiguous => tracing::debug!(
                     page = page.page.get(),
                     "constants share bytes with no owner; the page is not reconciled"
-                );
-            } else {
+                ),
                 // A definition quirk, not a user problem: the page keeps the
                 // file's values instead of being rebuilt through the overlap.
-                tracing::debug!(
+                PageRebuild::TextOverlap => tracing::debug!(
                     page = page.page.get(),
                     "a text field overlaps another value; the page is not reconciled"
-                );
+                ),
+                PageRebuild::Allowed => {}
             }
             continue;
         }

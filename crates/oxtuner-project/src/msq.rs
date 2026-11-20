@@ -1628,6 +1628,41 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
         assert_eq!(loaded.tune.raw_at("inside", 0).expect("it is there"), 7.0);
     }
 
+    #[test]
+    fn a_scaffolded_view_follows_its_owner_on_a_text_page() {
+        // `view` reads the first byte of `owner` and `note` is a text field over
+        // both, so the page cannot go through the codec. A scaffold never writes
+        // a view, so opening the file back has to derive it from its owner
+        // rather than leave it sitting on its definition default.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+owner = array, U08, 0, [4], \"\", 1, 0, 7, 255, 0
+view = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+note = string, ASCII, 8
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert_eq!(
+            loaded.tune.raw_at("view", 0).expect("it is there"),
+            7.0,
+            "the view reads the byte its owner holds when the file is opened back"
+        );
+    }
+
     fn scaffold_definition() -> Definition {
         let text = r#"
 [MegaTune]

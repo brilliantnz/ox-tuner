@@ -472,13 +472,14 @@ impl Tune {
     /// consistent afterwards instead of starting out with a pair no write would
     /// carry.
     ///
-    /// A page [`TuneLayout::page_can_be_rebuilt`] refuses is left exactly as it
-    /// is, the same rule a load follows: constants whose bytes overlap without
-    /// one covering the other have no owner, so the codec would settle them in
-    /// declaration order and drop one of them, and a text field overlapping a
-    /// number would be read back as part of that text. Only a view moves there,
-    /// because it is not a value of its own and follows the bytes its owner
-    /// holds.
+    /// A page [`TuneLayout::page_can_be_rebuilt`] refuses is never written and
+    /// read back, because constants whose bytes overlap without one covering
+    /// the other have no owner and the codec would settle them in declaration
+    /// order and drop one of them, while a text field overlapping a number
+    /// would be read back as part of that text. A view on one still moves,
+    /// since it is not a value of its own and follows the bytes its owner
+    /// holds, and the clamp below still runs over the pairs the page's bytes
+    /// cover.
     ///
     /// # Errors
     ///
@@ -1300,7 +1301,7 @@ nPages = 1
 pageSize = 16
 page = 1
 wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
-straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], "", 1, 0, 7, 255, 0
 first = scalar, U08, 8, "x", 1, 0, 0, 255, 0
 second = scalar, U08, 8, "x", 1, 0, 0, 5, 0
 "#,
@@ -1316,14 +1317,42 @@ second = scalar, U08, 8, "x", 1, 0, 0, 5, 0
         assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
         assert_eq!(tune.raw_at("second", 0).unwrap(), 5.0);
         assert_eq!(
-            tune.raw_at("wide", 0).unwrap(),
+            tune.raw_at("wide", 3).unwrap(),
             0.0,
-            "and the pair the page"
+            "a rebuild would put the straddle's seven into this cell"
         );
+    }
+
+    #[test]
+    fn settling_derives_the_views_of_a_page_it_cannot_rebuild() {
+        // `view` is a view of `owner`'s first byte and `note` is a text field
+        // over both, so the page cannot go through the codec. A view is still
+        // not a value of its own: it follows the bytes its owner holds even on
+        // a page whose numbers and text are left standing.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+owner = array, U08, 0, [4], "", 1, 0, 7, 255, 0
+view = scalar, U08, 0, "", 1, 0, 0, 255, 0
+note = string, ASCII, 8
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.settle_shared_bytes().unwrap();
+
         assert_eq!(
-            tune.raw_at("straddle", 0).unwrap(),
-            0.0,
-            "cannot rebuild is left"
+            tune.raw_at("view", 0).unwrap(),
+            7.0,
+            "the view reads the byte its owner holds, not its own default"
         );
     }
 

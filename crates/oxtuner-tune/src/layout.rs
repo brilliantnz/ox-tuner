@@ -639,6 +639,23 @@ pub struct TuneLayout {
     ambiguous: Vec<bool>,
 }
 
+/// Whether the page codec may rebuild a page, and why not when it may not.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the rebuild verdict is a closed set of page findings"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageRebuild {
+    /// Nothing stands in the way of writing the page and reading it back.
+    Allowed,
+    /// Constants share bytes with no owner, so a rebuild would settle them in
+    /// declaration order and drop one of them.
+    Ambiguous,
+    /// A text field overlaps a number, and the codec reads a text field as its
+    /// whole length, so a rebuild would read that number back as text.
+    TextOverlap,
+}
+
 impl TuneLayout {
     /// Builds the layout from a definition.
     ///
@@ -1087,16 +1104,29 @@ impl TuneLayout {
         all
     }
 
+    /// Whether the page codec may rebuild this page, and why not.
+    #[must_use]
+    pub fn page_rebuild(&self, page: IniPage) -> PageRebuild {
+        if self.page_has_ambiguous_overlap(page) {
+            PageRebuild::Ambiguous
+        } else if self.page_has_text_overlap(page) {
+            PageRebuild::TextOverlap
+        } else {
+            PageRebuild::Allowed
+        }
+    }
+
     /// Whether a write can rebuild this page through the page codec at all.
     ///
     /// Two kinds cannot. Constants whose bytes intersect without one covering
     /// the other have no owner, so a rebuild would settle them in declaration
     /// order and drop one of them. A text field is read as its whole length, so
-    /// a number under one comes back as part of that text. A load, an import
-    /// and a settle all leave such a page as it stands instead.
+    /// a number under one comes back as part of that text. A load and a settle
+    /// do not rebuild such a page at all, and an import takes the file's values
+    /// on it as written; none of them re-derives the page's bytes.
     #[must_use]
     pub fn page_can_be_rebuilt(&self, page: IniPage) -> bool {
-        !self.page_has_ambiguous_overlap(page) && !self.page_has_text_overlap(page)
+        self.page_rebuild(page) == PageRebuild::Allowed
     }
 
     /// The variable pairs on `page` whose values cannot both fit their shared bytes.
