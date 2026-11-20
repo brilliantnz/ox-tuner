@@ -13,8 +13,10 @@
 //!
 //! Diagnostics are flushed after each block, and a sink's final work runs
 //! after that section's last block, so the report follows source order instead
-//! of being grouped by section name. Coverage is recorded once, in
-//! first-appearance order.
+//! of being grouped by section name. Parse-stage diagnostics carry the source
+//! path from their [`SourcePos`]. Model structs hold only the local line number,
+//! so diagnostics built later from a frozen entry (validation, comms-key
+//! winners) have no file. Coverage is recorded once, in first-appearance order.
 //!
 //! Nothing here panics. A section this build does not model is kept verbatim in
 //! [`Definition::unsupported`]; a key inside a known section that we do not
@@ -30,10 +32,11 @@ mod sections;
 mod validation;
 
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
+use std::sync::Arc;
 
 use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::model::{Coverage, Definition, SectionCoverage};
-use crate::preprocess::{Expander, IncludeResolver, LogicalLine};
+use crate::preprocess::{Expander, IncludeResolver, LogicalLine, SourceFile, SourceId, SourcePos};
 use crate::settings::SettingsContext;
 use crate::source;
 
@@ -45,12 +48,9 @@ pub const MAX_SPEC_VERSION: f64 = 3.80;
 
 /// Version of the parser's output contract.
 ///
-/// A released build bumps this whenever the same input bytes and settings can
-/// produce a different `Definition` (a grammar fix, a new section, a changed
-/// default). The definition cache includes it in its key, so an upgrade misses
-/// instead of serving a definition the build no longer agrees with. Before the
-/// first release it stays at 1, so a cache entry written by an older build is
-/// not invalidated by a bump. Delete the cache file and let the app re-parse.
+/// Part of the definition cache key, pinned at its initial value while the app
+/// is experimental. A grammar fix, a new section or a changed default does not
+/// bump it: delete the cache folder and let the app re-parse instead.
 pub const PARSER_VERSION: u32 = 1;
 
 /// Parses bytes into a frozen definition.
@@ -65,6 +65,7 @@ pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Definitio
         &decoded.text,
         settings,
         None,
+        None,
         decoded.diagnostic.into_iter().collect(),
     )
 }
@@ -76,7 +77,7 @@ pub fn parse_bytes(bytes: &[u8], settings: &SettingsContext) -> Result<Definitio
 /// Returns [`IniError`] when the definition has a structural problem, such as a
 /// missing signature or an unbalanced conditional block.
 pub fn parse_str(text: &str, settings: &SettingsContext) -> Result<Definition, IniError> {
-    assemble(text, settings, None, Vec::new())
+    assemble(text, settings, None, None, Vec::new())
 }
 
 /// Parses text, inlining `#include` files through `resolver`.
@@ -90,7 +91,33 @@ pub fn parse_str_with_includes(
     settings: &SettingsContext,
     resolver: IncludeResolver<'_>,
 ) -> Result<Definition, IniError> {
-    assemble(text, settings, Some(resolver), Vec::new())
+    assemble(text, settings, None, Some(resolver), Vec::new())
+}
+
+/// Parses named text, inlining `#include` files through `resolver`.
+///
+/// `source_name` appears in diagnostics from the top file and seeds the include
+/// cycle stack. Include resolution stays root-relative through the resolver;
+/// see [`crate::preprocess`]. The unnamed entry points above keep the original
+/// diagnostic text.
+///
+/// # Errors
+///
+/// Returns [`IniError`] when the definition has a structural problem, or when
+/// an included file cannot be preprocessed.
+pub fn parse_str_with_source(
+    text: &str,
+    settings: &SettingsContext,
+    source_name: &str,
+    resolver: IncludeResolver<'_>,
+) -> Result<Definition, IniError> {
+    assemble(
+        text,
+        settings,
+        Some(source_name),
+        Some(resolver),
+        Vec::new(),
+    )
 }
 
 /// Drops this parse's literal intern table when `assemble` leaves, on both the
@@ -107,6 +134,7 @@ impl Drop for TextScope {
 fn assemble(
     text: &str,
     settings: &SettingsContext,
+    source_name: Option<&str>,
     includes: Option<IncludeResolver<'_>>,
     extra_diagnostics: Vec<Diagnostic>,
 ) -> Result<Definition, IniError> {
@@ -114,7 +142,7 @@ fn assemble(
 
     let preprocessed = {
         let _span = tracing::debug_span!("ini_preprocess").entered();
-        crate::preprocess::preprocess(text, settings, includes)?
+        crate::preprocess::preprocess_with_source(text, settings, source_name, includes)?
     };
 
     let mut definition = Definition::empty();
@@ -145,7 +173,12 @@ fn assemble(
 
     let coverage = {
         let _span = tracing::debug_span!("ini_parse_sections").entered();
-        parse_sections(&mut definition, &preprocessed.lines, &expander)
+        parse_sections(
+            &mut definition,
+            &preprocessed.lines,
+            &preprocessed.sources,
+            &expander,
+        )
     };
     definition.coverage = coverage;
 
@@ -180,9 +213,11 @@ fn assemble(
 fn parse_sections(
     definition: &mut Definition,
     lines: &[LogicalLine],
+    sources: &[SourceFile],
     expander: &Expander<'_>,
 ) -> Coverage {
     let blocks = section_blocks(lines);
+    let sources: Arc<[SourceFile]> = Arc::from(sources);
 
     // A sink's final work can itself emit diagnostics, so run it after that
     // section's last block rather than after every other section is fed. That
@@ -208,20 +243,27 @@ fn parse_sections(
             }
             Entry::Vacant(entry) => {
                 let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
-                let slot = SectionSlot::new(block.name, block.header.unwrap_or(0), entry.key());
+                let first_pos = block.header.unwrap_or_default();
+                let slot = SectionSlot::new(block.name, &sources, first_pos, entry.key());
                 order.push(entry.key().clone());
                 (entry.insert(slot), last == block_index)
             }
         };
 
         if slot.headers >= 1 {
+            // The first header may live in another file, where line numbers
+            // restart. Name that file so the reference is unambiguous.
+            let first = match slot.parser.path(slot.first_pos) {
+                Some(path) => format!("line {} in {path}", slot.first_pos.line),
+                None => format!("line {}", slot.first_pos.line),
+            };
             slot.parser.note(
                 "merged-section",
                 format!(
-                    "`[{}]` is declared again here; its entries continue the block at line {}",
-                    block.name, slot.first_line
+                    "`[{}]` is declared again here; its entries continue the block at {first}",
+                    block.name
                 ),
-                block.header.unwrap_or(0),
+                block.header.unwrap_or(slot.first_pos),
             );
         }
         slot.headers += 1;
@@ -252,8 +294,8 @@ fn parse_sections(
 /// builder alive across all blocks with the same name.
 struct SectionBlock<'a> {
     name: &'a str,
-    header: Option<u32>,
-    lines: Vec<(u32, &'a str)>,
+    header: Option<SourcePos>,
+    lines: Vec<(SourcePos, &'a str)>,
 }
 
 fn section_blocks(lines: &[LogicalLine]) -> Vec<SectionBlock<'_>> {
@@ -267,7 +309,7 @@ fn section_blocks(lines: &[LogicalLine]) -> Vec<SectionBlock<'_>> {
         if let Some(name) = section_header(&line.text) {
             blocks.push(SectionBlock {
                 name,
-                header: Some(line.line),
+                header: Some(line.pos),
                 lines: Vec::new(),
             });
             continue;
@@ -276,7 +318,7 @@ fn section_blocks(lines: &[LogicalLine]) -> Vec<SectionBlock<'_>> {
             .last_mut()
             .expect("the preamble block is always present")
             .lines
-            .push((line.line, line.text.as_str()));
+            .push((line.pos, line.text.as_str()));
     }
 
     blocks
@@ -293,16 +335,16 @@ struct SectionSlot {
     parser: SectionParser,
     sink: Box<dyn SectionSink>,
     headers: usize,
-    first_line: u32,
+    first_pos: SourcePos,
 }
 
 impl SectionSlot {
-    fn new(name: &str, first_line: u32, key: &str) -> Self {
+    fn new(name: &str, sources: &Arc<[SourceFile]>, first_pos: SourcePos, key: &str) -> Self {
         Self {
-            parser: SectionParser::new(name),
+            parser: SectionParser::new(name, sources),
             sink: new_sink(name, key),
             headers: 0,
-            first_line,
+            first_pos,
         }
     }
 }
@@ -315,7 +357,7 @@ pub(crate) trait SectionSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         expander: &Expander<'_>,
     );
 
@@ -324,14 +366,14 @@ pub(crate) trait SectionSink {
 }
 
 /// Adapts a section parser with no cross-block state to [`SectionSink`].
-struct FnSink(fn(&mut Definition, &mut SectionParser, &[(u32, &str)], &Expander<'_>));
+struct FnSink(fn(&mut Definition, &mut SectionParser, &[(SourcePos, &str)], &Expander<'_>));
 
 impl SectionSink for FnSink {
     fn feed(
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         expander: &Expander<'_>,
     ) {
         (self.0)(definition, section, lines, expander);
@@ -350,7 +392,7 @@ impl SectionSink for UnknownSink {
         &mut self,
         _definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &Expander<'_>,
     ) {
         for (_, text) in lines {
@@ -374,7 +416,7 @@ impl SectionSink for UnknownSink {
 fn parse_preamble(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
     _expander: &Expander<'_>,
 ) {
     for (line, text) in lines {
@@ -444,12 +486,16 @@ fn new_sink(name: &str, key: &str) -> Box<dyn SectionSink> {
 pub(crate) struct SectionParser {
     /// Section name as written.
     pub(crate) name: String,
-    /// Lines turned into model data.
-    understood: BTreeSet<u32>,
+    /// Source table shared by the whole parse, indexed by [`SourcePos::source`].
+    sources: Arc<[SourceFile]>,
+    /// Positions turned into model data. A position, not just a line number,
+    /// because included files restart their own line numbering.
+    understood: BTreeSet<SourcePos>,
     /// Lines seen.
     pub(crate) total: usize,
-    /// Keys reported as unrecognized, so each is logged once.
-    reported_keys: BTreeSet<String>,
+    /// Keys reported as unrecognized, so each is logged once per source file.
+    /// Included files have their own line numbering and their own namespace.
+    reported_keys: BTreeSet<(SourceId, String)>,
     /// Diagnostics for this section.
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// Whether the whole section was kept as raw data.
@@ -457,9 +503,10 @@ pub(crate) struct SectionParser {
 }
 
 impl SectionParser {
-    pub(crate) fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str, sources: &Arc<[SourceFile]>) -> Self {
         Self {
             name: name.to_owned(),
+            sources: Arc::clone(sources),
             understood: BTreeSet::new(),
             total: 0,
             reported_keys: BTreeSet::new(),
@@ -474,8 +521,8 @@ impl SectionParser {
     }
 
     /// Records that this line became model data.
-    pub(crate) fn understand(&mut self, line: u32) {
-        self.understood.insert(line);
+    pub(crate) fn understand(&mut self, pos: SourcePos) {
+        self.understood.insert(pos);
     }
 
     /// Adds one diagnostic through the file-wide bound.
@@ -483,26 +530,37 @@ impl SectionParser {
         push_bounded(&mut self.diagnostics, diagnostic);
     }
 
+    /// The path a position belongs to, when the caller named its file.
+    fn path(&self, pos: SourcePos) -> Option<&str> {
+        self.sources
+            .get(pos.source.index())
+            .and_then(|file| file.path.as_deref())
+    }
+
     /// Records a warning tied to a line.
-    pub(crate) fn warn(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.record(Diagnostic::new(
+    pub(crate) fn warn(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
+        let diagnostic = Diagnostic::at(
             Severity::Warning,
             code,
             message,
-            line,
+            self.path(pos),
+            pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// Records an informational note tied to a line.
-    pub(crate) fn note(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.record(Diagnostic::new(
+    pub(crate) fn note(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
+        let diagnostic = Diagnostic::at(
             Severity::Note,
             code,
             message,
-            line,
+            self.path(pos),
+            pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// Records an informational note about the section as a whole, for a fact
@@ -517,34 +575,36 @@ impl SectionParser {
     }
 
     /// Records an error tied to a line.
-    pub(crate) fn error(&mut self, code: &'static str, message: impl Into<String>, line: u32) {
-        self.record(Diagnostic::new(
+    pub(crate) fn error(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
+        let diagnostic = Diagnostic::at(
             Severity::Error,
             code,
             message,
-            line,
+            self.path(pos),
+            pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// A line inside a known section that is not an assignment and has no
     /// meaning here.
-    pub(crate) fn unrecognized_line(&mut self, line: u32, text: &str) {
+    pub(crate) fn unrecognized_line(&mut self, pos: SourcePos, text: &str) {
         self.note(
             "unrecognized-line",
             format!("unrecognized line `{}`", text.trim_ascii()),
-            line,
+            pos,
         );
     }
 
     /// A key this build does not model. Reported once per key per file.
-    pub(crate) fn unrecognized_key(&mut self, key: &str, line: u32) {
+    pub(crate) fn unrecognized_key(&mut self, key: &str, pos: SourcePos) {
         let lowered = key.to_ascii_lowercase();
-        if self.reported_keys.insert(lowered) {
+        if self.reported_keys.insert((pos.source, lowered)) {
             self.note(
                 "unrecognized-key",
                 format!("`{key}` is not modelled yet; the entry is kept out of the model"),
-                line,
+                pos,
             );
         }
     }
@@ -581,14 +641,14 @@ impl SectionParser {
 /// Convenience used by every section parser: count the entry, then decide.
 pub(crate) fn entry_line<'a>(
     section: &mut SectionParser,
-    line: u32,
+    pos: SourcePos,
     text: &'a str,
 ) -> Option<(&'a str, &'a str)> {
     section.count_entry();
     if let Some((key, value)) = crate::fields::split_assignment(text) {
         Some((key, value))
     } else {
-        section.unrecognized_line(line, text);
+        section.unrecognized_line(pos, text);
         None
     }
 }
@@ -853,6 +913,7 @@ fn validate_references(definition: &mut Definition) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preprocess::{Include, IncludeRequest};
 
     fn minimal() -> String {
         "[MegaTune]\nsignature = \"test 1\"\nqueryCommand = \"Q\"\n\n[Constants]\nnPages = 1\npageSize = 288\npage = 1\nx = scalar, U08, 0, \"ms\", 1.0, 0, 0, 255, 0\n".to_owned()
@@ -1695,7 +1756,7 @@ x = scalar, U08, 0, { bitStringValue(units, algo) }, 1, 0, 0, 255, 1
     #[test]
     fn an_include_that_cannot_be_resolved_is_reported_on_the_definition() {
         let text = format!("{}\n#include missing.inc\n", minimal());
-        let resolver = |_: &str| None;
+        let resolver = |_: IncludeRequest<'_>| None;
 
         let definition =
             parse_str_with_includes(&text, &SettingsContext::new(), &resolver).expect("parses");
@@ -1930,5 +1991,157 @@ yBins = otherBins, secondChannel
         assert_eq!(table.live_cursor.as_deref(), Some("rpm"));
         let curve = definition.curves.get("c").expect("the curve");
         assert_eq!(curve.live_cursor.as_deref(), Some("firstChannel"));
+    }
+
+    #[test]
+    fn a_diagnostic_from_an_include_names_the_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(Include {
+                path: "engine/config.inc".to_owned(),
+                text: "[Constants]\nnPages = 1\npageSize = 64\npage = nope\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/config.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-page")
+            .expect("the included file's bad line is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/config.inc"));
+        assert_eq!(diagnostic.line, Some(4));
+        assert!(
+            diagnostic
+                .to_string()
+                .starts_with("engine/config.inc:4: warning:")
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_two_includes_deep_names_its_own_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(Include {
+                path: "engine/config.inc".to_owned(),
+                text: "#include engine/pins.inc\n".to_owned(),
+            }),
+            "engine/pins.inc" => Some(Include {
+                path: "engine/pins.inc".to_owned(),
+                text: "[Constants]\npage = nope\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/config.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-page")
+            .expect("the nested file's bad line is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/pins.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_named_top_file_appears_in_its_own_diagnostics() {
+        let resolver = |_: IncludeRequest<'_>| None;
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\npage = nope\n",
+            &SettingsContext::new(),
+            "custom.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-page")
+            .expect("the bad line is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("custom.ini"));
+        assert_eq!(diagnostic.line, Some(4));
+        assert!(diagnostic.to_string().starts_with("custom.ini:4: warning:"));
+    }
+
+    #[test]
+    fn the_top_level_file_keeps_the_old_diagnostic_shape() {
+        let definition = parse("[MegaTune]\nsignature = \"x\"\n[Constants]\npage = nope\n");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-page")
+            .expect("the bad line is reported");
+        assert_eq!(diagnostic.source, None);
+        let line = diagnostic.line.expect("the line is set");
+        assert!(diagnostic.to_string().starts_with(&format!("{line}: ")));
+    }
+
+    #[test]
+    fn a_merged_section_names_the_first_file_when_headers_cross_files() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "extra.inc" => Some(Include {
+                path: "extra.inc".to_owned(),
+                text: "[Constants]\npage = 1\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include extra.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let merged = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "merged-section")
+            .expect("the repeated header is reported");
+        assert_eq!(merged.source.as_deref(), Some("extra.inc"));
+        assert!(merged.message.contains("line 3 in main.ini"));
+    }
+
+    #[test]
+    fn an_unrecognized_key_is_reported_once_per_source_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "one.inc" => Some(Include {
+                path: "one.inc".to_owned(),
+                text: "[Constants]\nmystery = 1\n".to_owned(),
+            }),
+            "two.inc" => Some(Include {
+                path: "two.inc".to_owned(),
+                text: "[Constants]\nmystery = 2\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include one.inc\n#include two.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let sources: Vec<&str> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unrecognized-key")
+            .filter_map(|diagnostic| diagnostic.source.as_deref())
+            .collect();
+        assert_eq!(sources, ["one.inc", "two.inc"]);
     }
 }

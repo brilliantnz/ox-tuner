@@ -8,13 +8,15 @@
 use crate::fields::split_fields;
 use crate::model::{Axis, Curve, Definition, Number, Table, Text};
 
+use crate::preprocess::SourcePos;
+
 use super::{SectionParser, SectionSink};
 
 /// `[TableEditor]`. The open table survives a repeated section header: a new
 /// block continues the same builder until the next `table =` or end of file.
 #[derive(Default)]
 pub(crate) struct TablesSink {
-    current: Option<Table>,
+    current: Option<(Table, SourcePos)>,
 }
 
 impl SectionSink for TablesSink {
@@ -22,7 +24,7 @@ impl SectionSink for TablesSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -35,8 +37,8 @@ impl SectionSink for TablesSink {
             let fields = split_fields(value);
 
             if lowered == "table" {
-                if let Some(table) = self.current.take() {
-                    insert_table(definition, section, table);
+                if let Some((table, _)) = self.current.take() {
+                    insert_table(definition, section, table, *line);
                 }
                 section.understand(*line);
 
@@ -54,30 +56,33 @@ impl SectionSink for TablesSink {
                     .and_then(|field| crate::fields::parse_u32(field))
                     .and_then(|page| u8::try_from(page).ok());
 
-                self.current = Some(Table {
-                    id: fields[0].to_owned(),
-                    map_id: Some(fields[1].to_owned()),
-                    title: Text::parse(fields[2]),
-                    page,
-                    x_bins: None,
-                    y_bins: None,
-                    z_bins: None,
-                    live_cursor: None,
-                    live_cursor_y: None,
-                    x_size: None,
-                    y_size: None,
-                    sibling_group: None,
-                    xy_labels: Vec::new(),
-                    up_down_label: Vec::new(),
-                    grid_height: None,
-                    grid_orient: None,
-                    topic_help: None,
-                    line: *line,
-                });
+                self.current = Some((
+                    Table {
+                        id: fields[0].to_owned(),
+                        map_id: Some(fields[1].to_owned()),
+                        title: Text::parse(fields[2]),
+                        page,
+                        x_bins: None,
+                        y_bins: None,
+                        z_bins: None,
+                        live_cursor: None,
+                        live_cursor_y: None,
+                        x_size: None,
+                        y_size: None,
+                        sibling_group: None,
+                        xy_labels: Vec::new(),
+                        up_down_label: Vec::new(),
+                        grid_height: None,
+                        grid_orient: None,
+                        topic_help: None,
+                        line: line.line,
+                    },
+                    *line,
+                ));
                 continue;
             }
 
-            let Some(table) = self.current.as_mut() else {
+            let Some((table, _)) = self.current.as_mut() else {
                 section.warn(
                     "orphan-key",
                     format!("`{key}` appears before any `table =` entry"),
@@ -101,8 +106,8 @@ impl SectionSink for TablesSink {
     }
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
-        if let Some(table) = self.current.take() {
-            insert_table(definition, section, table);
+        if let Some((table, pos)) = self.current.take() {
+            insert_table(definition, section, table, pos);
         }
     }
 }
@@ -115,7 +120,7 @@ struct TableKey<'a> {
     spelling: &'a str,
     value: &'a str,
     fields: &'a [&'a str],
-    line: u32,
+    line: SourcePos,
 }
 
 /// Applies one key inside an open `table = id` block.
@@ -174,15 +179,19 @@ fn apply_table_key(
     true
 }
 
-fn insert_table(definition: &mut Definition, section: &mut SectionParser, table: Table) {
+fn insert_table(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    table: Table,
+    pos: SourcePos,
+) {
     let id = table.id.clone();
-    let line = table.line;
     if let Some(existing) = definition.tables.get_mut(&id) {
         merge_table(existing, table);
         section.note(
             "merged-table",
             format!("table `{id}` is declared more than once; its fields are merged"),
-            line,
+            pos,
         );
     } else {
         definition.tables.insert(&id, table);
@@ -276,7 +285,7 @@ fn parse_axis(fields: &[&str]) -> Axis {
 /// like the table builder.
 #[derive(Default)]
 pub(crate) struct CurvesSink {
-    current: Option<Curve>,
+    current: Option<(Curve, SourcePos)>,
 }
 
 impl SectionSink for CurvesSink {
@@ -284,7 +293,7 @@ impl SectionSink for CurvesSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         _expander: &crate::preprocess::Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -297,37 +306,40 @@ impl SectionSink for CurvesSink {
             let fields = split_fields(value);
 
             if lowered == "curve" {
-                if let Some(curve) = self.current.take() {
-                    insert_curve(definition, section, curve);
+                if let Some((curve, _)) = self.current.take() {
+                    insert_curve(definition, section, curve, *line);
                 }
                 section.understand(*line);
                 let Some(name) = fields.first().copied() else {
                     section.warn("bad-curve", "`curve =` needs a name", *line);
                     continue;
                 };
-                self.current = Some(Curve {
-                    name: name.to_owned(),
-                    title: fields
-                        .get(1)
-                        .map(|field| Text::parse(field))
-                        .unwrap_or(Text::shared(name)),
-                    column_labels: Vec::new(),
-                    x_axis: Vec::new(),
-                    y_axis: Vec::new(),
-                    x_bins: None,
-                    y_bins: Vec::new(),
-                    live_cursor: None,
-                    live_cursor_y: None,
-                    line_labels: Vec::new(),
-                    gauge: None,
-                    show_text_values: false,
-                    suppress_graph: false,
-                    line: *line,
-                });
+                self.current = Some((
+                    Curve {
+                        name: name.to_owned(),
+                        title: fields
+                            .get(1)
+                            .map(|field| Text::parse(field))
+                            .unwrap_or(Text::shared(name)),
+                        column_labels: Vec::new(),
+                        x_axis: Vec::new(),
+                        y_axis: Vec::new(),
+                        x_bins: None,
+                        y_bins: Vec::new(),
+                        live_cursor: None,
+                        live_cursor_y: None,
+                        line_labels: Vec::new(),
+                        gauge: None,
+                        show_text_values: false,
+                        suppress_graph: false,
+                        line: line.line,
+                    },
+                    *line,
+                ));
                 continue;
             }
 
-            let Some(curve) = self.current.as_mut() else {
+            let Some((curve, _)) = self.current.as_mut() else {
                 section.warn(
                     "orphan-key",
                     format!("`{key}` appears before any `curve =` entry"),
@@ -379,21 +391,25 @@ impl SectionSink for CurvesSink {
     }
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
-        if let Some(curve) = self.current.take() {
-            insert_curve(definition, section, curve);
+        if let Some((curve, pos)) = self.current.take() {
+            insert_curve(definition, section, curve, pos);
         }
     }
 }
 
-fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve: Curve) {
+fn insert_curve(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    curve: Curve,
+    pos: SourcePos,
+) {
     let name = curve.name.clone();
-    let line = curve.line;
     if let Some(existing) = definition.curves.get_mut(&name) {
         merge_curve(existing, curve);
         section.note(
             "merged-curve",
             format!("curve `{name}` is declared more than once; its fields are merged"),
-            line,
+            pos,
         );
     } else {
         definition.curves.insert(&name, curve);

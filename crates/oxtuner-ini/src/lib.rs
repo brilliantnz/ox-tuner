@@ -26,11 +26,9 @@
 //!   are `serde` (the derives that let `oxtuner-project` cache a frozen
 //!   definition) and `tracing` (the phase spans around preprocessing, section
 //!   parsing and validation); there is no INI or parsing dependency.
-//! - **Versioned output.** [`PARSER_VERSION`] changes in a released build
-//!   whenever the same bytes and settings can produce a different
-//!   [`Definition`], so a definition cache written by an older parser is never
-//!   served by a newer one. Before the first release it stays at 1, so delete
-//!   the cache file and let the app re-parse after a parser change.
+//! - **Pinned cache key.** [`PARSER_VERSION`] is part of the definition cache
+//!   key and stays at 1 while the app is experimental. After a parser change,
+//!   delete the cache folder and let the app re-parse instead of bumping it.
 //!
 //! # Example
 //!
@@ -80,8 +78,12 @@ pub use model::{
 };
 pub use parser::{
     MAX_SPEC_VERSION, PARSER_VERSION, parse_bytes, parse_str, parse_str_with_includes,
+    parse_str_with_source,
 };
-pub use preprocess::{LogicalLine, MAX_INCLUDE_DEPTH, Preprocessed, preprocess};
+pub use preprocess::{
+    Include, IncludeRequest, IncludeResolver, LogicalLine, MAX_INCLUDE_DEPTH, Preprocessed,
+    SourceFile, SourceId, SourcePos, preprocess, preprocess_with_source,
+};
 pub use settings::SettingsContext;
 
 impl Definition {

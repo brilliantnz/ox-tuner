@@ -13,7 +13,7 @@ use crate::model::{
     BitOption, CommsSettings, Constant, ConstantClass, ConstantFlags, DataType, Definition,
     Dimension, Endianness, Number, Offset, Page, PcVariable, Shape, Text,
 };
-use crate::preprocess::{Expander, Fields};
+use crate::preprocess::{Expander, Fields, SourcePos};
 
 use super::{SectionParser, SectionSink};
 
@@ -39,7 +39,7 @@ const PRESERVED_COMMS_KEYS: &[&str] = &[
 pub(crate) fn parse_identification(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {
@@ -88,7 +88,7 @@ pub(crate) fn parse_identification(
                         key: key.to_owned(),
                         value: value.to_owned(),
                         section: section.name.clone(),
-                        line: *line,
+                        line: line.line,
                     });
                 definition.comms.raw.insert(lowered, value.to_owned());
                 section.understand(*line);
@@ -293,7 +293,7 @@ impl SectionSink for ConstantsSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         expander: &Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -401,7 +401,7 @@ fn is_constant_entry(fields: &Fields<'_>) -> bool {
 #[derive(Clone, Copy)]
 struct CommsOrigin<'a> {
     spelling: &'a str,
-    line: u32,
+    line: SourcePos,
 }
 
 /// Handles the communication and page-table keys that appear inside `[Constants]`.
@@ -453,7 +453,7 @@ fn parse_comms_key(
             key: origin.spelling.to_owned(),
             value: value.to_owned(),
             section: section.name.clone(),
-            line: origin.line,
+            line: origin.line.line,
         });
 
     // An unreadable numeric value keeps the dialect default and is reported
@@ -526,7 +526,7 @@ fn number_list(value: &str) -> Vec<u32> {
 
 /// One calibration entry, bundled so the parser keeps a readable signature.
 struct Entry<'a> {
-    line: u32,
+    line: SourcePos,
     key: &'a str,
     raw: &'a str,
     /// The entry's fields as written, before `$define` expansion. Only the
@@ -645,7 +645,7 @@ fn parse_constant(
         digits,
         options,
         flags,
-        line,
+        line: line.line,
         raw: raw.to_owned(),
     };
 
@@ -680,7 +680,7 @@ struct AttributeContext<'a, 'b> {
     fields: &'a Fields<'b>,
     raw_fields: &'a [&'a str],
     key: &'a str,
-    line: u32,
+    line: SourcePos,
     index: usize,
     flags: ConstantFlags,
 }
@@ -783,7 +783,7 @@ fn split_numbers<'a>(
     fields: impl IntoIterator<Item = &'a str>,
     flags: &mut ConstantFlags,
     key: &str,
-    line: u32,
+    line: SourcePos,
     section: &mut SectionParser,
 ) -> (Text, Vec<Number>) {
     let mut units = Text::empty();
@@ -831,7 +831,7 @@ fn looks_like_offset(field: &str) -> bool {
 
 fn parse_offset(
     section: &mut SectionParser,
-    line: u32,
+    line: SourcePos,
     key: &str,
     field: &str,
     cursor: &mut Cursor,
@@ -1126,7 +1126,7 @@ fn pc_shape_index(
     fields: &Fields<'_>,
     section: &mut SectionParser,
     key: &str,
-    line: u32,
+    line: SourcePos,
 ) -> usize {
     // An offset is a number or `nextOffset`/`lastOffset`; anything else is the
     // units or the shape, and a mis-typed entry keeps its positions so the
@@ -1189,7 +1189,7 @@ fn insert_channel_value(
     value: &str,
     fields: &Fields<'_>,
     lowered: &str,
-    line: u32,
+    line: SourcePos,
 ) {
     let channel = fields
         .get(1)
@@ -1211,7 +1211,7 @@ fn insert_channel_value(
         flags: ConstantFlags::default(),
         channel_value_on_connect: is_connect.then(|| channel.clone()),
         continuous_channel_value: (!is_connect).then_some(channel),
-        line,
+        line: line.line,
         raw: value.to_owned(),
     };
     insert_variable(definition, section, variable, line);
@@ -1229,7 +1229,7 @@ impl SectionSink for PcVariablesSink {
         &mut self,
         definition: &mut Definition,
         section: &mut SectionParser,
-        lines: &[(u32, &str)],
+        lines: &[(SourcePos, &str)],
         expander: &Expander<'_>,
     ) {
         for (line, text) in lines {
@@ -1325,7 +1325,7 @@ impl SectionSink for PcVariablesSink {
                 flags,
                 channel_value_on_connect: None,
                 continuous_channel_value: None,
-                line: *line,
+                line: line.line,
                 raw: value.to_owned(),
             };
             insert_variable(definition, section, variable, *line);
@@ -1338,7 +1338,7 @@ fn insert_variable(
     definition: &mut Definition,
     section: &mut SectionParser,
     variable: PcVariable,
-    line: u32,
+    line: SourcePos,
 ) {
     let name = variable.name.clone();
     if definition.pc_variables.insert(&name, variable).is_some() {

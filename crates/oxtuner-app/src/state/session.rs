@@ -28,10 +28,9 @@ use crate::platform::paths::AppPaths;
 
 /// The on-disk shape this build writes.
 ///
-/// The app is unreleased, so a shape change deletes the stale file and lets it
-/// be written again; schema versions and migrations arrive with the first
-/// release. The number exists so a file from a newer build is refused instead
-/// of half-read.
+/// The app is experimental, so a shape change deletes the stale file and lets
+/// it be written again; no migration is needed. The number stays at its initial
+/// value and only guards against a file from a newer build being half-read.
 pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
 
 /// How long to wait after the last layout/window change before writing.

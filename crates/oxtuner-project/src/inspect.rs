@@ -88,8 +88,8 @@ pub fn inspect_definition(path: &Path) -> Result<DefinitionPreview, ProjectError
     // One-shot inspection: the included content is not needed to show the
     // signature and the setting groups, and creation refuses includes anyway.
     let includes = RefCell::new(Vec::new());
-    let resolver = |name: &str| {
-        includes.borrow_mut().push(name.to_owned());
+    let resolver = |request: oxtuner_ini::IncludeRequest<'_>| {
+        includes.borrow_mut().push(request.path.to_owned());
         None
     };
     let definition =

@@ -33,8 +33,11 @@
 //! [`CACHE_FORMAT_VERSION`] covers the envelope layout and the serialized
 //! model, [`oxtuner_ini::PARSER_VERSION`] covers the parser's output contract,
 //! and [`oxtuner_ini::MAX_SPEC_VERSION`] covers the dialect ceilings this build
-//! understands. Any of them changing moves the cache path, so old entries are
-//! simply never found again.
+//! understands. They stay at their initial values while the app is
+//! experimental. A change to the envelope or the serialized model does not
+//! bump them: delete the cache folder and let the app write a fresh entry. An
+//! old entry that no longer decodes is a miss and is overwritten on the next
+//! store.
 
 use std::{
     cell::RefCell,
@@ -45,17 +48,19 @@ use std::{
     sync::Arc,
 };
 
-use oxtuner_ini::{BitOption, Definition, PARSER_VERSION, SettingsContext};
+use oxtuner_ini::{
+    BitOption, Definition, Include, IncludeRequest, PARSER_VERSION, SettingsContext,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
 use crate::project::read_include_canonical;
 
-/// Bump when the envelope layout or the serialized definition model changes.
-///
-/// The parser has its own [`PARSER_VERSION`] for grammatical changes; this one
-/// is about the cache file itself.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+/// Identifies the definition cache envelope. Keep it at its initial value while
+/// the app is experimental: the serialized model is expected to change, so
+/// delete the cache folder instead of bumping this constant. The parser has its
+/// own [`PARSER_VERSION`] for the same reason.
+pub const CACHE_FORMAT_VERSION: u32 = 1;
 
 /// Identifies a cache file as ours before any byte is interpreted.
 const MAGIC: &[u8; 8] = b"OXDEFN01";
@@ -99,24 +104,23 @@ pub enum DefinitionSource {
 /// the recorded `None` no longer matches and the entry is a miss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct IncludeFingerprint {
-    pub(crate) name: String,
+    /// Resolved base-relative path, not the written spelling.
+    pub(crate) path: String,
     pub(crate) sha256: Option<[u8; 32]>,
 }
 
 impl IncludeFingerprint {
     /// Fingerprints one resolver answer.
-    pub(crate) fn new(name: &str, content: Option<&str>) -> Self {
+    pub(crate) fn new(path: &str, content: Option<&str>) -> Self {
         Self {
-            name: name.to_owned(),
+            path: path.to_owned(),
             sha256: content.map(|text| hash::sha256(text.as_bytes())),
         }
     }
 
-    /// Whether the file still resolves to the same content.
+    /// Whether the resolved file still has the same content.
     fn matches(&self, base: &Path) -> bool {
-        read_include_canonical(base, &self.name)
-            .as_deref()
-            .map(|text| hash::sha256(text.as_bytes()))
+        read_include_canonical(base, &self.path).map(|(_, text)| hash::sha256(text.as_bytes()))
             == self.sha256
     }
 }
@@ -592,6 +596,16 @@ fn prune(directory: &Path) {
     }
 }
 
+/// Lexical identity for a path that did not resolve. Component checks still
+/// happen in `read_include_canonical`, so this is only for the cache key.
+fn normalize_include_name(name: &str) -> String {
+    name.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Collects the `#include` answers while the preprocessor resolves them.
 pub(crate) struct IncludeRecorder {
     base: PathBuf,
@@ -608,19 +622,29 @@ impl IncludeRecorder {
         }
     }
 
-    /// Resolves one include and records what it saw.
-    pub(crate) fn resolve(&self, name: &str) -> Option<String> {
-        let content = read_include_canonical(&self.base, name);
-        let fingerprint = IncludeFingerprint::new(name, content.as_deref());
+    /// Resolves one include and records what it saw under its resolved path.
+    pub(crate) fn resolve(&self, request: IncludeRequest<'_>) -> Option<Include> {
+        let resolved = read_include_canonical(&self.base, request.path);
+        // A missing file is still an input: the preprocessor reports its
+        // absence, and a file created later must miss the cache.
+        let identity = resolved.as_ref().map_or_else(
+            || normalize_include_name(request.path),
+            |(path, _)| path.clone(),
+        );
+        let fingerprint =
+            IncludeFingerprint::new(&identity, resolved.as_ref().map(|(_, text)| text.as_str()));
 
         let mut includes = self.includes.borrow_mut();
         // A file included twice is one input; keeping the first record is
         // enough because both resolutions saw the same bytes.
-        if !includes.iter().any(|include| include.name == name) {
+        if !includes.iter().any(|include| include.path == identity) {
             includes.push(fingerprint);
         }
 
-        content
+        resolved.map(|(_, text)| Include {
+            path: identity,
+            text,
+        })
     }
 
     pub(crate) fn finish(self) -> Vec<IncludeFingerprint> {
@@ -636,6 +660,14 @@ mod tests {
     )]
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn include(path: &str) -> IncludeRequest<'_> {
+        IncludeRequest {
+            path,
+            from: None,
+            depth: 0,
+        }
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -752,8 +784,8 @@ mod tests {
 
         let canonical_base = fs::canonicalize(&base).expect("canonical base");
         let recorder = IncludeRecorder::new(&canonical_base);
-        assert!(recorder.resolve("extra.inc").is_some());
-        assert!(recorder.resolve("missing.inc").is_none());
+        assert!(recorder.resolve(include("extra.inc")).is_some());
+        assert!(recorder.resolve(include("missing.inc")).is_none());
         let includes = recorder.finish();
         cache.store(&mut definition(), &includes);
         assert!(cache.load().is_some());
@@ -767,6 +799,57 @@ mod tests {
             cache.load().is_none(),
             "an include that was missing is an input too"
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_nested_include_change_is_a_cache_miss() {
+        let root = temp_dir("nested-include");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(base.join("engine")).unwrap();
+        fs::write(base.join("engine/config.inc"), "#include engine/pins.inc\n").unwrap();
+        fs::write(base.join("engine/pins.inc"), "pin = 1\n").unwrap();
+        let bytes = b"[MegaTune]\nsignature = \"cache test\"\n#include engine/config.inc\n";
+        let cache =
+            DefinitionCache::new(&root, &base, hash::sha256(bytes), &settings()).expect("key");
+
+        let canonical_base = fs::canonicalize(&base).expect("canonical base");
+        let recorder = IncludeRecorder::new(&canonical_base);
+        let config_file = recorder
+            .resolve(include("engine/config.inc"))
+            .expect("the config include resolves");
+        assert_eq!(config_file.path, "engine/config.inc");
+        // The second file is written root-relative inside the first, so its
+        // resolved path stays engine/pins.inc instead of becoming pins.inc.
+        let resolver = |request: IncludeRequest<'_>| recorder.resolve(request);
+        oxtuner_ini::preprocess(&config_file.text, &SettingsContext::new(), Some(&resolver))
+            .expect("the nested include resolves");
+        let includes = recorder.finish();
+        assert!(
+            includes.iter().any(|item| item.path == "engine/pins.inc"),
+            "fingerprints use resolved paths: {includes:?}"
+        );
+        cache.store(&mut definition(), &includes);
+        assert!(cache.load().is_some());
+
+        fs::write(base.join("engine/pins.inc"), "pin = 2\n").unwrap();
+        assert!(
+            cache.load().is_none(),
+            "a change to the nested include must invalidate"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_backslash_spelling_is_recorded_as_a_slash_path() {
+        let root = temp_dir("backslash-include");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(&base).unwrap();
+        let recorder = IncludeRecorder::new(&fs::canonicalize(&base).expect("canonical base"));
+        assert!(recorder.resolve(include("engine\\pins.inc")).is_none());
+        let includes = recorder.finish();
+        assert_eq!(includes.len(), 1);
+        assert_eq!(includes[0].path, "engine/pins.inc");
         fs::remove_dir_all(&root).unwrap();
     }
 

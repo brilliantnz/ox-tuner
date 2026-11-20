@@ -9,7 +9,7 @@ use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{
     BitRange, Channel, ChannelKind, DataType, Definition, Number, ScatteredConfig, Text,
 };
-use crate::preprocess::Expander;
+use crate::preprocess::{Expander, SourcePos};
 
 use super::SectionParser;
 
@@ -17,7 +17,7 @@ use super::SectionParser;
 pub(crate) fn parse_channels(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
     expander: &Expander<'_>,
 ) {
     for (line, text) in lines {
@@ -92,7 +92,7 @@ pub(crate) fn parse_channels(
                 *line,
             );
         }
-        match parse_channel(key, value, &fields, *line) {
+        match parse_channel(key, value, &fields, line.line) {
             Ok(channel) => {
                 let name = channel.name.clone();
                 if definition.channels.insert(&name, channel).is_some() {
@@ -244,7 +244,7 @@ fn parse_bit_range(field: &str) -> Option<BitRange> {
 pub(crate) fn parse_burst_mode(
     definition: &mut Definition,
     section: &mut SectionParser,
-    lines: &[(u32, &str)],
+    lines: &[(SourcePos, &str)],
 ) {
     for (line, text) in lines {
         let Some((key, value)) = super::entry_line(section, *line, text) else {

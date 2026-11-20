@@ -24,7 +24,9 @@ use serde_json::Value;
 use crate::platform::paths::AppPaths;
 use crate::state::store;
 
-/// Bump when the on-disk shape changes in a way that needs migration.
+/// Pinned while the app is experimental. A shape change deletes the stale
+/// settings file and lets the app write a fresh one; no migration or version
+/// bump is needed.
 pub(crate) const SETTINGS_SCHEMA_VERSION: u32 = 1;
 
 /// How many recent projects are remembered.
