@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::diff::diff_values;
 use crate::wire::{decode_page, encode_page, patch_page};
 use crate::{
-    EntryShape, IniPage, Owner, Tune, TuneDiff, TuneError, TuneLayout, Values, VariableSpec,
+    EntryShape, IniPage, Owner, PageRebuild, Tune, TuneDiff, TuneError, TuneLayout, Values,
+    VariableSpec,
 };
 
 mod conflict;
@@ -735,45 +736,49 @@ impl TuneImages {
         self.reject_conflicting_values(tune, applied)?;
 
         for &page in &pages {
-            // A page whose numeric constants share bytes with no owner keeps
-            // the file's values as written, and its views follow their owners.
-            // A file that says nothing about the page leaves it alone, like the
-            // regular path below.
-            if self.layout.page_has_ambiguous_overlap(page) {
-                let mentioned = applied.iter().any(|name| {
-                    self.layout
-                        .variable(name)
-                        .is_some_and(|spec| spec.ini_page() == Some(page))
-                });
-                if !mentioned {
-                    continue;
+            match self.layout.page_rebuild(page) {
+                // A page whose numeric constants share bytes with no owner keeps
+                // the file's values as written, and its views follow their owners.
+                // A file that says nothing about the page leaves it alone, like
+                // the regular path below.
+                PageRebuild::Ambiguous => {
+                    let mentioned = applied.iter().any(|name| {
+                        self.layout
+                            .variable(name)
+                            .is_some_and(|spec| spec.ini_page() == Some(page))
+                    });
+                    if !mentioned {
+                        continue;
+                    }
+
+                    self.adopt_ambiguous_page(
+                        &mut merged,
+                        &mut source,
+                        page,
+                        tune,
+                        applied,
+                        &mut resolved,
+                    )?;
                 }
-
-                self.adopt_ambiguous_page(
-                    &mut merged,
-                    &mut source,
-                    page,
-                    tune,
-                    applied,
-                    &mut resolved,
-                )?;
-
-                continue;
+                // A page that overlaps text with numbers cannot be decoded back
+                // without reading the overlap as text. The values the file
+                // carried are adopted as they stand, so nothing the file wrote
+                // is dropped, and a view still follows its owner like everywhere
+                // else even when the file named only the owner.
+                PageRebuild::TextOverlap => {
+                    self.merge_overlapping_page(
+                        &mut merged,
+                        &mut source,
+                        page,
+                        tune,
+                        applied,
+                        &mut resolved,
+                    )?;
+                    self.layout.derive_views(page, &mut merged, applied)?;
+                }
+                PageRebuild::Allowed => {}
             }
-
-            // A page that overlaps text with numbers cannot be decoded back
-            // without reading the overlap as text. The values the file carried
-            // are adopted as they stand, so nothing the file wrote is dropped.
-            if self.layout.page_has_text_overlap(page) {
-                self.merge_overlapping_page(
-                    &mut merged,
-                    &mut source,
-                    page,
-                    tune,
-                    applied,
-                    &mut resolved,
-                )?;
-
+            if !self.layout.page_can_be_rebuilt(page) {
                 continue;
             }
 

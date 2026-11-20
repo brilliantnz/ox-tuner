@@ -238,14 +238,15 @@ fn reconcile_pages(
         // with the settle path. Such a page keeps the values it has, but a view
         // is not a value of its own: it follows the bytes its owner holds, so
         // it is derived either way and only the numbers and text stand still.
-        if !layout.page_can_be_rebuilt(page.page) {
+        let verdict = layout.page_rebuild(page.page);
+        if verdict != PageRebuild::Allowed {
             if let Err(error) = layout.derive_views(page.page, tune, applied) {
                 report.warn(
                     IssueKind::ValueSkipped,
                     format!("page {}: {error}", page.page),
                 );
             }
-            match layout.page_rebuild(page.page) {
+            match verdict {
                 // The page cannot be rebuilt without declaration order choosing
                 // a winner, so the file's values stand.
                 PageRebuild::Ambiguous => tracing::debug!(

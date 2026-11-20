@@ -1325,10 +1325,10 @@ second = scalar, U08, 8, "x", 1, 0, 0, 5, 0
 
     #[test]
     fn settling_derives_the_views_of_a_page_it_cannot_rebuild() {
-        // `view` is a view of `owner`'s first byte and `note` is a text field
-        // over both, so the page cannot go through the codec. A view is still
-        // not a value of its own: it follows the bytes its owner holds even on
-        // a page whose numbers and text are left standing.
+        // `view` reads `owner`'s second byte, and `note` is a text field over
+        // the owner's remaining bytes, so the page cannot go through the codec.
+        // A view is still not a value of its own: it follows the bytes its
+        // owner holds even on a page whose numbers and text are left standing.
         let definition = parse_str(
             r#"
 [MegaTune]
@@ -1339,20 +1339,27 @@ nPages = 1
 pageSize = 16
 page = 1
 owner = array, U08, 0, [4], "", 1, 0, 7, 255, 0
-view = scalar, U08, 0, "", 1, 0, 0, 255, 0
+view = scalar, U08, 1, "", 1, 0, 0, 255, 0
 note = string, ASCII, 8
 "#,
             &SettingsContext::new(),
         )
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
+        assert!(
+            !tune.layout().page_can_be_rebuilt(IniPage::FIRST),
+            "this is the derive fallback only when the page is refused"
+        );
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            tune.set_image_raw("owner", index, value).unwrap();
+        }
 
         tune.settle_shared_bytes().unwrap();
 
         assert_eq!(
             tune.raw_at("view", 0).unwrap(),
-            7.0,
-            "the view reads the byte its owner holds, not its own default"
+            2.0,
+            "the view reads its owner's second byte, not its own default"
         );
     }
 

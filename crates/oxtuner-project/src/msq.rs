@@ -1630,10 +1630,10 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
 
     #[test]
     fn a_scaffolded_view_follows_its_owner_on_a_text_page() {
-        // `view` reads the first byte of `owner` and `note` is a text field over
-        // both, so the page cannot go through the codec. A scaffold never writes
-        // a view, so opening the file back has to derive it from its owner
-        // rather than leave it sitting on its definition default.
+        // `view` reads `owner`'s second byte, and `note` is a text field over
+        // the owner's remaining bytes, so the page cannot go through the codec.
+        // A scaffold never writes a view, so opening the file back has to derive
+        // it from its owner rather than leave it on its definition default.
         let definition = parse_str(
             "\
 [MegaTune]
@@ -1644,7 +1644,7 @@ nPages = 1
 pageSize = 16
 page = 1
 owner = array, U08, 0, [4], \"\", 1, 0, 7, 255, 0
-view = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+view = scalar, U08, 1, \"\", 1, 0, 0, 255, 0
 note = string, ASCII, 8
 ",
             &SettingsContext::new(),
@@ -1655,6 +1655,10 @@ note = string, ASCII, 8
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
+        assert!(
+            !loaded.layout.page_can_be_rebuilt(IniPage::FIRST),
+            "this is the derive fallback only when the page is refused"
+        );
 
         assert_eq!(
             loaded.tune.raw_at("view", 0).expect("it is there"),

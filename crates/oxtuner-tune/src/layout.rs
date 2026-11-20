@@ -1122,8 +1122,9 @@ impl TuneLayout {
     /// the other have no owner, so a rebuild would settle them in declaration
     /// order and drop one of them. A text field is read as its whole length, so
     /// a number under one comes back as part of that text. A load and a settle
-    /// do not rebuild such a page at all, and an import takes the file's values
-    /// on it as written; none of them re-derives the page's bytes.
+    /// do not rebuild such a page at all; each derives its views and leaves its
+    /// numbers and text where they are. An import adopts the file's values on it
+    /// as written.
     #[must_use]
     pub fn page_can_be_rebuilt(&self, page: IniPage) -> bool {
         self.page_rebuild(page) == PageRebuild::Allowed
