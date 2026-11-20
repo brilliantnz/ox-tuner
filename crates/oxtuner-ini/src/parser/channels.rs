@@ -85,6 +85,13 @@ pub(crate) fn parse_channels(
 
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated() {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
+                *line,
+            );
+        }
         match parse_channel(key, value, &fields, *line) {
             Ok(channel) => {
                 let name = channel.name.clone();
@@ -158,7 +165,7 @@ fn parse_channel(
         index += 1;
     }
 
-    let mut units = Text::Literal(String::new());
+    let mut units = Text::empty();
     if let Some(field) = fields.get(index)
         && (field.starts_with('"') || crate::fields::is_expression_field(field))
     {
@@ -211,9 +218,7 @@ fn parse_computed_channel(
     let source = crate::fields::expression_body(field).unwrap_or("");
     let expression = crate::expr::Expr::parse(source)
         .map_err(|error| format!("expression {source:?}: {error}"))?;
-    let units = fields
-        .get(1)
-        .map_or(Text::Literal(String::new()), Text::parse);
+    let units = fields.get(1).map_or(Text::empty(), Text::parse);
 
     Ok(Channel {
         name: name.to_owned(),

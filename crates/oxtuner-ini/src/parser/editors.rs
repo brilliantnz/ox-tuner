@@ -55,6 +55,11 @@ pub(crate) fn parse_tables(
                 x_bins: None,
                 y_bins: None,
                 z_bins: None,
+                live_cursor: None,
+                live_cursor_y: None,
+                x_size: None,
+                y_size: None,
+                sibling_group: None,
                 xy_labels: Vec::new(),
                 up_down_label: Vec::new(),
                 grid_height: None,
@@ -74,49 +79,15 @@ pub(crate) fn parse_tables(
             continue;
         };
 
-        match lowered.as_str() {
-            "xbins" => table.x_bins = Some(parse_axis(&fields)),
-            "ybins" => table.y_bins = Some(parse_axis(&fields)),
-            "zbins" => {
-                table.z_bins = fields.first().map(|field| (*field).to_owned());
-            }
-            "xylabels" => table.xy_labels = fields.iter().map(|field| Text::parse(field)).collect(),
-            "updownlabel" => {
-                table.up_down_label = fields.iter().map(|field| Text::parse(field)).collect();
-            }
-            "gridheight" => {
-                table.grid_height = fields.first().map(|field| Number::parse(field));
-            }
-            "gridorient" => {
-                let values: Vec<Number> = fields.iter().map(|field| Number::parse(field)).collect();
-                if values.len() == 3 {
-                    table.grid_orient =
-                        Some([values[0].clone(), values[1].clone(), values[2].clone()]);
-                } else {
-                    section.warn(
-                        "bad-grid-orient",
-                        format!("`gridOrient` needs three angles, got {}", values.len()),
-                        *line,
-                    );
-                }
-            }
-            "topichelp" => {
-                table.topic_help = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned());
-            }
-            // Recognised but not modelled on the table itself: window
-            // protection, which belongs to the UI layer.
-            "userpassword" => {
-                definition
-                    .comms
-                    .raw
-                    .insert(format!("table.{}.userpassword", table.id), value.to_owned());
-            }
-            _ => {
-                section.unrecognized_key(key, *line);
-                continue;
-            }
+        let site = TableKey {
+            lowered: &lowered,
+            spelling: key,
+            value,
+            fields: &fields,
+            line: *line,
+        };
+        if !apply_table_key(definition, section, table, site) {
+            continue;
         }
         section.understand(*line);
     }
@@ -126,22 +97,148 @@ pub(crate) fn parse_tables(
     }
 }
 
-fn insert_table(definition: &mut Definition, section: &mut SectionParser, table: Table) {
-    if table.z_bins.is_none() {
-        section.warn(
-            "table-without-cells",
-            format!("table `{}` has no `zBins` cell array", table.id),
-            table.line,
-        );
+/// One key inside an open `table = id` block, bundled to keep the parser's
+/// signature short.
+#[derive(Clone, Copy)]
+struct TableKey<'a> {
+    lowered: &'a str,
+    spelling: &'a str,
+    value: &'a str,
+    fields: &'a [&'a str],
+    line: u32,
+}
+
+/// Applies one key inside an open `table = id` block.
+fn apply_table_key(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    table: &mut Table,
+    site: TableKey<'_>,
+) -> bool {
+    let TableKey {
+        lowered,
+        spelling: key,
+        value,
+        fields,
+        line,
+    } = site;
+    match lowered {
+        "xbins" => table.x_bins = Some(parse_axis(fields)),
+        "ybins" => table.y_bins = Some(parse_axis(fields)),
+        "zbins" => table.z_bins = fields.first().map(|field| (*field).to_owned()),
+        "xylabels" => table.xy_labels = fields.iter().map(|field| Text::parse(field)).collect(),
+        "updownlabel" => {
+            table.up_down_label = fields.iter().map(|field| Text::parse(field)).collect();
+        }
+        "gridheight" => table.grid_height = fields.first().map(|field| Number::parse(field)),
+        "gridorient" => {
+            let values: Vec<Number> = fields.iter().map(|field| Number::parse(field)).collect();
+            if values.len() == 3 {
+                table.grid_orient = Some([values[0].clone(), values[1].clone(), values[2].clone()]);
+            } else {
+                section.warn(
+                    "bad-grid-orient",
+                    format!("`gridOrient` needs three angles, got {}", values.len()),
+                    line,
+                );
+            }
+        }
+        "topichelp" => {
+            table.topic_help = fields
+                .first()
+                .map(|field| crate::fields::unquote(field).to_owned());
+        }
+        // Recognised but not modelled on the table itself: window protection,
+        // which belongs to the UI layer.
+        "userpassword" => {
+            definition
+                .comms
+                .raw
+                .insert(format!("table.{}.userpassword", table.id), value.to_owned());
+        }
+        _ => {
+            section.unrecognized_key(key, line);
+            return false;
+        }
     }
+    true
+}
+
+fn insert_table(definition: &mut Definition, section: &mut SectionParser, table: Table) {
     let id = table.id.clone();
     let line = table.line;
-    if definition.tables.insert(&id, table).is_some() {
-        section.error(
-            "duplicate-name",
-            format!("table `{id}` is declared more than once; the later wins"),
+    if let Some(existing) = definition.tables.get_mut(&id) {
+        merge_table(existing, table);
+        section.note(
+            "merged-table",
+            format!("table `{id}` is declared more than once; its fields are merged"),
             line,
         );
+    } else {
+        definition.tables.insert(&id, table);
+    }
+}
+
+/// Applies a second `table = id` header to the first declaration without
+/// dropping either block's axes or labels.
+fn merge_table(existing: &mut Table, next: Table) {
+    let Table {
+        id: _,
+        map_id,
+        title,
+        page,
+        x_bins,
+        y_bins,
+        z_bins,
+        live_cursor: _,
+        live_cursor_y: _,
+        x_size: _,
+        y_size: _,
+        sibling_group: _,
+        xy_labels,
+        up_down_label,
+        grid_height,
+        grid_orient,
+        topic_help,
+        line: _,
+    } = next;
+
+    if map_id.is_some() {
+        existing.map_id = map_id;
+    }
+    // A bare repeated header defaults its title to the id; keep the earlier
+    // title in that case, the same rule the curve merger uses.
+    if title.literal() != Some(existing.id.as_str()) {
+        existing.title = title;
+    }
+    if page.is_some() {
+        existing.page = page;
+    }
+    if x_bins.is_some() {
+        existing.x_bins = x_bins;
+    }
+    if y_bins.is_some() {
+        existing.y_bins = y_bins;
+    }
+    if z_bins.is_some() {
+        existing.z_bins = z_bins;
+    }
+    // A restated header replaces the lists rather than appending to them, so
+    // merging a block converges instead of duplicating labels.
+    if !xy_labels.is_empty() {
+        existing.xy_labels = xy_labels;
+    }
+    if !up_down_label.is_empty() {
+        existing.up_down_label = up_down_label;
+    }
+    if grid_height.is_some() {
+        existing.grid_height = grid_height;
+    }
+    if grid_orient.is_some() {
+        existing.grid_orient = grid_orient;
+    }
+    if topic_help.is_some() {
+        existing.topic_help = topic_help;
     }
 }
 
@@ -196,12 +293,14 @@ pub(crate) fn parse_curves(
                 title: fields
                     .get(1)
                     .map(|field| Text::parse(field))
-                    .unwrap_or(Text::Literal(name.to_owned())),
+                    .unwrap_or(Text::shared(name)),
                 column_labels: Vec::new(),
                 x_axis: Vec::new(),
                 y_axis: Vec::new(),
                 x_bins: None,
                 y_bins: Vec::new(),
+                live_cursor: None,
+                live_cursor_y: None,
                 line_labels: Vec::new(),
                 gauge: None,
                 show_text_values: false,
@@ -234,12 +333,12 @@ pub(crate) fn parse_curves(
                     .first()
                     .map(|field| crate::fields::unquote(field).to_owned());
             }
-            "showtextvalues" => curve.show_text_values = is_true(value),
-            "suppressgraph" => curve.suppress_graph = is_true(value),
+            "showtextvalues" => curve.show_text_values = crate::fields::is_true(value),
+            "suppressgraph" => curve.suppress_graph = crate::fields::is_true(value),
             "linelabel" => curve.line_labels.push(
                 fields
                     .first()
-                    .map_or(Text::Literal(String::new()), |field| Text::parse(field)),
+                    .map_or(Text::empty(), |field| Text::parse(field)),
             ),
             // Presentation keys the curve editor owns: window size and help
             // topic. Kept verbatim rather than dropped.
@@ -263,30 +362,69 @@ pub(crate) fn parse_curves(
 }
 
 fn insert_curve(definition: &mut Definition, section: &mut SectionParser, curve: Curve) {
-    if curve.x_bins.is_none() || curve.y_bins.is_empty() {
-        section.warn(
-            "curve-without-arrays",
-            format!(
-                "curve `{}` needs an X array and at least one Y array",
-                curve.name
-            ),
-            curve.line,
-        );
-    }
     let name = curve.name.clone();
     let line = curve.line;
-    if definition.curves.insert(&name, curve).is_some() {
-        section.error(
-            "duplicate-name",
-            format!("curve `{name}` is declared more than once; the later wins"),
+    if let Some(existing) = definition.curves.get_mut(&name) {
+        merge_curve(existing, curve);
+        section.note(
+            "merged-curve",
+            format!("curve `{name}` is declared more than once; its fields are merged"),
             line,
         );
+    } else {
+        definition.curves.insert(&name, curve);
     }
 }
 
-fn is_true(value: &str) -> bool {
-    matches!(
-        value.trim_ascii().to_ascii_lowercase().as_str(),
-        "true" | "on" | "1" | "yes"
-    )
+/// Applies a second `curve = name` header to the first declaration. Series and
+/// labels accumulate; a header with a fresh range replaces the old range.
+fn merge_curve(existing: &mut Curve, next: Curve) {
+    let Curve {
+        name: _,
+        title,
+        column_labels,
+        x_axis,
+        y_axis,
+        x_bins,
+        y_bins,
+        live_cursor: _,
+        live_cursor_y: _,
+        line_labels,
+        gauge,
+        show_text_values,
+        suppress_graph,
+        line: _,
+    } = next;
+
+    // A bare repeated header defaults its title to the id; that default must
+    // not erase a title an earlier block wrote.
+    if title.literal() != Some(existing.name.as_str()) {
+        existing.title = title;
+    }
+    if !column_labels.is_empty() {
+        existing.column_labels = column_labels;
+    }
+    if !x_axis.is_empty() {
+        existing.x_axis = x_axis;
+    }
+    if !y_axis.is_empty() {
+        existing.y_axis = y_axis;
+    }
+    if x_bins.is_some() {
+        existing.x_bins = x_bins;
+    }
+    // Repeated `yBins` inside one block declares distinct series. A repeated
+    // `curve =` header restates the series list, so it replaces rather than
+    // appending.
+    if !y_bins.is_empty() {
+        existing.y_bins = y_bins;
+    }
+    if !line_labels.is_empty() {
+        existing.line_labels = line_labels;
+    }
+    if gauge.is_some() {
+        existing.gauge = gauge;
+    }
+    existing.show_text_values |= show_text_values;
+    existing.suppress_graph |= suppress_graph;
 }

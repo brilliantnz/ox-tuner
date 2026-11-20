@@ -48,9 +48,16 @@ nPages = 15
 ",
     );
 
-    for _ in 0..PAGES {
-        text.push_str("pageSize = 288\n");
+    // One list, as the real files write it: a repeated `pageSize` would
+    // replace the list and leave later pages with no declared size.
+    text.push_str("pageSize = ");
+    for index in 0..PAGES {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str("288");
     }
+    text.push('\n');
 
     for page in 1..=PAGES {
         let _ = writeln!(text, "page = {page}");
@@ -307,6 +314,46 @@ fn bench_project_save_noop(criterion: &mut Criterion) {
     });
 }
 
+/// Local-only real-project open. The project lives outside the repository and
+/// is never committed; the bench registers only when a path is supplied.
+fn bench_real_project_open(criterion: &mut Criterion) {
+    let Some(root) = std::env::var_os("OXTUNER_REAL_PROJECT").map(std::path::PathBuf::from) else {
+        return;
+    };
+    if !root.is_dir() {
+        return;
+    }
+
+    criterion.bench_function("project_open_real_cold", |bencher| {
+        bencher.iter(|| black_box(Project::open(black_box(&root)).expect("real project opens")));
+    });
+
+    let cache = tempfile::tempdir().expect("cache dir");
+    let first = Project::open_with_cache(&root, Some(cache.path())).expect("real project opens");
+    assert_eq!(
+        first.definition_source(),
+        DefinitionSource::Parsed,
+        "cold open must parse"
+    );
+    drop(first);
+    let warm = Project::open_with_cache(&root, Some(cache.path())).expect("real project opens");
+    assert_eq!(
+        warm.definition_source(),
+        DefinitionSource::Cache,
+        "warm bench must hit cache"
+    );
+    drop(warm);
+
+    criterion.bench_function("project_open_real_warm", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                Project::open_with_cache(black_box(&root), Some(cache.path()))
+                    .expect("real project opens"),
+            )
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_msq_parse,
@@ -315,6 +362,7 @@ criterion_group!(
     bench_project_open_reference,
     bench_project_open_reference_warm,
     bench_project_open_pc_variables,
-    bench_project_save_noop
+    bench_project_save_noop,
+    bench_real_project_open
 );
 criterion_main!(benches);

@@ -357,8 +357,14 @@ fn load_definition(
     base: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<(Definition, DefinitionSource), ProjectError> {
-    let cache = cache_dir
-        .and_then(|directory| DefinitionCache::new(directory, base, definition_digest, settings));
+    // One owner of the include-base invariant, for both folder and standalone
+    // opens: the cache key, every fingerprint and every `#include` read need
+    // the same resolved directory.
+    let base = canonical_base(base).unwrap_or_else(|| base.to_owned());
+    let base = base.as_path();
+    let cache = cache_dir.and_then(|directory| {
+        DefinitionCache::with_canonical_base(directory, base, definition_digest, settings)
+    });
 
     if let Some(cache) = &cache
         && let Some(definition) = cache.load()
@@ -384,8 +390,36 @@ fn load_definition(
     Ok((definition, DefinitionSource::Parsed))
 }
 
-/// Reads an `#include` file from `base`, refusing to leave it.
+/// Canonicalizes an include base once, so a project open does not repeat the
+/// same syscall for every include and every cache fingerprint check.
+pub(crate) fn canonical_base(base: &Path) -> Option<PathBuf> {
+    let base = if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    };
+    match fs::canonicalize(base) {
+        Ok(base) => Some(base),
+        Err(error) => {
+            tracing::debug!(
+                base = %base.display(),
+                %error,
+                "the include base directory could not be resolved"
+            );
+            None
+        }
+    }
+}
+
+/// Reads an `#include` file from `base`, refusing to leave it. Use
+/// [`canonical_base`] once and [`read_include_canonical`] for repeated reads.
 pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
+    let base = canonical_base(base)?;
+    read_include_canonical(&base, name)
+}
+
+/// Reads an `#include` from an already-canonical base.
+pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<String> {
     let path = Path::new(name);
     if path.components().any(|component| {
         matches!(
@@ -399,25 +433,6 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     // A symlink inside the definition directory can point anywhere, and a
     // backslash is not a separator on Unix, so lexical checks alone do not
     // keep the read inside `base`. Resolve both sides and compare.
-    //
-    // A bare filename has an empty parent, which is the working directory.
-    // `canonicalize` rejects the empty path, so spell it out.
-    let base = if base.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        base
-    };
-    let base = match fs::canonicalize(base) {
-        Ok(base) => base,
-        Err(error) => {
-            tracing::debug!(
-                base = %base.display(),
-                %error,
-                "the include base directory could not be resolved"
-            );
-            return None;
-        }
-    };
     let path = match fs::canonicalize(base.join(path)) {
         Ok(path) => path,
         Err(error) => {
@@ -425,7 +440,7 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
             return None;
         }
     };
-    if !path.starts_with(&base) {
+    if !path.starts_with(base) {
         return None;
     }
 

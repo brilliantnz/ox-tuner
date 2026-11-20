@@ -76,11 +76,21 @@ pub(crate) fn parse_identification(
                 section.understand(*line);
             }
             _ => {
-                // Everything else is a tunable the model keeps verbatim.
+                // Everything else is a tunable the model keeps verbatim. Its
+                // declaration is remembered so a page-local spelling cannot
+                // silently win over the header one.
+                let lowered = key.to_ascii_lowercase();
                 definition
-                    .comms
-                    .raw
-                    .insert(key.to_ascii_lowercase(), value.to_owned());
+                    .comms_sources
+                    .entry(lowered.clone())
+                    .or_default()
+                    .push(crate::model::CommsSource {
+                        key: key.to_owned(),
+                        value: value.to_owned(),
+                        section: section.name.clone(),
+                        line: *line,
+                    });
+                definition.comms.raw.insert(lowered, value.to_owned());
                 section.understand(*line);
             }
         }
@@ -92,17 +102,25 @@ pub(crate) fn parse_identification(
 struct Cursor {
     next: u32,
     last: u32,
+    /// Set when an offset could not be read. While poisoned, `nextOffset` and
+    /// `lastOffset` must not be used: they would fabricate an address from a
+    /// cursor whose last step is unknown. A fresh explicit offset clears it.
+    poisoned: bool,
 }
 
 impl Cursor {
     fn reset(&mut self) {
-        self.next = 0;
-        self.last = 0;
+        *self = Self::default();
+    }
+
+    fn poison(&mut self) {
+        self.poisoned = true;
     }
 
     fn advance(&mut self, address: Option<u32>, size: Option<u32>) {
         if let Some(address) = address {
             self.last = address;
+            self.poisoned = false;
             if let Some(size) = size {
                 self.next = address.saturating_add(size);
             }
@@ -301,6 +319,13 @@ pub(crate) fn parse_constants(
 
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated() {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
+                *line,
+            );
+        }
         if is_constant_entry(&fields) {
             let entry = Entry {
                 line: *line,
@@ -321,9 +346,12 @@ pub(crate) fn parse_constants(
             &mut table,
             current_page,
             &lowered,
+            CommsOrigin {
+                spelling: key,
+                line: *line,
+            },
             value,
             section,
-            *line,
         );
         if parsed {
             section.understand(*line);
@@ -348,16 +376,86 @@ fn is_constant_entry(fields: &Fields<'_>) -> bool {
     }
 }
 
+/// The written spelling and line of a communication key, kept together so the
+/// parser can report which declaration won without a long argument list.
+#[derive(Clone, Copy)]
+struct CommsOrigin<'a> {
+    spelling: &'a str,
+    line: u32,
+}
+
 /// Handles the communication and page-table keys that appear inside `[Constants]`.
 fn parse_comms_key(
     definition: &mut Definition,
     table: &mut PageTable,
     page: u8,
     key: &str,
+    origin: CommsOrigin<'_>,
     value: &str,
     section: &mut SectionParser,
-    line: u32,
 ) -> bool {
+    // Page geometry and per-page commands are page-local by nature, so they
+    // never compete with a header spelling.
+    match key {
+        "npages" => {
+            table.n_pages = crate::fields::parse_u32(value);
+            return true;
+        }
+        "pagesize" => {
+            table.sizes = number_list(value);
+            return true;
+        }
+        "parameterstartoffset" => {
+            table.start_offsets = number_list(value);
+            return true;
+        }
+        "pageidentifier" | "pagereadcommand" | "burncommand" | "pagevaluewrite"
+        | "pagechunkwrite" | "crc32checkcommand" | "pagecrccommand" => {
+            let kind = match key {
+                "pageidentifier" => CommandKind::Identifier,
+                "pagereadcommand" => CommandKind::Read,
+                "burncommand" => CommandKind::Burn,
+                "pagevaluewrite" => CommandKind::ValueWrite,
+                "pagechunkwrite" => CommandKind::ChunkWrite,
+                _ => CommandKind::Crc,
+            };
+            table.set_commands(page, kind, value);
+            return true;
+        }
+        _ => {}
+    }
+
+    definition
+        .comms_sources
+        .entry(key.to_owned())
+        .or_default()
+        .push(crate::model::CommsSource {
+            key: origin.spelling.to_owned(),
+            value: value.to_owned(),
+            section: section.name.clone(),
+            line: origin.line,
+        });
+
+    // An unreadable numeric value keeps the dialect default and is reported
+    // here, where the source line is available.
+    if matches!(key, "outputchannelstartoffset" | "maxunusedruntimerange")
+        && crate::fields::parse_u32(value).is_none()
+    {
+        section.warn(
+            "bad-number",
+            format!("`{key}` is not a number: {value}; keeping the dialect default"),
+            origin.line,
+        );
+        return true;
+    }
+
+    apply_comms_value(definition, key, value)
+}
+
+/// Applies one communication key to the typed model. Shared with the final
+/// header-wins pass so a value read from a page block can be replaced by the
+/// header's value without running the per-line diagnostics again.
+pub(crate) fn apply_comms_value(definition: &mut Definition, key: &str, value: &str) -> bool {
     let comms: &mut CommsSettings = &mut definition.comms;
     match key {
         "endianness" => {
@@ -366,73 +464,37 @@ fn parse_comms_key(
                 definition.endianness = endianness;
             }
         }
-        "npages" => table.n_pages = crate::fields::parse_u32(value),
-        "pagesize" => table.sizes = number_list(value),
-        "parameterstartoffset" => table.start_offsets = number_list(value),
-        "pageidentifier" => table.set_commands(page, CommandKind::Identifier, value),
-        "pagereadcommand" => table.set_commands(page, CommandKind::Read, value),
-        "burncommand" => table.set_commands(page, CommandKind::Burn, value),
-        "pagevaluewrite" => table.set_commands(page, CommandKind::ValueWrite, value),
-        "pagechunkwrite" => table.set_commands(page, CommandKind::ChunkWrite, value),
-        "crc32checkcommand" | "pagecrccommand" => table.set_commands(page, CommandKind::Crc, value),
         "blockingfactor" => comms.blocking_factor = crate::fields::parse_u32(value),
         "interwritedelay" => comms.inter_write_delay_ms = crate::fields::parse_u32(value),
-        "writeblocks" | "tswriteblocks" => comms.write_blocks = is_on(value),
+        "writeblocks" | "tswriteblocks" => comms.write_blocks = crate::fields::is_true(value),
         "blockreadtimeout" => comms.block_read_timeout_ms = crate::fields::parse_u32(value),
-        "pageactivationdelay" => {
-            comms.page_activation_delay_ms = crate::fields::parse_u32(value);
-        }
+        "pageactivationdelay" => comms.page_activation_delay_ms = crate::fields::parse_u32(value),
         "delayafterportopen" => comms.delay_after_port_open_ms = crate::fields::parse_u32(value),
-        "nocommreaddelay" => comms.no_comm_read_delay = is_on(value),
-        "messageenvelopeformat" => {
-            comms.envelope = Some(crate::fields::unquote(value).to_owned());
-        }
-        "forcebigendianprotocol" => comms.force_big_endian_protocol = is_on(value),
+        "nocommreaddelay" => comms.no_comm_read_delay = crate::fields::is_true(value),
+        "messageenvelopeformat" => comms.envelope = Some(crate::fields::unquote(value).to_owned()),
+        "forcebigendianprotocol" => comms.force_big_endian_protocol = crate::fields::is_true(value),
         "outputchannelstartoffset" => {
-            // An unreadable value keeps the dialect default instead of guessing.
             if let Some(offset) = crate::fields::parse_u32(value) {
                 comms.output_channel_start_offset = offset;
-            } else {
-                section.warn(
-                    "bad-number",
-                    format!("`{key}` is not a number: {value}; keeping the dialect default"),
-                    line,
-                );
             }
         }
         "defaultruntimerecordpersec" => {
             comms.default_runtime_record_per_sec = crate::fields::parse_u32(value);
         }
         "maxunusedruntimerange" => {
-            // An unreadable value keeps the dialect default instead of guessing.
             if let Some(range) = crate::fields::parse_u32(value) {
                 comms.max_unused_runtime_range = range;
-            } else {
-                section.warn(
-                    "bad-number",
-                    format!("`{key}` is not a number: {value}; keeping the dialect default"),
-                    line,
-                );
             }
         }
         "retrieveconfigerror" => comms.retrieve_config_error = Some(CommandTemplate::parse(value)),
         "ochgetcommand" => comms.och_get_command = Some(CommandTemplate::parse(value)),
         "ochblocksize" => comms.och_block_size = crate::fields::parse_u32(value),
-        other => {
-            if !PRESERVED_COMMS_KEYS.contains(&other) {
-                return false;
-            }
+        other if PRESERVED_COMMS_KEYS.contains(&other) => {
             comms.raw.insert(other.to_owned(), value.to_owned());
         }
+        _ => return false,
     }
     true
-}
-
-fn is_on(value: &str) -> bool {
-    matches!(
-        value.trim_ascii().to_ascii_lowercase().as_str(),
-        "on" | "true" | "1" | "yes"
-    )
 }
 
 fn number_list(value: &str) -> Vec<u32> {
@@ -479,16 +541,31 @@ fn parse_constant(
 
     // A `string` entry may omit its offset entirely (`string, ASCII, 20`), so
     // the offset decision is made per class.
-    let (offset, index) = if class == ConstantClass::String && fields.len() == 3 {
+    let (mut offset, index) = if class == ConstantClass::String && fields.len() == 3 {
         (Offset::Next, 2usize)
     } else {
         match fields.get(2) {
             Some(field) if looks_like_offset(field) => {
-                (parse_offset(section, line, key, field), 3usize)
+                (parse_offset(section, line, key, field, cursor), 3usize)
             }
             _ => (Offset::Next, 2usize),
         }
     };
+
+    // An offset derived from a poisoned cursor is not an address. Keep it
+    // unresolved and say why, instead of handing a consumer a plausible but
+    // wrong location it could write to.
+    if cursor.poisoned && matches!(offset, Offset::Next | Offset::Last) {
+        section.note(
+            "bad-offset",
+            format!(
+                "`{key}` derives its offset from an earlier unreadable offset; its memory \
+                 location is recorded as unknown"
+            ),
+            line,
+        );
+        offset = Offset::Unknown;
+    }
 
     let mut context = AttributeContext {
         fields: &fields,
@@ -598,7 +675,7 @@ fn parse_entry_attributes(
     let mut attributes = EntryAttributes {
         shape: Shape::Scalar,
         options: Arc::from([]),
-        units: Text::Literal(String::new()),
+        units: Text::empty(),
         scale: None,
         translate: None,
         minimum: None,
@@ -689,7 +766,7 @@ fn split_numbers<'a>(
     line: u32,
     section: &mut SectionParser,
 ) -> (Text, Vec<Number>) {
-    let mut units = Text::Literal(String::new());
+    let mut units = Text::empty();
     let mut numbers = Vec::new();
     let mut seen_units = false;
 
@@ -729,10 +806,16 @@ fn split_numbers<'a>(
 /// [`is_offset_field`] decides whether a field is an offset or a unit.
 fn looks_like_offset(field: &str) -> bool {
     let field = field.trim_ascii();
-    !field.starts_with('"') && !field.starts_with('[') && !field.starts_with('{')
+    !field.starts_with('"') && !field.starts_with('[')
 }
 
-fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) -> Offset {
+fn parse_offset(
+    section: &mut SectionParser,
+    line: u32,
+    key: &str,
+    field: &str,
+    cursor: &mut Cursor,
+) -> Offset {
     let lowered = field.trim_ascii().to_ascii_lowercase();
     match lowered.as_str() {
         "nextoffset" => return Offset::Next,
@@ -743,13 +826,21 @@ fn parse_offset(section: &mut SectionParser, line: u32, key: &str, field: &str) 
         return Offset::Fixed(value);
     }
     match crate::expr::Expr::parse(crate::fields::expression_body(field).unwrap_or(field)) {
-        Ok(expression) => Offset::Expression(expression),
+        Ok(expression) => {
+            // An expression offset has no known address, so the cursor cannot
+            // measure a following `nextOffset` or `lastOffset` from it.
+            cursor.poison();
+            Offset::Expression(expression)
+        }
         Err(error) => {
             // The offset decides where this constant lives in ECU memory, so a
             // failed parse must never become a fabricated — and therefore
             // writable — address. `Offset::Unknown` marks the constant's
             // layout as unresolved; the warning names the constant so
-            // consumers can filter for definitions with unknown layout.
+            // consumers can filter for definitions with unknown layout. The
+            // cursor is poisoned too, because every later derived offset would
+            // be measured from an unknown point.
+            cursor.poison();
             section.warn(
                 "bad-offset",
                 format!(
@@ -794,7 +885,10 @@ fn parse_dimension(field: &str) -> Option<Dimension> {
     let source = crate::fields::expression_body(field).unwrap_or(field);
     crate::expr::Expr::parse(source)
         .ok()
-        .map(Dimension::Expression)
+        .map(|parsed| Dimension::Expression {
+            source: source.to_owned(),
+            parsed,
+        })
 }
 
 fn parse_string_shape<'a>(fields: impl IntoIterator<Item = &'a str>) -> (Shape, usize) {
@@ -836,8 +930,10 @@ fn parse_bit_attributes(
         );
         return None;
     };
+    // The option list can hold 65k expanded fields. Storage keywords are
+    // written literally after it, so read them from the short raw fields.
     apply_keyword_fields(
-        context.fields.iter().skip(context.index),
+        context.raw_fields.iter().copied().skip(context.index),
         &mut context.flags,
     );
     let options = option_tables.table(
@@ -1065,6 +1161,42 @@ fn parse_pc_shape(class: ConstantClass, fields: &Fields<'_>, index: usize) -> (S
 }
 
 /// `[PcVariables]`: the same syntax as constants, without an offset.
+/// The two PC entries that bind a live channel instead of declaring storage.
+fn insert_channel_value(
+    definition: &mut Definition,
+    section: &mut SectionParser,
+    key: &str,
+    value: &str,
+    fields: &Fields<'_>,
+    lowered: &str,
+    line: u32,
+) {
+    let channel = fields
+        .get(1)
+        .map(|field| crate::fields::unquote(field).to_owned())
+        .unwrap_or_default();
+    let is_connect = lowered == "channelvalueonconnect";
+    let variable = PcVariable {
+        name: key.to_owned(),
+        class: ConstantClass::Scalar,
+        data_type: DataType::F32,
+        shape: Shape::Scalar,
+        units: Text::empty(),
+        scale: None,
+        translate: None,
+        minimum: None,
+        maximum: None,
+        digits: None,
+        options: Arc::from([]),
+        flags: ConstantFlags::default(),
+        channel_value_on_connect: is_connect.then(|| channel.clone()),
+        continuous_channel_value: (!is_connect).then_some(channel),
+        line,
+        raw: value.to_owned(),
+    };
+    insert_variable(definition, section, variable, line);
+}
+
 pub(crate) fn parse_pc_variables(
     definition: &mut Definition,
     section: &mut SectionParser,
@@ -1079,6 +1211,13 @@ pub(crate) fn parse_pc_variables(
         };
         let raw_fields = split_fields(value);
         let fields = expander.expand(&raw_fields);
+        if fields.truncated() {
+            section.warn(
+                "fields-truncated",
+                format!("`{key}` expands past the field cap; the list is kept short and reported"),
+                *line,
+            );
+        }
         if fields.is_empty() {
             continue;
         }
@@ -1089,30 +1228,7 @@ pub(crate) fn parse_pc_variables(
             .trim_ascii()
             .to_ascii_lowercase();
         if lowered == "channelvalueonconnect" || lowered == "continuouschannelvalue" {
-            let channel = fields
-                .get(1)
-                .map(|field| crate::fields::unquote(field).to_owned())
-                .unwrap_or_default();
-            let is_connect = lowered == "channelvalueonconnect";
-            let variable = PcVariable {
-                name: key.to_owned(),
-                class: ConstantClass::Scalar,
-                data_type: DataType::F32,
-                shape: Shape::Scalar,
-                units: Text::Literal(String::new()),
-                scale: None,
-                translate: None,
-                minimum: None,
-                maximum: None,
-                digits: None,
-                options: Arc::from([]),
-                flags: ConstantFlags::default(),
-                channel_value_on_connect: is_connect.then(|| channel.clone()),
-                continuous_channel_value: (!is_connect).then_some(channel),
-                line: *line,
-                raw: value.to_owned(),
-            };
-            insert_variable(definition, section, variable, *line);
+            insert_channel_value(definition, section, key, value, &fields, &lowered, *line);
             section.understand(*line);
             continue;
         }
@@ -1148,7 +1264,7 @@ pub(crate) fn parse_pc_variables(
         // parser skips them.
         let mut flags = ConstantFlags::default();
         if matches!(class, ConstantClass::Bits | ConstantClass::String) {
-            apply_keyword_fields(fields.iter().skip(index), &mut flags);
+            apply_keyword_fields(raw_fields.iter().copied().skip(index), &mut flags);
         }
 
         let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
@@ -1158,7 +1274,7 @@ pub(crate) fn parse_pc_variables(
         };
 
         let (units, numbers) = if class == ConstantClass::Bits || class == ConstantClass::String {
-            (Text::Literal(String::new()), Vec::new())
+            (Text::empty(), Vec::new())
         } else {
             split_numbers(fields.iter().skip(index), &mut flags, key, *line, section)
         };

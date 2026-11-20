@@ -579,6 +579,63 @@ fn a_standalone_tune_uses_its_settings_snapshot_and_has_no_sidecar() {
 }
 
 #[test]
+fn a_standalone_tune_resolves_its_includes() {
+    let dir = TempDir::new("standalone-include");
+    dir.write(
+        "standalone.ini",
+        "[MegaTune]\nsignature = \"speeduino 202501\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include extra.inc\n",
+    );
+    dir.write(
+        "extra.inc",
+        "fromInclude = scalar, U08, 0, \"\", 1, 0, 0, 255, 0\n",
+    );
+    dir.write("tune.msq", STANDALONE_TUNE);
+
+    let project = Project::open_standalone(
+        dir.path().join("tune.msq"),
+        dir.path().join("standalone.ini"),
+    )
+    .expect("the tune opens");
+
+    assert!(
+        project.definition().constant("fromInclude").is_some(),
+        "a standalone open must resolve its includes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_standalone_tune_resolves_includes_through_a_symlinked_base() {
+    use std::os::unix::fs::symlink;
+
+    let real = TempDir::new("standalone-include-real");
+    real.write(
+        "standalone.ini",
+        "[MegaTune]\nsignature = \"speeduino 202501\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include extra.inc\n",
+    );
+    real.write(
+        "extra.inc",
+        "fromInclude = scalar, U08, 0, \"\", 1, 0, 0, 255, 0\n",
+    );
+    real.write("tune.msq", STANDALONE_TUNE);
+
+    let alias = TempDir::new("standalone-include-alias");
+    let alias_path = alias.path().join("via-symlink");
+    symlink(real.path(), &alias_path).expect("the alias is creatable");
+
+    let project = Project::open_standalone(
+        alias_path.join("tune.msq"),
+        alias_path.join("standalone.ini"),
+    )
+    .expect("the tune opens");
+
+    assert!(
+        project.definition().constant("fromInclude").is_some(),
+        "the include base must be canonicalized before its paths are compared"
+    );
+}
+
+#[test]
 fn a_project_also_reads_the_settings_snapshot() {
     const DEFINITION: &str = r#"
 [MegaTune]

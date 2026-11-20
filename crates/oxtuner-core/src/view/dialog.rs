@@ -292,7 +292,10 @@ impl<'project> RowWalk<'project> {
             options
         };
 
-        let help = definition.context_help.get_ignore_case(variable).cloned();
+        let help = definition
+            .context_help
+            .get_ignore_case(variable)
+            .map(ToString::to_string);
 
         (options, help)
     }
@@ -370,7 +373,13 @@ impl<'project> RowWalk<'project> {
                         self.fields.push(field);
                     }
                 }
-                RowKind::Array1D | RowKind::Unmodeled => {
+                RowKind::Array1D
+                | RowKind::Unmodeled
+                | RowKind::ChannelSelector
+                | RowKind::CanDeviceSelector
+                | RowKind::CanClientIdSelector
+                | RowKind::LogFieldSelector
+                | RowKind::UserPassword => {
                     self.pending_preset = None;
 
                     self.unmodeled.push(DialogUnmodeledRow {

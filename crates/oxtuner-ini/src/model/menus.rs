@@ -29,6 +29,9 @@ pub struct MenuItem {
     /// Index in the owning menu's `items` of the `groupMenu` this entry was
     /// declared under with `groupChildMenu`.
     pub group: Option<usize>,
+    /// Whether this build can render the target. An unknown `std_*` target
+    /// stays parseable but is marked unsupported and listed on the definition.
+    pub supported: bool,
     /// Source line.
     pub line: u32,
 }

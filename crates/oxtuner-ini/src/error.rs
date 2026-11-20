@@ -108,6 +108,40 @@ impl Diagnostic {
     }
 }
 
+/// Most diagnostics one parse may keep. The truncation note is added on top of
+/// this, so the vector never grows without bound on a hostile file.
+pub const MAX_DIAGNOSTICS: usize = 512;
+
+/// Adds a diagnostic unless the file has already produced its full allowance.
+///
+/// Parsing stays lenient, but a file with a bad line on every line must not be
+/// able to grow the diagnostics vector without limit. One `diagnostics-truncated`
+/// note replaces the rest.
+pub fn push_bounded(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic) {
+    if diagnostics.len() < MAX_DIAGNOSTICS {
+        diagnostics.push(diagnostic);
+    } else if diagnostics
+        .last()
+        .is_none_or(|last| last.code != "diagnostics-truncated")
+    {
+        diagnostics.push(Diagnostic::whole_file(
+            Severity::Note,
+            "diagnostics-truncated",
+            format!("only the first {MAX_DIAGNOSTICS} diagnostics were kept for this file"),
+        ));
+    }
+}
+
+/// Adds a batch through the same bound as [`push_bounded`].
+pub fn extend_bounded(
+    diagnostics: &mut Vec<Diagnostic>,
+    incoming: impl IntoIterator<Item = Diagnostic>,
+) {
+    for diagnostic in incoming {
+        push_bounded(diagnostics, diagnostic);
+    }
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.line {
@@ -132,7 +166,19 @@ pub struct IniError {
 
 impl IniError {
     /// Wraps the diagnostics that stopped the parse.
-    pub fn new(diagnostics: Vec<Diagnostic>) -> Self {
+    ///
+    /// Structural failures are rare, but a hostile file can produce one per
+    /// line. The same bound as a successful parse keeps the error's `Display`
+    /// from growing without limit.
+    pub fn new(mut diagnostics: Vec<Diagnostic>) -> Self {
+        if diagnostics.len() > MAX_DIAGNOSTICS {
+            diagnostics.truncate(MAX_DIAGNOSTICS);
+            diagnostics.push(Diagnostic::whole_file(
+                Severity::Note,
+                "diagnostics-truncated",
+                format!("only the first {MAX_DIAGNOSTICS} diagnostics were kept"),
+            ));
+        }
         Self { diagnostics }
     }
 

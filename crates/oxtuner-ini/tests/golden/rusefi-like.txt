@@ -31,9 +31,12 @@ dialogs|2
 menus|1
 commands|1
 datalog|1
-unsupported|2
-unsupported_section|Tools
+unsupported|1
 unsupported_section|EventTriggers
-coverage|97.10
+loggers|0
+config_sections|1
+config_section|Tools|entries=1
+unresolved_targets|0
+coverage|98.55
 errors|0
 warnings|0

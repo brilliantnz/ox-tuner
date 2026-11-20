@@ -44,3 +44,9 @@ name = "pc_variables"
 path = "fuzz_targets/pc_variables.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sections"
+path = "fuzz_targets/sections.rs"
+test = false
+doc = false

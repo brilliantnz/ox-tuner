@@ -440,6 +440,61 @@ impl Expr {
 
         found
     }
+
+    /// Node count plus every call site, in one walk.
+    ///
+    /// The definition-wide validation needs both, and walking every expression
+    /// twice showed up on the larger real files.
+    pub fn audit(&self) -> (usize, Vec<(&str, usize)>) {
+        let mut pending = vec![self];
+        let mut count = 0usize;
+        let mut calls = Vec::new();
+        while let Some(expression) = pending.pop() {
+            count += 1;
+            match expression {
+                Self::Number(_) | Self::Ident(_) => {}
+                Self::Unary(_, operand) => pending.push(operand),
+                Self::Binary(_, left, right) => {
+                    pending.push(left);
+                    pending.push(right);
+                }
+                Self::Ternary(condition, when_true, when_false) => {
+                    pending.push(condition);
+                    pending.push(when_true);
+                    pending.push(when_false);
+                }
+                Self::Call(name, arguments) => {
+                    calls.push((name.as_str(), arguments.len()));
+                    pending.extend(arguments.iter());
+                }
+                Self::Index(base, index) => {
+                    pending.push(base);
+                    pending.push(index);
+                }
+            }
+        }
+        (count, calls)
+    }
+
+    /// Number of nodes in the tree, counted iteratively.
+    ///
+    /// The parser caps one tree's depth and source length. A file can still hold
+    /// many expressions, so the definition-wide budget uses this count.
+    pub fn node_count(&self) -> usize {
+        self.audit().0
+    }
+
+    /// Every call in the tree with its argument count, for builtin validation.
+    ///
+    /// The definition parser uses this to report unknown and runtime-only
+    /// builtins once per name. It is public so an application that compiles
+    /// expressions through a different path can run the same check.
+    ///
+    /// Iterative like [`Self::identifiers`], so a long flat expression cannot
+    /// exhaust the stack while the definition is being checked.
+    pub fn call_sites(&self) -> Vec<(&str, usize)> {
+        self.audit().1
+    }
 }
 
 /// A value in the 64-bit integer view the bitwise operators work on.
@@ -496,25 +551,11 @@ fn apply_binary(operator: BinaryOp, left: f64, right: f64) -> Option<f64> {
     }
 }
 
-/// The pure functions the evaluator implements. Everything else stays a
-/// [`Expr::Call`] and simply does not fold.
+/// Folds a call through the crate's builtin registry. Everything else stays an
+/// [`Expr::Call`] and simply does not fold; the caller supplies runtime values
+/// for functions that need them through [`EvalContext::function`].
 fn evaluate_call(name: &str, arguments: &[f64]) -> Option<f64> {
-    let lowered = name.to_ascii_lowercase();
-    match lowered.as_str() {
-        "abs" => Some(arguments.first()?.abs()),
-        "sqrt" => Some(arguments.first()?.sqrt()),
-        "round" => Some(arguments.first()?.round()),
-        "floor" => Some(arguments.first()?.floor()),
-        "ceil" => Some(arguments.first()?.ceil()),
-        "exp" => Some(arguments.first()?.exp()),
-        "log" => Some(arguments.first()?.ln()),
-        "log10" => Some(arguments.first()?.log10()),
-        "recip" => Some(1.0 / arguments.first()?),
-        "pow" => Some(arguments.first()?.powf(*arguments.get(1)?)),
-        "min" => arguments.iter().copied().reduce(f64::min),
-        "max" => arguments.iter().copied().reduce(f64::max),
-        _ => None,
-    }
+    crate::builtins::fold(name, arguments)
 }
 
 /// Why an expression could not be parsed.

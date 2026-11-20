@@ -10,13 +10,18 @@
 //! - recorded `#set` / `#unset` defaults and `#define` string lists,
 //! - inlined `#include` files when a resolver is supplied.
 //!
+//! Includes are resolved recursively up to [`MAX_INCLUDE_DEPTH`] levels, and a
+//! logical name already on the include stack reports `circular-include` instead
+//! of recursing again. `from_str` keeps refusing includes: there is no base to
+//! resolve a path against, so only the resolver entry point follows them.
+//!
 //! The output keeps 1-based line numbers so every later diagnostic can point at
 //! the line the user will find in their editor.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::{Diagnostic, IniError, Severity};
+use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::expr::bump_depth;
 use crate::fields::{assignment_index, has_assignment, split_fields, strip_comment};
 use crate::settings::SettingsContext;
@@ -84,12 +89,19 @@ impl Preprocessed {
 pub struct Fields<'a> {
     prefix: Vec<Cow<'a, str>>,
     tail: Option<&'a [&'a str]>,
+    /// Set when an expansion cap stopped the list before its declared end.
+    truncated: bool,
 }
 
 impl Fields<'_> {
     /// Number of fields.
     pub fn len(&self) -> usize {
         self.prefix.len() + self.tail.map_or(0, <[&str]>::len)
+    }
+
+    /// Whether an expansion cap stopped the list before its declared end.
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Whether the list is empty.
@@ -120,7 +132,11 @@ impl Fields<'static> {
     /// A list made only of owned fields, for tests that build the expected
     /// expansion by hand.
     pub fn from_owned(prefix: Vec<Cow<'static, str>>) -> Self {
-        Self { prefix, tail: None }
+        Self {
+            prefix,
+            tail: None,
+            truncated: false,
+        }
     }
 }
 
@@ -140,6 +156,8 @@ impl Fields<'static> {
 pub struct Expander<'a> {
     /// Each define's fully expanded fields, keyed lowercase.
     resolved: BTreeMap<String, Vec<&'a str>>,
+    /// Defines whose expansion hit a cap and was left short.
+    truncated: BTreeSet<String>,
 }
 
 impl<'a> Expander<'a> {
@@ -152,12 +170,21 @@ impl<'a> Expander<'a> {
     /// dominate the whole parse.
     pub fn new(defines: &'a BTreeMap<String, Vec<String>>) -> Self {
         let mut resolved: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
+        let mut truncated = BTreeSet::new();
         let mut stack = Vec::new();
         for name in defines.keys() {
             stack.clear();
-            resolve(defines, &mut resolved, name, &mut stack, 0);
+            resolve(defines, &mut resolved, name, &mut stack, 0, &mut truncated);
         }
-        Self { resolved }
+        Self {
+            resolved,
+            truncated,
+        }
+    }
+
+    /// Defines whose declared list did not survive the expansion caps.
+    pub fn truncated_defines(&self) -> &BTreeSet<String> {
+        &self.truncated
     }
 
     /// Expanded fields.
@@ -168,19 +195,27 @@ impl<'a> Expander<'a> {
     /// Expanded fields plus the names that could not be resolved.
     pub fn expand_reporting<'s>(&'s self, fields: &'s [&'s str]) -> (Fields<'s>, Vec<String>) {
         let mut undefined = Vec::new();
-        let mut expanded = Vec::with_capacity(fields.len());
+        let mut expanded = Vec::with_capacity(fields.len().min(MAX_EXPANDED_FIELDS));
+        let mut bytes = 0usize;
         let mut index = 0usize;
         let mut tail: Option<&'s [&'a str]> = None;
+        let mut truncated = false;
 
         while index < fields.len() {
+            if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                truncated = true;
+                break;
+            }
             let field = fields[index];
             index += 1;
 
             let Some(name) = field.strip_prefix('$').map(str::trim) else {
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
                 continue;
             };
             if name.is_empty() || name.contains(char::is_whitespace) {
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
                 continue;
             }
@@ -193,6 +228,8 @@ impl<'a> Expander<'a> {
 
                 // A trailing define with no per-index override stays borrowed.
                 if index == fields.len() && !has_override {
+                    // The tail stays borrowed, so it costs no allocation and
+                    // does not need a byte-count pass over a large define.
                     tail = Some(values);
                     continue;
                 }
@@ -211,12 +248,27 @@ impl<'a> Expander<'a> {
                         }
                         index += 1;
                     }
-                    expanded.extend(values);
+                    for value in values {
+                        bytes += value.len();
+                        expanded.push(value);
+                        if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                    }
                 } else {
-                    expanded.extend(values.iter().copied().map(Cow::Borrowed));
+                    for value in values {
+                        bytes += value.len();
+                        expanded.push(Cow::Borrowed(*value));
+                        if expanded.len() >= MAX_EXPANDED_FIELDS || bytes >= MAX_EXPANDED_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                    }
                 }
             } else {
                 undefined.push(name.to_owned());
+                bytes += field.len();
                 expanded.push(Cow::Borrowed(field));
             }
         }
@@ -225,6 +277,7 @@ impl<'a> Expander<'a> {
             Fields {
                 prefix: expanded,
                 tail,
+                truncated,
             },
             undefined,
         )
@@ -245,6 +298,7 @@ fn resolve<'a>(
     name: &str,
     stack: &mut Vec<&'a String>,
     depth: usize,
+    truncated: &mut BTreeSet<String>,
 ) -> Option<()> {
     if depth > MAX_DEFINE_NESTING {
         return None;
@@ -259,7 +313,7 @@ fn resolve<'a>(
     }
 
     stack.push(key);
-    let fields = resolve_fields(defines, resolved, key, stack, depth);
+    let fields = resolve_fields(defines, resolved, key, stack, depth, truncated);
     // Pop even when resolution failed: `stack` is the chain of names being
     // resolved, and a failure deeper in the chain must not leave this name on
     // it for the caller to trip over.
@@ -281,18 +335,38 @@ fn resolve_fields<'a>(
     key: &str,
     stack: &mut Vec<&'a String>,
     depth: usize,
+    truncated: &mut BTreeSet<String>,
 ) -> Option<Vec<&'a str>> {
     let source = defines.get(key)?;
-    let mut fields = Vec::with_capacity(source.len());
+    let mut fields = Vec::with_capacity(source.len().min(MAX_EXPANDED_FIELDS));
+    let mut bytes = 0usize;
     for field in source {
         match field.strip_prefix('$').map(str::trim) {
             Some(nested) if !nested.is_empty() => {
-                resolve(defines, resolved, nested, stack, depth + 1)?;
+                resolve(defines, resolved, nested, stack, depth + 1, truncated)?;
                 let (nested_key, _) = lookup(defines, nested)?;
                 let nested_fields = resolved.get(nested_key.as_str())?;
-                fields.extend(nested_fields.iter().copied());
+                for nested in nested_fields {
+                    if fields.len() >= MAX_EXPANDED_FIELDS
+                        || bytes.saturating_add(nested.len()) > MAX_EXPANDED_BYTES
+                    {
+                        truncated.insert(key.to_owned());
+                        return None;
+                    }
+                    bytes += nested.len();
+                    fields.push(*nested);
+                }
             }
-            _ => fields.push(field.as_str()),
+            _ => {
+                if fields.len() >= MAX_EXPANDED_FIELDS
+                    || bytes.saturating_add(field.len()) > MAX_EXPANDED_BYTES
+                {
+                    truncated.insert(key.to_owned());
+                    return None;
+                }
+                bytes += field.len();
+                fields.push(field.as_str());
+            }
         }
     }
     Some(fields)
@@ -324,6 +398,35 @@ fn parse_index_override(field: &str) -> Option<(usize, String)> {
 /// Resolves an `#include path` to text. Return `None` when the file cannot be
 /// found; the caller turns that into a diagnostic instead of failing.
 pub type IncludeResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Deepest include chain this pass follows. The top file is depth 0; reaching
+/// this cap with another `#include` reports `include-depth-exceeded` with the
+/// chain so a cycle that escapes name detection cannot recurse forever.
+pub const MAX_INCLUDE_DEPTH: u32 = 8;
+
+/// Largest expanded field list one define or one entry may produce. A real
+/// CAN-address define has 65 536 fields, so this leaves ample room while
+/// stopping a hostile chain of references from exhausting memory.
+pub const MAX_EXPANDED_FIELDS: usize = 1 << 20;
+
+/// Largest total text one expanded field list may hold.
+pub const MAX_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
+
+/// The recursion state shared by one include chain.
+struct IncludeScope<'a> {
+    depth: u32,
+    stack: &'a [String],
+}
+
+/// The include chain ending at `last`, for a diagnostic that names the cycle.
+fn chain_text(stack: &[String], last: &str) -> String {
+    stack
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(last))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
 
 /// A `/* … */` comment, which may run across physical lines.
 ///
@@ -452,6 +555,16 @@ pub fn preprocess(
     settings: &SettingsContext,
     includes: Option<IncludeResolver<'_>>,
 ) -> Result<Preprocessed, IniError> {
+    preprocess_inner(text, settings, includes, 0, &[])
+}
+
+fn preprocess_inner(
+    text: &str,
+    settings: &SettingsContext,
+    includes: Option<IncludeResolver<'_>>,
+    depth: u32,
+    stack: &[String],
+) -> Result<Preprocessed, IniError> {
     let mut preprocessed = Preprocessed {
         settings: settings.clone(),
         ..Preprocessed::default()
@@ -501,6 +614,7 @@ pub fn preprocess(
                 &mut conditionals,
                 includes,
                 &mut fatal,
+                &IncludeScope { depth, stack },
             );
             continue;
         }
@@ -535,24 +649,30 @@ pub fn preprocess(
     }
 
     if let Some(line) = block_comment.open {
-        preprocessed.diagnostics.push(Diagnostic::new(
-            Severity::Warning,
-            "unterminated-block-comment",
-            "this `/*` comment has no matching `*/`; the rest of the file is ignored",
-            line,
-            "Preprocessor",
-        ));
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::new(
+                Severity::Warning,
+                "unterminated-block-comment",
+                "this `/*` comment has no matching `*/`; the rest of the file is ignored",
+                line,
+                "Preprocessor",
+            ),
+        );
     }
 
     if preprocessed.hash_comments > 0 {
-        preprocessed.diagnostics.push(Diagnostic::whole_file(
-            Severity::Note,
-            "hash-comments",
-            format!(
-                "{} `#` line(s) named no directive and were read as comments",
-                preprocessed.hash_comments
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::whole_file(
+                Severity::Note,
+                "hash-comments",
+                format!(
+                    "{} `#` line(s) named no directive and were read as comments",
+                    preprocessed.hash_comments
+                ),
             ),
-        ));
+        );
     }
 
     if let Some(frame) = conditionals
@@ -587,6 +707,10 @@ pub fn preprocess(
 }
 
 /// One open `#if` … `#endif` block.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag tracks a distinct part of the frame's branch state"
+)]
 struct Conditional {
     /// Whether the enclosing block is active.
     parent_active: bool,
@@ -594,6 +718,8 @@ struct Conditional {
     branch_taken: bool,
     /// Whether this branch is being emitted.
     active: bool,
+    /// Whether this frame has already seen an `#else`.
+    saw_else: bool,
     /// Line of the `#if` that opened the block.
     depth_line: Option<u32>,
 }
@@ -605,6 +731,7 @@ fn handle_directive(
     conditionals: &mut Vec<Conditional>,
     includes: Option<IncludeResolver<'_>>,
     fatal: &mut Vec<Diagnostic>,
+    scope: &IncludeScope<'_>,
 ) {
     let (name, rest) = match directive.split_once(char::is_whitespace) {
         Some((name, rest)) => (name, rest.trim_ascii()),
@@ -623,7 +750,15 @@ fn handle_directive(
         ),
         "define" | "set" | "unset" | "include" => {
             if conditionals.iter().all(|frame| frame.active) {
-                handle_active_directive(&name, rest, line_number, preprocessed, includes);
+                handle_active_directive(
+                    &name,
+                    rest,
+                    line_number,
+                    preprocessed,
+                    includes,
+                    fatal,
+                    scope,
+                );
             }
         }
         _ => {
@@ -653,10 +788,18 @@ fn handle_conditional_directive(
                 parent_active: enclosing_active,
                 branch_taken: taken,
                 active: taken,
+                saw_else: false,
                 depth_line: Some(line_number),
             });
         }
         "elif" => match conditionals.last_mut() {
+            Some(frame) if frame.saw_else => fatal.push(Diagnostic::new(
+                Severity::Error,
+                "elif-after-else",
+                "`#elif` after `#else` in the same `#if` block",
+                line_number,
+                "Preprocessor",
+            )),
             Some(frame) => {
                 let result = evaluate_condition(rest, &mut preprocessed.settings);
                 let taken = resolve_condition(result, preprocessed, fatal, line_number);
@@ -673,10 +816,18 @@ fn handle_conditional_directive(
             )),
         },
         "else" => match conditionals.last_mut() {
+            Some(frame) if frame.saw_else => fatal.push(Diagnostic::new(
+                Severity::Error,
+                "duplicate-else",
+                "this `#if` block already has an `#else`",
+                line_number,
+                "Preprocessor",
+            )),
             Some(frame) => {
                 let taken = !frame.branch_taken && frame.parent_active;
                 frame.active = taken;
                 frame.branch_taken |= taken;
+                frame.saw_else = true;
             }
             None => fatal.push(Diagnostic::new(
                 Severity::Error,
@@ -705,6 +856,8 @@ fn handle_active_directive(
     line_number: u32,
     preprocessed: &mut Preprocessed,
     includes: Option<IncludeResolver<'_>>,
+    fatal: &mut Vec<Diagnostic>,
+    scope: &IncludeScope<'_>,
 ) {
     match name {
         "define" => {
@@ -713,13 +866,16 @@ fn handle_active_directive(
                 None => (rest.trim_ascii(), ""),
             };
             if define_name.is_empty() {
-                preprocessed.diagnostics.push(Diagnostic::new(
-                    Severity::Warning,
-                    "empty-define",
-                    "`#define` without a name",
-                    line_number,
-                    "Preprocessor",
-                ));
+                push_bounded(
+                    &mut preprocessed.diagnostics,
+                    Diagnostic::new(
+                        Severity::Warning,
+                        "empty-define",
+                        "`#define` without a name",
+                        line_number,
+                        "Preprocessor",
+                    ),
+                );
                 return;
             }
             preprocessed.defines.insert(
@@ -732,34 +888,89 @@ fn handle_active_directive(
                 preprocessed.settings.declare(flag, name == "set");
             }
         }
-        "include" => {
-            let path = crate::fields::unquote(rest);
-            let resolved = includes.and_then(|resolver| resolver(path));
-            match resolved {
-                Some(nested_text) => {
-                    // Included text is preprocessed in the same context. A
-                    // second-level include is deliberately not resolved: the
-                    // dialect allows it, but the first implementation keeps the
-                    // include graph shallow and reports the rest.
-                    if let Ok(nested) = preprocess(&nested_text, &preprocessed.settings, None) {
-                        preprocessed.lines.extend(nested.lines);
-                        for (key, values) in nested.defines {
-                            preprocessed.defines.entry(key).or_insert(values);
-                        }
-                        preprocessed.diagnostics.extend(nested.diagnostics);
-                        preprocessed.settings = nested.settings;
-                    }
-                }
-                None => preprocessed.diagnostics.push(Diagnostic::new(
-                    Severity::Note,
-                    "include-not-found",
-                    format!("could not resolve `#include {path}`; the entry is ignored"),
-                    line_number,
-                    "Preprocessor",
-                )),
-            }
-        }
+        "include" => handle_include(rest, line_number, preprocessed, includes, fatal, scope),
         _ => {}
+    }
+}
+
+/// Resolves one `#include` and merges what the nested preprocess produced.
+fn handle_include(
+    rest: &str,
+    line_number: u32,
+    preprocessed: &mut Preprocessed,
+    includes: Option<IncludeResolver<'_>>,
+    fatal: &mut Vec<Diagnostic>,
+    scope: &IncludeScope<'_>,
+) {
+    let path = crate::fields::unquote(rest).to_owned();
+    let chain = chain_text(scope.stack, &path);
+
+    if scope.depth >= MAX_INCLUDE_DEPTH {
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::new(
+                Severity::Error,
+                "include-depth-exceeded",
+                format!(
+                    "`#include {path}` would go past the include depth cap of \
+                     {MAX_INCLUDE_DEPTH}: {chain}"
+                ),
+                line_number,
+                "Preprocessor",
+            ),
+        );
+        return;
+    }
+    if scope.stack.iter().any(|name| name == &path) {
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::new(
+                Severity::Error,
+                "circular-include",
+                format!("`#include {path}` closes an include cycle: {chain}"),
+                line_number,
+                "Preprocessor",
+            ),
+        );
+        return;
+    }
+
+    let Some(nested_text) = includes.and_then(|resolver| resolver(&path)) else {
+        let parent = scope
+            .stack
+            .last()
+            .map_or("the top-level file", String::as_str);
+        push_bounded(
+            &mut preprocessed.diagnostics,
+            Diagnostic::new(
+                Severity::Note,
+                "include-not-found",
+                format!("could not resolve `#include {path}` from {parent}; the entry is ignored"),
+                line_number,
+                "Preprocessor",
+            ),
+        );
+        return;
+    };
+
+    let mut nested_stack = scope.stack.to_vec();
+    nested_stack.push(path);
+    match preprocess_inner(
+        &nested_text,
+        &preprocessed.settings,
+        includes,
+        scope.depth + 1,
+        &nested_stack,
+    ) {
+        Ok(nested) => {
+            preprocessed.lines.extend(nested.lines);
+            for (key, values) in nested.defines {
+                preprocessed.defines.entry(key).or_insert(values);
+            }
+            extend_bounded(&mut preprocessed.diagnostics, nested.diagnostics);
+            preprocessed.settings = nested.settings;
+        }
+        Err(error) => fatal.extend(error.diagnostics().iter().cloned()),
     }
 }
 
@@ -812,13 +1023,16 @@ fn resolve_condition(
             false
         }
         Err(ConditionError::Syntax(message)) => {
-            preprocessed.diagnostics.push(Diagnostic::new(
-                Severity::Warning,
-                "bad-condition",
-                message,
-                line_number,
-                "Preprocessor",
-            ));
+            push_bounded(
+                &mut preprocessed.diagnostics,
+                Diagnostic::new(
+                    Severity::Warning,
+                    "bad-condition",
+                    message,
+                    line_number,
+                    "Preprocessor",
+                ),
+            );
             false
         }
     }
@@ -1357,6 +1571,107 @@ mod tests {
 
         assert_eq!(output.lines.len(), 2);
         assert_eq!(output.diagnostics[0].code, "include-not-found");
+    }
+
+    #[test]
+    fn a_three_deep_include_chain_is_followed() {
+        let resolver = |path: &str| match path {
+            "a.inc" => Some("#include b.inc\n".to_owned()),
+            "b.inc" => Some("#include c.inc\n".to_owned()),
+            "c.inc" => Some("deep = 1\n".to_owned()),
+            _ => None,
+        };
+
+        let output = preprocess(
+            "[X]\n#include a.inc\n",
+            &SettingsContext::new(),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        assert_eq!(output.lines.len(), 2);
+        assert_eq!(output.lines[1].text, "deep = 1");
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "include-depth-exceeded")
+        );
+    }
+
+    #[test]
+    fn a_circular_include_names_the_chain() {
+        let resolver = |path: &str| match path {
+            "a.inc" => Some("#include b.inc\n".to_owned()),
+            "b.inc" => Some("#include a.inc\n".to_owned()),
+            _ => None,
+        };
+
+        let output = preprocess(
+            "[X]\n#include a.inc\n",
+            &SettingsContext::new(),
+            Some(&resolver),
+        )
+        .expect("the cycle is reported, not fatal");
+
+        let diagnostic = output
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "circular-include")
+            .expect("the cycle is reported");
+        assert!(diagnostic.message.contains("a.inc -> b.inc -> a.inc"));
+    }
+
+    #[test]
+    fn an_include_past_the_depth_cap_is_reported() {
+        let resolver = |path: &str| {
+            let number = path.strip_suffix(".inc")?.parse::<u32>().ok()?;
+            Some(format!("#include {}.inc\n", number + 1))
+        };
+
+        let output = preprocess(
+            "[X]\n#include 0.inc\n",
+            &SettingsContext::new(),
+            Some(&resolver),
+        )
+        .expect("the depth cap is reported, not fatal");
+
+        let diagnostic = output
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "include-depth-exceeded")
+            .expect("the cap is reported");
+        assert!(diagnostic.message.contains("depth cap"));
+    }
+
+    #[test]
+    fn a_second_else_in_one_conditional_is_fatal() {
+        let error = preprocess(
+            "[X]\n#if A\n#else\n#else\n#endif\n",
+            &SettingsContext::new(),
+            None,
+        )
+        .expect_err("must be fatal");
+
+        assert_eq!(error.diagnostics()[0].code, "duplicate-else");
+    }
+
+    #[test]
+    fn diagnostics_are_capped_for_a_hostile_file() {
+        let text = format!("[X]\n{}", "#define\n".repeat(crate::MAX_DIAGNOSTICS + 40));
+
+        let output = preprocess(&text, &SettingsContext::new(), None).expect("preprocesses");
+
+        assert!(
+            output.diagnostics.len() <= crate::MAX_DIAGNOSTICS + 1,
+            "the bound plus one truncation note is all the file may keep"
+        );
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "diagnostics-truncated")
+        );
     }
 
     #[test]

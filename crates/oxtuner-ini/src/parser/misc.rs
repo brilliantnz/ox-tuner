@@ -13,6 +13,40 @@ use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, Referenc
 
 use super::SectionParser;
 
+/// Applies one `defaultValue` or `rawValue` entry, returning whether it had a
+/// value to apply. Array defaults are kept separately from scalar ones.
+fn apply_default(
+    definition: &mut Definition,
+    name: &str,
+    rest: Option<&str>,
+    raw: bool,
+    section: &mut SectionParser,
+    line: u32,
+) -> bool {
+    let Some(rest) = rest else {
+        return false;
+    };
+    if let Some(values) = number_list(rest) {
+        if raw {
+            definition
+                .extensions
+                .raw_default_arrays
+                .insert(name, values);
+        } else {
+            definition.extensions.default_arrays.insert(name, values);
+        }
+    } else {
+        let number = Number::parse(rest);
+        if raw {
+            definition.extensions.raw_defaults.insert(name, number);
+        } else {
+            definition.extensions.defaults.insert(name, number);
+        }
+    }
+    section.understand(line);
+    true
+}
+
 /// `[ConstantsExtensions]` (rusEFI spells it in the plural) and `[Defaults]`.
 pub(crate) fn parse_extensions(
     definition: &mut Definition,
@@ -27,20 +61,7 @@ pub(crate) fn parse_extensions(
 
         match key.to_ascii_lowercase().as_str() {
             "defaultvalue" | "defaults" => {
-                if let Some(rest) = rest {
-                    match number_list(&rest) {
-                        Some(values) => {
-                            definition.extensions.default_arrays.insert(&name, values);
-                        }
-                        None => {
-                            definition
-                                .extensions
-                                .defaults
-                                .insert(&name, Number::parse(&rest));
-                        }
-                    }
-                    section.understand(*line);
-                } else {
+                if !apply_default(definition, &name, rest.as_deref(), false, section, *line) {
                     section.warn(
                         "bad-default",
                         format!("`{key} = {value}` needs a name and a value"),
@@ -49,23 +70,7 @@ pub(crate) fn parse_extensions(
                 }
             }
             "rawvalue" => {
-                if let Some(rest) = rest {
-                    match number_list(&rest) {
-                        Some(values) => {
-                            definition
-                                .extensions
-                                .raw_default_arrays
-                                .insert(&name, values);
-                        }
-                        None => {
-                            definition
-                                .extensions
-                                .raw_defaults
-                                .insert(&name, Number::parse(&rest));
-                        }
-                    }
-                    section.understand(*line);
-                }
+                apply_default(definition, &name, rest.as_deref(), true, section, *line);
             }
             "maximumelements" => {
                 if let Some(rest) = rest
@@ -110,12 +115,13 @@ pub(crate) fn parse_extensions(
                 section.understand(*line);
             }
             "ignoremissingbitoptions" => {
-                definition.extensions.ignore_missing_bit_options = is_true(value);
+                definition.extensions.ignore_missing_bit_options = crate::fields::is_true(value);
                 section.understand(*line);
             }
             // The dialect's own key contains the typo; accept both spellings.
             "surpressconfigerrorverbiage" | "suppressconfigerrorverbiage" => {
-                definition.extensions.suppress_config_error_verbiage = is_true(value);
+                definition.extensions.suppress_config_error_verbiage =
+                    crate::fields::is_true(value);
                 section.understand(*line);
             }
             _ => section.unrecognized_key(key, *line),
@@ -152,13 +158,6 @@ fn number_list(value: &str) -> Option<Vec<f64>> {
         .collect::<Option<_>>()?;
 
     (values.len() > 1).then_some(values)
-}
-
-fn is_true(value: &str) -> bool {
-    matches!(
-        value.trim_ascii().to_ascii_lowercase().as_str(),
-        "true" | "on" | "1" | "yes"
-    )
 }
 
 /// `[ControllerCommands]`.

@@ -8,11 +8,15 @@
 
 use crate::fields::split_fields;
 use crate::model::{
-    Definition, Dialog, DialogRow, KeyAction, Menu, MenuItem, MenuTargetKind, RowKind,
-    SettingGroup, SettingOption,
+    Definition, Dialog, DialogRow, KeyAction, Menu, MenuItem, MenuTargetKind, RowClassification,
+    RowKind, SettingGroup, SettingOption,
 };
 
 use super::SectionParser;
+
+/// `std_*` targets with an app-owned renderer. Anything else stays parseable
+/// but unsupported, with its name recorded on the definition.
+const RENDERED_STD_TARGETS: &[&str] = &["std_realtime", "std_injection", "std_ms3Rtc"];
 
 /// `[SettingGroups]`: options become `#if` flags.
 pub(crate) fn parse_setting_groups(
@@ -39,22 +43,27 @@ pub(crate) fn parse_setting_groups(
                     || (*name).to_owned(),
                     |field| crate::fields::unquote(field).to_owned(),
                 );
-                let replaced = definition.setting_groups.insert(
-                    name.to_owned(),
-                    SettingGroup {
-                        name: name.to_owned(),
-                        label,
-                        options: Vec::new(),
-                    },
-                );
-                if replaced.is_some() {
-                    section.error(
-                        "duplicate-name",
-                        format!(
-                            "setting group `{name}` is declared more than once; the later \
-                             declaration replaces the earlier one"
-                        ),
+                if let Some(existing) = definition.setting_groups.get_mut(name) {
+                    // A repeated header continues the group: options collected
+                    // under either header are kept in one list.
+                    // A bare repeated header defaults the label to the group
+                    // name; keep the earlier label in that case.
+                    if label != name {
+                        existing.label = label;
+                    }
+                    section.note(
+                        "merged-setting-group",
+                        format!("setting group `{name}` is declared more than once; options are appended"),
                         *line,
+                    );
+                } else {
+                    definition.setting_groups.insert(
+                        name.to_owned(),
+                        SettingGroup {
+                            name: name.to_owned(),
+                            label,
+                            options: Vec::new(),
+                        },
                     );
                 }
                 current = Some(name.to_owned());
@@ -81,6 +90,16 @@ pub(crate) fn parse_setting_groups(
                     );
                     continue;
                 };
+                if name.eq_ignore_ascii_case("DEFAULT") {
+                    section.note(
+                        "default-setting-option",
+                        format!(
+                            "`{name}` is the fallback for `{group_name}`; when no option matches, \
+                             the `#else` branch of the flag is used"
+                        ),
+                        *line,
+                    );
+                }
                 if let Some(group) = definition.setting_groups.get_mut(group_name) {
                     group.options.push(SettingOption {
                         name: name.to_owned(),
@@ -131,12 +150,22 @@ pub(crate) fn parse_dialogs(
                 line: *line,
             };
             current = Some(name.to_owned());
-            if definition.dialogs.insert(name, dialog).is_some() {
-                section.error(
-                    "duplicate-name",
-                    format!("dialog `{name}` is declared more than once; the later wins"),
+            if let Some(existing) = definition.dialogs.get_mut(name) {
+                // A second header continues the dialog instead of starting a
+                // new one, so rows written under either header stay together.
+                if dialog.title.is_some() {
+                    existing.title = dialog.title;
+                }
+                if dialog.layout.is_some() {
+                    existing.layout = dialog.layout;
+                }
+                section.note(
+                    "merged-dialog",
+                    format!("dialog `{name}` is declared more than once; rows are appended"),
                     *line,
                 );
+            } else {
+                definition.dialogs.insert(name, dialog);
             }
             section.understand(*line);
             continue;
@@ -186,6 +215,14 @@ pub(crate) fn parse_dialogs(
         if kind == RowKind::Unmodeled {
             // Kept as data; reported once so coverage stays honest.
             section.unrecognized_key(&keyword, *line);
+        } else if kind.classification() == RowClassification::Deferred {
+            // Also kept as data, but with a note that says why it is not
+            // interpreted yet, so a deferred row is never a silent drop.
+            section.note(
+                "row-deferred",
+                format!("`{keyword}` is kept verbatim until a consumer needs it"),
+                *line,
+            );
         }
         if let Some(dialog) = definition.dialogs.get_mut(name) {
             dialog.rows.push(DialogRow {
@@ -224,6 +261,7 @@ pub(crate) fn parse_menu(
                     label: String::new(),
                     conditions: Vec::new(),
                     group: None,
+                    supported: true,
                     line: *line,
                 });
                 group = None;
@@ -261,6 +299,8 @@ pub(crate) fn parse_menu(
                     .collect();
                 let kind = match lowered.as_str() {
                     "groupmenu" => MenuTargetKind::Group,
+                    // A divider is also written as `subMenu = std_separator`.
+                    _ if target.eq_ignore_ascii_case("std_separator") => MenuTargetKind::Separator,
                     _ if target.starts_with("std_") => MenuTargetKind::Standard,
                     _ => MenuTargetKind::DefinitionTarget,
                 };
@@ -269,6 +309,8 @@ pub(crate) fn parse_menu(
                 } else {
                     None
                 };
+                let supported =
+                    kind != MenuTargetKind::Standard || std_target_supported(definition, &target);
                 let Some(menu) = index.and_then(|index| definition.menus.get_mut(index)) else {
                     section.warn(
                         "orphan-menu-item",
@@ -284,13 +326,15 @@ pub(crate) fn parse_menu(
                     label,
                     conditions,
                     group: owner,
+                    supported,
                     line: *line,
                 });
                 // A group header opens a group and a child keeps it open; a
                 // plain subMenu ends it.
-                group = match lowered.as_str() {
-                    "groupmenu" => Some(position),
-                    "groupchildmenu" => group,
+                group = match (lowered.as_str(), kind) {
+                    (_, MenuTargetKind::Separator) => None,
+                    ("groupmenu", _) => Some(position),
+                    ("groupchildmenu", _) => group,
                     _ => None,
                 };
                 section.understand(*line);
@@ -307,6 +351,27 @@ pub(crate) fn parse_menu(
             _ => section.unrecognized_key(key, *line),
         }
     }
+}
+
+/// Whether a `std_*` target has a renderer, recording it when it does not.
+fn std_target_supported(definition: &mut Definition, target: &str) -> bool {
+    if target.eq_ignore_ascii_case("std_separator") {
+        return true;
+    }
+    if RENDERED_STD_TARGETS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(target))
+    {
+        return true;
+    }
+    if !definition
+        .unresolved_targets
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(target))
+    {
+        definition.unresolved_targets.push(target.to_owned());
+    }
+    false
 }
 
 /// Selects the menu with this title, creating it when it is new.
@@ -405,9 +470,10 @@ pub(crate) fn parse_context_help(
         let Some((key, value)) = super::entry_line(section, *line, text) else {
             continue;
         };
-        definition
-            .context_help
-            .insert(key, crate::fields::unquote(value).to_owned());
+        definition.context_help.insert(
+            key,
+            crate::model::intern_text(crate::fields::unquote(value)),
+        );
         section.understand(*line);
     }
 }
@@ -468,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_setting_group_is_reported_and_the_later_one_wins() {
+    fn a_repeated_setting_group_header_merges_its_options() {
         let definition = parse(
             "\
 [MegaTune]
@@ -485,15 +551,16 @@ settingOption = second, \"Second\"
         let diagnostic = definition
             .diagnostics
             .iter()
-            .find(|diagnostic| diagnostic.code == "duplicate-name")
-            .expect("the second declaration is reported");
+            .find(|diagnostic| diagnostic.code == "merged-setting-group")
+            .expect("the repeated header is reported");
         assert_eq!(diagnostic.line, Some(7));
-        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.severity, Severity::Note);
 
         let group = definition.setting_groups.get("mcu").expect("group");
         assert_eq!(group.label, "Second");
-        assert_eq!(group.options.len(), 1);
-        assert_eq!(group.options[0].name, "second");
+        assert_eq!(group.options.len(), 2);
+        assert_eq!(group.options[0].name, "first");
+        assert_eq!(group.options[1].name, "second");
     }
 
     #[test]
@@ -520,6 +587,46 @@ settingOption = second, \"Second\"
         assert_eq!(dialog.rows[0].kind, RowKind::Unmodeled);
         assert_eq!(dialog.rows[0].keyword, "brandNewRow");
         assert_eq!(dialog.rows[0].fields, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn every_row_kind_has_an_audit_classification() {
+        assert_eq!(RowKind::ALL.len(), 26);
+        for kind in RowKind::ALL {
+            assert_ne!(*kind, RowKind::Unmodeled);
+            // `classification` matches every variant, so adding a kind without
+            // auditing it here is a compile error.
+            let _ = kind.classification();
+        }
+    }
+
+    #[test]
+    fn deferred_rows_keep_their_fields_and_get_a_note() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[UiDialogs]
+dialog = d, \"D\"
+channelSelector = a, b
+logFieldSelector = c, d
+userPassword = pw
+",
+        );
+
+        let dialog = definition.dialogs.get("d").expect("dialog");
+        assert_eq!(dialog.rows.len(), 3);
+        assert_eq!(dialog.rows[0].kind, RowKind::ChannelSelector);
+        assert_eq!(dialog.rows[0].fields, vec!["a", "b"]);
+        assert_eq!(dialog.rows[1].kind, RowKind::LogFieldSelector);
+        assert_eq!(dialog.rows[2].kind, RowKind::UserPassword);
+
+        let notes = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "row-deferred")
+            .count();
+        assert_eq!(notes, 3);
     }
 
     #[test]

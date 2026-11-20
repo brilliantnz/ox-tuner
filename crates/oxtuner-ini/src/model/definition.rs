@@ -5,10 +5,22 @@ use crate::error::Diagnostic;
 use crate::fields::CommandTemplate;
 
 use super::{
-    Channel, ChannelKind, CommsSettings, Constant, ConstantClass, ControllerCommand, Coverage,
-    Curve, DatalogEntry, Dialog, Endianness, Extensions, FrontPage, Gauge, KeyAction, Menu, Number,
-    Ordered, Page, PcVariable, ReferenceTable, SettingGroup, Table, UnsupportedSection,
+    Channel, ChannelKind, CommsSettings, ConfigSection, Constant, ConstantClass, ControllerCommand,
+    Coverage, Curve, DatalogEntry, Dialog, Dimension, Endianness, Extensions, FrontPage, Gauge,
+    KeyAction, LoggerDefinition, Menu, Number, Ordered, Page, PcVariable, ReferenceTable,
+    SettingGroup, Shape, Table, UnsupportedSection,
 };
+
+/// Features the definition actually provides, for app-side gating.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    /// The definition declares at least one 2-D table.
+    pub has_tables: bool,
+    /// The definition declares a burst read command.
+    pub has_burst: bool,
+    /// The definition declares dashboard slots or indicators.
+    pub has_frontpage: bool,
+}
 
 /// The frozen result of parsing an INI file.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
@@ -56,8 +68,9 @@ pub struct Definition {
     pub controller_commands: Ordered<ControllerCommand>,
     /// Setting groups whose options are `#if` flags.
     pub setting_groups: Ordered<SettingGroup>,
-    /// Per-constant help text.
-    pub context_help: Ordered<String>,
+    /// Per-constant help text. Repeated texts share one allocation in a parsed
+    /// definition; a definition reloaded from the cache has its own copies.
+    pub context_help: Ordered<std::sync::Arc<str>>,
     /// Datalog fields.
     pub datalog_entries: Vec<DatalogEntry>,
     /// Constant metadata applied after declaration.
@@ -68,6 +81,18 @@ pub struct Definition {
     pub key_actions: Vec<KeyAction>,
     /// Sections kept as raw data.
     pub unsupported: Vec<UnsupportedSection>,
+    /// Features derived from the frozen model, for UI gating.
+    pub capabilities: Capabilities,
+    /// Parser scratch: declarations collected while reading, drained by
+    /// `resolve_comms_keys` before the model is returned.
+    #[serde(skip)]
+    pub(crate) comms_sources: BTreeMap<String, Vec<crate::model::CommsSource>>,
+    /// High-speed loggers from `[LoggerDefinition]`.
+    pub loggers: Vec<LoggerDefinition>,
+    /// Named configuration sections modelled as typed entry lists.
+    pub config_sections: Vec<ConfigSection>,
+    /// `std_*` menu targets with no renderer in this build, in first-seen order.
+    pub unresolved_targets: Vec<String>,
     /// `#define` string lists, keyed lowercase.
     pub defines: BTreeMap<String, Vec<String>>,
     /// Flags the file asked about.
@@ -127,6 +152,11 @@ impl Definition {
             reference_tables: Ordered::new(),
             key_actions: Vec::new(),
             unsupported: Vec::new(),
+            capabilities: Capabilities::default(),
+            comms_sources: BTreeMap::new(),
+            loggers: Vec::new(),
+            config_sections: Vec::new(),
+            unresolved_targets: Vec::new(),
             defines: BTreeMap::new(),
             tested_flags: BTreeSet::new(),
             active_flags: BTreeSet::new(),
@@ -163,6 +193,89 @@ impl Definition {
             && self
                 .spec_version
                 .is_none_or(|version| version <= crate::MAX_SPEC_VERSION)
+    }
+
+    /// Stable hash of the parts of a definition that affect how a project is
+    /// read. A migration prompt compares this against the hash stored with the
+    /// tune; a reordered comment does not change it, a renamed constant or a
+    /// moved address does. FNV-1a is spelled out here because a standard
+    /// library `DefaultHasher` may change between toolchains.
+    pub fn structural_hash(&self) -> u64 {
+        fn feed(hash: &mut u64, bytes: &[u8]) {
+            // A full-width length prefix keeps two adjacent fields from
+            // hashing like one pair shifted by a character.
+            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            for byte in length.to_le_bytes() {
+                *hash ^= u64::from(byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            for &byte in bytes {
+                *hash ^= u64::from(byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        feed(&mut hash, self.signature.as_bytes());
+        feed(
+            &mut hash,
+            self.ini_version.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hash,
+            &self.spec_version.map_or(0, f64::to_bits).to_le_bytes(),
+        );
+        feed(&mut hash, &[u8::from(self.spec_version.is_some())]);
+        for page in &self.pages {
+            feed(&mut hash, &page.number.to_le_bytes());
+            feed(&mut hash, &page.size.to_le_bytes());
+            feed(&mut hash, &page.start_offset.to_le_bytes());
+        }
+        for (_, constant) in self.constants.iter() {
+            feed(&mut hash, constant.name.as_bytes());
+            feed(&mut hash, &constant.page.to_le_bytes());
+            feed(
+                &mut hash,
+                &constant.address.unwrap_or(u32::MAX).to_le_bytes(),
+            );
+            feed(
+                &mut hash,
+                &u8::from(constant.address.is_some()).to_le_bytes(),
+            );
+            // A variant tag plus the written dimensions, not a byte count:
+            // [16], [4x4] and string[16] all hold sixteen cells but index
+            // differently, and a bit shift changes every presented value.
+            match &constant.shape {
+                Shape::Scalar => feed(&mut hash, &[0]),
+                Shape::Bits { low, high, shift } => {
+                    feed(&mut hash, &[1, *low, *high, *shift]);
+                }
+                Shape::List(length) => {
+                    feed(&mut hash, &[2]);
+                    feed(&mut hash, length.normalized().as_bytes());
+                }
+                Shape::Table { cols, rows } => {
+                    feed(&mut hash, &[3]);
+                    feed(&mut hash, cols.normalized().as_bytes());
+                    feed(&mut hash, rows.normalized().as_bytes());
+                }
+                Shape::Text { length, columns } => {
+                    feed(&mut hash, &[4]);
+                    feed(&mut hash, length.normalized().as_bytes());
+                    let columns = columns
+                        .as_ref()
+                        .map_or_else(String::new, Dimension::normalized);
+                    feed(&mut hash, columns.as_bytes());
+                }
+            }
+        }
+        for (name, values) in &self.defines {
+            feed(&mut hash, name.as_bytes());
+            for value in values {
+                feed(&mut hash, value.as_bytes());
+            }
+        }
+        hash
     }
 
     /// A table by id.
@@ -355,6 +468,30 @@ impl Definition {
         let _ = writeln!(out, "unsupported|{}", self.unsupported.len());
         for section in &self.unsupported {
             let _ = writeln!(out, "unsupported_section|{}", section.name);
+        }
+        let _ = writeln!(out, "loggers|{}", self.loggers.len());
+        for logger in &self.loggers {
+            let _ = writeln!(
+                out,
+                "logger|{}|kind={}|fields={}|calculated={}",
+                logger.name,
+                logger.kind,
+                logger.fields.len(),
+                logger.calculated.len()
+            );
+        }
+        let _ = writeln!(out, "config_sections|{}", self.config_sections.len());
+        for section in &self.config_sections {
+            let _ = writeln!(
+                out,
+                "config_section|{}|entries={}",
+                section.name,
+                section.entries.len()
+            );
+        }
+        let _ = writeln!(out, "unresolved_targets|{}", self.unresolved_targets.len());
+        for target in &self.unresolved_targets {
+            let _ = writeln!(out, "unresolved_target|{target}");
         }
         let _ = writeln!(out, "coverage|{:.2}", self.coverage.percent());
         let errors = self
