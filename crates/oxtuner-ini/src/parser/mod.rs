@@ -351,7 +351,7 @@ struct UnknownSink {
 impl SectionSink for UnknownSink {
     fn feed(
         &mut self,
-        definition: &mut Definition,
+        _definition: &mut Definition,
         section: &mut SectionParser,
         lines: &[(u32, &str)],
         _expander: &Expander<'_>,
@@ -361,7 +361,6 @@ impl SectionSink for UnknownSink {
             self.lines.push((*text).to_owned());
         }
         section.kept_raw = true;
-        let _ = definition;
     }
 
     fn finish(&mut self, definition: &mut Definition, _section: &mut SectionParser) {
@@ -1139,6 +1138,27 @@ mod tests {
         assert_eq!(definition.unsupported.len(), 1);
         assert_eq!(definition.unsupported[0].name, "EventTriggers");
         assert_eq!(definition.unsupported[0].lines, vec!["trigger = something"]);
+    }
+
+    #[test]
+    fn a_repeated_unknown_header_keeps_one_section_with_all_its_lines() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[EventTriggers]
+first = 1
+[Constants]
+page = 1
+[EventTriggers]
+second = 2
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.unsupported.len(), 1);
+        let section = &definition.unsupported[0];
+        assert_eq!(section.name, "EventTriggers");
+        assert_eq!(section.lines, ["first = 1", "second = 2"]);
     }
 
     #[test]
