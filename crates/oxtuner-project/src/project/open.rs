@@ -382,13 +382,15 @@ fn load_definition(
     let text = oxtuner_ini::source::decode(bytes).text;
     let recorder = IncludeRecorder::new(base);
     let resolver = |request: oxtuner_ini::IncludeRequest<'_>| recorder.resolve(request);
-    let mut definition = oxtuner_ini::parse_str_with_source(
-        &text,
-        settings,
-        &definition_path.to_string_lossy(),
-        &resolver,
-    )
-    .map_err(ProjectError::Ini)?;
+    // Diagnostics name the file, not its absolute location: the resolver's
+    // include paths are already base-relative, and the top file should match.
+    let definition_name = definition_path.file_name().map_or_else(
+        || definition_path.to_string_lossy(),
+        |name| name.to_string_lossy(),
+    );
+    let mut definition =
+        oxtuner_ini::parse_str_with_source(&text, settings, &definition_name, &resolver)
+            .map_err(ProjectError::Ini)?;
     let includes = recorder.finish();
 
     if let Some(cache) = &cache {
