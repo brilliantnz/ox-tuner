@@ -774,10 +774,11 @@ fn preprocess_inner(
         let continuation = uncommented.starts_with([' ', '\t'])
             && !content.starts_with('[')
             && !has_assignment(content)
-            && preprocessed
-                .lines
-                .last()
-                .is_some_and(|previous| previous.text.trim_ascii_end().ends_with(','));
+            && preprocessed.lines.last().is_some_and(|previous| {
+                // An included file's last line can end in a comma, but an
+                // indented line in the parent is not its continuation.
+                previous.pos.source == source && previous.text.trim_ascii_end().ends_with(',')
+            });
 
         if continuation {
             if let Some(previous) = preprocessed.lines.last_mut() {
@@ -2014,6 +2015,24 @@ mod tests {
             .expect("the missing root-relative include is reported");
         assert_eq!(diagnostic.source.as_deref(), Some("engine/config.inc"));
         assert_eq!(diagnostic.line, Some(1));
+    }
+
+    #[test]
+    fn a_continuation_does_not_join_across_an_include() {
+        let resolver = |request: IncludeRequest<'_>| {
+            (request.path == "tail.inc").then(|| inc("tail.inc", "list = 1,\n"))
+        };
+        let output = preprocess_with_source(
+            "[X]\n#include tail.inc\n   2\n",
+            &SettingsContext::new(),
+            Some("main.ini"),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        assert_eq!(output.lines[1].text, "list = 1,");
+        assert_eq!(output.lines[2].text, "2");
+        assert_eq!(output.lines[2].pos.source, output.lines[0].pos.source);
     }
 
     #[test]
