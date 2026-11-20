@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::model::{Coverage, Definition, SectionCoverage};
-use crate::preprocess::{Expander, IncludeResolver, LogicalLine, SourceFile, SourcePos};
+use crate::preprocess::{Expander, IncludeResolver, LogicalLine, SourceFile, SourceId, SourcePos};
 use crate::settings::SettingsContext;
 use crate::source;
 
@@ -252,11 +252,17 @@ fn parse_sections(
         };
 
         if slot.headers >= 1 {
+            // The first header may live in another file, where line numbers
+            // restart. Name that file so the reference is unambiguous.
+            let first = match slot.parser.path(slot.first_pos) {
+                Some(path) => format!("line {} in {path}", slot.first_pos.line),
+                None => format!("line {}", slot.first_pos.line),
+            };
             slot.parser.note(
                 "merged-section",
                 format!(
-                    "`[{}]` is declared again here; its entries continue the block at line {}",
-                    block.name, slot.first_pos.line
+                    "`[{}]` is declared again here; its entries continue the block at {first}",
+                    block.name
                 ),
                 block.header.unwrap_or(slot.first_pos),
             );
@@ -488,8 +494,9 @@ pub(crate) struct SectionParser {
     understood: BTreeSet<SourcePos>,
     /// Lines seen.
     pub(crate) total: usize,
-    /// Keys reported as unrecognized, so each is logged once.
-    reported_keys: BTreeSet<String>,
+    /// Keys reported as unrecognized, so each is logged once per source file.
+    /// Included files have their own line numbering and their own namespace.
+    reported_keys: BTreeSet<(SourceId, String)>,
     /// Diagnostics for this section.
     pub(crate) diagnostics: Vec<Diagnostic>,
     /// Whether the whole section was kept as raw data.
@@ -533,28 +540,28 @@ impl SectionParser {
 
     /// Records a warning tied to a line.
     pub(crate) fn warn(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
-        let path = self.path(pos).map(str::to_owned);
-        self.record(Diagnostic::at(
+        let diagnostic = Diagnostic::at(
             Severity::Warning,
             code,
             message,
-            path.as_deref(),
+            self.path(pos),
             pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// Records an informational note tied to a line.
     pub(crate) fn note(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
-        let path = self.path(pos).map(str::to_owned);
-        self.record(Diagnostic::at(
+        let diagnostic = Diagnostic::at(
             Severity::Note,
             code,
             message,
-            path.as_deref(),
+            self.path(pos),
             pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// Records an informational note about the section as a whole, for a fact
@@ -570,15 +577,15 @@ impl SectionParser {
 
     /// Records an error tied to a line.
     pub(crate) fn error(&mut self, code: &'static str, message: impl Into<String>, pos: SourcePos) {
-        let path = self.path(pos).map(str::to_owned);
-        self.record(Diagnostic::at(
+        let diagnostic = Diagnostic::at(
             Severity::Error,
             code,
             message,
-            path.as_deref(),
+            self.path(pos),
             pos.line,
             &self.name,
-        ));
+        );
+        self.record(diagnostic);
     }
 
     /// A line inside a known section that is not an assignment and has no
@@ -594,7 +601,7 @@ impl SectionParser {
     /// A key this build does not model. Reported once per key per file.
     pub(crate) fn unrecognized_key(&mut self, key: &str, pos: SourcePos) {
         let lowered = key.to_ascii_lowercase();
-        if self.reported_keys.insert(lowered) {
+        if self.reported_keys.insert((pos.source, lowered)) {
             self.note(
                 "unrecognized-key",
                 format!("`{key}` is not modelled yet; the entry is kept out of the model"),
@@ -2081,5 +2088,35 @@ yBins = otherBins, secondChannel
         assert_eq!(diagnostic.source, None);
         let line = diagnostic.line.expect("the line is set");
         assert!(diagnostic.to_string().starts_with(&format!("{line}: ")));
+    }
+
+    #[test]
+    fn an_unrecognized_key_is_reported_once_per_source_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "one.inc" => Some(Include {
+                path: "one.inc".to_owned(),
+                text: "[Constants]\nmystery = 1\n".to_owned(),
+            }),
+            "two.inc" => Some(Include {
+                path: "two.inc".to_owned(),
+                text: "[Constants]\nmystery = 2\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include one.inc\n#include two.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let sources: Vec<&str> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "unrecognized-key")
+            .filter_map(|diagnostic| diagnostic.source.as_deref())
+            .collect();
+        assert_eq!(sources, ["one.inc", "two.inc"]);
     }
 }

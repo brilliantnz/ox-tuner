@@ -34,7 +34,10 @@
 //! model, [`oxtuner_ini::PARSER_VERSION`] covers the parser's output contract,
 //! and [`oxtuner_ini::MAX_SPEC_VERSION`] covers the dialect ceilings this build
 //! understands. Any of them changing moves the cache path, so old entries are
-//! simply never found again.
+//! simply never found again. A serialized-model change without a version bump
+//! is tolerated too: an old entry that fails to decode is a miss and is
+//! overwritten on the next store. This matters before the first release, when
+//! the format versions stay fixed.
 
 use std::{
     cell::RefCell,
