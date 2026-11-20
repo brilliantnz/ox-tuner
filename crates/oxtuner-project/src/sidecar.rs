@@ -22,11 +22,9 @@ pub const SIDECAR_DIR: &str = ".oxtuner";
 /// Project state file inside the sidecar directory.
 pub const STATE_FILE: &str = "project.json";
 
-/// Bump when the on-disk shape changes in a way that needs migration.
-///
-/// The app is unreleased, so a stale file is deleted and recreated instead of
-/// migrated. The version exists so a newer file is refused rather than
-/// half-read.
+/// Pinned while the app is experimental. A shape change deletes the stale
+/// sidecar and lets the app recreate it; no migration or version bump is needed.
+/// The number only keeps a newer file from being half-read.
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
 /// Per-project state: definition reference, last-used connection and panel

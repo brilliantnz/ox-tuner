@@ -49,9 +49,9 @@ const SNAPSHOT_FILE_NAME: &str = "theme-bundled.json";
 /// migrated against [`SNAPSHOT_FILE_NAME`]: a value still equal to the old
 /// bundle takes the new value, and a value the user changed stays.
 ///
-/// Before the first release the bundled default may change shape freely.
+/// The bundled default may change shape freely while the app is experimental.
 /// Delete the seeded file from the config directory and let the app reseed it
-/// instead of migrating; a schema bump belongs to a released build.
+/// instead of bumping this constant or migrating.
 const THEME_SCHEMA_VERSION: u32 = 1;
 
 /// The key that carries [`THEME_SCHEMA_VERSION`] in the theme set.
