@@ -68,6 +68,48 @@ proptest! {
         prop_assert_eq!(first, second);
     }
 
+    /// Splitting one `[Constants]` block around a neutral section must not
+    /// change the constants it produces. The second half uses `nextOffset`, so
+    /// the page cursor has to survive the split for the two models to match.
+    #[test]
+    fn a_split_constants_block_produces_the_same_model(
+        offsets in proptest::collection::vec(0u32..4096, 1..12),
+    ) {
+        let header = "[MegaTune]\nsignature = \"x\"\n[Constants]\n\
+                      nPages = 1\npageSize = 4096\npage = 1\n";
+        let midpoint = offsets.len() / 2;
+        let mut whole = String::from(header);
+        let mut split = String::from(header);
+
+        for (index, offset) in offsets.iter().enumerate() {
+            let written = if index < midpoint {
+                offset.to_string()
+            } else {
+                "nextOffset".to_owned()
+            };
+            let line = format!("c_{index} = scalar, U08, {written}, \"u\", 1, 0, 0, 255, 0\n");
+            whole.push_str(&line);
+            if index == midpoint {
+                split.push_str("[OutputChannels]\n[Constants]\n");
+            }
+            split.push_str(&line);
+        }
+
+        let whole = parse(&whole).expect("whole block parses");
+        let split = parse(&split).expect("split block parses");
+        prop_assert_eq!(whole.constants.len(), split.constants.len());
+        for (name, constant) in whole.constants.iter() {
+            let other = split.constant(name).expect("both blocks declare it");
+            prop_assert_eq!(
+                constant.address,
+                other.address,
+                "offsets diverged for {}",
+                name
+            );
+        }
+        prop_assert_eq!(whole.pages.len(), split.pages.len());
+    }
+
     /// A definition that parses has a signature: everything else follows the
     /// signature, so accepting a file without one would be a silent lie.
     ///
