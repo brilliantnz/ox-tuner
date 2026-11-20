@@ -11,9 +11,10 @@
 //! headers sees the model the first one left behind. The `merged-section` note
 //! is written on the repeated header and names both header lines.
 //!
-//! Diagnostics are flushed after each block, so the report follows source
-//! order instead of being grouped by section name. Coverage and the sinks'
-//! end-of-document work run once, in first-appearance order.
+//! Diagnostics are flushed after each block, and a sink's final work runs
+//! after that section's last block, so the report follows source order instead
+//! of being grouped by section name. Coverage is recorded once, in
+//! first-appearance order.
 //!
 //! Nothing here panics. A section this build does not model is kept verbatim in
 //! [`Definition::unsupported`]; a key inside a known section that we do not
@@ -142,50 +143,11 @@ fn assemble(
         );
     }
 
-    {
+    let coverage = {
         let _span = tracing::debug_span!("ini_parse_sections").entered();
-        let blocks = section_blocks(&preprocessed.lines);
-
-        let mut coverage = Coverage::default();
-        let mut slots: HashMap<String, SectionSlot> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
-
-        for block in &blocks {
-            let slot = match slots.entry(block.name.to_ascii_lowercase()) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let slot = SectionSlot::new(block.name, block.header.unwrap_or(0), entry.key());
-                    order.push(entry.key().clone());
-                    entry.insert(slot)
-                }
-            };
-
-            if slot.headers >= 1 {
-                slot.parser.note(
-                    "merged-section",
-                    format!(
-                        "`[{}]` is declared again here; its entries continue the block at line {}",
-                        block.name, slot.first_line
-                    ),
-                    block.header.unwrap_or(0),
-                );
-            }
-            slot.headers += 1;
-
-            slot.sink
-                .feed(&mut definition, &mut slot.parser, &block.lines, &expander);
-            slot.parser.flush_diagnostics(&mut definition);
-        }
-
-        for key in &order {
-            let slot = slots.get_mut(key).expect("every ordered name has a slot");
-            slot.sink.finish(&mut definition, &mut slot.parser);
-            slot.parser.flush_diagnostics(&mut definition);
-            slot.parser.finish_coverage(&mut coverage);
-        }
-
-        definition.coverage = coverage;
-    }
+        parse_sections(&mut definition, &preprocessed.lines, &expander)
+    };
+    definition.coverage = coverage;
 
     let _span = tracing::debug_span!("ini_resolve_validate").entered();
 
@@ -212,6 +174,77 @@ fn assemble(
 
     finalize(&mut definition);
     Ok(definition)
+}
+
+/// Dispatches every section block in document order and returns its coverage.
+fn parse_sections(
+    definition: &mut Definition,
+    lines: &[LogicalLine],
+    expander: &Expander<'_>,
+) -> Coverage {
+    let blocks = section_blocks(lines);
+
+    // A sink's final work can itself emit diagnostics, so run it after that
+    // section's last block rather than after every other section is fed. That
+    // keeps those notes in source order too. Coverage is still recorded once,
+    // in first-appearance order.
+    let mut last_blocks: HashMap<String, usize> = HashMap::new();
+    for (index, block) in blocks.iter().enumerate().rev() {
+        last_blocks
+            .entry(block.name.to_ascii_lowercase())
+            .or_insert(index);
+    }
+
+    let mut coverage = Coverage::default();
+    let mut slots: HashMap<String, SectionSlot> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for (block_index, block) in blocks.iter().enumerate() {
+        let key = block.name.to_ascii_lowercase();
+        let (slot, is_last_block) = match slots.entry(key) {
+            Entry::Occupied(entry) => {
+                let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
+                (entry.into_mut(), last == block_index)
+            }
+            Entry::Vacant(entry) => {
+                let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
+                let slot = SectionSlot::new(block.name, block.header.unwrap_or(0), entry.key());
+                order.push(entry.key().clone());
+                (entry.insert(slot), last == block_index)
+            }
+        };
+
+        if slot.headers >= 1 {
+            slot.parser.note(
+                "merged-section",
+                format!(
+                    "`[{}]` is declared again here; its entries continue the block at line {}",
+                    block.name, slot.first_line
+                ),
+                block.header.unwrap_or(0),
+            );
+        }
+        slot.headers += 1;
+
+        slot.sink
+            .feed(definition, &mut slot.parser, &block.lines, expander);
+        slot.parser.flush_diagnostics(definition);
+
+        if is_last_block {
+            slot.sink.finish(definition, &mut slot.parser);
+            slot.parser.flush_diagnostics(definition);
+        }
+    }
+
+    for key in &order {
+        slots
+            .get(key)
+            .expect("every ordered name has a slot")
+            .parser
+            .finish_coverage(&mut coverage);
+    }
+
+    coverage
 }
 
 /// One `[section]` header and the lines that follow it, in document order.
@@ -289,7 +322,7 @@ pub(crate) trait SectionSink {
         expander: &Expander<'_>,
     );
 
-    /// Runs once at the end of the document, in first-appearance order.
+    /// Runs once, after the last block with this section name.
     fn finish(&mut self, _definition: &mut Definition, _section: &mut SectionParser) {}
 }
 
@@ -1269,6 +1302,31 @@ page = nope
             .filter_map(|diagnostic| diagnostic.line)
             .collect();
         assert_eq!(lines, vec![4, 6, 8]);
+    }
+
+    #[test]
+    fn a_final_table_merge_note_precedes_later_sections() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[TableEditor]
+table = t, m, \"T\"
+table = t, m, \"T\"
+[Constants]
+page = nope
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        // The merge note is emitted by the sink's final work, but its line is
+        // before the constants warning. It must not be pushed behind it.
+        let lines: Vec<u32> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code.as_ref(), "merged-table" | "bad-page"))
+            .filter_map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(lines, vec![5, 7]);
     }
 
     #[test]
