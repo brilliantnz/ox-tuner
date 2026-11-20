@@ -33,11 +33,11 @@
 //! [`CACHE_FORMAT_VERSION`] covers the envelope layout and the serialized
 //! model, [`oxtuner_ini::PARSER_VERSION`] covers the parser's output contract,
 //! and [`oxtuner_ini::MAX_SPEC_VERSION`] covers the dialect ceilings this build
-//! understands. Any of them changing moves the cache path, so old entries are
-//! simply never found again. A serialized-model change without a version bump
-//! is tolerated too: an old entry that fails to decode is a miss and is
-//! overwritten on the next store. This matters before the first release, when
-//! the format versions stay fixed.
+//! understands. They stay at their initial values while the app is
+//! experimental. A change to the envelope or the serialized model does not
+//! bump them: delete the cache folder and let the app write a fresh entry. An
+//! old entry that no longer decodes is a miss and is overwritten on the next
+//! store.
 
 use std::{
     cell::RefCell,
@@ -56,11 +56,11 @@ use serde::{Deserialize, Serialize};
 use crate::hash;
 use crate::project::read_include_canonical;
 
-/// Bump when the envelope layout or the serialized definition model changes.
-///
-/// The parser has its own [`PARSER_VERSION`] for grammatical changes; this one
-/// is about the cache file itself.
-pub const CACHE_FORMAT_VERSION: u32 = 2;
+/// Identifies the definition cache envelope. Keep it at its initial value while
+/// the app is experimental: the serialized model is expected to change, so
+/// delete the cache folder instead of bumping this constant. The parser has its
+/// own [`PARSER_VERSION`] for the same reason.
+pub const CACHE_FORMAT_VERSION: u32 = 1;
 
 /// Identifies a cache file as ours before any byte is interpreted.
 const MAGIC: &[u8; 8] = b"OXDEFN01";

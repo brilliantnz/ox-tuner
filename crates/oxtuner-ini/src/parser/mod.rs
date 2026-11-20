@@ -48,12 +48,9 @@ pub const MAX_SPEC_VERSION: f64 = 3.80;
 
 /// Version of the parser's output contract.
 ///
-/// A released build bumps this whenever the same input bytes and settings can
-/// produce a different `Definition` (a grammar fix, a new section, a changed
-/// default). The definition cache includes it in its key, so an upgrade misses
-/// instead of serving a definition the build no longer agrees with. Before the
-/// first release it stays at 1, so a cache entry written by an older build is
-/// not invalidated by a bump. Delete the cache file and let the app re-parse.
+/// Part of the definition cache key, pinned at its initial value while the app
+/// is experimental. A grammar fix, a new section or a changed default does not
+/// bump it: delete the cache folder and let the app re-parse instead.
 pub const PARSER_VERSION: u32 = 1;
 
 /// Parses bytes into a frozen definition.
