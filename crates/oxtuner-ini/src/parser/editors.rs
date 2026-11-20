@@ -8,92 +8,102 @@
 use crate::fields::split_fields;
 use crate::model::{Axis, Curve, Definition, Number, Table, Text};
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
-/// `[TableEditor]`.
-pub(crate) fn parse_tables(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut current: Option<Table> = None;
+/// `[TableEditor]`. The open table survives a repeated section header: a new
+/// block continues the same builder until the next `table =` or end of file.
+#[derive(Default)]
+pub(crate) struct TablesSink {
+    current: Option<Table>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
-        let Some((key, value)) = crate::fields::split_assignment(text) else {
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-        let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(value);
+impl SectionSink for TablesSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
+            let Some((key, value)) = crate::fields::split_assignment(text) else {
+                section.unrecognized_line(*line, text);
+                continue;
+            };
+            let lowered = key.to_ascii_lowercase();
+            let fields = split_fields(value);
 
-        if lowered == "table" {
-            if let Some(table) = current.take() {
-                insert_table(definition, section, table);
+            if lowered == "table" {
+                if let Some(table) = self.current.take() {
+                    insert_table(definition, section, table);
+                }
+                section.understand(*line);
+
+                if fields.len() < 3 {
+                    section.warn(
+                        "bad-table",
+                        format!("`table = {value}` needs an id, a map id and a title"),
+                        *line,
+                    );
+                    continue;
+                }
+                // Speeduino appends the page as a fourth field; rusEFI does not.
+                let page = fields
+                    .get(3)
+                    .and_then(|field| crate::fields::parse_u32(field))
+                    .and_then(|page| u8::try_from(page).ok());
+
+                self.current = Some(Table {
+                    id: fields[0].to_owned(),
+                    map_id: Some(fields[1].to_owned()),
+                    title: Text::parse(fields[2]),
+                    page,
+                    x_bins: None,
+                    y_bins: None,
+                    z_bins: None,
+                    live_cursor: None,
+                    live_cursor_y: None,
+                    x_size: None,
+                    y_size: None,
+                    sibling_group: None,
+                    xy_labels: Vec::new(),
+                    up_down_label: Vec::new(),
+                    grid_height: None,
+                    grid_orient: None,
+                    topic_help: None,
+                    line: *line,
+                });
+                continue;
             }
-            section.understand(*line);
 
-            if fields.len() < 3 {
+            let Some(table) = self.current.as_mut() else {
                 section.warn(
-                    "bad-table",
-                    format!("`table = {value}` needs an id, a map id and a title"),
+                    "orphan-key",
+                    format!("`{key}` appears before any `table =` entry"),
                     *line,
                 );
                 continue;
-            }
-            // Speeduino appends the page as a fourth field; rusEFI does not.
-            let page = fields
-                .get(3)
-                .and_then(|field| crate::fields::parse_u32(field))
-                .and_then(|page| u8::try_from(page).ok());
+            };
 
-            current = Some(Table {
-                id: fields[0].to_owned(),
-                map_id: Some(fields[1].to_owned()),
-                title: Text::parse(fields[2]),
-                page,
-                x_bins: None,
-                y_bins: None,
-                z_bins: None,
-                live_cursor: None,
-                live_cursor_y: None,
-                x_size: None,
-                y_size: None,
-                sibling_group: None,
-                xy_labels: Vec::new(),
-                up_down_label: Vec::new(),
-                grid_height: None,
-                grid_orient: None,
-                topic_help: None,
+            let site = TableKey {
+                lowered: &lowered,
+                spelling: key,
+                value,
+                fields: &fields,
                 line: *line,
-            });
-            continue;
+            };
+            if !apply_table_key(definition, section, table, site) {
+                continue;
+            }
+            section.understand(*line);
         }
-
-        let Some(table) = current.as_mut() else {
-            section.warn(
-                "orphan-key",
-                format!("`{key}` appears before any `table =` entry"),
-                *line,
-            );
-            continue;
-        };
-
-        let site = TableKey {
-            lowered: &lowered,
-            spelling: key,
-            value,
-            fields: &fields,
-            line: *line,
-        };
-        if !apply_table_key(definition, section, table, site) {
-            continue;
-        }
-        section.understand(*line);
     }
 
-    if let Some(table) = current {
-        insert_table(definition, section, table);
+    fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
+        if let Some(table) = self.current.take() {
+            insert_table(definition, section, table);
+        }
     }
 }
 
@@ -262,102 +272,116 @@ fn parse_axis(fields: &[&str]) -> Axis {
     }
 }
 
-/// `[CurveEditor]`.
-pub(crate) fn parse_curves(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut current: Option<Curve> = None;
+/// `[CurveEditor]`. The open curve survives a repeated section header, just
+/// like the table builder.
+#[derive(Default)]
+pub(crate) struct CurvesSink {
+    current: Option<Curve>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
-        let Some((key, value)) = crate::fields::split_assignment(text) else {
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-        let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(value);
-
-        if lowered == "curve" {
-            if let Some(curve) = current.take() {
-                insert_curve(definition, section, curve);
-            }
-            section.understand(*line);
-            let Some(name) = fields.first().copied() else {
-                section.warn("bad-curve", "`curve =` needs a name", *line);
+impl SectionSink for CurvesSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
+            let Some((key, value)) = crate::fields::split_assignment(text) else {
+                section.unrecognized_line(*line, text);
                 continue;
             };
-            current = Some(Curve {
-                name: name.to_owned(),
-                title: fields
-                    .get(1)
-                    .map(|field| Text::parse(field))
-                    .unwrap_or(Text::shared(name)),
-                column_labels: Vec::new(),
-                x_axis: Vec::new(),
-                y_axis: Vec::new(),
-                x_bins: None,
-                y_bins: Vec::new(),
-                live_cursor: None,
-                live_cursor_y: None,
-                line_labels: Vec::new(),
-                gauge: None,
-                show_text_values: false,
-                suppress_graph: false,
-                line: *line,
-            });
-            continue;
-        }
+            let lowered = key.to_ascii_lowercase();
+            let fields = split_fields(value);
 
-        let Some(curve) = current.as_mut() else {
-            section.warn(
-                "orphan-key",
-                format!("`{key}` appears before any `curve =` entry"),
-                *line,
-            );
-            continue;
-        };
-
-        match lowered.as_str() {
-            "columnlabel" => {
-                curve.column_labels = fields.iter().map(|field| Text::parse(field)).collect();
-            }
-            "xaxis" => curve.x_axis = fields.iter().map(|field| Number::parse(field)).collect(),
-            "yaxis" => curve.y_axis = fields.iter().map(|field| Number::parse(field)).collect(),
-            // A curve may plot several Y arrays; order matters for the colours.
-            "ybins" => curve.y_bins.push(parse_axis(&fields)),
-            "xbins" => curve.x_bins = Some(parse_axis(&fields)),
-            "gauge" => {
-                curve.gauge = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned());
-            }
-            "showtextvalues" => curve.show_text_values = crate::fields::is_true(value),
-            "suppressgraph" => curve.suppress_graph = crate::fields::is_true(value),
-            "linelabel" => curve.line_labels.push(
-                fields
-                    .first()
-                    .map_or(Text::empty(), |field| Text::parse(field)),
-            ),
-            // Presentation keys the curve editor owns: window size and help
-            // topic. Kept verbatim rather than dropped.
-            "size" | "topichelp" | "userpassword" => {
-                definition
-                    .comms
-                    .raw
-                    .insert(format!("curve.{}.{key}", curve.name), value.to_owned());
-            }
-            _ => {
-                section.unrecognized_key(key, *line);
+            if lowered == "curve" {
+                if let Some(curve) = self.current.take() {
+                    insert_curve(definition, section, curve);
+                }
+                section.understand(*line);
+                let Some(name) = fields.first().copied() else {
+                    section.warn("bad-curve", "`curve =` needs a name", *line);
+                    continue;
+                };
+                self.current = Some(Curve {
+                    name: name.to_owned(),
+                    title: fields
+                        .get(1)
+                        .map(|field| Text::parse(field))
+                        .unwrap_or(Text::shared(name)),
+                    column_labels: Vec::new(),
+                    x_axis: Vec::new(),
+                    y_axis: Vec::new(),
+                    x_bins: None,
+                    y_bins: Vec::new(),
+                    live_cursor: None,
+                    live_cursor_y: None,
+                    line_labels: Vec::new(),
+                    gauge: None,
+                    show_text_values: false,
+                    suppress_graph: false,
+                    line: *line,
+                });
                 continue;
             }
+
+            let Some(curve) = self.current.as_mut() else {
+                section.warn(
+                    "orphan-key",
+                    format!("`{key}` appears before any `curve =` entry"),
+                    *line,
+                );
+                continue;
+            };
+
+            match lowered.as_str() {
+                "columnlabel" => {
+                    curve.column_labels = fields.iter().map(|field| Text::parse(field)).collect();
+                }
+                "xaxis" => {
+                    curve.x_axis = fields.iter().map(|field| Number::parse(field)).collect();
+                }
+                "yaxis" => {
+                    curve.y_axis = fields.iter().map(|field| Number::parse(field)).collect();
+                }
+                // A curve may plot several Y arrays; order matters for the colours.
+                "ybins" => curve.y_bins.push(parse_axis(&fields)),
+                "xbins" => curve.x_bins = Some(parse_axis(&fields)),
+                "gauge" => {
+                    curve.gauge = fields
+                        .first()
+                        .map(|field| crate::fields::unquote(field).to_owned());
+                }
+                "showtextvalues" => curve.show_text_values = crate::fields::is_true(value),
+                "suppressgraph" => curve.suppress_graph = crate::fields::is_true(value),
+                "linelabel" => curve.line_labels.push(
+                    fields
+                        .first()
+                        .map_or(Text::empty(), |field| Text::parse(field)),
+                ),
+                // Presentation keys the curve editor owns: window size and help
+                // topic. Kept verbatim rather than dropped.
+                "size" | "topichelp" | "userpassword" => {
+                    definition
+                        .comms
+                        .raw
+                        .insert(format!("curve.{}.{key}", curve.name), value.to_owned());
+                }
+                _ => {
+                    section.unrecognized_key(key, *line);
+                    continue;
+                }
+            }
+            section.understand(*line);
         }
-        section.understand(*line);
     }
 
-    if let Some(curve) = current {
-        insert_curve(definition, section, curve);
+    fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
+        if let Some(curve) = self.current.take() {
+            insert_curve(definition, section, curve);
+        }
     }
 }
 

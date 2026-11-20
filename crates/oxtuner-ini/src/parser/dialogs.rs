@@ -12,343 +12,373 @@ use crate::model::{
     RowKind, SettingGroup, SettingOption,
 };
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
 /// `std_*` targets with an app-owned renderer. Anything else stays parseable
 /// but unsupported, with its name recorded on the definition.
 const RENDERED_STD_TARGETS: &[&str] = &["std_realtime", "std_injection", "std_ms3Rtc"];
 
-/// `[SettingGroups]`: options become `#if` flags.
-pub(crate) fn parse_setting_groups(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut current: Option<String> = None;
+/// `[SettingGroups]`: options become `#if` flags. The open group survives a
+/// repeated section header.
+#[derive(Default)]
+pub(crate) struct SettingGroupsSink {
+    current: Option<String>,
+}
 
-    for (line, text) in lines {
-        let Some((key, value)) = super::entry_line(section, *line, text) else {
-            continue;
-        };
-        let fields = split_fields(value);
-        let lowered = key.to_ascii_lowercase();
+impl SectionSink for SettingGroupsSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            let Some((key, value)) = super::entry_line(section, *line, text) else {
+                continue;
+            };
+            let fields = split_fields(value);
+            let lowered = key.to_ascii_lowercase();
 
-        match lowered.as_str() {
-            "settinggroup" => {
-                let Some(name) = fields.first().copied() else {
-                    section.warn("bad-setting-group", "`settingGroup =` needs a name", *line);
-                    continue;
-                };
-                let label = fields.get(1).map_or_else(
-                    || (*name).to_owned(),
-                    |field| crate::fields::unquote(field).to_owned(),
-                );
-                if let Some(existing) = definition.setting_groups.get_mut(name) {
-                    // A repeated header continues the group: options collected
-                    // under either header are kept in one list.
-                    // A bare repeated header defaults the label to the group
-                    // name; keep the earlier label in that case.
-                    if label != name {
-                        existing.label = label;
+            match lowered.as_str() {
+                "settinggroup" => {
+                    let Some(name) = fields.first().copied() else {
+                        section.warn("bad-setting-group", "`settingGroup =` needs a name", *line);
+                        continue;
+                    };
+                    let label = fields.get(1).map_or_else(
+                        || (*name).to_owned(),
+                        |field| crate::fields::unquote(field).to_owned(),
+                    );
+                    if let Some(existing) = definition.setting_groups.get_mut(name) {
+                        // A repeated header continues the group: options collected
+                        // under either header are kept in one list.
+                        // A bare repeated header defaults the label to the group
+                        // name; keep the earlier label in that case.
+                        if label != name {
+                            existing.label = label;
+                        }
+                        section.note(
+                            "merged-setting-group",
+                            format!(
+                                "setting group `{name}` is declared more than once; options are \
+                                 appended"
+                            ),
+                            *line,
+                        );
+                    } else {
+                        definition.setting_groups.insert(
+                            name.to_owned(),
+                            SettingGroup {
+                                name: name.to_owned(),
+                                label,
+                                options: Vec::new(),
+                            },
+                        );
                     }
-                    section.note(
-                        "merged-setting-group",
-                        format!("setting group `{name}` is declared more than once; options are appended"),
-                        *line,
-                    );
-                } else {
-                    definition.setting_groups.insert(
-                        name.to_owned(),
-                        SettingGroup {
-                            name: name.to_owned(),
-                            label,
-                            options: Vec::new(),
-                        },
-                    );
-                }
-                current = Some(name.to_owned());
-                section.understand(*line);
-            }
-            "settingoption" => {
-                let Some(name) = fields.first().copied() else {
-                    section.warn(
-                        "bad-setting-option",
-                        "`settingOption =` needs a name",
-                        *line,
-                    );
-                    continue;
-                };
-                let label = fields.get(1).map_or_else(
-                    || (*name).to_owned(),
-                    |field| crate::fields::unquote(field).to_owned(),
-                );
-                let Some(group_name) = current.as_deref() else {
-                    section.warn(
-                        "orphan-setting-option",
-                        "`settingOption` appears before any `settingGroup`",
-                        *line,
-                    );
-                    continue;
-                };
-                if name.eq_ignore_ascii_case("DEFAULT") {
-                    section.note(
-                        "default-setting-option",
-                        format!(
-                            "`{name}` is the fallback for `{group_name}`; when no option matches, \
-                             the `#else` branch of the flag is used"
-                        ),
-                        *line,
-                    );
-                }
-                if let Some(group) = definition.setting_groups.get_mut(group_name) {
-                    group.options.push(SettingOption {
-                        name: name.to_owned(),
-                        label,
-                    });
+                    self.current = Some(name.to_owned());
                     section.understand(*line);
                 }
+                "settingoption" => {
+                    let Some(name) = fields.first().copied() else {
+                        section.warn(
+                            "bad-setting-option",
+                            "`settingOption =` needs a name",
+                            *line,
+                        );
+                        continue;
+                    };
+                    let label = fields.get(1).map_or_else(
+                        || (*name).to_owned(),
+                        |field| crate::fields::unquote(field).to_owned(),
+                    );
+                    let Some(group_name) = self.current.as_deref() else {
+                        section.warn(
+                            "orphan-setting-option",
+                            "`settingOption` appears before any `settingGroup`",
+                            *line,
+                        );
+                        continue;
+                    };
+                    if name.eq_ignore_ascii_case("DEFAULT") {
+                        section.note(
+                            "default-setting-option",
+                            format!(
+                                "`{name}` is the fallback for `{group_name}`; when no option \
+                                 matches, the `#else` branch of the flag is used"
+                            ),
+                            *line,
+                        );
+                    }
+                    if let Some(group) = definition.setting_groups.get_mut(group_name) {
+                        group.options.push(SettingOption {
+                            name: name.to_owned(),
+                            label,
+                        });
+                        section.understand(*line);
+                    }
+                }
+                _ => section.unrecognized_key(key, *line),
             }
-            _ => section.unrecognized_key(key, *line),
         }
     }
 }
 
-/// `[UiDialogs]` and `[UserDefined]`.
-pub(crate) fn parse_dialogs(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
+/// `[UiDialogs]` and `[UserDefined]`. The open container survives a repeated
+/// section header so its row list continues where the first block left off.
+#[derive(Default)]
+pub(crate) struct DialogsSink {
     // The open container is tracked by name rather than by value: a panel that
     // is declared on its own (`indicatorPanel = name, 2`) has to stay in the
     // same ordered collection as the dialogs that reference it.
-    let mut current: Option<String> = None;
+    current: Option<String>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
+impl SectionSink for DialogsSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
 
-        // `dialog = name, "Title", layout` opens a block; every other line is a
-        // row or a bare keyword.
-        let assignment = crate::fields::split_assignment(text);
+            // `dialog = name, "Title", layout` opens a block; every other line is a
+            // row or a bare keyword.
+            let assignment = crate::fields::split_assignment(text);
 
-        if let Some((key, value)) = assignment
-            && key.eq_ignore_ascii_case("dialog")
-        {
-            let fields = split_fields(value);
+            if let Some((key, value)) = assignment
+                && key.eq_ignore_ascii_case("dialog")
+            {
+                let fields = split_fields(value);
 
-            let Some(name) = fields.first().copied() else {
-                section.warn("bad-dialog", "`dialog =` needs a name", *line);
+                let Some(name) = fields.first().copied() else {
+                    section.warn("bad-dialog", "`dialog =` needs a name", *line);
+                    continue;
+                };
+                let dialog = Dialog {
+                    name: name.to_owned(),
+                    title: fields
+                        .get(1)
+                        .map(|field| crate::fields::unquote(field).to_owned()),
+                    layout: fields.get(2).map(|field| field.to_ascii_lowercase()),
+                    rows: Vec::new(),
+                    line: *line,
+                };
+                self.current = Some(name.to_owned());
+                if let Some(existing) = definition.dialogs.get_mut(name) {
+                    // A second header continues the dialog instead of starting a
+                    // new one, so rows written under either header stay together.
+                    if dialog.title.is_some() {
+                        existing.title = dialog.title;
+                    }
+                    if dialog.layout.is_some() {
+                        existing.layout = dialog.layout;
+                    }
+                    section.note(
+                        "merged-dialog",
+                        format!("dialog `{name}` is declared more than once; rows are appended"),
+                        *line,
+                    );
+                } else {
+                    definition.dialogs.insert(name, dialog);
+                }
+                section.understand(*line);
                 continue;
+            }
+
+            let (keyword, fields) = match assignment {
+                Some((key, value)) => (key.trim_ascii().to_owned(), split_fields(value)),
+                None => (text.trim_ascii().to_owned(), Vec::new()),
             };
-            let dialog = Dialog {
-                name: name.to_owned(),
-                title: fields
-                    .get(1)
-                    .map(|field| crate::fields::unquote(field).to_owned()),
-                layout: fields.get(2).map(|field| field.to_ascii_lowercase()),
-                rows: Vec::new(),
-                line: *line,
-            };
-            current = Some(name.to_owned());
-            if let Some(existing) = definition.dialogs.get_mut(name) {
-                // A second header continues the dialog instead of starting a
-                // new one, so rows written under either header stay together.
-                if dialog.title.is_some() {
-                    existing.title = dialog.title;
-                }
-                if dialog.layout.is_some() {
-                    existing.layout = dialog.layout;
-                }
-                section.note(
-                    "merged-dialog",
-                    format!("dialog `{name}` is declared more than once; rows are appended"),
+            let kind = RowKind::parse(&keyword);
+
+            // A container keyword always starts its own container:
+            // `indicatorPanel = name, 2` defines a reusable panel that dialogs
+            // reference with `panel = name`, whether or not a dialog is open.
+            if matches!(
+                kind,
+                RowKind::IndicatorPanel | RowKind::ReadoutPanel | RowKind::LiveGraph
+            ) {
+                let name = fields
+                    .first()
+                    .map_or_else(|| keyword.clone(), |f| (*f).to_owned());
+                let container = Dialog {
+                    name: name.clone(),
+                    title: fields
+                        .get(1)
+                        .map(|field| crate::fields::unquote(field).to_owned()),
+                    layout: Some(keyword.to_ascii_lowercase()),
+                    rows: Vec::new(),
+                    line: *line,
+                };
+                self.current = Some(name.clone());
+                definition.dialogs.insert(name, container);
+            }
+
+            let Some(name) = self.current.as_deref() else {
+                section.warn(
+                    "orphan-dialog-row",
+                    format!(
+                        "`{}` appears before any `dialog =` entry",
+                        text.trim_ascii()
+                    ),
                     *line,
                 );
-            } else {
-                definition.dialogs.insert(name, dialog);
+                continue;
+            };
+
+            if kind == RowKind::Unmodeled {
+                // Kept as data; reported once so coverage stays honest.
+                section.unrecognized_key(&keyword, *line);
+            } else if kind.classification() == RowClassification::Deferred {
+                // Also kept as data, but with a note that says why it is not
+                // interpreted yet, so a deferred row is never a silent drop.
+                section.note(
+                    "row-deferred",
+                    format!("`{keyword}` is kept verbatim until a consumer needs it"),
+                    *line,
+                );
+            }
+            if let Some(dialog) = definition.dialogs.get_mut(name) {
+                dialog.rows.push(DialogRow {
+                    kind,
+                    keyword,
+                    fields: fields.iter().map(|field| (*field).to_owned()).collect(),
+                    line: *line,
+                });
             }
             section.understand(*line);
-            continue;
         }
-
-        let (keyword, fields) = match assignment {
-            Some((key, value)) => (key.trim_ascii().to_owned(), split_fields(value)),
-            None => (text.trim_ascii().to_owned(), Vec::new()),
-        };
-        let kind = RowKind::parse(&keyword);
-
-        // A container keyword always starts its own container: `indicatorPanel =
-        // name, 2` defines a reusable panel that dialogs reference with
-        // `panel = name`, whether or not a dialog happens to be open.
-        if matches!(
-            kind,
-            RowKind::IndicatorPanel | RowKind::ReadoutPanel | RowKind::LiveGraph
-        ) {
-            let name = fields
-                .first()
-                .map_or_else(|| keyword.clone(), |f| (*f).to_owned());
-            let container = Dialog {
-                name: name.clone(),
-                title: fields
-                    .get(1)
-                    .map(|field| crate::fields::unquote(field).to_owned()),
-                layout: Some(keyword.to_ascii_lowercase()),
-                rows: Vec::new(),
-                line: *line,
-            };
-            current = Some(name.clone());
-            definition.dialogs.insert(name, container);
-        }
-
-        let Some(name) = current.as_deref() else {
-            section.warn(
-                "orphan-dialog-row",
-                format!(
-                    "`{}` appears before any `dialog =` entry",
-                    text.trim_ascii()
-                ),
-                *line,
-            );
-            continue;
-        };
-
-        if kind == RowKind::Unmodeled {
-            // Kept as data; reported once so coverage stays honest.
-            section.unrecognized_key(&keyword, *line);
-        } else if kind.classification() == RowClassification::Deferred {
-            // Also kept as data, but with a note that says why it is not
-            // interpreted yet, so a deferred row is never a silent drop.
-            section.note(
-                "row-deferred",
-                format!("`{keyword}` is kept verbatim until a consumer needs it"),
-                *line,
-            );
-        }
-        if let Some(dialog) = definition.dialogs.get_mut(name) {
-            dialog.rows.push(DialogRow {
-                kind,
-                keyword,
-                fields: fields.iter().map(|field| (*field).to_owned()).collect(),
-                line: *line,
-            });
-        }
-        section.understand(*line);
     }
 }
 
-/// `[Menu]`.
-pub(crate) fn parse_menu(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut dialog: Option<String> = None;
-    let mut index: Option<usize> = None;
+/// `[Menu]`. The current dialog, menu index and open group survive a repeated
+/// section header.
+#[derive(Default)]
+pub(crate) struct MenuSink {
+    dialog: Option<String>,
+    index: Option<usize>,
     // Index in the current menu's `items` of the `groupMenu` that later
     // `groupChildMenu` entries belong to. A `subMenu` or a separator closes it.
-    let mut group: Option<usize> = None;
+    group: Option<usize>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
-        let Some((key, value)) = crate::fields::split_assignment(text) else {
-            // `std_separator` is a bare keyword.
-            if text.trim_ascii().eq_ignore_ascii_case("std_separator")
-                && let Some(menu) = index.and_then(|index| definition.menus.get_mut(index))
-            {
-                menu.items.push(MenuItem {
-                    kind: MenuTargetKind::Separator,
-                    target: String::new(),
-                    label: String::new(),
-                    conditions: Vec::new(),
-                    group: None,
-                    supported: true,
-                    line: *line,
-                });
-                group = None;
-                section.understand(*line);
-                continue;
-            }
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-
-        let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(value);
-
-        match lowered.as_str() {
-            "menudialog" => {
-                dialog = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned());
-                section.understand(*line);
-            }
-            "menu" => {
-                index = Some(open_menu(definition, &fields, dialog.as_deref()));
-                group = None;
-                section.understand(*line);
-            }
-            "submenu" | "groupmenu" | "groupchildmenu" => {
-                let (target, label, conditions) = parse_menu_item(&fields);
-                // Speeduino writes a toolbar/menu index after the label
-                // (`subMenu = target, "Label", 9, { gate }`). It is metadata,
-                // not a gate slot; a bare `0` is the empty enable placeholder
-                // rusEFI uses and stays for the gate walker.
-                let conditions = conditions
-                    .into_iter()
-                    .filter(|condition| !is_non_zero_number(condition))
-                    .collect();
-                let kind = match lowered.as_str() {
-                    "groupmenu" => MenuTargetKind::Group,
-                    // A divider is also written as `subMenu = std_separator`.
-                    _ if target.eq_ignore_ascii_case("std_separator") => MenuTargetKind::Separator,
-                    _ if target.starts_with("std_") => MenuTargetKind::Standard,
-                    _ => MenuTargetKind::DefinitionTarget,
-                };
-                let owner = if lowered == "groupchildmenu" {
-                    group
-                } else {
-                    None
-                };
-                let supported =
-                    kind != MenuTargetKind::Standard || std_target_supported(definition, &target);
-                let Some(menu) = index.and_then(|index| definition.menus.get_mut(index)) else {
-                    section.warn(
-                        "orphan-menu-item",
-                        format!("`{key}` appears before any `menu =` entry"),
-                        *line,
-                    );
+impl SectionSink for MenuSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
+            let Some((key, value)) = crate::fields::split_assignment(text) else {
+                // `std_separator` is a bare keyword.
+                if text.trim_ascii().eq_ignore_ascii_case("std_separator")
+                    && let Some(menu) = self.index.and_then(|index| definition.menus.get_mut(index))
+                {
+                    menu.items.push(MenuItem {
+                        kind: MenuTargetKind::Separator,
+                        target: String::new(),
+                        label: String::new(),
+                        conditions: Vec::new(),
+                        group: None,
+                        supported: true,
+                        line: *line,
+                    });
+                    self.group = None;
+                    section.understand(*line);
                     continue;
-                };
-                let position = menu.items.len();
-                menu.items.push(MenuItem {
-                    kind,
-                    target,
-                    label,
-                    conditions,
-                    group: owner,
-                    supported,
-                    line: *line,
-                });
-                // A group header opens a group and a child keeps it open; a
-                // plain subMenu ends it.
-                group = match (lowered.as_str(), kind) {
-                    (_, MenuTargetKind::Separator) => None,
-                    ("groupmenu", _) => Some(position),
-                    ("groupchildmenu", _) => group,
-                    _ => None,
-                };
-                section.understand(*line);
+                }
+                section.unrecognized_line(*line, text);
+                continue;
+            };
+
+            let lowered = key.to_ascii_lowercase();
+            let fields = split_fields(value);
+
+            match lowered.as_str() {
+                "menudialog" => {
+                    self.dialog = fields
+                        .first()
+                        .map(|field| crate::fields::unquote(field).to_owned());
+                    section.understand(*line);
+                }
+                "menu" => {
+                    self.index = Some(open_menu(definition, &fields, self.dialog.as_deref()));
+                    self.group = None;
+                    section.understand(*line);
+                }
+                "submenu" | "groupmenu" | "groupchildmenu" => {
+                    let (target, label, conditions) = parse_menu_item(&fields);
+                    // Speeduino writes a toolbar/menu index after the label
+                    // (`subMenu = target, "Label", 9, { gate }`). It is metadata,
+                    // not a gate slot; a bare `0` is the empty enable placeholder
+                    // rusEFI uses and stays for the gate walker.
+                    let conditions = conditions
+                        .into_iter()
+                        .filter(|condition| !is_non_zero_number(condition))
+                        .collect();
+                    let kind = match lowered.as_str() {
+                        "groupmenu" => MenuTargetKind::Group,
+                        // A divider is also written as `subMenu = std_separator`.
+                        _ if target.eq_ignore_ascii_case("std_separator") => {
+                            MenuTargetKind::Separator
+                        }
+                        _ if target.starts_with("std_") => MenuTargetKind::Standard,
+                        _ => MenuTargetKind::DefinitionTarget,
+                    };
+                    let owner = if lowered == "groupchildmenu" {
+                        self.group
+                    } else {
+                        None
+                    };
+                    let supported = kind != MenuTargetKind::Standard
+                        || std_target_supported(definition, &target);
+                    let Some(menu) = self.index.and_then(|index| definition.menus.get_mut(index))
+                    else {
+                        section.warn(
+                            "orphan-menu-item",
+                            format!("`{key}` appears before any `menu =` entry"),
+                            *line,
+                        );
+                        continue;
+                    };
+                    let position = menu.items.len();
+                    menu.items.push(MenuItem {
+                        kind,
+                        target,
+                        label,
+                        conditions,
+                        group: owner,
+                        supported,
+                        line: *line,
+                    });
+                    // A group header opens a group and a child keeps it open; a
+                    // plain subMenu ends it.
+                    self.group = match (lowered.as_str(), kind) {
+                        (_, MenuTargetKind::Separator) => None,
+                        ("groupmenu", _) => Some(position),
+                        ("groupchildmenu", _) => self.group,
+                        _ => None,
+                    };
+                    section.understand(*line);
+                }
+                "removesubmenu" | "updatesubmenulabel" | "replacesubmenu" => {
+                    // Menu overrides (iniSpec 3.78) are recognised and
+                    // preserved; applying them belongs to the UI layer.
+                    definition
+                        .comms
+                        .raw
+                        .insert(format!("menu.{key}"), value.to_owned());
+                    section.understand(*line);
+                }
+                _ => section.unrecognized_key(key, *line),
             }
-            "removesubmenu" | "updatesubmenulabel" | "replacesubmenu" => {
-                // Menu overrides (iniSpec 3.78) are recognised and preserved;
-                // applying them belongs to the UI layer.
-                definition
-                    .comms
-                    .raw
-                    .insert(format!("menu.{key}"), value.to_owned());
-                section.understand(*line);
-            }
-            _ => section.unrecognized_key(key, *line),
         }
     }
 }

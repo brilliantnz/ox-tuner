@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::preprocess::{Expander, Fields};
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
 /// Communication keys that are recognised but not modelled yet. Their value
 /// is kept verbatim in [`CommsSettings::raw`] rather than being dropped.
@@ -277,91 +277,111 @@ impl PageTable {
     }
 }
 
-/// `[Constants]`.
-pub(crate) fn parse_constants(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-    expander: &Expander<'_>,
-) {
-    let mut cursor = Cursor::default();
-    let mut table = PageTable::default();
-    let mut option_tables = OptionTables::default();
-    let mut current_page = 0u8;
-    let mut highest_page = 0u8;
+/// `[Constants]`. The cursor, page table and option tables survive a repeated
+/// header so a second block continues the same builder.
+#[derive(Default)]
+pub(crate) struct ConstantsSink {
+    cursor: Cursor,
+    table: PageTable,
+    option_tables: OptionTables,
+    current_page: u8,
+    highest_page: u8,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
+impl SectionSink for ConstantsSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        expander: &Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
 
-        let Some((key, value)) = crate::fields::split_assignment(text) else {
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-        let lowered = key.to_ascii_lowercase();
-
-        if lowered == "page" {
-            match crate::fields::parse_u32(value).and_then(|page| u8::try_from(page).ok()) {
-                Some(page) => {
-                    current_page = page;
-                    highest_page = highest_page.max(page);
-                    // `nextOffset` / `lastOffset` restart on every page boundary.
-                    cursor.reset();
-                }
-                None => section.warn(
-                    "bad-page",
-                    format!("`page = {value}` is not a page number"),
-                    *line,
-                ),
-            }
-            section.understand(*line);
-            continue;
-        }
-
-        let raw_fields = split_fields(value);
-        let fields = expander.expand(&raw_fields);
-        if fields.truncated() {
-            section.warn(
-                "fields-truncated",
-                format!("`{key}` expands past the field cap; the list is kept short and reported"),
-                *line,
-            );
-        }
-        if is_constant_entry(&fields) {
-            let entry = Entry {
-                line: *line,
-                key,
-                raw: value,
-                raw_fields: &raw_fields,
-                fields,
-                page: current_page,
+            let Some((key, value)) = crate::fields::split_assignment(text) else {
+                section.unrecognized_line(*line, text);
+                continue;
             };
-            if parse_constant(definition, section, entry, &mut cursor, &mut option_tables) {
-                section.understand(*line);
-            }
-            continue;
-        }
+            let lowered = key.to_ascii_lowercase();
 
-        let parsed = parse_comms_key(
-            definition,
-            &mut table,
-            current_page,
-            &lowered,
-            CommsOrigin {
-                spelling: key,
-                line: *line,
-            },
-            value,
-            section,
-        );
-        if parsed {
-            section.understand(*line);
-        } else {
-            section.unrecognized_key(key, *line);
-            definition.comms.raw.insert(lowered, value.to_owned());
+            if lowered == "page" {
+                match crate::fields::parse_u32(value).and_then(|page| u8::try_from(page).ok()) {
+                    Some(page) => {
+                        // `nextOffset` / `lastOffset` restart at a page boundary,
+                        // not when a repeated header restates the current page.
+                        if page != self.current_page {
+                            self.cursor.reset();
+                        }
+                        self.current_page = page;
+                        self.highest_page = self.highest_page.max(page);
+                    }
+                    None => section.warn(
+                        "bad-page",
+                        format!("`page = {value}` is not a page number"),
+                        *line,
+                    ),
+                }
+                section.understand(*line);
+                continue;
+            }
+
+            let raw_fields = split_fields(value);
+            let fields = expander.expand(&raw_fields);
+            if fields.truncated() {
+                section.warn(
+                    "fields-truncated",
+                    format!(
+                        "`{key}` expands past the field cap; the list is kept short and reported"
+                    ),
+                    *line,
+                );
+            }
+            if is_constant_entry(&fields) {
+                let entry = Entry {
+                    line: *line,
+                    key,
+                    raw: value,
+                    raw_fields: &raw_fields,
+                    fields,
+                    page: self.current_page,
+                };
+                if parse_constant(
+                    definition,
+                    section,
+                    entry,
+                    &mut self.cursor,
+                    &mut self.option_tables,
+                ) {
+                    section.understand(*line);
+                }
+                continue;
+            }
+
+            let parsed = parse_comms_key(
+                definition,
+                &mut self.table,
+                self.current_page,
+                &lowered,
+                CommsOrigin {
+                    spelling: key,
+                    line: *line,
+                },
+                value,
+                section,
+            );
+            if parsed {
+                section.understand(*line);
+            } else {
+                section.unrecognized_key(key, *line);
+                definition.comms.raw.insert(lowered, value.to_owned());
+            }
         }
     }
 
-    definition.pages = table.build(highest_page, section);
+    fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
+        definition.pages = std::mem::take(&mut self.table).build(self.highest_page, section);
+    }
 }
 
 /// Whether the expanded field list is a calibration entry rather than a section
@@ -1197,108 +1217,120 @@ fn insert_channel_value(
     insert_variable(definition, section, variable, line);
 }
 
-pub(crate) fn parse_pc_variables(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-    expander: &Expander<'_>,
-) {
-    let mut option_tables = OptionTables::default();
+/// `[PcVariables]`. The shared option tables survive a repeated header so a
+/// second block reuses the same `Arc` per define.
+#[derive(Default)]
+pub(crate) struct PcVariablesSink {
+    option_tables: OptionTables,
+}
 
-    for (line, text) in lines {
-        let Some((key, value)) = super::entry_line(section, *line, text) else {
-            continue;
-        };
-        let raw_fields = split_fields(value);
-        let fields = expander.expand(&raw_fields);
-        if fields.truncated() {
-            section.warn(
-                "fields-truncated",
-                format!("`{key}` expands past the field cap; the list is kept short and reported"),
-                *line,
-            );
-        }
-        if fields.is_empty() {
-            continue;
-        }
+impl SectionSink for PcVariablesSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        expander: &Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            let Some((key, value)) = super::entry_line(section, *line, text) else {
+                continue;
+            };
+            let raw_fields = split_fields(value);
+            let fields = expander.expand(&raw_fields);
+            if fields.truncated() {
+                section.warn(
+                    "fields-truncated",
+                    format!(
+                        "`{key}` expands past the field cap; the list is kept short and reported"
+                    ),
+                    *line,
+                );
+            }
+            if fields.is_empty() {
+                continue;
+            }
 
-        let lowered = fields
-            .get(0)
-            .unwrap_or_default()
-            .trim_ascii()
-            .to_ascii_lowercase();
-        if lowered == "channelvalueonconnect" || lowered == "continuouschannelvalue" {
-            insert_channel_value(definition, section, key, value, &fields, &lowered, *line);
+            let lowered = fields
+                .get(0)
+                .unwrap_or_default()
+                .trim_ascii()
+                .to_ascii_lowercase();
+            if lowered == "channelvalueonconnect" || lowered == "continuouschannelvalue" {
+                insert_channel_value(definition, section, key, value, &fields, &lowered, *line);
+                section.understand(*line);
+                continue;
+            }
+
+            let Some(class) = ConstantClass::parse(&lowered) else {
+                section.warn(
+                    "unknown-class",
+                    format!(
+                        "`{key}` starts with {:?}, which is not a PC variable class",
+                        fields.get(0).unwrap_or_default()
+                    ),
+                    *line,
+                );
+                continue;
+            };
+            let Some(data_type) = fields.get(1).and_then(DataType::parse) else {
+                section.warn(
+                    "unknown-type",
+                    format!("`{key}` has data type {:?}", fields.get(1).unwrap_or("")),
+                    *line,
+                );
+                continue;
+            };
+
+            let mut index = pc_shape_index(class, &fields, section, key, *line);
+            let (shape, used) = parse_pc_shape(class, &fields, index);
+            index += used;
+
+            // A PC variable carries the same presentation attributes as a
+            // `[Constants]` entry, without an offset: `array, S08, [10], "unit",
+            // scale, translate, min, max, digits`. A string or a `bits` entry has
+            // no numbers, so its storage keywords are collected here; the option
+            // parser skips them.
+            let mut flags = ConstantFlags::default();
+            if matches!(class, ConstantClass::Bits | ConstantClass::String) {
+                apply_keyword_fields(raw_fields.iter().copied().skip(index), &mut flags);
+            }
+
+            let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
+                self.option_tables
+                    .table(shared_define(&raw_fields, index), &fields, index)
+            } else {
+                Arc::from([])
+            };
+
+            let (units, numbers) = if class == ConstantClass::Bits || class == ConstantClass::String
+            {
+                (Text::empty(), Vec::new())
+            } else {
+                split_numbers(fields.iter().skip(index), &mut flags, key, *line, section)
+            };
+
+            let variable = PcVariable {
+                name: key.to_owned(),
+                class,
+                data_type,
+                shape,
+                units,
+                scale: numbers.first().cloned(),
+                translate: numbers.get(1).cloned(),
+                minimum: numbers.get(2).cloned(),
+                maximum: numbers.get(3).cloned(),
+                digits: numbers.get(4).cloned(),
+                options,
+                flags,
+                channel_value_on_connect: None,
+                continuous_channel_value: None,
+                line: *line,
+                raw: value.to_owned(),
+            };
+            insert_variable(definition, section, variable, *line);
             section.understand(*line);
-            continue;
         }
-
-        let Some(class) = ConstantClass::parse(&lowered) else {
-            section.warn(
-                "unknown-class",
-                format!(
-                    "`{key}` starts with {:?}, which is not a PC variable class",
-                    fields.get(0).unwrap_or_default()
-                ),
-                *line,
-            );
-            continue;
-        };
-        let Some(data_type) = fields.get(1).and_then(DataType::parse) else {
-            section.warn(
-                "unknown-type",
-                format!("`{key}` has data type {:?}", fields.get(1).unwrap_or("")),
-                *line,
-            );
-            continue;
-        };
-
-        let mut index = pc_shape_index(class, &fields, section, key, *line);
-        let (shape, used) = parse_pc_shape(class, &fields, index);
-        index += used;
-
-        // A PC variable carries the same presentation attributes as a
-        // `[Constants]` entry, without an offset: `array, S08, [10], "unit",
-        // scale, translate, min, max, digits`. A string or a `bits` entry has
-        // no numbers, so its storage keywords are collected here; the option
-        // parser skips them.
-        let mut flags = ConstantFlags::default();
-        if matches!(class, ConstantClass::Bits | ConstantClass::String) {
-            apply_keyword_fields(raw_fields.iter().copied().skip(index), &mut flags);
-        }
-
-        let options: Arc<[BitOption]> = if class == ConstantClass::Bits {
-            option_tables.table(shared_define(&raw_fields, index), &fields, index)
-        } else {
-            Arc::from([])
-        };
-
-        let (units, numbers) = if class == ConstantClass::Bits || class == ConstantClass::String {
-            (Text::empty(), Vec::new())
-        } else {
-            split_numbers(fields.iter().skip(index), &mut flags, key, *line, section)
-        };
-
-        let variable = PcVariable {
-            name: key.to_owned(),
-            class,
-            data_type,
-            shape,
-            units,
-            scale: numbers.first().cloned(),
-            translate: numbers.get(1).cloned(),
-            minimum: numbers.get(2).cloned(),
-            maximum: numbers.get(3).cloned(),
-            digits: numbers.get(4).cloned(),
-            options,
-            flags,
-            channel_value_on_connect: None,
-            continuous_channel_value: None,
-            line: *line,
-            raw: value.to_owned(),
-        };
-        insert_variable(definition, section, variable, *line);
-        section.understand(*line);
     }
 }
 
