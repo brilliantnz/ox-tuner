@@ -111,6 +111,7 @@ pub(crate) fn validate_expression_calls(definition: &mut Definition) {
     walk_editors(definition, &mut issues);
     walk_dashboard(definition, &mut issues);
     walk_dialogs(definition, &mut issues);
+    walk_loggers(definition, &mut issues);
 
     let mut diagnostics: Vec<Diagnostic> = issues
         .reasons
@@ -246,16 +247,55 @@ fn walk_dialogs(definition: &Definition, issues: &mut Issues) {
     for menu in &definition.menus {
         for item in &menu.items {
             for condition in &item.conditions {
-                let trimmed = condition.trim_ascii();
-                let body = trimmed
-                    .strip_prefix('{')
-                    .and_then(|text| text.strip_suffix('}'))
-                    .unwrap_or(trimmed);
-                if let Ok(expression) = Expr::parse(body) {
-                    add_expr(&expression, item.line, "Menu", issues);
-                }
+                add_symbolic(Some(condition), item.line, "Menu", issues);
             }
         }
+    }
+}
+
+/// Logger conditions and calc expressions are symbolic strings, so they are
+/// parsed here rather than carried as typed attributes.
+fn walk_loggers(definition: &Definition, issues: &mut Issues) {
+    for logger in &definition.loggers {
+        add_symbolic(
+            logger.data_ready_condition.as_deref(),
+            logger.line,
+            "LoggerDefinition",
+            issues,
+        );
+        for field in logger
+            .fields
+            .iter()
+            .chain(&logger.header_fields)
+            .chain(&logger.calculated)
+        {
+            add_symbolic(
+                field.update_condition.as_deref(),
+                field.line,
+                "LoggerDefinition",
+                issues,
+            );
+            add_symbolic(
+                field.expression.as_deref(),
+                field.line,
+                "LoggerDefinition",
+                issues,
+            );
+        }
+    }
+}
+
+fn add_symbolic(text: Option<&str>, line: u32, section: &str, issues: &mut Issues) {
+    let Some(text) = text else {
+        return;
+    };
+    let trimmed = text.trim_ascii();
+    let body = trimmed
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(trimmed);
+    if let Ok(expression) = Expr::parse(body) {
+        add_expr(&expression, line, section, issues);
     }
 }
 

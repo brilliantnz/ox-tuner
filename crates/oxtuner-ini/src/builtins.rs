@@ -156,8 +156,9 @@ pub static BUILTINS: &[Builtin] = &[
     symbolic!("lastvalue", Arity::Exact(1), BuiltinKind::Deferred),
     symbolic!("historicalvalue", Arity::Exact(2), BuiltinKind::Deferred),
     symbolic!("pastvalue", Arity::Exact(2), BuiltinKind::Deferred),
-    symbolic!("maxvalue", Arity::Exact(2), BuiltinKind::Deferred),
-    symbolic!("minvalue", Arity::Exact(2), BuiltinKind::Deferred),
+    // Real loggers call `maxValue(refTime)` as well as the two-argument form.
+    symbolic!("maxvalue", Arity::Between(1, 2), BuiltinKind::Deferred),
+    symbolic!("minvalue", Arity::Between(1, 2), BuiltinKind::Deferred),
     symbolic!("smoothbasic", Arity::Exact(2), BuiltinKind::Deferred),
     symbolic!("smoothfiltered", Arity::Exact(2), BuiltinKind::Deferred),
     symbolic!("accumulate", Arity::Exact(1), BuiltinKind::Deferred),
@@ -256,6 +257,26 @@ mod tests {
         assert_eq!(fold("bitStringValue", &[1.0, 2.0]), None);
         assert_eq!(fold("pastValue", &[1.0, 2.0]), None);
         assert_eq!(fold("table", &[1.0, 2.0]), None);
+    }
+
+    #[test]
+    fn the_history_helpers_accept_the_arities_real_files_write() {
+        // Speeduino and FOME write `maxValue(refTime)`, rusEFI writes
+        // `pastValue(time, 1)`.
+        for call in [
+            "maxValue(refTime)",
+            "minValue(refTime)",
+            "pastValue(time, 1)",
+        ] {
+            let expression = crate::expr::Expr::parse(call).expect("parses");
+            for (name, arity) in expression.call_sites() {
+                let builtin = lookup(name).expect("the helper is registered");
+                assert!(
+                    builtin.arity.accepts(arity),
+                    "{call}: {name} rejects {arity} argument(s)"
+                );
+            }
+        }
     }
 
     #[test]
