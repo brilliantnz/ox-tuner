@@ -1562,6 +1562,72 @@ second = scalar, U08, 0, \"y\", 0.01, 0, 0, 255, 1
         );
     }
 
+    #[test]
+    fn a_scaffold_keeps_the_values_of_a_page_it_cannot_rebuild() {
+        // `wide` runs 0..4 and `straddle` runs 2..6, so no value owns what they
+        // share and the page cannot go through the codec. A scaffold writes the
+        // defaults as they are rather than settling one over the other.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], \"\", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        for cell in 0..4 {
+            assert_eq!(loaded.tune.raw_at("wide", cell).expect("it is there"), 0.0);
+            assert_eq!(
+                loaded.tune.raw_at("straddle", cell).expect("it is there"),
+                7.0,
+                "cell {cell} must not be written over by a rebuild"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scaffold_keeps_a_text_page_it_cannot_rebuild() {
+        // The codec reads `note` as its whole eight bytes, so a rebuild would
+        // hand the middle of it to the number underneath and read it back as
+        // text. The scaffold writes both as they are instead.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert_eq!(loaded.tune.text("note").expect("it is there"), "");
+        assert_eq!(loaded.tune.raw_at("inside", 0).expect("it is there"), 7.0);
+    }
+
     fn scaffold_definition() -> Definition {
         let text = r#"
 [MegaTune]

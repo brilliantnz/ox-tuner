@@ -472,6 +472,12 @@ impl Tune {
     /// definition's defaults is consistent afterwards, instead of starting out
     /// with a pair no write would carry.
     ///
+    /// A page the codec cannot rebuild is left exactly as it is, the same rule
+    /// a load follows. Constants whose bytes overlap without one covering the
+    /// other have no owner, so the codec would settle them in declaration order
+    /// and drop one of them. A text field that overlaps a number would be read
+    /// back as part of that text. Neither is a rebuild this is allowed to make.
+    ///
     /// # Errors
     ///
     /// Returns [`TuneError`] when a page cannot be encoded or decoded, or when
@@ -480,6 +486,12 @@ impl Tune {
         let layout = Arc::clone(&self.layout);
 
         for page in layout.pages() {
+            if layout.page_has_ambiguous_overlap(page.page)
+                || layout.page_has_text_overlap(page.page)
+            {
+                continue;
+            }
+
             let names: Vec<&str> = page
                 .variables
                 .iter()
@@ -1167,6 +1179,69 @@ second = scalar, U08, 0, "x", 1, 0, 20, 255, 0
 
         assert_eq!(tune.raw_at("first", 0).unwrap(), 15.0);
         assert_eq!(tune.raw_at("second", 0).unwrap(), 15.0);
+    }
+
+    #[test]
+    fn settling_leaves_a_page_with_an_ambiguous_pair_alone() {
+        // `wide` runs 0..4 and `straddle` runs 2..6, so neither covers the
+        // other and no value owns what they share. Rebuilding the page would
+        // fill those bytes in declaration order and silently rewrite the tail
+        // of `wide`, exactly what a load refuses to do.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], "", 1, 0, 7, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.settle_shared_bytes().unwrap();
+
+        for cell in 0..4 {
+            assert_eq!(tune.raw_at("wide", cell).unwrap(), 0.0);
+            assert_eq!(
+                tune.raw_at("straddle", cell).unwrap(),
+                7.0,
+                "cell {cell} of the constant the rebuild would have written over"
+            );
+        }
+    }
+
+    #[test]
+    fn settling_leaves_a_page_with_a_text_overlap_alone() {
+        // The codec reads a text field as its whole length, so a number under
+        // one comes back as part of the text. Rebuilding the page would turn
+        // `note` into whatever bytes `inside` writes into its middle.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+note = string, ASCII, 8
+inside = scalar, U08, 4, "x", 1, 0, 7, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.settle_shared_bytes().unwrap();
+
+        assert_eq!(tune.text("note").unwrap(), "");
+        assert_eq!(tune.raw_at("inside", 0).unwrap(), 7.0);
     }
 
     #[test]
