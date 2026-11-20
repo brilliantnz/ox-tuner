@@ -346,8 +346,9 @@ fn add_dimension(dimension: &Dimension, line: u32, section: &str, issues: &mut I
 }
 
 fn add_expr(expression: &Expr, line: u32, section: &str, issues: &mut Issues) {
-    issues.nodes += expression.node_count();
-    for (name, arity) in expression.call_sites() {
+    let (nodes, calls) = expression.audit();
+    issues.nodes += nodes;
+    for (name, arity) in calls {
         let reason = match crate::builtins::lookup(name) {
             None => format!("`{name}` is not a known builtin; the call is kept as data"),
             Some(builtin) if !builtin.arity.accepts(arity) => format!(

@@ -441,13 +441,14 @@ impl Expr {
         found
     }
 
-    /// Number of nodes in the tree, counted iteratively.
+    /// Node count plus every call site, in one walk.
     ///
-    /// The parser caps one tree's depth and source length. A file can still hold
-    /// many expressions, so the definition-wide budget uses this count.
-    pub fn node_count(&self) -> usize {
+    /// The definition-wide validation needs both, and walking every expression
+    /// twice showed up on the larger real files.
+    pub fn audit(&self) -> (usize, Vec<(&str, usize)>) {
         let mut pending = vec![self];
         let mut count = 0usize;
+        let mut calls = Vec::new();
         while let Some(expression) = pending.pop() {
             count += 1;
             match expression {
@@ -462,14 +463,25 @@ impl Expr {
                     pending.push(when_true);
                     pending.push(when_false);
                 }
-                Self::Call(_, arguments) => pending.extend(arguments.iter()),
+                Self::Call(name, arguments) => {
+                    calls.push((name.as_str(), arguments.len()));
+                    pending.extend(arguments.iter());
+                }
                 Self::Index(base, index) => {
                     pending.push(base);
                     pending.push(index);
                 }
             }
         }
-        count
+        (count, calls)
+    }
+
+    /// Number of nodes in the tree, counted iteratively.
+    ///
+    /// The parser caps one tree's depth and source length. A file can still hold
+    /// many expressions, so the definition-wide budget uses this count.
+    pub fn node_count(&self) -> usize {
+        self.audit().0
     }
 
     /// Every call in the tree with its argument count, for builtin validation.
@@ -481,34 +493,7 @@ impl Expr {
     /// Iterative like [`Self::identifiers`], so a long flat expression cannot
     /// exhaust the stack while the definition is being checked.
     pub fn call_sites(&self) -> Vec<(&str, usize)> {
-        let mut found = Vec::new();
-        let mut pending = vec![self];
-
-        while let Some(expression) = pending.pop() {
-            match expression {
-                Self::Call(name, arguments) => {
-                    found.push((name.as_str(), arguments.len()));
-                    pending.extend(arguments.iter());
-                }
-                Self::Number(_) | Self::Ident(_) => {}
-                Self::Unary(_, operand) => pending.push(operand),
-                Self::Binary(_, left, right) => {
-                    pending.push(right);
-                    pending.push(left);
-                }
-                Self::Ternary(condition, when_true, when_false) => {
-                    pending.push(when_false);
-                    pending.push(when_true);
-                    pending.push(condition);
-                }
-                Self::Index(base, index) => {
-                    pending.push(index);
-                    pending.push(base);
-                }
-            }
-        }
-
-        found
+        self.audit().1
     }
 }
 
