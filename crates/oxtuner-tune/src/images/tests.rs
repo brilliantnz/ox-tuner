@@ -433,6 +433,41 @@ second = scalar, U08, 0, "", 1, 0, 0, 255, 0
         );
     }
 
+    #[test]
+    fn a_view_follows_its_owner_on_an_overlap_page_when_the_file_names_only_the_owner() {
+        // `data0` reads the first byte of `data`, and `note` is a text field
+        // over the rest of the owner, so the page is left standing instead of
+        // rebuilt. The file names only the owner, and a view is not a value of
+        // its own: it follows the byte the file carried rather than sitting on
+        // the stale value it had.
+        let definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        images
+            .working_mut()
+            .set_image_raw("data0", 0, 9.0)
+            .expect("a stale view");
+
+        let file_definition = parse_str(OVERLAPPING, &SettingsContext::new()).expect("parses");
+        let file_layout = Arc::new(TuneLayout::build(&file_definition, &|_| None));
+        let mut imported = Tune::new(file_layout);
+        for (index, value) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+            imported
+                .set_image_raw("data", index, value)
+                .expect("the array takes a value");
+        }
+
+        images
+            .import_applied(&imported, &["data".to_owned()])
+            .expect("the import goes through");
+
+        assert_eq!(
+            images.working().raw_at("data0", 0).expect("it is there"),
+            1.0,
+            "the view follows the owner's byte the file carried"
+        );
+    }
+
     /// A definition with the peers on one page and an unrelated constant on another.
     const TWO_PAGES: &str = r#"
 [MegaTune]

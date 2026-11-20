@@ -759,6 +759,7 @@ impl TuneImages {
                         applied,
                         &mut resolved,
                     )?;
+                    continue;
                 }
                 // A page that overlaps text with numbers cannot be decoded back
                 // without reading the overlap as text. The values the file
@@ -775,11 +776,9 @@ impl TuneImages {
                         &mut resolved,
                     )?;
                     self.layout.derive_views(page, &mut merged, applied)?;
+                    continue;
                 }
                 PageRebuild::Allowed => {}
-            }
-            if !self.layout.page_can_be_rebuilt(page) {
-                continue;
             }
 
             let names = self.layout.page_patch_names(applied, page);
