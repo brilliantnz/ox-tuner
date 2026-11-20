@@ -466,29 +466,31 @@ impl Tune {
     /// still has to be picked. This writes each page image and reads it back,
     /// which is the settle the codec does anyway: the page codec runs non-bits
     /// first and bits after, so among peers of the same kind the later declared
-    /// one keeps its value while a `bits` field always merges last. Every
-    /// constant on the page follows the result, views included, and each group
-    /// is then pulled onto a value all of it can store. A tune built from a
-    /// definition's defaults is consistent afterwards, instead of starting out
-    /// with a pair no write would carry.
+    /// one keeps its value while a `bits` field always merges last. On a page it
+    /// rebuilds, every constant follows the result, views included, and each
+    /// group is then pulled onto a value all of it can store, so the tune is
+    /// consistent afterwards instead of starting out with a pair no write would
+    /// carry.
     ///
-    /// A page the codec cannot rebuild is left exactly as it is, the same rule
-    /// a load follows. Constants whose bytes overlap without one covering the
-    /// other have no owner, so the codec would settle them in declaration order
-    /// and drop one of them. A text field that overlaps a number would be read
-    /// back as part of that text. Neither is a rebuild this is allowed to make.
+    /// A page [`TuneLayout::page_can_be_rebuilt`] refuses is left exactly as it
+    /// is, the same rule a load follows: constants whose bytes overlap without
+    /// one covering the other have no owner, so the codec would settle them in
+    /// declaration order and drop one of them, and a text field overlapping a
+    /// number would be read back as part of that text. Only a view moves there,
+    /// because it is not a value of its own and follows the bytes its owner
+    /// holds.
     ///
     /// # Errors
     ///
-    /// Returns [`TuneError`] when a page cannot be encoded or decoded, or when
-    /// a value's shape does not fit the layout.
+    /// Returns [`TuneError`] when a page cannot be encoded or decoded, when a
+    /// value's shape does not fit the layout, or when a view cannot be derived
+    /// from the variable that owns its bytes.
     pub fn settle_shared_bytes(&mut self) -> Result<(), TuneError> {
         let layout = Arc::clone(&self.layout);
 
         for page in layout.pages() {
-            if layout.page_has_ambiguous_overlap(page.page)
-                || layout.page_has_text_overlap(page.page)
-            {
+            if !layout.page_can_be_rebuilt(page.page) {
+                layout.derive_views(page.page, self, &[])?;
                 continue;
             }
 
@@ -1242,6 +1244,87 @@ inside = scalar, U08, 4, "x", 1, 0, 7, 255, 0
 
         assert_eq!(tune.text("note").unwrap(), "");
         assert_eq!(tune.raw_at("inside", 0).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn settling_skips_one_page_without_skipping_the_next() {
+        // Page 1 cannot be rebuilt and page 2 can. Skipping must not mean
+        // giving up on the pages after it.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 16, 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], "", 1, 0, 7, 255, 0
+page = 2
+first = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.settle_shared_bytes().unwrap();
+
+        assert_eq!(
+            tune.raw_at("first", 0).unwrap(),
+            tune.raw_at("second", 0).unwrap(),
+            "the peers on the page that can be rebuilt still settle"
+        );
+        assert_eq!(tune.raw_at("wide", 3).unwrap(), 0.0);
+        assert_eq!(
+            tune.raw_at("straddle", 0).unwrap(),
+            7.0,
+            "and the page that cannot be is still untouched"
+        );
+    }
+
+    #[test]
+    fn clamping_still_runs_on_a_page_settling_skips() {
+        // The pair under `first`/`second` is legal and agrees on twelve, which
+        // only `first` can store. The clamp has to pull both onto five even
+        // though the page is one the rebuild skipped.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
+straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+first = scalar, U08, 8, "x", 1, 0, 0, 255, 0
+second = scalar, U08, 8, "x", 1, 0, 0, 5, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+        tune.set_image_raw("first", 0, 12.0).unwrap();
+        tune.set_image_raw("second", 0, 12.0).unwrap();
+
+        tune.settle_shared_bytes().unwrap();
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 5.0);
+        assert_eq!(
+            tune.raw_at("wide", 0).unwrap(),
+            0.0,
+            "and the pair the page"
+        );
+        assert_eq!(
+            tune.raw_at("straddle", 0).unwrap(),
+            0.0,
+            "cannot rebuild is left"
+        );
     }
 
     #[test]

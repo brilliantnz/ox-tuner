@@ -234,29 +234,32 @@ fn reconcile_pages(
         if names.is_empty() && !has_alias {
             continue;
         }
-        if layout.page_has_ambiguous_overlap(page.page) {
-            // The page cannot be rebuilt without declaration order choosing a
-            // winner, so the file's values stand. A view the file did not carry
-            // still follows the bytes its owner holds.
-            if let Err(error) = layout.derive_views(page.page, tune, applied) {
-                report.warn(
-                    IssueKind::ValueSkipped,
-                    format!("page {}: {error}", page.page),
+        // The one answer to "can the codec rebuild this page at all", shared
+        // with the settle path. The two branches below only differ in what to
+        // say about it and in the views a lost page still owes its owner.
+        if !layout.page_can_be_rebuilt(page.page) {
+            if layout.page_has_ambiguous_overlap(page.page) {
+                // The page cannot be rebuilt without declaration order choosing
+                // a winner, so the file's values stand. A view the file did not
+                // carry still follows the bytes its owner holds.
+                if let Err(error) = layout.derive_views(page.page, tune, applied) {
+                    report.warn(
+                        IssueKind::ValueSkipped,
+                        format!("page {}: {error}", page.page),
+                    );
+                }
+                tracing::debug!(
+                    page = page.page.get(),
+                    "constants share bytes with no owner; the page is not reconciled"
+                );
+            } else {
+                // A definition quirk, not a user problem: the page keeps the
+                // file's values instead of being rebuilt through the overlap.
+                tracing::debug!(
+                    page = page.page.get(),
+                    "a text field overlaps another value; the page is not reconciled"
                 );
             }
-            tracing::debug!(
-                page = page.page.get(),
-                "constants share bytes with no owner; the page is not reconciled"
-            );
-            continue;
-        }
-        if layout.page_has_text_overlap(page.page) {
-            // A definition quirk, not a user problem: the page keeps the file's
-            // values instead of being rebuilt through the overlap.
-            tracing::debug!(
-                page = page.page.get(),
-                "a text field overlaps another value; the page is not reconciled"
-            );
             continue;
         }
 

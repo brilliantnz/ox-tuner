@@ -1087,6 +1087,18 @@ impl TuneLayout {
         all
     }
 
+    /// Whether a write can rebuild this page through the page codec at all.
+    ///
+    /// Two kinds cannot. Constants whose bytes intersect without one covering
+    /// the other have no owner, so a rebuild would settle them in declaration
+    /// order and drop one of them. A text field is read as its whole length, so
+    /// a number under one comes back as part of that text. A load, an import
+    /// and a settle all leave such a page as it stands instead.
+    #[must_use]
+    pub fn page_can_be_rebuilt(&self, page: IniPage) -> bool {
+        !self.page_has_ambiguous_overlap(page) && !self.page_has_text_overlap(page)
+    }
+
     /// The variable pairs on `page` whose values cannot both fit their shared bytes.
     ///
     /// Two constants may share storage and still be legal: a bit field merges
