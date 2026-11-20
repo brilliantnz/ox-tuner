@@ -13,9 +13,10 @@
 //!
 //! Diagnostics are flushed after each block, and a sink's final work runs
 //! after that section's last block, so the report follows source order instead
-//! of being grouped by section name. Each located diagnostic carries the source
-//! path from its [`SourcePos`]; model structs still hold only the local line
-//! number. Coverage is recorded once, in first-appearance order.
+//! of being grouped by section name. Parse-stage diagnostics carry the source
+//! path from their [`SourcePos`]. Model structs hold only the local line number,
+//! so diagnostics built later from a frozen entry (validation, comms-key
+//! winners) have no file. Coverage is recorded once, in first-appearance order.
 //!
 //! Nothing here panics. A section this build does not model is kept verbatim in
 //! [`Definition::unsupported`]; a key inside a known section that we do not
@@ -98,9 +99,10 @@ pub fn parse_str_with_includes(
 
 /// Parses named text, inlining `#include` files through `resolver`.
 ///
-/// `source_name` appears in diagnostics from the top file and becomes the
-/// identity of its includes' base. The unnamed entry points above keep the
-/// original diagnostic text.
+/// `source_name` appears in diagnostics from the top file and seeds the include
+/// cycle stack. Include resolution stays root-relative through the resolver;
+/// see [`crate::preprocess`]. The unnamed entry points above keep the original
+/// diagnostic text.
 ///
 /// # Errors
 ///
@@ -2088,6 +2090,32 @@ yBins = otherBins, secondChannel
         assert_eq!(diagnostic.source, None);
         let line = diagnostic.line.expect("the line is set");
         assert!(diagnostic.to_string().starts_with(&format!("{line}: ")));
+    }
+
+    #[test]
+    fn a_merged_section_names_the_first_file_when_headers_cross_files() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "extra.inc" => Some(Include {
+                path: "extra.inc".to_owned(),
+                text: "[Constants]\npage = 1\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include extra.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let merged = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "merged-section")
+            .expect("the repeated header is reported");
+        assert_eq!(merged.source.as_deref(), Some("extra.inc"));
+        assert!(merged.message.contains("line 3 in main.ini"));
     }
 
     #[test]

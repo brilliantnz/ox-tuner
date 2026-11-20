@@ -16,8 +16,7 @@ use super::{SectionParser, SectionSink};
 /// block continues the same builder until the next `table =` or end of file.
 #[derive(Default)]
 pub(crate) struct TablesSink {
-    current: Option<Table>,
-    current_pos: Option<SourcePos>,
+    current: Option<(Table, SourcePos)>,
 }
 
 impl SectionSink for TablesSink {
@@ -38,7 +37,7 @@ impl SectionSink for TablesSink {
             let fields = split_fields(value);
 
             if lowered == "table" {
-                if let Some(table) = self.current.take() {
+                if let Some((table, _)) = self.current.take() {
                     insert_table(definition, section, table, *line);
                 }
                 section.understand(*line);
@@ -57,31 +56,33 @@ impl SectionSink for TablesSink {
                     .and_then(|field| crate::fields::parse_u32(field))
                     .and_then(|page| u8::try_from(page).ok());
 
-                self.current = Some(Table {
-                    id: fields[0].to_owned(),
-                    map_id: Some(fields[1].to_owned()),
-                    title: Text::parse(fields[2]),
-                    page,
-                    x_bins: None,
-                    y_bins: None,
-                    z_bins: None,
-                    live_cursor: None,
-                    live_cursor_y: None,
-                    x_size: None,
-                    y_size: None,
-                    sibling_group: None,
-                    xy_labels: Vec::new(),
-                    up_down_label: Vec::new(),
-                    grid_height: None,
-                    grid_orient: None,
-                    topic_help: None,
-                    line: line.line,
-                });
-                self.current_pos = Some(*line);
+                self.current = Some((
+                    Table {
+                        id: fields[0].to_owned(),
+                        map_id: Some(fields[1].to_owned()),
+                        title: Text::parse(fields[2]),
+                        page,
+                        x_bins: None,
+                        y_bins: None,
+                        z_bins: None,
+                        live_cursor: None,
+                        live_cursor_y: None,
+                        x_size: None,
+                        y_size: None,
+                        sibling_group: None,
+                        xy_labels: Vec::new(),
+                        up_down_label: Vec::new(),
+                        grid_height: None,
+                        grid_orient: None,
+                        topic_help: None,
+                        line: line.line,
+                    },
+                    *line,
+                ));
                 continue;
             }
 
-            let Some(table) = self.current.as_mut() else {
+            let Some((table, _)) = self.current.as_mut() else {
                 section.warn(
                     "orphan-key",
                     format!("`{key}` appears before any `table =` entry"),
@@ -105,13 +106,8 @@ impl SectionSink for TablesSink {
     }
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
-        if let Some(table) = self.current.take() {
-            insert_table(
-                definition,
-                section,
-                table,
-                self.current_pos.unwrap_or_default(),
-            );
+        if let Some((table, pos)) = self.current.take() {
+            insert_table(definition, section, table, pos);
         }
     }
 }
@@ -289,8 +285,7 @@ fn parse_axis(fields: &[&str]) -> Axis {
 /// like the table builder.
 #[derive(Default)]
 pub(crate) struct CurvesSink {
-    current: Option<Curve>,
-    current_pos: Option<SourcePos>,
+    current: Option<(Curve, SourcePos)>,
 }
 
 impl SectionSink for CurvesSink {
@@ -311,7 +306,7 @@ impl SectionSink for CurvesSink {
             let fields = split_fields(value);
 
             if lowered == "curve" {
-                if let Some(curve) = self.current.take() {
+                if let Some((curve, _)) = self.current.take() {
                     insert_curve(definition, section, curve, *line);
                 }
                 section.understand(*line);
@@ -319,30 +314,32 @@ impl SectionSink for CurvesSink {
                     section.warn("bad-curve", "`curve =` needs a name", *line);
                     continue;
                 };
-                self.current = Some(Curve {
-                    name: name.to_owned(),
-                    title: fields
-                        .get(1)
-                        .map(|field| Text::parse(field))
-                        .unwrap_or(Text::shared(name)),
-                    column_labels: Vec::new(),
-                    x_axis: Vec::new(),
-                    y_axis: Vec::new(),
-                    x_bins: None,
-                    y_bins: Vec::new(),
-                    live_cursor: None,
-                    live_cursor_y: None,
-                    line_labels: Vec::new(),
-                    gauge: None,
-                    show_text_values: false,
-                    suppress_graph: false,
-                    line: line.line,
-                });
-                self.current_pos = Some(*line);
+                self.current = Some((
+                    Curve {
+                        name: name.to_owned(),
+                        title: fields
+                            .get(1)
+                            .map(|field| Text::parse(field))
+                            .unwrap_or(Text::shared(name)),
+                        column_labels: Vec::new(),
+                        x_axis: Vec::new(),
+                        y_axis: Vec::new(),
+                        x_bins: None,
+                        y_bins: Vec::new(),
+                        live_cursor: None,
+                        live_cursor_y: None,
+                        line_labels: Vec::new(),
+                        gauge: None,
+                        show_text_values: false,
+                        suppress_graph: false,
+                        line: line.line,
+                    },
+                    *line,
+                ));
                 continue;
             }
 
-            let Some(curve) = self.current.as_mut() else {
+            let Some((curve, _)) = self.current.as_mut() else {
                 section.warn(
                     "orphan-key",
                     format!("`{key}` appears before any `curve =` entry"),
@@ -394,13 +391,8 @@ impl SectionSink for CurvesSink {
     }
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
-        if let Some(curve) = self.current.take() {
-            insert_curve(
-                definition,
-                section,
-                curve,
-                self.current_pos.unwrap_or_default(),
-            );
+        if let Some((curve, pos)) = self.current.take() {
+            insert_curve(definition, section, curve, pos);
         }
     }
 }
