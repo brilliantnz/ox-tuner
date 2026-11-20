@@ -374,7 +374,7 @@ impl SectionSink for UnknownSink {
     }
 }
 
-/// Preamble attributes before the first header (rusEFI has one).
+/// Preamble attributes before the first header, which some definitions have.
 fn parse_preamble(
     definition: &mut Definition,
     section: &mut SectionParser,
