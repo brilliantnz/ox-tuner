@@ -7,84 +7,92 @@
 use crate::fields::split_fields;
 use crate::model::{Definition, Gauge, Indicator, Number, Text};
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
-/// `[GaugeConfigurations]`.
-pub(crate) fn parse_gauges(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut category: Option<String> = None;
+/// `[GaugeConfigurations]`. The category survives a repeated section header.
+#[derive(Default)]
+pub(crate) struct GaugesSink {
+    category: Option<String>,
+}
 
-    for (line, text) in lines {
-        let Some((key, value)) = super::entry_line(section, *line, text) else {
-            continue;
-        };
-        let fields = split_fields(value);
+impl SectionSink for GaugesSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            let Some((key, value)) = super::entry_line(section, *line, text) else {
+                continue;
+            };
+            let fields = split_fields(value);
 
-        if key.eq_ignore_ascii_case("gaugeCategory") {
-            category = fields
-                .first()
-                .map(|field| crate::fields::unquote(field).to_owned());
+            if key.eq_ignore_ascii_case("gaugeCategory") {
+                self.category = fields
+                    .first()
+                    .map(|field| crate::fields::unquote(field).to_owned());
+                section.understand(*line);
+                continue;
+            }
+
+            // channel, "Title", "Units", lo, hi, loD, loW, hiW, hiD, vd, ld[, active]
+            // The trailing label-digits field is optional in the wild; rusEFI
+            // templates omit it.
+            if fields.len() < 10 {
+                section.warn(
+                    "bad-gauge",
+                    format!(
+                        "`{key}` needs at least 10 fields (channel, title, units, six limits \
+                         and value digits), got {}",
+                        fields.len()
+                    ),
+                    *line,
+                );
+                continue;
+            }
+
+            let gauge = Gauge {
+                category: self.category.clone(),
+                name: key.to_owned(),
+                channel: fields[0].to_owned(),
+                title: Text::parse(fields[1]),
+                units: Text::parse(fields[2]),
+                low: Number::parse(fields[3]),
+                high: Number::parse(fields[4]),
+                low_danger: Number::parse(fields[5]),
+                low_warning: Number::parse(fields[6]),
+                high_warning: Number::parse(fields[7]),
+                high_danger: Number::parse(fields[8]),
+                value_digits: Number::parse(fields[9]),
+                label_digits: fields
+                    .get(10)
+                    .map_or_else(|| Number::parse(fields[9]), |field| Number::parse(field)),
+                active: fields
+                    .get(11)
+                    .and_then(|field| crate::fields::expression_body(field))
+                    .and_then(|source| crate::expr::Expr::parse(source).ok()),
+                active_source: fields
+                    .get(11)
+                    .and_then(|field| crate::fields::expression_body(field))
+                    .map(str::to_owned),
+                line: *line,
+            };
+
+            if !definition.channels.contains(&gauge.channel) {
+                section.note(
+                    "gauge-without-channel",
+                    format!(
+                        "gauge `{}` shows `{}`, which is not an output channel",
+                        gauge.name, gauge.channel
+                    ),
+                    *line,
+                );
+            }
+            definition.gauges.push(gauge);
             section.understand(*line);
-            continue;
         }
-
-        // channel, "Title", "Units", lo, hi, loD, loW, hiW, hiD, vd, ld[, active]
-        // The trailing label-digits field is optional in the wild; rusEFI
-        // templates omit it.
-        if fields.len() < 10 {
-            section.warn(
-                "bad-gauge",
-                format!(
-                    "`{key}` needs at least 10 fields (channel, title, units, six limits and value digits), got {}",
-                    fields.len()
-                ),
-                *line,
-            );
-            continue;
-        }
-
-        let gauge = Gauge {
-            category: category.clone(),
-            name: key.to_owned(),
-            channel: fields[0].to_owned(),
-            title: Text::parse(fields[1]),
-            units: Text::parse(fields[2]),
-            low: Number::parse(fields[3]),
-            high: Number::parse(fields[4]),
-            low_danger: Number::parse(fields[5]),
-            low_warning: Number::parse(fields[6]),
-            high_warning: Number::parse(fields[7]),
-            high_danger: Number::parse(fields[8]),
-            value_digits: Number::parse(fields[9]),
-            label_digits: fields
-                .get(10)
-                .map_or_else(|| Number::parse(fields[9]), |field| Number::parse(field)),
-            active: fields
-                .get(11)
-                .and_then(|field| crate::fields::expression_body(field))
-                .and_then(|source| crate::expr::Expr::parse(source).ok()),
-            active_source: fields
-                .get(11)
-                .and_then(|field| crate::fields::expression_body(field))
-                .map(str::to_owned),
-            line: *line,
-        };
-
-        if !definition.channels.contains(&gauge.channel) {
-            section.note(
-                "gauge-without-channel",
-                format!(
-                    "gauge `{}` shows `{}`, which is not an output channel",
-                    gauge.name, gauge.channel
-                ),
-                *line,
-            );
-        }
-        definition.gauges.push(gauge);
-        section.understand(*line);
     }
 }
 

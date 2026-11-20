@@ -10,83 +10,93 @@ use crate::model::{
     ConfigEntry, ConfigSection, Definition, LoggerDefinition, LoggerField, Number, Text,
 };
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
-/// `[LoggerDefinition]`: named loggers with a bit-level record layout.
-pub(crate) fn parse_loggers(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut current: Option<LoggerDefinition> = None;
-    let mut names = std::collections::BTreeSet::new();
+/// `[LoggerDefinition]`: named loggers with a bit-level record layout. The open
+/// logger and the seen-name set survive a repeated section header.
+#[derive(Default)]
+pub(crate) struct LoggersSink {
+    current: Option<LoggerDefinition>,
+    names: std::collections::BTreeSet<String>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
-        let Some((key, value)) = split_assignment(text) else {
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-        let fields = split_fields(value);
-        let lowered = key.to_ascii_lowercase();
+impl SectionSink for LoggersSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
+            let Some((key, value)) = split_assignment(text) else {
+                section.unrecognized_line(*line, text);
+                continue;
+            };
+            let fields = split_fields(value);
+            let lowered = key.to_ascii_lowercase();
 
-        if lowered == "loggerdef" {
-            if let Some(logger) = current.take() {
-                definition.loggers.push(logger);
-            }
-            let opened = open_logger(&fields, *line, section, &mut names);
-            if opened.is_none() {
-                section.warn("bad-logger", "`loggerDef` needs a name", *line);
-            }
-            current = opened;
-            section.understand(*line);
-            continue;
-        }
-
-        let Some(logger) = current.as_mut() else {
-            section.warn(
-                "orphan-logger-key",
-                format!("`{key}` appears before any `loggerDef` entry"),
-                *line,
-            );
-            continue;
-        };
-
-        match lowered.as_str() {
-            "startcommand" => logger.start_command = Some(unquote(value).to_owned()),
-            "stopcommand" => logger.stop_command = Some(unquote(value).to_owned()),
-            "datareadcommand" => logger.data_read_command = Some(unquote(value).to_owned()),
-            "datareadtimeout" => logger.data_read_timeout_ms = crate::fields::parse_u32(value),
-            "continuousread" => logger.continuous_read = crate::fields::is_true(value),
-            "datareadycondition" => logger.data_ready_condition = Some(value.to_owned()),
-            "datalength" => logger.data_length = crate::fields::parse_u32(value),
-            "recorddef" => {
-                logger.header_len = fields
-                    .first()
-                    .and_then(|field| crate::fields::parse_u32(field))
-                    .unwrap_or(0);
-                logger.footer_len = fields
-                    .get(1)
-                    .and_then(|field| crate::fields::parse_u32(field))
-                    .unwrap_or(0);
-                logger.record_len = fields
-                    .get(2)
-                    .and_then(|field| crate::fields::parse_u32(field))
-                    .unwrap_or(0);
-            }
-            "recordfield" => logger.fields.push(record_field(&fields, *line)),
-            "headerfield" => logger.header_fields.push(record_field(&fields, *line)),
-            "calcfield" => logger.calculated.push(calculated_field(&fields, *line)),
-            _ => {
-                section.unrecognized_key(key, *line);
+            if lowered == "loggerdef" {
+                if let Some(logger) = self.current.take() {
+                    definition.loggers.push(logger);
+                }
+                let opened = open_logger(&fields, *line, section, &mut self.names);
+                if opened.is_none() {
+                    section.warn("bad-logger", "`loggerDef` needs a name", *line);
+                }
+                self.current = opened;
+                section.understand(*line);
                 continue;
             }
+
+            let Some(logger) = self.current.as_mut() else {
+                section.warn(
+                    "orphan-logger-key",
+                    format!("`{key}` appears before any `loggerDef` entry"),
+                    *line,
+                );
+                continue;
+            };
+
+            match lowered.as_str() {
+                "startcommand" => logger.start_command = Some(unquote(value).to_owned()),
+                "stopcommand" => logger.stop_command = Some(unquote(value).to_owned()),
+                "datareadcommand" => logger.data_read_command = Some(unquote(value).to_owned()),
+                "datareadtimeout" => logger.data_read_timeout_ms = crate::fields::parse_u32(value),
+                "continuousread" => logger.continuous_read = crate::fields::is_true(value),
+                "datareadycondition" => logger.data_ready_condition = Some(value.to_owned()),
+                "datalength" => logger.data_length = crate::fields::parse_u32(value),
+                "recorddef" => {
+                    logger.header_len = fields
+                        .first()
+                        .and_then(|field| crate::fields::parse_u32(field))
+                        .unwrap_or(0);
+                    logger.footer_len = fields
+                        .get(1)
+                        .and_then(|field| crate::fields::parse_u32(field))
+                        .unwrap_or(0);
+                    logger.record_len = fields
+                        .get(2)
+                        .and_then(|field| crate::fields::parse_u32(field))
+                        .unwrap_or(0);
+                }
+                "recordfield" => logger.fields.push(record_field(&fields, *line)),
+                "headerfield" => logger.header_fields.push(record_field(&fields, *line)),
+                "calcfield" => logger.calculated.push(calculated_field(&fields, *line)),
+                _ => {
+                    section.unrecognized_key(key, *line);
+                    continue;
+                }
+            }
+            section.understand(*line);
         }
-        section.understand(*line);
     }
 
-    if let Some(logger) = current {
-        definition.loggers.push(logger);
+    fn finish(&mut self, definition: &mut Definition, _section: &mut SectionParser) {
+        if let Some(logger) = self.current.take() {
+            definition.loggers.push(logger);
+        }
     }
 }
 
@@ -176,31 +186,51 @@ fn calculated_field(fields: &[&str], line: u32) -> LoggerField {
     }
 }
 
-/// A named section whose schema a later consumer will own.
-pub(crate) fn parse_config_section(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut entries = Vec::new();
+/// A named section whose schema a later consumer will own. A repeated header
+/// appends to the same entry buffer so only one `ConfigSection` is pushed at
+/// the end of the document.
+pub(crate) struct ConfigSectionSink {
+    name: String,
+    entries: Vec<ConfigEntry>,
+}
 
-    for (line, text) in lines {
-        section.count_entry();
-        let Some((key, value)) = split_assignment(text) else {
-            section.unrecognized_line(*line, text);
-            continue;
-        };
-        entries.push(ConfigEntry {
-            key: key.to_owned(),
-            value: value.to_owned(),
-            fields: split_fields(value).into_iter().map(str::to_owned).collect(),
-            line: *line,
-        });
-        section.understand(*line);
+impl ConfigSectionSink {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl SectionSink for ConfigSectionSink {
+    fn feed(
+        &mut self,
+        _definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            section.count_entry();
+            let Some((key, value)) = split_assignment(text) else {
+                section.unrecognized_line(*line, text);
+                continue;
+            };
+            self.entries.push(ConfigEntry {
+                key: key.to_owned(),
+                value: value.to_owned(),
+                fields: split_fields(value).into_iter().map(str::to_owned).collect(),
+                line: *line,
+            });
+            section.understand(*line);
+        }
     }
 
-    definition.config_sections.push(ConfigSection {
-        name: section.name.clone(),
-        entries,
-    });
+    fn finish(&mut self, definition: &mut Definition, _section: &mut SectionParser) {
+        definition.config_sections.push(ConfigSection {
+            name: self.name.clone(),
+            entries: std::mem::take(&mut self.entries),
+        });
+    }
 }

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::fields::{CommandTemplate, split_fields};
 use crate::model::{ControllerCommand, DatalogEntry, Definition, Number, ReferenceTable};
 
-use super::SectionParser;
+use super::{SectionParser, SectionSink};
 
 /// Applies one `defaultValue` or `rawValue` entry, returning whether it had a
 /// value to apply. Array defaults are kept separately from scalar ones.
@@ -213,92 +213,99 @@ pub(crate) fn parse_controller_commands(
     }
 }
 
-/// `[ReferenceTables]`.
-pub(crate) fn parse_reference_tables(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut current: Option<String> = None;
+/// `[ReferenceTables]`. The open table survives a repeated section header.
+#[derive(Default)]
+pub(crate) struct ReferenceTablesSink {
+    current: Option<String>,
+}
 
-    for (line, text) in lines {
-        let Some((key, value)) = super::entry_line(section, *line, text) else {
-            continue;
-        };
-        let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(value);
+impl SectionSink for ReferenceTablesSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            let Some((key, value)) = super::entry_line(section, *line, text) else {
+                continue;
+            };
+            let lowered = key.to_ascii_lowercase();
+            let fields = split_fields(value);
 
-        if lowered == "referencetable" {
-            let Some(name) = fields.first().copied() else {
+            if lowered == "referencetable" {
+                let Some(name) = fields.first().copied() else {
+                    section.warn(
+                        "bad-reference-table",
+                        "`referenceTable =` needs a name",
+                        *line,
+                    );
+                    continue;
+                };
+                let replaced = definition.reference_tables.insert(
+                    name,
+                    ReferenceTable {
+                        name: name.to_owned(),
+                        title: fields
+                            .get(1)
+                            .map(|field| crate::fields::unquote(field).to_owned()),
+                        line: *line,
+                        ..ReferenceTable::default()
+                    },
+                );
+                if replaced.is_some() {
+                    section.error(
+                        "duplicate-name",
+                        format!(
+                            "reference table `{name}` is declared more than once; the later \
+                             declaration replaces the earlier one"
+                        ),
+                        *line,
+                    );
+                }
+                self.current = Some(name.to_owned());
+                section.understand(*line);
+                continue;
+            }
+
+            // Section-level commands.
+            if matches!(
+                lowered.as_str(),
+                "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
+            ) {
+                definition.comms.raw.insert(lowered, value.to_owned());
+                section.understand(*line);
+                continue;
+            }
+
+            let Some(name) = self.current.clone() else {
                 section.warn(
-                    "bad-reference-table",
-                    "`referenceTable =` needs a name",
+                    "orphan-reference-table-key",
+                    format!("`{key}` appears before any `referenceTable =` entry"),
                     *line,
                 );
                 continue;
             };
-            let replaced = definition.reference_tables.insert(
-                name,
-                ReferenceTable {
-                    name: name.to_owned(),
-                    title: fields
-                        .get(1)
-                        .map(|field| crate::fields::unquote(field).to_owned()),
-                    line: *line,
-                    ..ReferenceTable::default()
-                },
+            let Some(table) = definition.reference_tables.get_mut(&name) else {
+                continue;
+            };
+
+            let understood = apply_reference_table_key(
+                table,
+                &mut definition.comms.raw,
+                &lowered,
+                &fields,
+                &name,
+                key,
+                value,
             );
-            if replaced.is_some() {
-                section.error(
-                    "duplicate-name",
-                    format!(
-                        "reference table `{name}` is declared more than once; the later \
-                         declaration replaces the earlier one"
-                    ),
-                    *line,
-                );
+            if !understood {
+                section.unrecognized_key(key, *line);
+                continue;
             }
-            current = Some(name.to_owned());
             section.understand(*line);
-            continue;
         }
-
-        // Section-level commands.
-        if matches!(
-            lowered.as_str(),
-            "tablewritecommand" | "tableblockingfactor" | "tablecrccommand"
-        ) {
-            definition.comms.raw.insert(lowered, value.to_owned());
-            section.understand(*line);
-            continue;
-        }
-
-        let Some(name) = current.clone() else {
-            section.warn(
-                "orphan-reference-table-key",
-                format!("`{key}` appears before any `referenceTable =` entry"),
-                *line,
-            );
-            continue;
-        };
-        let Some(table) = definition.reference_tables.get_mut(&name) else {
-            continue;
-        };
-
-        let understood = apply_reference_table_key(
-            table,
-            &mut definition.comms.raw,
-            &lowered,
-            &fields,
-            &name,
-            key,
-            value,
-        );
-        if !understood {
-            section.unrecognized_key(key, *line);
-            continue;
-        }
-        section.understand(*line);
     }
 }
 
@@ -382,50 +389,59 @@ fn apply_reference_table_key(
     true
 }
 
-/// `[Datalog]`.
-pub(crate) fn parse_datalog(
-    definition: &mut Definition,
-    section: &mut SectionParser,
-    lines: &[(u32, &str)],
-) {
-    let mut category: Option<String> = None;
+/// `[Datalog]`. The category survives a repeated section header.
+#[derive(Default)]
+pub(crate) struct DatalogSink {
+    category: Option<String>,
+}
 
-    for (line, text) in lines {
-        let Some((key, value)) = super::entry_line(section, *line, text) else {
-            continue;
-        };
-        let lowered = key.to_ascii_lowercase();
-        let fields = split_fields(value);
+impl SectionSink for DatalogSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &crate::preprocess::Expander<'_>,
+    ) {
+        for (line, text) in lines {
+            let Some((key, value)) = super::entry_line(section, *line, text) else {
+                continue;
+            };
+            let lowered = key.to_ascii_lowercase();
+            let fields = split_fields(value);
 
-        match lowered.as_str() {
-            "category" => {
-                category = fields
-                    .first()
-                    .map(|field| crate::fields::unquote(field).to_owned());
-                section.understand(*line);
-            }
-            "entry" => {
-                if fields.len() < 4 {
-                    section.warn(
-                        "bad-datalog-entry",
-                        format!("`entry = {value}` needs a channel, a label, a type and a format"),
-                        *line,
-                    );
-                    continue;
+            match lowered.as_str() {
+                "category" => {
+                    self.category = fields
+                        .first()
+                        .map(|field| crate::fields::unquote(field).to_owned());
+                    section.understand(*line);
                 }
-                definition.datalog_entries.push(DatalogEntry {
-                    channel: crate::fields::unquote(fields[0]).to_owned(),
-                    label: crate::fields::unquote(fields[1]).to_owned(),
-                    value_type: Some(fields[2].to_owned()),
-                    format: fields[3].to_owned(),
-                    enable: fields.get(4).map(|f| (*f).to_owned()),
-                    lag: fields.get(5).map(|f| (*f).to_owned()),
-                    category: category.clone(),
-                    line: *line,
-                });
-                section.understand(*line);
+                "entry" => {
+                    if fields.len() < 4 {
+                        section.warn(
+                            "bad-datalog-entry",
+                            format!(
+                                "`entry = {value}` needs a channel, a label, a type and a format"
+                            ),
+                            *line,
+                        );
+                        continue;
+                    }
+                    definition.datalog_entries.push(DatalogEntry {
+                        channel: crate::fields::unquote(fields[0]).to_owned(),
+                        label: crate::fields::unquote(fields[1]).to_owned(),
+                        value_type: Some(fields[2].to_owned()),
+                        format: fields[3].to_owned(),
+                        enable: fields.get(4).map(|f| (*f).to_owned()),
+                        lag: fields.get(5).map(|f| (*f).to_owned()),
+                        category: self.category.clone(),
+                        line: *line,
+                    });
+                    section.understand(*line);
+                }
+                _ => section.unrecognized_key(key, *line),
             }
-            _ => section.unrecognized_key(key, *line),
         }
     }
 }

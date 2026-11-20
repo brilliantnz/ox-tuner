@@ -1,6 +1,6 @@
 constants|2
 pages|1
-diagnostic|note: [Constants] `[Constants]` has 2 header(s); their entries are merged into one section (merged-section)
+diagnostic|8: note: [Constants] `[Constants]` is declared again here; its entries continue the block at line 3 (merged-section)
 included_deep|true
 include_depth_exceeded|true
 number|{min(4, 2)}|2

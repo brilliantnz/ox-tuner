@@ -1,9 +1,20 @@
 //! Pass 2–4: sections → resolved model → frozen [`Definition`].
 //!
-//! Sections are read **in document order**, because the dialect is order
-//! sensitive: a constant referenced in another constant's expression must be
-//! declared earlier, and `[PcVariables]` load before `[Constants]` on purpose
-//! (reference §Section load order).
+//! Sections are dispatched in document order, line by line, because the
+//! dialect is order sensitive: a constant referenced in another constant's
+//! expression must be declared earlier, and `[PcVariables]` load before
+//! `[Constants]` on purpose (reference §Section load order).
+//!
+//! A second header with the same name continues the open section builder. Its
+//! lines are read where they sit in the document, not moved up to the first
+//! block. That keeps order-sensitive readings honest: a block between the two
+//! headers sees the model the first one left behind. The `merged-section` note
+//! is written on the repeated header and names both header lines.
+//!
+//! Diagnostics are flushed after each block, and a sink's final work runs
+//! after that section's last block, so the report follows source order instead
+//! of being grouped by section name. Coverage is recorded once, in
+//! first-appearance order.
 //!
 //! Nothing here panics. A section this build does not model is kept verbatim in
 //! [`Definition::unsupported`]; a key inside a known section that we do not
@@ -18,7 +29,7 @@ mod misc;
 mod sections;
 mod validation;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 
 use crate::error::{Diagnostic, IniError, Severity, extend_bounded, push_bounded};
 use crate::model::{Coverage, Definition, SectionCoverage};
@@ -132,29 +143,11 @@ fn assemble(
         );
     }
 
-    {
+    let coverage = {
         let _span = tracing::debug_span!("ini_parse_sections").entered();
-        let sections = split_sections(&preprocessed.lines);
-
-        let mut coverage = Coverage::default();
-        for section in &sections {
-            let mut parser = SectionParser::new(&section.name);
-            if section.repeats > 0 {
-                parser.note_section(
-                    "merged-section",
-                    format!(
-                        "`[{}]` has {} header(s); their entries are merged into one section",
-                        section.name,
-                        section.repeats + 1
-                    ),
-                );
-            }
-            dispatch(&mut definition, &mut parser, &section.lines, &expander);
-            parser.finish(&mut definition, &mut coverage);
-        }
-
-        definition.coverage = coverage;
-    }
+        parse_sections(&mut definition, &preprocessed.lines, &expander)
+    };
+    definition.coverage = coverage;
 
     let _span = tracing::debug_span!("ini_resolve_validate").entered();
 
@@ -183,53 +176,110 @@ fn assemble(
     Ok(definition)
 }
 
-/// One `[section]` and the lines that belong to it. Text before the first
-/// header belongs to the empty-named preamble (rusEFI has one).
-struct RawSection<'a> {
-    name: String,
-    lines: Vec<(u32, &'a str)>,
-    /// Extra headers with this name folded into this one. Real files use one
-    /// block per section, but a second one must continue the first builder
-    /// instead of throwing its state away. Lines after a repeated header are
-    /// therefore attached to whatever container the first block left open;
-    /// that is the "continue the list" behaviour, not an orphan row.
-    repeats: usize,
+/// Dispatches every section block in document order and returns its coverage.
+fn parse_sections(
+    definition: &mut Definition,
+    lines: &[LogicalLine],
+    expander: &Expander<'_>,
+) -> Coverage {
+    let blocks = section_blocks(lines);
+
+    // A sink's final work can itself emit diagnostics, so run it after that
+    // section's last block rather than after every other section is fed. That
+    // keeps those notes in source order too. Coverage is still recorded once,
+    // in first-appearance order.
+    let mut last_blocks: HashMap<String, usize> = HashMap::new();
+    for (index, block) in blocks.iter().enumerate().rev() {
+        last_blocks
+            .entry(block.name.to_ascii_lowercase())
+            .or_insert(index);
+    }
+
+    let mut coverage = Coverage::default();
+    let mut slots: HashMap<String, SectionSlot> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for (block_index, block) in blocks.iter().enumerate() {
+        let key = block.name.to_ascii_lowercase();
+        let (slot, is_last_block) = match slots.entry(key) {
+            Entry::Occupied(entry) => {
+                let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
+                (entry.into_mut(), last == block_index)
+            }
+            Entry::Vacant(entry) => {
+                let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
+                let slot = SectionSlot::new(block.name, block.header.unwrap_or(0), entry.key());
+                order.push(entry.key().clone());
+                (entry.insert(slot), last == block_index)
+            }
+        };
+
+        if slot.headers >= 1 {
+            slot.parser.note(
+                "merged-section",
+                format!(
+                    "`[{}]` is declared again here; its entries continue the block at line {}",
+                    block.name, slot.first_line
+                ),
+                block.header.unwrap_or(0),
+            );
+        }
+        slot.headers += 1;
+
+        slot.sink
+            .feed(definition, &mut slot.parser, &block.lines, expander);
+        slot.parser.flush_diagnostics(definition);
+
+        if is_last_block {
+            slot.sink.finish(definition, &mut slot.parser);
+            slot.parser.flush_diagnostics(definition);
+        }
+    }
+
+    for key in &order {
+        let slot = slots.get(key).expect("every ordered name has a slot");
+        slot.parser.finish_coverage(&mut coverage);
+    }
+
+    coverage
 }
 
-fn split_sections(lines: &[LogicalLine]) -> Vec<RawSection<'_>> {
-    let mut sections: Vec<RawSection<'_>> = vec![RawSection {
-        name: String::new(),
+/// One `[section]` header and the lines that follow it, in document order.
+///
+/// Text before the first header is the preamble and has no header line. Real
+/// files use one block per section, but a repeated header gets its own block so
+/// its lines are read at their document position. The slot below keeps the
+/// builder alive across all blocks with the same name.
+struct SectionBlock<'a> {
+    name: &'a str,
+    header: Option<u32>,
+    lines: Vec<(u32, &'a str)>,
+}
+
+fn section_blocks(lines: &[LogicalLine]) -> Vec<SectionBlock<'_>> {
+    let mut blocks = vec![SectionBlock {
+        name: "",
+        header: None,
         lines: Vec::new(),
-        repeats: 0,
     }];
-    // Dispatch matches the lowercase header, so merging must use the same key.
-    let mut by_name: HashMap<String, usize> = HashMap::new();
-    let mut current = 0usize;
 
     for line in lines {
         if let Some(name) = section_header(&line.text) {
-            let key = name.to_ascii_lowercase();
-            if let Some(&index) = by_name.get(&key) {
-                sections[index].repeats += 1;
-                current = index;
-            } else {
-                let index = sections.len();
-                by_name.insert(key, index);
-                sections.push(RawSection {
-                    name: name.to_owned(),
-                    lines: Vec::new(),
-                    repeats: 0,
-                });
-                current = index;
-            }
+            blocks.push(SectionBlock {
+                name,
+                header: Some(line.line),
+                lines: Vec::new(),
+            });
             continue;
         }
-        sections[current]
+        blocks
+            .last_mut()
+            .expect("the preamble block is always present")
             .lines
             .push((line.line, line.text.as_str()));
     }
 
-    sections
+    blocks
 }
 
 fn section_header(text: &str) -> Option<&str> {
@@ -238,68 +288,155 @@ fn section_header(text: &str) -> Option<&str> {
     Some(inner.trim_ascii())
 }
 
-fn dispatch(
+/// The persistent builder for one section name.
+struct SectionSlot {
+    parser: SectionParser,
+    sink: Box<dyn SectionSink>,
+    headers: usize,
+    first_line: u32,
+}
+
+impl SectionSlot {
+    fn new(name: &str, first_line: u32, key: &str) -> Self {
+        Self {
+            parser: SectionParser::new(name),
+            sink: new_sink(name, key),
+            headers: 0,
+            first_line,
+        }
+    }
+}
+
+/// The per-block half of a section parser. State that must survive a repeated
+/// header lives here, not in the parser, so the dispatch loop can keep one
+/// builder per section name.
+pub(crate) trait SectionSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        expander: &Expander<'_>,
+    );
+
+    /// Runs once, after the last block with this section name.
+    fn finish(&mut self, _definition: &mut Definition, _section: &mut SectionParser) {}
+}
+
+/// Adapts a section parser with no cross-block state to [`SectionSink`].
+struct FnSink(fn(&mut Definition, &mut SectionParser, &[(u32, &str)], &Expander<'_>));
+
+impl SectionSink for FnSink {
+    fn feed(
+        &mut self,
+        definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        expander: &Expander<'_>,
+    ) {
+        (self.0)(definition, section, lines, expander);
+    }
+}
+
+/// An unknown section: raw lines accumulate across repeated headers and become
+/// one [`UnsupportedSection`] at the end of the document.
+struct UnknownSink {
+    name: String,
+    lines: Vec<String>,
+}
+
+impl SectionSink for UnknownSink {
+    fn feed(
+        &mut self,
+        _definition: &mut Definition,
+        section: &mut SectionParser,
+        lines: &[(u32, &str)],
+        _expander: &Expander<'_>,
+    ) {
+        for (_, text) in lines {
+            section.total = section.total.saturating_add(1);
+            self.lines.push((*text).to_owned());
+        }
+        section.kept_raw = true;
+    }
+
+    fn finish(&mut self, definition: &mut Definition, _section: &mut SectionParser) {
+        definition
+            .unsupported
+            .push(crate::model::UnsupportedSection {
+                name: self.name.clone(),
+                lines: std::mem::take(&mut self.lines),
+            });
+    }
+}
+
+/// Preamble attributes before the first header, which some definitions have.
+fn parse_preamble(
     definition: &mut Definition,
     section: &mut SectionParser,
     lines: &[(u32, &str)],
-    expander: &Expander<'_>,
+    _expander: &Expander<'_>,
 ) {
-    match section.name.to_ascii_lowercase().as_str() {
-        "megatune" | "tunerstudio" => constants::parse_identification(definition, section, lines),
-        "settinggroups" => dialogs::parse_setting_groups(definition, section, lines),
-        "pcvariables" => constants::parse_pc_variables(definition, section, lines, expander),
-        "constants" => constants::parse_constants(definition, section, lines, expander),
-        "constantsextensions" | "constantextensions" | "defaults" => {
-            misc::parse_extensions(definition, section, lines);
+    for (line, text) in lines {
+        section.count_entry();
+        if let Some((key, value)) = crate::fields::split_assignment(text) {
+            definition.comms.raw.insert(
+                key.trim_ascii().to_ascii_lowercase(),
+                value.trim_ascii().to_owned(),
+            );
+            section.understand(*line);
+        } else {
+            section.unrecognized_line(*line, text);
         }
-        "outputchannels" => channels::parse_channels(definition, section, lines, expander),
-        "burstmode" => channels::parse_burst_mode(definition, section, lines),
-        "tableeditor" => editors::parse_tables(definition, section, lines),
-        "curveeditor" => editors::parse_curves(definition, section, lines),
-        "gaugeconfigurations" => dashboard::parse_gauges(definition, section, lines),
-        "frontpage" => dashboard::parse_front_page(definition, section, lines),
-        "userdefined" | "uidialogs" => dialogs::parse_dialogs(definition, section, lines),
-        "menu" => dialogs::parse_menu(definition, section, lines),
-        "settingcontexthelp" => dialogs::parse_context_help(definition, section, lines),
-        "keyactions" => dialogs::parse_key_actions(definition, section, lines),
-        "controllercommands" => misc::parse_controller_commands(definition, section, lines),
-        "referencetables" => misc::parse_reference_tables(definition, section, lines),
-        "datalog" => misc::parse_datalog(definition, section, lines),
-        "loggerdefinition" => sections::parse_loggers(definition, section, lines),
+    }
+}
+
+/// Builds the sink for a section name. Stateless parsers share `FnSink`; only
+/// builders with cross-block state get their own type.
+fn new_sink(name: &str, key: &str) -> Box<dyn SectionSink> {
+    match key {
+        "constants" => Box::new(constants::ConstantsSink::default()),
+        "pcvariables" => Box::new(constants::PcVariablesSink::default()),
+        "tableeditor" => Box::new(editors::TablesSink::default()),
+        "curveeditor" => Box::new(editors::CurvesSink::default()),
+        "settinggroups" => Box::new(dialogs::SettingGroupsSink::default()),
+        "userdefined" | "uidialogs" => Box::new(dialogs::DialogsSink::default()),
+        "menu" => Box::new(dialogs::MenuSink::default()),
+        "gaugeconfigurations" => Box::new(dashboard::GaugesSink::default()),
+        "referencetables" => Box::new(misc::ReferenceTablesSink::default()),
+        "datalog" => Box::new(misc::DatalogSink::default()),
+        "loggerdefinition" => Box::new(sections::LoggersSink::default()),
         "porteditor" | "ftpbrowser" | "veanalyze" | "wueanalyze" | "gammae" | "datalogviews"
-        | "tools" => sections::parse_config_section(definition, section, lines),
-        "" => {
-            // File-level attributes before the first header. rusEFI opens with
-            // `enable2ndByteCanID = false`; keep it, do not reject the file.
-            for (line, text) in lines {
-                section.count_entry();
-                if let Some((key, value)) = crate::fields::split_assignment(text) {
-                    definition.comms.raw.insert(
-                        key.trim_ascii().to_ascii_lowercase(),
-                        value.trim_ascii().to_owned(),
-                    );
-                    section.understand(*line);
-                } else {
-                    section.unrecognized_line(*line, text);
-                }
-            }
+        | "tools" => Box::new(sections::ConfigSectionSink::new(name)),
+        "" => Box::new(FnSink(parse_preamble)),
+        "megatune" | "tunerstudio" => Box::new(FnSink(|definition, section, lines, _| {
+            constants::parse_identification(definition, section, lines);
+        })),
+        "constantsextensions" | "constantextensions" | "defaults" => {
+            Box::new(FnSink(|definition, section, lines, _| {
+                misc::parse_extensions(definition, section, lines);
+            }))
         }
-        _ => {
-            // Unknown section: data, never an error (ADR-0006 decision 4).
-            let mut raw = Vec::new();
-            for (line, text) in lines {
-                section.total = section.total.saturating_add(1);
-                raw.push((*text).to_owned());
-                let _ = line;
-            }
-            definition
-                .unsupported
-                .push(crate::model::UnsupportedSection {
-                    name: section.name.clone(),
-                    lines: raw,
-                });
-            section.kept_raw = true;
-        }
+        "outputchannels" => Box::new(FnSink(channels::parse_channels)),
+        "burstmode" => Box::new(FnSink(|definition, section, lines, _| {
+            channels::parse_burst_mode(definition, section, lines);
+        })),
+        "frontpage" => Box::new(FnSink(|definition, section, lines, _| {
+            dashboard::parse_front_page(definition, section, lines);
+        })),
+        "settingcontexthelp" => Box::new(FnSink(|definition, section, lines, _| {
+            dialogs::parse_context_help(definition, section, lines);
+        })),
+        "keyactions" => Box::new(FnSink(|definition, section, lines, _| {
+            dialogs::parse_key_actions(definition, section, lines);
+        })),
+        "controllercommands" => Box::new(FnSink(|definition, section, lines, _| {
+            misc::parse_controller_commands(definition, section, lines);
+        })),
+        _ => Box::new(UnknownSink {
+            name: name.to_owned(),
+            lines: Vec::new(),
+        }),
     }
 }
 
@@ -412,7 +549,17 @@ impl SectionParser {
         }
     }
 
-    fn finish(self, definition: &mut Definition, coverage: &mut Coverage) {
+    /// Moves this block's diagnostics into the file-wide report. Called after
+    /// every block so the report follows source order instead of grouping by
+    /// section name.
+    fn flush_diagnostics(&mut self, definition: &mut Definition) {
+        let diagnostics = std::mem::take(&mut self.diagnostics);
+        extend_bounded(&mut definition.diagnostics, diagnostics);
+    }
+
+    /// Records coverage once the document is complete, using the totals
+    /// accumulated across every block with this name.
+    fn finish_coverage(&self, coverage: &mut Coverage) {
         let understood = self.understood.len();
         let entries = self.total;
         let unsupported = entries.saturating_sub(understood);
@@ -428,7 +575,6 @@ impl SectionParser {
                 unsupported,
             });
         }
-        extend_bounded(&mut definition.diagnostics, self.diagnostics);
     }
 }
 
@@ -1002,6 +1148,27 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_unknown_header_keeps_one_section_with_all_its_lines() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[EventTriggers]
+first = 1
+[Constants]
+page = 1
+[EventTriggers]
+second = 2
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.unsupported.len(), 1);
+        let section = &definition.unsupported[0];
+        assert_eq!(section.name, "EventTriggers");
+        assert_eq!(section.lines, ["first = 1", "second = 2"]);
+    }
+
+    #[test]
     fn an_entry_outside_its_page_is_an_error_with_a_line_number() {
         let text = "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 4\npage = 1\nwide = array, U16, 3, [4], \"x\", 1.0, 0\n";
 
@@ -1135,6 +1302,195 @@ yBins = y
             .map(|diagnostic| diagnostic.line)
             .collect();
         assert_eq!(lines, vec![Some(7), Some(14)]);
+    }
+
+    #[test]
+    fn a_split_section_reports_diagnostics_in_source_order() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+page = nope
+[OutputChannels]
+maxUnusedRuntimeRange = nope
+[Constants]
+page = nope
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        // The second `[Constants]` block sits after `[OutputChannels]` in the
+        // file, so its warning must be reported after the channel one. Grouping
+        // diagnostics by section name used to produce [4, 8, 6].
+        let lines: Vec<u32> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code.as_ref(), "bad-page" | "bad-number"))
+            .filter_map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(lines, vec![4, 6, 8]);
+    }
+
+    #[test]
+    fn a_final_table_merge_note_precedes_later_sections() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[TableEditor]
+table = t, m, \"T\"
+table = t, m, \"T\"
+[Constants]
+page = nope
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        // The merge note is emitted by the sink's final work, but its line is
+        // before the constants warning. It must not be pushed behind it.
+        let lines: Vec<u32> = definition
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code.as_ref(), "merged-table" | "bad-page"))
+            .filter_map(|diagnostic| diagnostic.line)
+            .collect();
+        assert_eq!(lines, vec![5, 7]);
+    }
+
+    #[test]
+    fn a_split_constants_block_keeps_the_page_cursor() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+[OutputChannels]
+c = scalar, U08, 0, \"u\", 1, 0
+[Constants]
+page = 1
+b = scalar, U08, nextOffset, \"u\", 1, 0, 0, 255, 0
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        // Restating `page = 1` continues the same page instead of starting a
+        // new one, so `nextOffset` follows the cursor left by `a`.
+        assert_eq!(
+            definition
+                .constant("b")
+                .and_then(|constant| constant.address),
+            Some(1)
+        );
+        assert!(
+            !definition
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "offset-outside-page")
+        );
+    }
+
+    #[test]
+    fn a_split_constants_keeps_constant_order() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+a = scalar, U08, 0, \"u\", 1, 0, 0, 255, 0
+[OutputChannels]
+[Constants]
+b = scalar, U08, nextOffset, \"u\", 1, 0, 0, 255, 0
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        let names: Vec<&str> = definition.constants.iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(definition.constant("a").and_then(|c| c.address), Some(0));
+        assert_eq!(definition.constant("b").and_then(|c| c.address), Some(1));
+    }
+
+    #[test]
+    fn a_split_dialog_continues_its_row_list() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[UiDialogs]
+dialog = d, \"Title\", yAxis
+ field = \"A\", a
+[UiDialogs]
+dialog = d, \"Title 2\", yAxis
+ field = \"B\", b
+ field = \"C\", c
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.dialogs.len(), 1);
+        let dialog = definition.dialogs.get("d").expect("the merged dialog");
+        assert_eq!(dialog.title.as_deref(), Some("Title 2"));
+        let fields: Vec<&str> = dialog
+            .rows
+            .iter()
+            .map(|row| row.fields[1].as_str())
+            .collect();
+        assert_eq!(fields, ["a", "b", "c"]);
+
+        let merged = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "merged-section")
+            .expect("the repeated header is reported");
+        assert_eq!(merged.line, Some(6));
+        assert!(
+            merged
+                .message
+                .contains("its entries continue the block at line 3")
+        );
+    }
+
+    #[test]
+    fn a_split_table_editor_continues_the_same_table() {
+        let text = "\
+[MegaTune]
+signature = \"x\"
+[TableEditor]
+table = t, m, \"T\"
+xBins = x
+[CurveEditor]
+curve = c, \"C\"
+xBins = cx
+yBins = cy
+[TableEditor]
+table = t, m, \"T\"
+yBins = y
+zBins = z
+";
+
+        let definition = parse_str(text, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(definition.tables.len(), 1);
+        let table = definition.tables.get("t").expect("the merged table");
+        assert_eq!(
+            table.x_bins.as_ref().map(|axis| axis.array.as_str()),
+            Some("x")
+        );
+        assert_eq!(
+            table.y_bins.as_ref().map(|axis| axis.array.as_str()),
+            Some("y")
+        );
+        assert_eq!(table.z_bins.as_deref(), Some("z"));
+
+        let merged = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "merged-table")
+            .expect("the repeated declaration is reported");
+        assert_eq!(merged.line, Some(11));
     }
 
     #[test]
@@ -1508,6 +1864,28 @@ host = \"192.168.0.1\"
         assert_eq!(ports.entries[1].fields[1], ">");
         assert_eq!(definition.config_sections[1].name, "FTPBrowser");
         assert_eq!(definition.unsupported.len(), 0);
+    }
+
+    #[test]
+    fn a_repeated_config_header_appends_to_one_section() {
+        let definition = parse(
+            "\
+[MegaTune]
+signature = \"x\"
+[PortEditor]
+pins = 1, 2, 3
+[OutputChannels]
+[PortEditor]
+watched = { rpm }, >, 3000
+",
+        );
+
+        assert_eq!(definition.config_sections.len(), 1);
+        let ports = &definition.config_sections[0];
+        assert_eq!(ports.name, "PortEditor");
+        assert_eq!(ports.entries.len(), 2);
+        assert_eq!(ports.entries[0].fields, vec!["1", "2", "3"]);
+        assert_eq!(ports.entries[1].fields[1], ">");
     }
 
     #[test]
