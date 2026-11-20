@@ -334,7 +334,7 @@ struct SectionSlot {
 }
 
 impl SectionSlot {
-    fn new(name: &str, sources: &[SourceFile], first_pos: SourcePos, key: &str) -> Self {
+    fn new(name: &str, sources: &Arc<[SourceFile]>, first_pos: SourcePos, key: &str) -> Self {
         Self {
             parser: SectionParser::new(name, sources),
             sink: new_sink(name, key),
@@ -497,10 +497,10 @@ pub(crate) struct SectionParser {
 }
 
 impl SectionParser {
-    pub(crate) fn new(name: &str, sources: &[SourceFile]) -> Self {
+    pub(crate) fn new(name: &str, sources: &Arc<[SourceFile]>) -> Self {
         Self {
             name: name.to_owned(),
-            sources: Arc::from(sources),
+            sources: Arc::clone(sources),
             understood: BTreeSet::new(),
             total: 0,
             reported_keys: BTreeSet::new(),
@@ -2046,6 +2046,27 @@ yBins = otherBins, secondChannel
             .expect("the nested file's bad line is reported");
         assert_eq!(diagnostic.source.as_deref(), Some("engine/pins.inc"));
         assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_named_top_file_appears_in_its_own_diagnostics() {
+        let resolver = |_: IncludeRequest<'_>| None;
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\npage = nope\n",
+            &SettingsContext::new(),
+            "custom.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "bad-page")
+            .expect("the bad line is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("custom.ini"));
+        assert_eq!(diagnostic.line, Some(4));
+        assert!(diagnostic.to_string().starts_with("custom.ini:4: warning:"));
     }
 
     #[test]
