@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use oxtuner_ini::expr::EvalContext;
 use oxtuner_ini::{ChannelKind, DataType, Definition};
-use oxtuner_tune::{EntryShape, Owner, Tune, TuneLayout, Values, VariableSpec};
+use oxtuner_tune::{EntryShape, Owner, PageRebuild, Tune, TuneLayout, Values, VariableSpec};
 
 use crate::check::{IssueKind, LoadReport, check_page_data};
 use crate::msq::{Entry, Msq};
@@ -234,28 +234,59 @@ fn reconcile_pages(
         if names.is_empty() && !has_alias {
             continue;
         }
-        if layout.page_has_ambiguous_overlap(page.page) {
-            // The page cannot be rebuilt without declaration order choosing a
-            // winner, so the file's values stand. A view the file did not carry
-            // still follows the bytes its owner holds.
+        // The one answer to "can the codec rebuild this page at all", shared
+        // with the settle path. Such a page keeps the values it has, but a view
+        // is not a value of its own: it follows the bytes its owner holds, so
+        // it is derived either way and only the numbers and text stand still.
+        let verdict = layout.page_rebuild(page.page);
+        if verdict != PageRebuild::Allowed {
             if let Err(error) = layout.derive_views(page.page, tune, applied) {
                 report.warn(
                     IssueKind::ValueSkipped,
                     format!("page {}: {error}", page.page),
                 );
             }
-            tracing::debug!(
-                page = page.page.get(),
-                "constants share bytes with no owner; the page is not reconciled"
-            );
+            match verdict {
+                // The page cannot be rebuilt without declaration order choosing
+                // a winner, so the file's values stand.
+                PageRebuild::Ambiguous => tracing::debug!(
+                    page = page.page.get(),
+                    "constants share bytes with no owner; the page is not reconciled"
+                ),
+                // A definition quirk, not a user problem: the page keeps the
+                // file's values instead of being rebuilt through the overlap.
+                PageRebuild::TextOverlap => tracing::debug!(
+                    page = page.page.get(),
+                    "a text field overlaps another value; the page is not reconciled"
+                ),
+                PageRebuild::Allowed => {}
+            }
             continue;
         }
-        if layout.page_has_text_overlap(page.page) {
-            // A definition quirk, not a user problem: the page keeps the file's
-            // values instead of being rebuilt through the overlap.
+
+        // Two values for one set of bytes have no single answer to give.
+        // Rebuilding the page would pick one by the order the file lists them
+        // in, so the page is left as loaded and the caller decides what to do
+        // about it. That can be the file stating two answers, or the declared
+        // ranges clamping one value into two; the message names the pair and
+        // covers both, because the caller treats them the same.
+        let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
+        let clash = layout
+            .value_conflicts(page.page, tune)
+            .into_iter()
+            .find(|conflict| carried(&conflict.first) && carried(&conflict.second));
+        if let Some(conflict) = clash {
+            report.warn(
+                IssueKind::ValueSkipped,
+                format!(
+                    "page {}: the values for `{}` and `{}` cannot both stand within their \
+                     declared ranges over the bytes they share, so the page is left as loaded",
+                    page.page, conflict.first, conflict.second
+                ),
+            );
             tracing::debug!(
                 page = page.page.get(),
-                "a text field overlaps another value; the page is not reconciled"
+                "the file carries values the shared bytes cannot both hold; the page is not reconciled"
             );
             continue;
         }
@@ -271,8 +302,11 @@ fn reconcile_pages(
             oxtuner_tune::decode_page(layout, page.page, &patched, &mut decoded)?;
 
             // The values the file wrote, the owners whose bytes a view wrote,
-            // and every view on the page follow the decoded result.
-            let mut moved: Vec<&str> = names.clone();
+            // every view on the page, and every constant that shares bytes with
+            // any of those follow the decoded result. Moving one constant moves
+            // the bytes its neighbours also claim, and a neighbour left behind
+            // would hold a value the rebuild just replaced.
+            let mut moved: Vec<&str> = layout.names_sharing_bytes_with(&names);
             for name in &names {
                 if let Some(owner) = layout.alias_owner(name)
                     && !moved.contains(&owner)
@@ -1134,6 +1168,51 @@ fuelLoadRes = { ((algorithm == 0) || (algorithm == 2)) ? 2.000 : 0.500 }
         PARSED.get_or_init(|| {
             parse_str(CHAINED_DEFINITION, &SettingsContext::new()).expect("definition parses")
         })
+    }
+
+    #[test]
+    fn a_file_that_states_two_values_for_one_byte_keeps_them_as_written() {
+        // `first` and `second` cover the same byte and the file gives them
+        // different values. Rebuilding the page would drop one of them in
+        // favour of the other by the order the file lists them in, so the page
+        // is left as the file wrote it and the caller decides what to do.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+second = scalar, U08, 0, \"x\", 1, 0, 0, 255, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let msq = Msq::parse(
+            r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="8">
+        <constant name="first">100.0</constant>
+        <constant name="second">200.0</constant>
+    </page>
+</msq>"#
+                .as_bytes(),
+        )
+        .expect("the tune parses");
+
+        let loaded = load(&msq, &definition);
+
+        assert_eq!(
+            loaded.tune.raw_at("first", 0).expect("the file wrote it"),
+            100.0
+        );
+        assert_eq!(
+            loaded.tune.raw_at("second", 0).expect("the file wrote it"),
+            200.0
+        );
     }
 
     #[test]

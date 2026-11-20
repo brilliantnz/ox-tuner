@@ -27,7 +27,7 @@ use oxtuner_datalog::{LogColumn, LogStatus, Logger};
 use oxtuner_ini::Definition;
 use oxtuner_project::{DefinitionSource, Project};
 use oxtuner_protocol::{BehaviorKind, LinkMode};
-use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, decode_page, patch_page};
+use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, ValueConflict, decode_page, patch_page};
 
 use crate::contract::{
     AxisEdit, BurnReport, CellEdit, CommandRequest, ConflictResolution, ConnectionView,
