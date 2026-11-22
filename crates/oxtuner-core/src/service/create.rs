@@ -28,7 +28,9 @@ use super::*;
 pub(super) enum Stage {
     /// The signature reply has not arrived yet.
     Signature,
-    /// The signature matched and every page was requested.
+    /// The signature matched and the optional version query is in flight.
+    Version,
+    /// The version query is done and every page was requested.
     Pages,
     /// The pages decoded, so the project can be written.
     Ready,
@@ -156,6 +158,40 @@ pub(super) fn signature_reached(
         ));
     }
 
+    if let Some(command) = live.connection.version_command.clone() {
+        create.stage = Stage::Version;
+        return live
+            .request(
+                create.op,
+                PendingKind::CreateVersion,
+                IoOp::Version { command },
+            )
+            .map_err(|error| error.to_string());
+    }
+
+    begin_page_read(create, live)
+}
+
+/// Records the optional version reply and starts the page read.
+///
+/// A failed query is diagnostic-only: the create can continue with the
+/// signature as its firmware identity.
+pub(super) fn version_reached(
+    create: &mut PendingCreate,
+    live: &mut Live,
+    text: Option<String>,
+) -> Result<(), String> {
+    if let Some(text) = text
+        && !text.trim().is_empty()
+    {
+        live.connection.version_text = Some(text);
+    }
+
+    begin_page_read(create, live)
+}
+
+/// Queues every page and marks the create ready to decode.
+fn begin_page_read(create: &mut PendingCreate, live: &mut Live) -> Result<(), String> {
     create.stage = Stage::Pages;
     live.request(create.op, PendingKind::CreateRead, IoOp::ReadAll)
         .map_err(|error| error.to_string())
@@ -225,11 +261,14 @@ pub(super) fn finish(
     let seed = live
         .as_ref()
         .and_then(|connection| connection.images.standalone.as_deref());
+    let firmware_text = live
+        .as_ref()
+        .and_then(|connection| connection.connection.version_text.as_deref());
     let root = create.prepared.root().to_path_buf();
 
     match create
         .prepared
-        .create(seed, oxtuner_project::WritePolicy::Full)
+        .create(seed, oxtuner_project::WritePolicy::Full, firmware_text)
     {
         Ok(project) => adopt_project(
             project,

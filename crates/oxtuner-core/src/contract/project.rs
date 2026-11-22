@@ -346,6 +346,12 @@ pub struct ConnectionView {
     pub custom: bool,
     /// The signature the ECU reported.
     pub signature: String,
+    /// The firmware version text the ECU answered, when it did.
+    ///
+    /// This comes from the definition's `versionInfo` command, not from the
+    /// signature and not from the registry's display name. `None` means the
+    /// controller did not answer or the definition has no command.
+    pub version_text: Option<String>,
     /// The signature the definition expects.
     pub definition_signature: String,
     /// Whether they match.
@@ -451,6 +457,7 @@ mod tests {
                 port: port.to_owned(),
                 custom: false,
                 signature: signature.to_owned(),
+                version_text: None,
                 definition_signature: signature.to_owned(),
                 verdict: SignatureVerdict::Match,
                 read_only: false,

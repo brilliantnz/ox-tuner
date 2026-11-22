@@ -515,6 +515,8 @@ pub(crate) struct ScaffoldOptions<'a> {
     pub write_stamp: Option<&'a str>,
     /// The setting flags the `<settings>` snapshot records.
     pub flags: &'a [String],
+    /// The firmware text the controller answered, when it did.
+    pub firmware_text: Option<&'a str>,
 }
 
 /// Which entries a scaffold writes.
@@ -548,6 +550,13 @@ fn writes_entry(
     tune: &Tune,
     spec: &VariableSpec,
 ) -> bool {
+    // The CAN id lives in `project.properties` (`canId`), matching the
+    // reference writer; a tune entry would be a second source of truth. The
+    // working image keeps the value for the page protocol.
+    if spec.name.eq_ignore_ascii_case("tsCanId") {
+        return false;
+    }
+
     match policy {
         WritePolicy::Full => !invalid_first(definition, spec),
         WritePolicy::SparseFromDefaults => {
@@ -778,6 +787,7 @@ impl Msq {
             policy,
             write_stamp,
             flags,
+            firmware_text,
         } = options;
 
         if policy == WritePolicy::SparseFromDefaults && seed.is_some() {
@@ -820,7 +830,10 @@ impl Msq {
 
         let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
         push_child(&mut root.children, bibliography_element(write_stamp));
-        push_child(&mut root.children, version_element(definition));
+        push_child(
+            &mut root.children,
+            version_element(definition, firmware_text),
+        );
 
         let pc_page = if pc_entries.is_empty() {
             Element::self_closing("page", &[])
@@ -1446,16 +1459,25 @@ fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>)
 
 /// The `<versionInfo>` header for a scaffolded tune.
 ///
-/// `firmwareInfo` carries the signature: the INI's `versionInfo` key is the
-/// interrogate command (Speeduino answers `"S"` with the signature), not
-/// firmware text, so only the signature describes the firmware.
-fn version_element(definition: &Definition) -> Element {
+/// `firmwareInfo` prefers the text the controller answered for the definition's
+/// `versionInfo` command; without one it falls back to the signature, which is
+/// still a truthful firmware identity. The signature attribute is always the
+/// signature.
+fn version_element(definition: &Definition, firmware_text: Option<&str>) -> Element {
     let pages = definition.pages.len().to_string();
+    let firmware = firmware_text
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(definition.signature.as_str());
+    // The reference sample spells the same value `Speeduino+2025.01.7`; the
+    // `+` is its writer's encoding, not part of the ECU reply. Keep the reply
+    // verbatim: both readers accept the space form and it is what the
+    // controller actually reported.
     Element::self_closing(
         "versionInfo",
         &[
             ("fileFormat", SCAFFOLD_FILE_FORMAT),
-            ("firmwareInfo", definition.signature.as_str()),
+            ("firmwareInfo", firmware),
             ("nPages", &pages),
             ("signature", definition.signature.as_str()),
         ],
@@ -1584,6 +1606,7 @@ mod tests {
                 policy,
                 write_stamp: None,
                 flags: &[],
+                firmware_text: None,
             },
         )
     }
@@ -1974,6 +1997,7 @@ page = 2
 b = scalar, U08, 0, "", 1, 0, 0, 255, 0
 
 [PcVariables]
+tsCanId = bits, U08, [0:0], "CAN 0", "CAN 1"
 pcDefault = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
 pcZero = scalar, U16, 2, "", 1, 0, 0, 65535, 0
 pcNoDefault = scalar, U16, 4, "", 1, 0, 0, 65535, 0
@@ -2010,6 +2034,10 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
         assert!(
             !names.iter().any(|name| name == "invalidField"),
             "an INVALID-first field is not persisted: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "tsCanId"),
+            "the CAN id lives in properties, not the tune: {names:?}"
         );
         for name in [
             "scalarDefault",

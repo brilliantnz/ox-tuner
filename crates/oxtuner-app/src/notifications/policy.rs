@@ -248,6 +248,7 @@ mod tests {
             port: "/dev/tty.usbmodem1".into(),
             custom: false,
             signature: "speeduino-2024".into(),
+            version_text: None,
             definition_signature: "speeduino-2024".into(),
             verdict: oxtuner_core::SignatureVerdict::Match,
             read_only: false,

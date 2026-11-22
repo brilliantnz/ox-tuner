@@ -37,6 +37,11 @@ pub struct SimConfig {
     pub faults: Vec<FaultRule>,
     /// Pages preloaded with bytes before the first read.
     pub pages: Vec<(u8, Vec<u8>)>,
+    /// Firmware text to answer the definition's `versionInfo` command with.
+    ///
+    /// `None` leaves that command unmatched, so the host sees a silent
+    /// controller and keeps the signature as its firmware identity.
+    pub version_text: Option<String>,
     /// How many realtime reads report `burnPending` after a burn.
     ///
     /// A real board answers a burn before the EEPROM write starts, so the bit
@@ -51,6 +56,7 @@ impl Default for SimConfig {
             seed: 0x5EED_2025,
             faults: Vec::new(),
             pages: Vec::new(),
+            version_text: None,
             burn_pending_samples: 0,
         }
     }
@@ -63,6 +69,7 @@ impl From<&Scenario> for SimConfig {
             seed: scenario.seed.unwrap_or(0x5EED_2025),
             faults: scenario.faults.clone(),
             pages: scenario.pages.clone(),
+            version_text: None,
             burn_pending_samples: 0,
         }
     }
@@ -199,7 +206,7 @@ impl SimTransport {
         let signature = config
             .signature
             .unwrap_or_else(|| definition.signature.clone());
-        let ecu = SimEcu::new(definition, signature)?;
+        let ecu = SimEcu::with_version(definition, signature, config.version_text)?;
         let sizes: Vec<(u8, u32)> = definition
             .pages
             .iter()
@@ -412,6 +419,13 @@ impl SimTransport {
                     self.ecu.signature.clone()
                 }
             }
+            Request::Version => {
+                // Speeduino prefixes its product string with a serial return
+                // code; the host strips controls before reading the text.
+                let mut payload = vec![0];
+                payload.extend_from_slice(&self.ecu.version_text);
+                payload
+            }
             Request::ReadPage {
                 page,
                 offset,
@@ -545,7 +559,9 @@ fn data_payload(reply_code: ReplyCode, data: Vec<u8>, framed: bool) -> Vec<u8> {
 /// The operation a request maps to, for fault lookup.
 fn operation_of(request: &Request<'_>) -> SimOp {
     match request {
-        Request::Signature => SimOp::Signature,
+        // A controller that cannot answer its signature cannot answer the
+        // version command either, so both share the signature fault class.
+        Request::Signature | Request::Version => SimOp::Signature,
         Request::ReadPage { .. } => SimOp::ReadPage,
         Request::WritePage { .. } => SimOp::WritePage,
         Request::Burn { .. } => SimOp::Burn,

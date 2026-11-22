@@ -207,6 +207,8 @@ app:
       en: Close
     status_connected:
       en: 'Connected · %{signature}'
+    firmware_version:
+      en: 'Firmware: %{version}'
     status_read_only:
       en: Read-only
     status_testing:
