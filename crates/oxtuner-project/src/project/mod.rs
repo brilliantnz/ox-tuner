@@ -333,7 +333,7 @@ pub use create::{
     ConnectionSeed, CreateRequest, accepts_definition, ensure_target_free, split_destination,
     validate_project_name,
 };
-pub(crate) use open::{read_include, read_include_canonical};
+pub(crate) use open::{normalize_include_name, read_include, read_include_canonical};
 
 /// The definition path as stored in the sidecar: relative to the project root.
 fn sidecar_definition_path(root: &Path, definition: &Path) -> String {

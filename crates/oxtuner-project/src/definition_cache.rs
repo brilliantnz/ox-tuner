@@ -54,7 +54,7 @@ use oxtuner_ini::{
 use serde::{Deserialize, Serialize};
 
 use crate::hash;
-use crate::project::read_include_canonical;
+use crate::project::{normalize_include_name, read_include_canonical};
 
 /// Identifies the definition cache envelope. Keep it at its initial value while
 /// the app is experimental: the serialized model is expected to change, so
@@ -596,16 +596,6 @@ fn prune(directory: &Path) {
     }
 }
 
-/// Lexical identity for a path that did not resolve. Component checks still
-/// happen in `read_include_canonical`, so this is only for the cache key.
-fn normalize_include_name(name: &str) -> String {
-    name.replace('\\', "/")
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 /// Collects the `#include` answers while the preprocessor resolves them.
 pub(crate) struct IncludeRecorder {
     base: PathBuf,
@@ -626,9 +616,14 @@ impl IncludeRecorder {
     pub(crate) fn resolve(&self, request: IncludeRequest<'_>) -> Option<Include> {
         let resolved = read_include_canonical(&self.base, request.path);
         // A missing file is still an input: the preprocessor reports its
-        // absence, and a file created later must miss the cache.
+        // absence, and a file created later must miss the cache. A refused
+        // name keeps a separator-normalized spelling, so both ways of writing
+        // it share one cache key.
         let identity = resolved.as_ref().map_or_else(
-            || normalize_include_name(request.path),
+            || {
+                normalize_include_name(request.path)
+                    .unwrap_or_else(|| request.path.replace('\\', "/"))
+            },
             |(path, _)| path.clone(),
         );
         let fingerprint =
@@ -847,6 +842,37 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         let recorder = IncludeRecorder::new(&fs::canonicalize(&base).expect("canonical base"));
         assert!(recorder.resolve(include("engine\\pins.inc")).is_none());
+        let includes = recorder.finish();
+        assert_eq!(includes.len(), 1);
+        assert_eq!(includes[0].path, "engine/pins.inc");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_backslash_include_resolves_and_parses() {
+        let root = temp_dir("backslash-parsed");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(base.join("engine")).unwrap();
+        fs::write(
+            base.join("engine/pins.inc"),
+            "[Constants]\nnPages = 1\npageSize = 64\npage = 1\npinValue = scalar, U08, 0, \"\", 1, 0, 0, 255, 0\n",
+        )
+        .unwrap();
+        let recorder = IncludeRecorder::new(&fs::canonicalize(&base).expect("canonical base"));
+        let resolver = |request: IncludeRequest<'_>| recorder.resolve(request);
+
+        let definition = oxtuner_ini::parse_str_with_source(
+            "[MegaTune]\nsignature = \"cache test\"\n#include engine\\pins.inc\n",
+            &settings(),
+            "speeduino.ini",
+            &resolver,
+        )
+        .expect("the backslash include parses");
+
+        assert!(
+            definition.constants.contains("pinValue"),
+            "the included file's constants join the definition"
+        );
         let includes = recorder.finish();
         assert_eq!(includes.len(), 1);
         assert_eq!(includes[0].path, "engine/pins.inc");
