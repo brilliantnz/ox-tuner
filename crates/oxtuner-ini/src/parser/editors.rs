@@ -37,8 +37,8 @@ impl SectionSink for TablesSink {
             let fields = split_fields(value);
 
             if lowered == "table" {
-                if let Some((table, _)) = self.current.take() {
-                    insert_table(definition, section, table, *line);
+                if let Some((table, origin)) = self.current.take() {
+                    insert_table(definition, section, table, origin, *line);
                 }
                 section.understand(*line);
 
@@ -107,7 +107,7 @@ impl SectionSink for TablesSink {
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
         if let Some((table, pos)) = self.current.take() {
-            insert_table(definition, section, table, pos);
+            insert_table(definition, section, table, pos, pos);
         }
     }
 }
@@ -183,7 +183,8 @@ fn insert_table(
     definition: &mut Definition,
     section: &mut SectionParser,
     table: Table,
-    pos: SourcePos,
+    origin: SourcePos,
+    site: SourcePos,
 ) {
     let id = table.id.clone();
     if let Some(existing) = definition.tables.get_mut(&id) {
@@ -191,10 +192,11 @@ fn insert_table(
         section.note(
             "merged-table",
             format!("table `{id}` is declared more than once; its fields are merged"),
-            pos,
+            site,
         );
     } else {
         definition.tables.insert(&id, table);
+        section.record_origin(&id, origin);
     }
 }
 
@@ -306,8 +308,8 @@ impl SectionSink for CurvesSink {
             let fields = split_fields(value);
 
             if lowered == "curve" {
-                if let Some((curve, _)) = self.current.take() {
-                    insert_curve(definition, section, curve, *line);
+                if let Some((curve, origin)) = self.current.take() {
+                    insert_curve(definition, section, curve, origin, *line);
                 }
                 section.understand(*line);
                 let Some(name) = fields.first().copied() else {
@@ -392,7 +394,7 @@ impl SectionSink for CurvesSink {
 
     fn finish(&mut self, definition: &mut Definition, section: &mut SectionParser) {
         if let Some((curve, pos)) = self.current.take() {
-            insert_curve(definition, section, curve, pos);
+            insert_curve(definition, section, curve, pos, pos);
         }
     }
 }
@@ -401,7 +403,8 @@ fn insert_curve(
     definition: &mut Definition,
     section: &mut SectionParser,
     curve: Curve,
-    pos: SourcePos,
+    origin: SourcePos,
+    site: SourcePos,
 ) {
     let name = curve.name.clone();
     if let Some(existing) = definition.curves.get_mut(&name) {
@@ -409,10 +412,11 @@ fn insert_curve(
         section.note(
             "merged-curve",
             format!("curve `{name}` is declared more than once; its fields are merged"),
-            pos,
+            site,
         );
     } else {
         definition.curves.insert(&name, curve);
+        section.record_origin(&name, origin);
     }
 }
 
