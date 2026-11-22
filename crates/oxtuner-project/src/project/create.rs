@@ -663,35 +663,52 @@ fn read_definition(path: &Path) -> Result<Vec<u8>, ProjectError> {
 /// flag (`AFR`, `FAHRENHEIT`). The reference writer stores those, so the
 /// project can reproduce the choices it was created with.
 fn chosen_flags(definition: &oxtuner_ini::Definition, settings: &[String]) -> Vec<String> {
-    let declared = |option: &str| {
+    // The declared spelling, so a caller that passes a case variant still
+    // writes the definition's own option name. A flag the file only tests has
+    // no declared spelling; the caller's name is kept (the parser matches it
+    // case-insensitively, and the wizard passes the canonical uppercase form).
+    let declared = |option: &str| -> Option<&str> {
         definition
             .setting_groups
             .values()
             .flat_map(|group| group.options.iter())
-            .any(|candidate| candidate.name.eq_ignore_ascii_case(option))
+            .map(|candidate| candidate.name.as_str())
             // A boolean group's own name is its active flag.
-            || definition.setting_groups.values().any(|group| {
-                group.options.is_empty() && group.name.eq_ignore_ascii_case(option)
-            })
-            // The display choices the wizard offers are only ever tested with
-            // `#if`, never declared as a setting group, so the flags the file
-            // tests count too.
-            || definition
-                .tested_flags
-                .iter()
-                .any(|tested| tested.eq_ignore_ascii_case(option))
+            .chain(
+                definition
+                    .setting_groups
+                    .values()
+                    .filter(|group| group.options.is_empty())
+                    .map(|group| group.name.as_str()),
+            )
+            .find(|candidate| candidate.eq_ignore_ascii_case(option))
+    };
+    let tested = |option: &str| {
+        definition
+            .tested_flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case(option))
     };
 
     let mut flags: Vec<String> = Vec::new();
     for option in settings {
-        if option.eq_ignore_ascii_case("DEFAULT") || !declared(option) {
+        if option.eq_ignore_ascii_case("DEFAULT") {
             continue;
         }
-        if flags.iter().any(|flag| flag.eq_ignore_ascii_case(option)) {
+        let Some(name) = declared(option) else {
+            // The display choices the wizard offers are only ever tested with
+            // `#if`, never declared as a setting group, so a tested flag counts
+            // too.
+            if tested(option) && !flags.iter().any(|flag| flag.eq_ignore_ascii_case(option)) {
+                flags.push(option.clone());
+            }
+            continue;
+        };
+        if flags.iter().any(|flag| flag.eq_ignore_ascii_case(name)) {
             continue;
         }
 
-        flags.push(option.clone());
+        flags.push(name.to_owned());
     }
 
     // A boolean group the user left off writes its explicit off flag.
@@ -1083,6 +1100,16 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
                 "enablehardware_test_OFF".to_owned(),
             ],
             "an active display choice suppresses its negative"
+        );
+        assert_eq!(
+            chosen_flags(&definition, &["RESETCONTROL_STANDARD".to_owned()]),
+            vec![
+                "resetcontrol_standard".to_owned(),
+                "enablehardware_test_OFF".to_owned(),
+                "AFR".to_owned(),
+                "FAHRENHEIT".to_owned(),
+            ],
+            "the file records the definition's spelling, not the caller's"
         );
     }
 
