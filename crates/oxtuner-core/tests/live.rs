@@ -461,6 +461,33 @@ fn connecting_reads_the_optional_firmware_text() {
 }
 
 #[test]
+fn connecting_without_a_version_answer_keeps_the_signature_identity() {
+    let harness = Harness::start();
+    let fixture = FIXTURE.replace(
+        "queryCommand = \"Q\"",
+        "queryCommand = \"Q\"\nversionInfo = \"S\"",
+    );
+    harness
+        .handle
+        .load_definition("versioned.ini", fixture.as_bytes())
+        .expect("queued");
+    harness.wait_loaded();
+
+    // No `version_text`: the simulator leaves the command unanswered, which is
+    // a controller that does not implement `versionInfo`.
+    harness.connect(SimConfig::default());
+    let summary = harness.wait_connected();
+
+    assert_eq!(
+        summary.version_text, None,
+        "a silent controller leaves the version unavailable"
+    );
+    assert_eq!(summary.signature, "speeduino 202501");
+
+    harness.thread.join();
+}
+
+#[test]
 fn a_mismatched_signature_locks_the_session_read_only() {
     let harness = Harness::start();
     harness.load();

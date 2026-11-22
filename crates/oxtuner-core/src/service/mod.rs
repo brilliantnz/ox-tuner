@@ -1248,9 +1248,13 @@ impl Live {
         } else {
             SignatureVerdict::Mismatch
         };
-        self.connection.signature = signature;
         // A reconnect keeps the last version text: the handshake proves the
-        // link, not a different controller. A new session starts with `None`.
+        // link, not a different controller. A changed signature means the
+        // controller is not the one that reported that text, so it is dropped.
+        if self.connection.signature != signature {
+            self.connection.version_text = None;
+        }
+        self.connection.signature = signature;
         self.connection.connected = true;
         self.connection.revision = self.connection.revision.wrapping_add(1);
         self.timers.reconnect = None;

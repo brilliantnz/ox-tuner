@@ -550,9 +550,10 @@ fn writes_entry(
     tune: &Tune,
     spec: &VariableSpec,
 ) -> bool {
-    // The CAN id lives in `project.properties` (`canId`), matching the
-    // reference writer; a tune entry would be a second source of truth. The
-    // working image keeps the value for the page protocol.
+    // The CAN id lives in `project.properties` (`canId`). The TunerStudio
+    // from-ECU sample also persists `tsCanId` in the tune, but that is a
+    // redundant second source of truth; the scaffold omits it and the working
+    // image keeps the value for the page protocol.
     if spec.name.eq_ignore_ascii_case("tsCanId") {
         return false;
     }

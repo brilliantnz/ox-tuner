@@ -126,7 +126,11 @@ impl MsProtocol {
 
 /// The first line of a command reply, trimmed and capped.
 fn reply_text(reply: &[u8]) -> String {
-    let text = String::from_utf8_lossy(reply);
+    // A firmware version is ASCII. A reply that is not valid UTF-8 is a
+    // malformed answer, not text to display with replacement characters.
+    let Ok(text) = std::str::from_utf8(reply) else {
+        return String::new();
+    };
     let line = text
         // A firmware reply often starts with a serial return code byte
         // (`SERIAL_RC_OK`) before the text; it is not part of the version.
@@ -159,6 +163,11 @@ mod tests {
         );
         assert_eq!(reply_text(b"  \r\nnext"), "");
         assert_eq!(reply_text(b""), "");
+        assert_eq!(
+            reply_text(&[0xFF, 0xFE]),
+            "",
+            "an invalid reply is not text"
+        );
     }
 
     #[test]

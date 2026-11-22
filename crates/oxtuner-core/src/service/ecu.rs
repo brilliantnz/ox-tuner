@@ -566,6 +566,10 @@ pub(super) fn on_reply(
             true
         }
         (PendingKind::ConnectVersion, IoOutcome::Failed(failure)) => {
+            if failure.kind == IoFailureKind::LinkLost {
+                connection_lost(live, session, events, latest, failure.message);
+                return true;
+            }
             // Optional metadata: report it and keep the session.
             tracing::warn!(
                 kind = failure.kind.as_str(),
