@@ -311,6 +311,7 @@ mod tests {
             settings: Vec::new(),
             connection: None,
             layout: ProjectLayout::default(),
+            write_stamp: None,
         }
     }
 

@@ -1250,6 +1250,7 @@ mod ecu;
 mod log;
 mod ports;
 mod probe;
+mod stamp;
 mod transfer;
 mod tune;
 

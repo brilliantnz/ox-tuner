@@ -672,7 +672,12 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
-        CommandRequest::CreateProject { request } => {
+        CommandRequest::CreateProject { mut request } => {
+            // The core owns the clock: the project crate only formats the
+            // stamp it is given, so tests can inject an exact one.
+            if request.write_stamp.is_none() {
+                request.write_stamp = Some(stamp::now());
+            }
             // The definition parse and the scaffold write belong on the core
             // thread, never on the UI thread.
             let root = request.root();
@@ -702,7 +707,10 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
-        CommandRequest::CreateProjectFromEcu { request, link } => {
+        CommandRequest::CreateProjectFromEcu { mut request, link } => {
+            if request.write_stamp.is_none() {
+                request.write_stamp = Some(stamp::now());
+            }
             // The read owns the core loop's connection state; the project is
             // written only after every page arrived and decoded.
             if let Some(create) = super::create::begin(op, request, &link, live, events, report) {

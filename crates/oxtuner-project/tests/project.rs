@@ -1253,6 +1253,7 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1317,6 +1318,7 @@ rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::prepare(&request)
         .expect("a one-row table is a legal shape")
@@ -1329,6 +1331,152 @@ rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
         "a declared [4x1] table keeps its shape: {tune}"
     );
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+}
+
+#[test]
+fn creation_writes_the_reference_properties_header_and_rotates_the_backup() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = enablehardware_test, "Enable Hardware Test Page"
+settingGroup = resetcontrol_group, "Reset Control Features"
+settingOption = resetcontrol_standard, "Basic Options Only"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+#if LAMBDA
+lambda_value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#else
+afr_value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+#if CELSIUS
+celsius_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
+#else
+fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+    let sandbox = TempDir::new("create-metadata");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Metadata".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: vec!["resetcontrol_standard".to_owned()],
+        connection: Some(ConnectionSeed {
+            port: "COM6".to_owned(),
+            baud: 115_200,
+        }),
+        layout: ProjectLayout::default(),
+        write_stamp: Some("Sun Nov 22 06:46:58 UTC 2026".to_owned()),
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+    let root = project.root().to_path_buf();
+    drop(project);
+
+    let properties =
+        fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties");
+    assert!(
+        properties.starts_with(
+            "#Project Attributes.\n#Ox Tuner\n#Last Saved on: Sun Nov 22 06:46:58 UTC 2026\n#Sun Nov 22 06:46:58 UTC 2026\n"
+        ),
+        "{properties}"
+    );
+    for key in [
+        "projectName=Metadata",
+        "commPort=COM6",
+        "baudRate=115200",
+        "canId=-1",
+        "firmwareDescription=speeduino 202501",
+        "ecuSettings=resetcontrol_standard|enablehardware_test_OFF|AFR|FAHRENHEIT|",
+        "useCommonDashboardDir=false",
+        "useCommonTuneViewDir=false",
+        "lastDisplayedTuneFile=",
+    ] {
+        assert!(properties.contains(key), "{key} missing: {properties}");
+    }
+
+    let backup =
+        fs::read_to_string(root.join("projectCfg/project.properties.bkup")).expect("the backup");
+    assert!(
+        backup.contains("useCommonDashboardDir=false"),
+        "the first stage already knows the dashboard choice: {backup}"
+    );
+    assert!(backup.contains("commPort=COM6"), "{backup}");
+    assert!(backup.contains("ecuSettings="), "{backup}");
+    for later in ["canId=", "firmwareDescription=", "lastDisplayedTuneFile="] {
+        assert!(
+            !backup.contains(later),
+            "the backup is the first-stage file, so {later} is not in it: {backup}"
+        );
+    }
+
+    let tune = fs::read_to_string(root.join(TUNE_FILE)).expect("the tune");
+    assert!(
+        tune.contains(
+            r#"<bibliography author="Ox Tuner" tuneComment="" writeDate="Sun Nov 22 06:46:58 UTC 2026"/>"#
+        ),
+        "{tune}"
+    );
+    for flag in [
+        "AFR",
+        "FAHRENHEIT",
+        "enablehardware_test_OFF",
+        "resetcontrol_standard",
+    ] {
+        assert!(
+            tune.contains(&format!(r#"<setting name="{flag}" value="{flag}"/>"#)),
+            "{flag} missing: {tune}"
+        );
+    }
+}
+
+#[test]
+fn creation_without_a_stamp_writes_an_undated_header() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-undated");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Undated".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+        write_stamp: None,
+    };
+    let project = Project::create(&request).expect("creation succeeds");
+    let root = project.root().to_path_buf();
+    drop(project);
+
+    let properties =
+        fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties");
+    assert!(
+        properties.starts_with("#Project Attributes.\n#Ox Tuner\nprojectName=Undated\n"),
+        "{properties}"
+    );
+    assert!(!properties.contains("Last Saved on:"), "{properties}");
+
+    let tune = fs::read_to_string(root.join(TUNE_FILE)).expect("the tune");
+    assert!(
+        tune.contains(r#"<bibliography author="Ox Tuner" tuneComment=""/>"#),
+        "{tune}"
+    );
+    assert!(!tune.contains("writeDate="), "{tune}");
 }
 
 #[test]
@@ -1356,6 +1504,7 @@ defaultValue = axis, 10 20 30
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1394,6 +1543,7 @@ rawValue = axis, 1 2 3
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1517,6 +1667,7 @@ defaultValue = p, 7.25
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1768,6 +1919,7 @@ reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -1799,6 +1951,7 @@ fn creating_a_project_refuses_a_folder_that_already_exists() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1824,6 +1977,7 @@ fn creating_a_project_refuses_an_empty_folder_that_already_exists() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1851,6 +2005,7 @@ fn creating_a_project_refuses_a_file_that_holds_the_name() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1874,6 +2029,7 @@ fn creating_a_project_refuses_an_unusable_name() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1893,6 +2049,7 @@ fn creating_a_project_checks_the_detected_signature() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -1916,6 +2073,7 @@ fn creating_a_project_refuses_a_definition_that_is_not_ini() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
 
     assert!(matches!(
@@ -1936,6 +2094,7 @@ fn creating_a_project_refuses_an_unreadable_definition() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     assert!(matches!(
         Project::create(&request),
@@ -2013,6 +2172,7 @@ page = 1
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let error = Project::create(&request).expect_err("an include cannot be copied");
     assert!(
@@ -2078,6 +2238,7 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -2160,6 +2321,7 @@ settingOption = pressure_bar, "BAR"
         settings: vec!["pressure_bar".to_owned()],
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 
@@ -2200,6 +2362,7 @@ fn creation_remembers_the_connection_the_wizard_picked() {
             baud: 57_600,
         }),
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     Project::create(&request).expect("creation succeeds");
 
@@ -2223,6 +2386,7 @@ fn creation_without_a_baud_keeps_the_definition_rate() {
         settings: Vec::new(),
         connection: None,
         layout: ProjectLayout::default(),
+        write_stamp: None,
     };
     let project = Project::create(&request).expect("creation succeeds");
 

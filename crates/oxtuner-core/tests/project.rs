@@ -420,6 +420,7 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
             settings: Vec::new(),
             connection: None,
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();
@@ -464,6 +465,7 @@ fn creating_from_the_ecu_seeds_the_tune_and_keeps_pc_defaults() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 pages: vec![(1, page)],
@@ -518,6 +520,7 @@ fn a_create_from_ecu_signature_mismatch_writes_nothing() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 signature: Some("speeduino 999999".to_owned()),
@@ -555,6 +558,7 @@ fn a_failed_create_read_leaves_no_folder() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 faults: vec![FaultRule::new(SimOp::ReadPage, Fault::Disconnect, 1)],
@@ -591,6 +595,7 @@ fn stopping_the_core_answers_an_in_flight_create() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::silent(),
         )
@@ -615,6 +620,66 @@ fn stopping_the_core_answers_an_in_flight_create() {
 
     assert_eq!(answers, 1, "the create op is answered once");
     assert!(!dir.path().join("Stopped").exists());
+}
+
+#[test]
+fn a_create_keeps_an_injected_stamp_and_dates_a_missing_one() {
+    let dir = TempDir::new("create-stamp");
+    let core = Harness::start();
+    let definition = definition_path(dir.path());
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Stamped".to_owned(),
+            ini_path: definition.clone(),
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: Some("Sun Nov 22 06:46:58 UTC 2026".to_owned()),
+        })
+        .expect("the command is queued");
+    assert_eq!(core.next().op(), Some(op));
+
+    let properties = fs::read_to_string(dir.path().join("Stamped/projectCfg/project.properties"))
+        .expect("properties");
+    assert!(
+        properties.contains("#Last Saved on: Sun Nov 22 06:46:58 UTC 2026"),
+        "{properties}"
+    );
+    let tune = fs::read_to_string(dir.path().join("Stamped").join(TUNE_FILE)).expect("tune");
+    assert!(
+        tune.contains(r#"writeDate="Sun Nov 22 06:46:58 UTC 2026""#),
+        "{tune}"
+    );
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Dated".to_owned(),
+            ini_path: definition,
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: None,
+        })
+        .expect("the command is queued");
+    assert_eq!(core.next().op(), Some(op));
+
+    let properties = fs::read_to_string(dir.path().join("Dated/projectCfg/project.properties"))
+        .expect("properties");
+    let saved = properties
+        .lines()
+        .find(|line| line.starts_with("#Last Saved on: "))
+        .expect("the core injects a stamp when the request carries none");
+    assert!(
+        saved.len() > "#Last Saved on: ".len(),
+        "the injected stamp is not empty: {saved}"
+    );
 }
 
 #[test]
@@ -666,6 +731,7 @@ fn a_created_project_remembers_the_wizard_connection() {
                 baud: 57_600,
             }),
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();
@@ -694,6 +760,7 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
             settings: Vec::new(),
             connection: None,
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();

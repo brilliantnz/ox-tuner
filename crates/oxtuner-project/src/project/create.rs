@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use oxtuner_ini::SettingsContext;
 
 use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
-use crate::msq::{Msq, WritePolicy};
+use crate::msq::{Msq, ScaffoldOptions, WritePolicy};
 use crate::sidecar::ProjectLayout;
 
 /// The longest folder name creation accepts.
@@ -73,6 +73,12 @@ pub struct CreateRequest {
     /// one the user already arranged, so a new project keeps the workspace as
     /// it is.
     pub layout: ProjectLayout,
+    /// The save-time stamp written into the tune and properties headers.
+    ///
+    /// The caller formats it (the core injects the clock), so tests can assert
+    /// an exact string. `None` leaves the headers undated, which is what a
+    /// caller that writes no reference metadata gets.
+    pub write_stamp: Option<String>,
 }
 
 /// A serial device a new project should remember.
@@ -211,7 +217,7 @@ impl Project {
             "definition read for the new project"
         );
 
-        let (definition, settings) = parse_definition(request, &ini_bytes)?;
+        let definition = parse_definition(request, &ini_bytes)?;
 
         Ok(PreparedProject {
             request: request.clone(),
@@ -219,7 +225,6 @@ impl Project {
             root,
             ini_bytes,
             definition,
-            settings,
         })
     }
 
@@ -256,7 +261,7 @@ impl Project {
         // project this build created never looks half-written there.
         let mut backup = properties_path.into_os_string();
         backup.push(".bkup");
-        write_tracked(written, PathBuf::from(backup), built.properties.as_bytes())?;
+        write_tracked(written, PathBuf::from(backup), built.backup.as_bytes())?;
 
         for dir in SCAFFOLD_DIRS {
             create_tracked(written, root.join(dir))?;
@@ -313,7 +318,6 @@ pub struct PreparedProject {
     root: PathBuf,
     ini_bytes: Vec<u8>,
     definition: oxtuner_ini::Definition,
-    settings: SettingsContext,
 }
 
 impl PreparedProject {
@@ -386,14 +390,7 @@ impl PreparedProject {
         seed: Option<&oxtuner_tune::Tune>,
         policy: WritePolicy,
     ) -> Result<Project, ProjectError> {
-        let built = build_scaffold(
-            &self.name,
-            &self.request,
-            &self.definition,
-            &self.settings,
-            seed,
-            policy,
-        )?;
+        let built = build_scaffold(&self.name, &self.request, &self.definition, seed, policy)?;
 
         // The target was checked in `prepare`; `create_dir` makes that check
         // atomic by refusing a folder that appeared in between. Reusing it
@@ -436,9 +433,10 @@ impl PreparedProject {
 struct BuiltScaffold {
     tune_bytes: Vec<u8>,
     properties: String,
+    backup: String,
 }
 
-/// Parses the definition creation will copy and build its settings context.
+/// Parses the definition creation will copy.
 ///
 /// A chosen setting group marks its option active, exactly like the
 /// `<settings>` entry a saved tune carries. The parser only sees the names as
@@ -449,7 +447,7 @@ struct BuiltScaffold {
 fn parse_definition(
     request: &CreateRequest,
     ini_bytes: &[u8],
-) -> Result<(oxtuner_ini::Definition, SettingsContext), ProjectError> {
+) -> Result<oxtuner_ini::Definition, ProjectError> {
     let overrides: Vec<(String, bool)> = request
         .settings
         .iter()
@@ -497,7 +495,7 @@ fn parse_definition(
         });
     }
 
-    Ok((definition, settings))
+    Ok(definition)
 }
 
 /// Builds every file's bytes in memory from a parsed definition.
@@ -509,34 +507,104 @@ fn build_scaffold(
     name: &str,
     request: &CreateRequest,
     definition: &oxtuner_ini::Definition,
-    settings: &SettingsContext,
     seed: Option<&oxtuner_tune::Tune>,
     policy: WritePolicy,
 ) -> Result<BuiltScaffold, ProjectError> {
-    let document = Msq::scaffold(definition, settings, seed, policy).map_err(ProjectError::Msq)?;
+    let flags = chosen_flags(definition, &request.settings);
+    let document = Msq::scaffold(
+        definition,
+        ScaffoldOptions {
+            seed,
+            policy,
+            write_stamp: request.write_stamp.as_deref(),
+            flags: &flags,
+        },
+    )
+    .map_err(ProjectError::Msq)?;
     let tune_bytes = document.save()?;
     tracing::debug!(
         bytes = tune_bytes.len(),
         seeded = seed.is_some(),
+        flags = flags.len(),
         "tune scaffolded"
     );
 
-    // The keys are the ones TunerStudio reads, so a project created here
-    // opens there without a settings mismatch. `ecuSettings` is the flag
-    // list the definition's setting groups produced; TunerStudio stores it
-    // pipe-separated with a trailing separator.
-    //
-    // The signature is trimmed: a definition can carry a trailing NUL,
-    // which a Java-properties file must not hold (a reader would see it as
-    // part of the value and report the project as corrupt).
-    let signature = definition.signature.trim();
-    let mut ecu_settings = String::new();
-    for flag in chosen_flags(definition, &request.settings) {
-        ecu_settings.push_str(&flag);
-        ecu_settings.push('|');
+    let properties = properties_text(name, request, definition, &flags);
+    let backup = backup_properties_text(name, request, &flags);
+
+    Ok(BuiltScaffold {
+        tune_bytes,
+        properties,
+        backup,
+    })
+}
+
+/// The header comment lines the reference writer puts above the properties.
+///
+/// A stamped create writes four lines; an undated one writes the two identity
+/// lines only.
+fn properties_header(stamp: Option<&str>) -> String {
+    let mut header = String::from("#Project Attributes.\n#Ox Tuner\n");
+    if let Some(stamp) = stamp {
+        // A stamp is one header line. A caller-supplied newline would end the
+        // comment and inject a property key, so it is folded to a space.
+        let stamp = stamp.replace(['\n', '\r'], " ");
+        header.push_str("#Last Saved on: ");
+        header.push_str(&stamp);
+        header.push('\n');
+        header.push('#');
+        header.push_str(&stamp);
+        header.push('\n');
     }
 
-    let mut properties = String::from("# Created by Ox Tuner.\n");
+    header
+}
+
+/// The final `project.properties` text.
+fn properties_text(
+    name: &str,
+    request: &CreateRequest,
+    definition: &oxtuner_ini::Definition,
+    flags: &[String],
+) -> String {
+    let mut properties = properties_header(request.write_stamp.as_deref());
+    push_project_keys(&mut properties, name, request);
+    push_flag_key(&mut properties, flags);
+
+    // The keys that only the final file carries: identity, firmware text and
+    // the workspace choice.
+    properties.push_str("canId=-1\n");
+    let signature = definition.signature.trim();
+    if !signature.is_empty() {
+        properties.push_str("firmwareDescription=");
+        properties.push_str(&oxtuner_encoding::escape_java_property(signature));
+        properties.push('\n');
+    }
+    properties.push_str("useCommonDashboardDir=false\n");
+    properties.push_str("useCommonTuneViewDir=false\n");
+    properties.push_str("lastDisplayedTuneFile=\n");
+
+    properties
+}
+
+/// The first-stage properties the `.bkup` keeps.
+///
+/// It holds what the writer knows before the identity and workspace keys are
+/// added, so the backup proves an earlier state instead of duplicating the
+/// current file.
+fn backup_properties_text(name: &str, request: &CreateRequest, flags: &[String]) -> String {
+    let mut properties = properties_header(request.write_stamp.as_deref());
+    push_project_keys(&mut properties, name, request);
+    push_flag_key(&mut properties, flags);
+    // The reference's first stage already knows the dashboard choice; only the
+    // identity and last-displayed keys arrive later.
+    properties.push_str("useCommonDashboardDir=false\n");
+
+    properties
+}
+
+/// The keys both properties files carry.
+fn push_project_keys(properties: &mut String, name: &str, request: &CreateRequest) {
     properties.push_str("projectName=");
     properties.push_str(&oxtuner_encoding::escape_java_property(name));
     properties.push('\n');
@@ -544,19 +612,25 @@ fn build_scaffold(
     properties.push_str("ecuConfigFile=");
     properties.push_str(MAIN_DEFINITION);
     properties.push('\n');
-    if !signature.is_empty() {
-        properties.push_str("firmwareDescription=");
-        properties.push_str(&oxtuner_encoding::escape_java_property(signature));
+
+    if let Some(connection) = &request.connection {
+        properties.push_str("commPort=");
+        properties.push_str(&oxtuner_encoding::escape_java_property(&connection.port));
+        properties.push('\n');
+        properties.push_str("baudRate=");
+        properties.push_str(&connection.baud.to_string());
         properties.push('\n');
     }
-    properties.push_str("ecuSettings=");
-    properties.push_str(&ecu_settings);
-    properties.push('\n');
+}
 
-    Ok(BuiltScaffold {
-        tune_bytes,
-        properties,
-    })
+/// The `ecuSettings` key, pipe-separated with the reference's trailing bar.
+fn push_flag_key(properties: &mut String, flags: &[String]) {
+    properties.push_str("ecuSettings=");
+    for flag in flags {
+        properties.push_str(flag);
+        properties.push('|');
+    }
+    properties.push('\n');
 }
 
 /// Reads the definition creation will copy.
@@ -583,32 +657,105 @@ fn read_definition(path: &Path) -> Result<Vec<u8>, ProjectError> {
 /// definition's setting groups never declare is dropped too, because it cannot
 /// compile a branch and would only add a setting the definition does not know.
 /// Duplicates collapse to their first occurrence.
+///
+/// Two choices have no name of their own in the picker: a boolean group that is
+/// off records `<group>_OFF`, and an unset display choice records its negative
+/// flag (`AFR`, `FAHRENHEIT`). The reference writer stores those, so the
+/// project can reproduce the choices it was created with.
 fn chosen_flags(definition: &oxtuner_ini::Definition, settings: &[String]) -> Vec<String> {
-    let declared = |option: &str| {
+    // The declared spelling, so a caller that passes a case variant still
+    // writes the definition's own option name. A flag the file only tests has
+    // no declared spelling; the caller's name is kept (the parser matches it
+    // case-insensitively, and the wizard passes the canonical uppercase form).
+    let declared = |option: &str| -> Option<&str> {
         definition
             .setting_groups
             .values()
             .flat_map(|group| group.options.iter())
-            .any(|candidate| candidate.name.eq_ignore_ascii_case(option))
-            // The display choices the wizard offers are only ever tested with
-            // `#if`, never declared as a setting group, so the flags the file
-            // tests count too.
-            || definition
-                .tested_flags
-                .iter()
-                .any(|tested| tested.eq_ignore_ascii_case(option))
+            .map(|candidate| candidate.name.as_str())
+            // A boolean group's own name is its active flag.
+            .chain(
+                definition
+                    .setting_groups
+                    .values()
+                    .filter(|group| group.options.is_empty())
+                    .map(|group| group.name.as_str()),
+            )
+            .find(|candidate| candidate.eq_ignore_ascii_case(option))
+    };
+    let tested = |option: &str| {
+        definition
+            .tested_flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case(option))
     };
 
     let mut flags: Vec<String> = Vec::new();
     for option in settings {
-        if option.eq_ignore_ascii_case("DEFAULT") || !declared(option) {
+        if option.eq_ignore_ascii_case("DEFAULT") {
             continue;
         }
-        if flags.iter().any(|flag| flag.eq_ignore_ascii_case(option)) {
+        let Some(name) = declared(option) else {
+            // The display choices the wizard offers are only ever tested with
+            // `#if`, never declared as a setting group, so a tested flag counts
+            // too.
+            if tested(option) && !flags.iter().any(|flag| flag.eq_ignore_ascii_case(option)) {
+                flags.push(option.clone());
+            }
+            continue;
+        };
+        if flags.iter().any(|flag| flag.eq_ignore_ascii_case(name)) {
             continue;
         }
 
-        flags.push(option.clone());
+        flags.push(name.to_owned());
+    }
+
+    // A boolean group the user left off writes its explicit off flag.
+    for group in definition.setting_groups.values() {
+        if !group.options.is_empty() {
+            continue;
+        }
+        if flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case(&group.name))
+        {
+            continue;
+        }
+
+        let off = format!("{}_OFF", group.name);
+        if !flags.iter().any(|flag| flag.eq_ignore_ascii_case(&off)) {
+            flags.push(off);
+        }
+    }
+
+    // A display choice that stays on the definition's default writes the
+    // negative flag. A definition that declares the choice itself keeps its
+    // own option name and gets no application row.
+    let definition_declares = |group_name: &str, option_name: &str| {
+        definition.setting_groups.values().any(|group| {
+            group.name.eq_ignore_ascii_case(group_name)
+                || group
+                    .options
+                    .iter()
+                    .any(|option| option.name.eq_ignore_ascii_case(option_name))
+        })
+    };
+    for (positive, negative, group_name) in [
+        ("LAMBDA", "AFR", "lambdaSensor"),
+        ("CELSIUS", "FAHRENHEIT", "temperature"),
+    ] {
+        let tested = definition
+            .tested_flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case(positive));
+        let chosen = flags.iter().any(|flag| flag.eq_ignore_ascii_case(positive));
+        if !tested || chosen || definition_declares(group_name, positive) {
+            continue;
+        }
+        if !flags.iter().any(|flag| flag.eq_ignore_ascii_case(negative)) {
+            flags.push(negative.to_owned());
+        }
     }
 
     flags
@@ -842,9 +989,127 @@ wideband = scalar, U08, 0, "", 1, 0, 0, 255, 0
             vec!["LAMBDA".to_owned()],
             "a name is recorded once"
         );
+        assert_eq!(
+            chosen_flags(&definition, &["undeclared".to_owned()]),
+            vec!["AFR".to_owned()],
+            "the undeclared name is dropped, and the unset Lambda display records AFR"
+        );
+    }
+
+    #[test]
+    fn chosen_flags_keeps_a_definition_declared_display_choice_out_of_the_application_rows() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = lambdaSensor, "Lambda Sensor"
+settingOption = NARROW_BAND_EGO, "Narrowband"
+settingOption = LAMBDA, "Wideband Lambda"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+#if LAMBDA
+lambda_value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+        let definition =
+            oxtuner_ini::parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
+        let flags = chosen_flags(&definition, &[]);
+
         assert!(
-            chosen_flags(&definition, &["undeclared".to_owned()]).is_empty(),
-            "a name nothing declares is not recorded"
+            !flags
+                .iter()
+                .any(|flag| flag.eq_ignore_ascii_case("LAMBDA") || flag.eq_ignore_ascii_case("AFR")),
+            "a definition that declares the choice itself gets no application row: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn chosen_flags_records_off_and_default_display_choices() {
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[SettingGroups]
+settingGroup = enablehardware_test, "Enable Hardware Test Page"
+settingGroup = resetcontrol_group, "Reset Control Features"
+settingOption = resetcontrol_standard, "Basic Options Only"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+#if LAMBDA
+lambda_value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#else
+afr_value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+#endif
+#if CELSIUS
+celsius_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
+#else
+fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
+#endif
+"#;
+
+        let definition =
+            oxtuner_ini::parse_str(DEFINITION, &SettingsContext::new()).expect("parses");
+
+        assert_eq!(
+            chosen_flags(
+                &definition,
+                &[
+                    "resetcontrol_standard".to_owned(),
+                    "enablehardware_test".to_owned()
+                ]
+            ),
+            vec![
+                "resetcontrol_standard".to_owned(),
+                "enablehardware_test".to_owned(),
+                "AFR".to_owned(),
+                "FAHRENHEIT".to_owned(),
+            ],
+            "the active boolean writes its own name, and the display defaults write their negatives"
+        );
+        assert_eq!(
+            chosen_flags(&definition, &["resetcontrol_standard".to_owned()]),
+            vec![
+                "resetcontrol_standard".to_owned(),
+                "enablehardware_test_OFF".to_owned(),
+                "AFR".to_owned(),
+                "FAHRENHEIT".to_owned(),
+            ],
+            "a boolean left off writes <group>_OFF"
+        );
+        assert_eq!(
+            chosen_flags(
+                &definition,
+                &[
+                    "resetcontrol_standard".to_owned(),
+                    "LAMBDA".to_owned(),
+                    "CELSIUS".to_owned()
+                ]
+            ),
+            vec![
+                "resetcontrol_standard".to_owned(),
+                "LAMBDA".to_owned(),
+                "CELSIUS".to_owned(),
+                "enablehardware_test_OFF".to_owned(),
+            ],
+            "an active display choice suppresses its negative"
+        );
+        assert_eq!(
+            chosen_flags(&definition, &["RESETCONTROL_STANDARD".to_owned()]),
+            vec![
+                "resetcontrol_standard".to_owned(),
+                "enablehardware_test_OFF".to_owned(),
+                "AFR".to_owned(),
+                "FAHRENHEIT".to_owned(),
+            ],
+            "the file records the definition's spelling, not the caller's"
         );
     }
 
