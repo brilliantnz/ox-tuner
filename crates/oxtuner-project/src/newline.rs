@@ -98,6 +98,7 @@ mod tests {
     fn the_majority_line_ending_wins() {
         assert_eq!(Newline::detect(b"a\r\nb\r\nc\n"), Some(Newline::Crlf));
         assert_eq!(Newline::detect(b"a\nb\nc\r\n"), Some(Newline::Lf));
+        assert_eq!(Newline::detect(b"a\r\nb\n"), Some(Newline::Lf));
         assert_eq!(Newline::detect(b"a\rb\r"), Some(Newline::Lf));
         assert_eq!(Newline::detect(b"no break"), None);
     }
