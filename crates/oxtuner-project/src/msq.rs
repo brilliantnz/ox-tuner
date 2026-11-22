@@ -153,6 +153,11 @@ pub struct PageHeader {
 #[derive(Debug, Clone)]
 pub struct Msq {
     document: Document,
+    /// The line ending the file arrived with, applied again on save.
+    ///
+    /// Text nodes and every edit use LF in memory; this is the one place the
+    /// on-disk style enters and leaves.
+    newline: crate::newline::Newline,
 }
 
 /// Why a `.msq` could not be parsed or written.
@@ -863,7 +868,10 @@ impl Msq {
                 Node::Text("\n".to_owned()),
             ],
         };
-        let scaffold = Self { document };
+        let scaffold = Self {
+            document,
+            newline: crate::newline::new_file(),
+        };
         Self::check_defaults(&scaffold, definition)?;
 
         Ok(scaffold)
@@ -898,6 +906,7 @@ impl Msq {
     /// Returns [`MsqError`] when the XML is malformed or the root is not
     /// `<msq>`.
     pub fn parse(bytes: &[u8]) -> Result<Self, MsqError> {
+        let newline = crate::newline::Newline::detect(bytes).unwrap_or_default();
         let source = oxtuner_encoding::decode_latin1(bytes);
         let document = Document::parse(&source)?;
         let root = document.root().ok_or_else(|| MsqError::RootIsNotMsq {
@@ -908,7 +917,7 @@ impl Msq {
                 found: root.name.clone(),
             });
         }
-        Ok(Self { document })
+        Ok(Self { document, newline })
     }
 
     /// Serializes back to ISO-8859-1 bytes.
@@ -918,7 +927,8 @@ impl Msq {
     /// Returns [`MsqError::Encoding`] when the text has a character outside
     /// ISO-8859-1.
     pub fn save(&self) -> Result<Vec<u8>, MsqError> {
-        Ok(oxtuner_encoding::encode_latin1(&self.document.serialize())?)
+        let text = self.newline.encode(&self.document.serialize());
+        Ok(oxtuner_encoding::encode_latin1(&text)?)
     }
 
     /// The parsed document, for callers that need raw access (tests, tools).
@@ -1654,6 +1664,87 @@ mod tests {
     fn an_unmodified_save_is_byte_identical() {
         let msq = sample();
         assert_eq!(msq.save().unwrap(), SAMPLE.as_bytes());
+    }
+
+    #[test]
+    fn a_crlf_tune_keeps_its_line_ending_through_a_save_and_an_edit() {
+        let source = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\r\n\
+<msq>\r\n\
+  <versionInfo signature=\"s\"/>\r\n\
+  <page number=\"0\" size=\"8\">\r\n\
+    <constant name=\"a\">1.0</constant>\r\n\
+  </page>\r\n\
+</msq>\r\n";
+
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+        assert_eq!(
+            msq.save().expect("saves"),
+            source.as_bytes(),
+            "an unedited CRLF tune is byte-identical"
+        );
+
+        msq.set_entry_text(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "a",
+            "2.0",
+        )
+        .expect("the entry is there");
+        let saved = msq.save().expect("saves");
+        let text = String::from_utf8(saved).expect("ascii");
+
+        assert!(text.contains("2.0"), "{text}");
+        assert!(
+            text.split_inclusive('\n')
+                .all(|line| line.ends_with("\r\n")),
+            "every line keeps CRLF after an edit: {text:?}"
+        );
+        assert!(
+            !text.replace("\r\n", "").contains('\n'),
+            "the edit does not introduce an LF-only line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_mixed_file_saves_in_its_dominant_style() {
+        // Mirrors the reference tune: one LF after the declaration, CRLF
+        // everywhere else. The dominant style wins, so the saved file has no
+        // LF-only line even though the input did.
+        let source = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n\
+<msq>\r\n</msq>\r\n";
+
+        let msq = Msq::parse(source.as_bytes()).expect("parses");
+        let text = String::from_utf8(msq.save().expect("saves")).expect("ascii");
+
+        assert!(
+            text.split_inclusive('\n')
+                .all(|line| line.ends_with("\r\n")),
+            "the dominant CRLF style wins over the lone LF: {text:?}"
+        );
+    }
+
+    #[test]
+    fn an_lf_tune_stays_lf_after_an_edit() {
+        let source = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n\
+<msq>\n\
+  <versionInfo signature=\"s\"/>\n\
+  <page number=\"0\" size=\"8\">\n\
+    <constant name=\"a\">1.0</constant>\n\
+  </page>\n\
+</msq>\n";
+
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+        msq.set_entry_text(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "a",
+            "2.0",
+        )
+        .expect("the entry is there");
+        let text = String::from_utf8(msq.save().expect("saves")).expect("ascii");
+
+        assert!(text.contains("2.0"), "{text}");
+        assert!(!text.contains('\r'), "an LF tune stays LF: {text:?}");
     }
 
     #[test]
