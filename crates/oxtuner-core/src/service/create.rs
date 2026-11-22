@@ -227,7 +227,10 @@ pub(super) fn finish(
         .and_then(|connection| connection.images.standalone.as_deref());
     let root = create.prepared.root().to_path_buf();
 
-    match create.prepared.create(seed) {
+    match create
+        .prepared
+        .create(seed, oxtuner_project::WritePolicy::Full)
+    {
         Ok(project) => adopt_project(
             project,
             create.op,

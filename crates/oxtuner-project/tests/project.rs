@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oxtuner_project::hash::{hex, sha256};
 use oxtuner_project::{
     ConnectionSeed, CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState,
-    TUNE_FILE,
+    TUNE_FILE, WritePolicy,
 };
 
 const MAIN_DEFINITION: &str = r#"
@@ -1318,11 +1318,14 @@ rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
         connection: None,
         layout: ProjectLayout::default(),
     };
-    let project = Project::create(&request).expect("a one-row table is a legal shape");
+    let project = Project::prepare(&request)
+        .expect("a one-row table is a legal shape")
+        .create(None, WritePolicy::Full)
+        .expect("creation succeeds");
 
     let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
     assert!(
-        tune.contains(r#"name="rowWise" cols="4" rows="1""#),
+        tune.contains(r#"cols="4" digits="0" name="rowWise" rows="1""#),
         "a declared [4x1] table keeps its shape: {tune}"
     );
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);

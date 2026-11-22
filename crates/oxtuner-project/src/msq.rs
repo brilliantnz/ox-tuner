@@ -496,6 +496,225 @@ pub(crate) fn image_for(definition: &Definition) -> Tune {
     Tune::new(Arc::new(layout))
 }
 
+/// Which entries a scaffold writes.
+///
+/// The two creation sources need different files. A project created from a
+/// controller holds the ECU's whole tune, so the writer emits every constant
+/// the definition describes, minus the INVALID-first placeholders. A manual
+/// project matches the reference writer's sparse new tune: only arrays whose
+/// default is non-zero and the numeric PC variables that declare a default.
+#[expect(
+    clippy::exhaustive_enums,
+    reason = "the two creation sources have exactly two writer policies"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePolicy {
+    /// Every constant the definition has, with the current image values.
+    Full,
+    /// Only the values the reference writer stores for a new from-INI tune.
+    ///
+    /// This policy reads inclusion from the tune's values, so it is only
+    /// meaningful without a seed: a seeded sparse scaffold would materialize
+    /// the zero-default arrays the reference leaves implicit.
+    SparseFromDefaults,
+}
+
+/// Whether a scaffold writes `spec` under `policy`.
+fn writes_entry(
+    policy: WritePolicy,
+    definition: &Definition,
+    layout: &TuneLayout,
+    tune: &Tune,
+    spec: &VariableSpec,
+) -> bool {
+    match policy {
+        WritePolicy::Full => !invalid_first(definition, spec),
+        WritePolicy::SparseFromDefaults => {
+            if layout.is_alias(&spec.name) || !declares_default(definition, &spec.name) {
+                return false;
+            }
+
+            if spec.ini_page().is_some() {
+                // Page scalars stay implicit and resolve from the definition on
+                // open; only arrays with a non-zero default are materialized.
+                let is_array = matches!(spec.shape, EntryShape::Array { .. });
+                is_array
+                    && tune
+                        .value(&spec.name)
+                        .is_some_and(|values| user_non_zero(spec, values))
+            } else {
+                // A PC variable has no page to fall back to, so every numeric
+                // one with a declared default is written, zero included.
+                spec.shape.is_numeric()
+            }
+        }
+    }
+}
+
+/// Whether the definition's option 0 for `spec` is the `INVALID` placeholder.
+///
+/// The reference writer treats the whole field as non-persistent. The value
+/// stays in the tune image so expressions and menus still see the real board
+/// metadata; only the file omits it.
+fn invalid_first(definition: &Definition, spec: &VariableSpec) -> bool {
+    let options = definition
+        .constant(&spec.name)
+        .map(|constant| &constant.options)
+        .or_else(|| {
+            definition
+                .pc_variables
+                .get_ignore_case(&spec.name)
+                .map(|variable| &variable.options)
+        });
+
+    matches!(options.and_then(|options| options.first()), Some(option) if option.value == 0 && option.hidden)
+}
+
+/// Whether the definition carries a `defaultValue` or `rawValue` for `name`.
+fn declares_default(definition: &Definition, name: &str) -> bool {
+    let extensions = &definition.extensions;
+    extensions.defaults.contains(name)
+        || extensions.raw_defaults.contains(name)
+        || extensions.default_arrays.contains(name)
+        || extensions.raw_default_arrays.contains(name)
+}
+
+/// Whether any cell of a value reads as non-zero in user units.
+///
+/// The reference materializes an array because its default is non-zero as the
+/// user sees it, so a translate offset matters: raw `0.0` with translate `10`
+/// is a non-zero default. A value whose conversion cannot be resolved falls
+/// back to its raw form. The text arm is defensive: the current policies only
+/// ask this of numeric entries, but a future policy may pass text.
+fn user_non_zero(spec: &VariableSpec, values: &Values) -> bool {
+    match values {
+        Values::Numbers(numbers) => numbers
+            .iter()
+            .any(|raw| spec.to_user(*raw).map_or(*raw != 0.0, |user| user != 0.0)),
+        Values::Text(text) => !text.is_empty(),
+    }
+}
+
+/// Adds the reference writer's `UNALLOCATED_TOP_<page>` filler to each page
+/// with unwritten bytes at its top.
+///
+/// The filler is a zero array named after the **file** page number, which is
+/// one lower than the INI page. It only exists in the full policy: a sparse
+/// tune carries no constants whose layout would expose a gap.
+fn add_page_fillers(pages: &mut BTreeMap<u16, Vec<Element>>, layout: &TuneLayout) {
+    for page_layout in layout.pages() {
+        let msq_page = page_layout.page.to_msq().get();
+        if !pages.contains_key(&msq_page) {
+            continue;
+        }
+
+        let mut end = 0_u32;
+        for index in &page_layout.variables {
+            let Some(spec) = layout.variables().get(*index) else {
+                continue;
+            };
+            // A variable without an address cannot be placed on the page, so
+            // its bytes are not part of what this gap describes. The writer may
+            // still emit its value as text, but no page byte is claimed.
+            let Some(address) = spec.address else {
+                continue;
+            };
+            let start = address.saturating_sub(page_layout.start_offset);
+            end = end.max(start.saturating_add(page_bytes(spec)));
+        }
+
+        let gap = page_layout.size.saturating_sub(end);
+        if gap == 0 {
+            continue;
+        }
+
+        let rows = gap.to_string();
+        let name = format!("UNALLOCATED_TOP_{msq_page}");
+        let mut fill = String::from("\n         ");
+        for index in 0..gap {
+            if index > 0 {
+                fill.push_str("\n         ");
+            }
+            fill.push_str("0.0 ");
+        }
+        fill.push_str("\n      ");
+
+        let mut element = Element::new(
+            "constant",
+            &[
+                ("cols", "1"),
+                ("digits", "0"),
+                ("name", name.as_str()),
+                ("rows", rows.as_str()),
+                ("units", "RAW"),
+            ],
+        );
+        element.set_text(&fill);
+        pages.entry(msq_page).or_default().push(element);
+    }
+}
+
+/// Bytes a variable occupies on a page.
+fn page_bytes(spec: &VariableSpec) -> u32 {
+    let cells = match spec.shape {
+        EntryShape::Text { len } => return u32::try_from(len).unwrap_or(u32::MAX),
+        _ => u32::try_from(spec.element_count()).unwrap_or(u32::MAX),
+    };
+    cells.saturating_mul(spec.data_type.size())
+}
+
+/// Builds the PC entries and page entries a scaffold writes.
+///
+/// A value the definition cannot format is left out with a debug line; the
+/// open that follows reports it as missing, which is better than dropping the
+/// whole create.
+fn scaffold_entries(
+    definition: &Definition,
+    layout: &TuneLayout,
+    tune: &Tune,
+    policy: WritePolicy,
+) -> (Vec<Element>, BTreeMap<u16, Vec<Element>>) {
+    let mut pc_entries: Vec<Element> = Vec::new();
+    let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
+
+    for spec in layout.variables() {
+        if !writes_entry(policy, definition, layout, tune, spec) {
+            continue;
+        }
+        let Some(values) = tune.value(&spec.name) else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+        let values = clamp_values(spec, values);
+        let text = match load::format_values(spec, definition, &values) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::debug!(
+                    name = %spec.name,
+                    %error,
+                    "the scaffold left this value out"
+                );
+                continue;
+            }
+        };
+
+        let tag = match spec.ini_page() {
+            Some(_) => EntryKind::Constant,
+            None => EntryKind::PcVariable,
+        };
+        let element = entry_element(spec, is_list(definition, &spec.name), tag, &text);
+
+        match spec.ini_page() {
+            Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
+            None => pc_entries.push(element),
+        }
+    }
+
+    (pc_entries, pages)
+}
+
 impl Msq {
     /// Builds a new tune document with every value at its definition default,
     /// or at the page values of `seed` when one is supplied.
@@ -503,13 +722,15 @@ impl Msq {
     /// The document mirrors what the reference writer produces: an unnumbered
     /// PC page first, one numbered page per definition page carrying the
     /// definition's page sizes, and a `<settings>` snapshot of the active
-    /// flags. Variables the definition marks `noMsqSave` are left out, the
-    /// same rule the save path applies.
+    /// flags. `policy` decides which entries are materialized; the full policy
+    /// also adds the reference writer's `UNALLOCATED_TOP_<page>` fillers.
     ///
     /// Presentation attributes are evaluated against the definition's declared
-    /// defaults, so an expression such as `{fuelLoadMax}` or `{0.1/stoich}`
-    /// resolves before the value is written. A value that still cannot be
-    /// written is left out and the open that follows reports it as missing.
+    /// defaults for an unseeded scaffold, and against the ECU image for a
+    /// seeded one, so an expression such as `{fuelLoadMax}` or `{0.1/stoich}`
+    /// resolves in the same context the file will be read with. A value that
+    /// still cannot be written is left out and the open that follows reports
+    /// it as missing.
     ///
     /// `seed` is the ECU page image a project created from a controller was
     /// read from. Its page-backed values replace the defaults; PC variables
@@ -531,11 +752,30 @@ impl Msq {
         definition: &Definition,
         settings: &SettingsContext,
         seed: Option<&Tune>,
+        policy: WritePolicy,
     ) -> Result<Self, MsqError> {
+        if policy == WritePolicy::SparseFromDefaults && seed.is_some() {
+            return Err(MsqError::SeedRejected {
+                reason: "a sparse scaffold has no ECU image to seed".to_owned(),
+            });
+        }
         let mut tune = image_for(definition);
         apply_definition_defaults(&mut tune, definition);
         if let Some(seed) = seed {
             apply_page_seed(&mut tune, seed)?;
+            // The seed moved the values a presentation expression reads, so
+            // the scaffold resolves those expressions again against the image.
+            // Without this a `{0.1 / stoich}` scale would be formatted from the
+            // definition's `stoich` while the file carries the ECU's, and the
+            // text would read back as different bytes.
+            let layout = crate::load::layout_for_tune(definition, &tune);
+            let mut resolved = Tune::new(layout);
+            resolved
+                .adopt_values(&tune)
+                .map_err(|error| MsqError::SeedRejected {
+                    reason: error.to_string(),
+                })?;
+            tune = resolved;
         }
         // A definition can give two constants the same bytes and disagree with
         // itself about what those bytes should hold. A new project must not be
@@ -546,58 +786,25 @@ impl Msq {
                 reason: error.to_string(),
             })?;
         let layout = Arc::clone(tune.layout());
+        let (pc_entries, mut pages) = scaffold_entries(definition, &layout, &tune, policy);
 
-        let mut pc_entries: Vec<Element> = Vec::new();
-        let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
-        for spec in layout.variables() {
-            if spec.no_msq_save || layout.is_alias(&spec.name) {
-                continue;
-            }
-            let Some(values) = tune.value(&spec.name) else {
-                continue;
-            };
-            if values.is_empty() {
-                continue;
-            }
-            let values = clamp_values(spec, values);
-            let text = match load::format_values(spec, definition, &values) {
-                Ok(text) => text,
-                Err(error) => {
-                    tracing::debug!(
-                        name = %spec.name,
-                        %error,
-                        "the scaffold left this value out"
-                    );
-                    continue;
-                }
-            };
-
-            let tag = match spec.ini_page() {
-                Some(_) => EntryKind::Constant,
-                None => EntryKind::PcVariable,
-            };
-            let element = entry_element(spec, is_list(definition, &spec.name), tag, &text);
-
-            match spec.ini_page() {
-                Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
-                None => pc_entries.push(element),
-            }
+        if policy == WritePolicy::Full {
+            add_page_fillers(&mut pages, &layout);
         }
 
         let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
         push_child(
             &mut root.children,
-            1,
             Element::self_closing("bibliography", &[("author", "Ox Tuner")]),
         );
-        push_child(&mut root.children, 1, version_element(definition));
+        push_child(&mut root.children, version_element(definition));
 
         let pc_page = if pc_entries.is_empty() {
             Element::self_closing("page", &[])
         } else {
             page_element(None, None, pc_entries)
         };
-        push_child(&mut root.children, 1, pc_page);
+        push_child(&mut root.children, pc_page);
 
         for page in &definition.pages {
             let Some(ini) = IniPage::new(page.number) else {
@@ -611,17 +818,16 @@ impl Msq {
             } else {
                 page_element(Some(&number.to_string()), Some(&size), entries)
             };
-            push_child(&mut root.children, 1, numbered);
+            push_child(&mut root.children, numbered);
         }
 
         if let Some(leftover) = pages.keys().next() {
             return Err(MsqError::UnknownPage { page: *leftover });
         }
 
-        push_child(&mut root.children, 1, settings_element(settings));
+        push_child(&mut root.children, settings_element(settings));
         push_child(
             &mut root.children,
-            1,
             Element::self_closing("userComments", &[]),
         );
 
@@ -1127,12 +1333,14 @@ impl Msq {
 
 /// A `<constant>` or `<pcVariable>` element for one formatted value.
 ///
-/// Arrays carry their `cols`/`rows` shape, the same attributes the reference
-/// writer stores; scalars and labels need only their name.
+/// Attributes are stored in alphabetical order: arrays carry `cols`/`rows`,
+/// non-bits carry `digits`, and a non-empty `units` is kept. Bit fields are a
+/// bare `name` plus the label, the way the reference writer stores them.
 fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str) -> Element {
     let cols_text;
-    let rows_text;
-    let mut attrs: Vec<(&str, &str)> = vec![("name", spec.name.as_str())];
+    let mut rows_text: Option<String> = None;
+    let digits_text = spec.digits.to_string();
+    let mut attrs: Vec<(&str, &str)> = Vec::new();
     if let EntryShape::Array { cols, rows } = spec.shape {
         // A one-dimensional list is written as one column of N rows, the way
         // the reference writer stores it. A `[Nx1]` table keeps its declared
@@ -1143,9 +1351,21 @@ fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str
             (cols, rows)
         };
         cols_text = cols.to_string();
-        rows_text = rows.to_string();
+        rows_text = Some(rows.to_string());
         attrs.push(("cols", cols_text.as_str()));
-        attrs.push(("rows", rows_text.as_str()));
+    }
+
+    let is_bits = matches!(spec.shape, EntryShape::Bits { .. });
+
+    if !is_bits {
+        attrs.push(("digits", digits_text.as_str()));
+    }
+    attrs.push(("name", spec.name.as_str()));
+    if let Some(rows) = &rows_text {
+        attrs.push(("rows", rows.as_str()));
+    }
+    if !is_bits && !spec.units.is_empty() {
+        attrs.push(("units", spec.units.as_str()));
     }
 
     let mut element = Element::new(kind.element(), &attrs);
@@ -1153,7 +1373,8 @@ fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str
     element
 }
 
-/// A `<page>` element with its entries, indented one level deeper.
+/// A `<page>` element with its entries, in the reference writer's unindented
+/// layout.
 fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>) -> Element {
     let mut attrs: Vec<(&str, &str)> = Vec::new();
     if let Some(number) = number {
@@ -1165,9 +1386,9 @@ fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>)
 
     let mut page = Element::new("page", &attrs);
     for entry in entries {
-        push_child(&mut page.children, 2, entry);
+        push_child(&mut page.children, entry);
     }
-    page.children.push(Node::Text("\n    ".to_owned()));
+    page.children.push(Node::Text("\n".to_owned()));
     page
 }
 
@@ -1202,17 +1423,20 @@ fn settings_element(settings: &SettingsContext) -> Element {
         let flag = flag.as_str();
         push_child(
             &mut element.children,
-            2,
             Element::self_closing("setting", &[("name", flag), ("value", flag)]),
         );
     }
-    element.children.push(Node::Text("\n    ".to_owned()));
+    element.children.push(Node::Text("\n".to_owned()));
     element
 }
 
-/// Appends an indented child element to a parent's children.
-fn push_child(children: &mut Vec<Node>, depth: usize, element: Element) {
-    children.push(Node::Text(format!("\n{}", "    ".repeat(depth))));
+/// Appends a child element on its own line, with no indentation.
+///
+/// The reference writer puts every element at column zero; following it is what
+/// makes a created file compare cleanly. Loaded documents keep their own text
+/// nodes, so this only shapes the scaffold.
+fn push_child(children: &mut Vec<Node>, element: Element) {
+    children.push(Node::Text("\n".to_owned()));
     children.push(Node::Element(element));
 }
 
@@ -1294,9 +1518,9 @@ mod tests {
         <constant digits="1" name="reqFuel" units="ms">15.4</constant>
         <constant name="aeMode">"TPS"</constant>
         <constant cols="1" digits="0" name="wueRates" rows="3" units="%">
-         145.0 
-         135.0 
-         100.0 
+         145.0
+         135.0
+         100.0
       </constant>
         <!-- unknown to build 0.1, must survive -->
         <futureThing mode="x"><nested a="1"/></futureThing>
@@ -1507,7 +1731,8 @@ mod tests {
     fn scaffold_emits_a_document_that_checks_clean() {
         let definition = scaffold_definition();
         let settings = SettingsContext::new();
-        let msq = Msq::scaffold(&definition, &settings, None).expect("defaults scaffold");
+        let msq = Msq::scaffold(&definition, &settings, None, WritePolicy::Full)
+            .expect("defaults scaffold");
 
         let info = msq.version_info().expect("the header is present");
         assert_eq!(info.file_format, "5.0");
@@ -1551,7 +1776,8 @@ mod tests {
         seed.set_image_raw("table", 3, 9.0).expect("seeded");
         seed.set_image_raw("rpmhigh", 0, 12_345.0).expect("seeded");
 
-        let msq = Msq::scaffold(&definition, &settings, Some(&seed)).expect("seeded scaffold");
+        let msq = Msq::scaffold(&definition, &settings, Some(&seed), WritePolicy::Full)
+            .expect("seeded scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1567,6 +1793,215 @@ mod tests {
             loaded.tune.raw_at("rpmhigh", 0).expect("it is there"),
             0.0,
             "a PC variable has no page and keeps its definition default"
+        );
+    }
+
+    fn policy_definition() -> Definition {
+        let text = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 16, 16
+page = 1
+invalidField = bits, U08, 0, [0:7], "INVALID", "One"
+scalarDefault = scalar, U08, 1, "", 1, 0, 0, 255, 0
+arr = array, U08, 2, [4], "", 1, 0, 0, 255, 0
+zeroArr = array, U08, 6, [4], "", 1, 0, 0, 255, 0
+owner = array, U08, 10, [2], "", 1, 0, 0, 255, 0
+alias = bits, U08, 10, [0:7], "a", "b"
+page = 2
+b = scalar, U08, 0, "", 1, 0, 0, 255, 0
+
+[PcVariables]
+pcDefault = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+pcZero = scalar, U16, 2, "", 1, 0, 0, 65535, 0
+pcNoDefault = scalar, U16, 4, "", 1, 0, 0, 65535, 0
+noSave = array, U08, [8], "", 1, 0, 0, 255, 0, noMsqSave
+pcText = string, ASCII, 8
+
+[ConstantsExtensions]
+defaultValue = scalarDefault, 7
+defaultValue = arr, 1 2 3 4
+defaultValue = zeroArr, 0 0 0 0
+defaultValue = pcDefault, 1000
+defaultValue = pcZero, 0
+defaultValue = noSave, 1 1 1 1 1 1 1 1
+"#;
+        oxtuner_ini::parse_str_with_includes(
+            text,
+            &SettingsContext::new(),
+            &|_: oxtuner_ini::IncludeRequest<'_>| None,
+        )
+        .expect("the policy fixture parses")
+    }
+
+    fn scaffold_names(policy: WritePolicy) -> Vec<String> {
+        let definition = policy_definition();
+        let msq = Msq::scaffold(&definition, &SettingsContext::new(), None, policy)
+            .expect("the policy fixture scaffolds");
+
+        msq.entries().into_iter().map(|entry| entry.name).collect()
+    }
+
+    #[test]
+    fn the_full_policy_writes_aliases_nosave_and_page_fillers() {
+        let names = scaffold_names(WritePolicy::Full);
+
+        assert!(
+            !names.iter().any(|name| name == "invalidField"),
+            "an INVALID-first field is not persisted: {names:?}"
+        );
+        for name in [
+            "scalarDefault",
+            "arr",
+            "zeroArr",
+            "owner",
+            "alias",
+            "noSave",
+            "UNALLOCATED_TOP_0",
+            "UNALLOCATED_TOP_1",
+        ] {
+            assert!(
+                names.iter().any(|candidate| candidate == name),
+                "{name}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sparse_policy_writes_only_materialized_defaults() {
+        let names = scaffold_names(WritePolicy::SparseFromDefaults);
+
+        for name in ["arr", "pcDefault", "pcZero", "noSave"] {
+            assert!(
+                names.iter().any(|candidate| candidate == name),
+                "{name}: {names:?}"
+            );
+        }
+        for name in [
+            "invalidField",
+            "scalarDefault",
+            "zeroArr",
+            "owner",
+            "alias",
+            "b",
+            "pcNoDefault",
+            "pcText",
+            "UNALLOCATED_TOP_0",
+            "UNALLOCATED_TOP_1",
+        ] {
+            assert!(
+                !names.iter().any(|candidate| candidate == name),
+                "{name} must stay implicit: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seed_resolves_presentation_expressions_against_its_own_values() {
+        // `table`'s scale is `0.1 / stoich`. The definition default makes the
+        // scale one thing; the ECU's `stoich` makes it another. The text must
+        // be formatted with the scale the file will be read with, or the same
+        // bytes come back as different raw values.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+stoich = scalar, U08, 0, \":1\", 0.1, 0, 0, 25.5, 1
+table = array, U08, 2, [2], \"Lambda\", { 0.1 / stoich }, 0, 0, 2, 3
+
+[ConstantsExtensions]
+defaultValue = stoich, 14.7
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let mut seed = Tune::from_definition(&definition);
+        seed.set_image_raw("stoich", 0, 100.0).expect("seeded");
+        seed.set_image_raw("table", 0, 10.0).expect("seeded");
+        seed.set_image_raw("table", 1, 10.0).expect("seeded");
+
+        let msq = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            Some(&seed),
+            WritePolicy::Full,
+        )
+        .expect("the seeded scaffold is written");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert_eq!(loaded.tune.raw_at("table", 0).expect("it is there"), 10.0);
+        assert_eq!(loaded.tune.raw_at("table", 1).expect("it is there"), 10.0);
+        assert!(
+            loaded
+                .layout
+                .value_conflicts(IniPage::FIRST, &loaded.tune)
+                .is_empty(),
+            "the file round-trips without a shared-byte conflict"
+        );
+    }
+
+    #[test]
+    fn a_scaffolded_entry_matches_the_reference_attribute_layout() {
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
+axis = array, U08, 1, [2], \"\", 1, 0, 0, 255, 0
+mode = bits, U08, 3, [0:1], \"A\", \"B\"
+
+[ConstantsExtensions]
+defaultValue = reqFuel, 15.4
+defaultValue = axis, 10 20
+",
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+
+        let msq = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect("scaffolds");
+        let text = String::from_utf8(msq.save().expect("serializes")).expect("ascii");
+
+        assert!(
+            text.contains(r#"<constant digits="1" name="reqFuel" units="ms">15.4</constant>"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"<constant cols="1" digits="0" name="axis" rows="2">"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"<constant name="mode">"A"</constant>"#),
+            "a bits field is a bare label, as the reference writes it: {text}"
+        );
+        assert!(
+            text.contains("\n         10.0 \n         20.0 \n      </constant>"),
+            "array cells keep the reference padding and trailing space: {text}"
+        );
+        assert!(
+            !text.contains("\n    <"),
+            "the reference writer puts every element at column zero: {text}"
         );
     }
 
@@ -1594,7 +2029,8 @@ second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
         .expect("parses");
         let settings = SettingsContext::new();
 
-        let msq = Msq::scaffold(&definition, &settings, None).expect("defaults scaffold");
+        let msq = Msq::scaffold(&definition, &settings, None, WritePolicy::Full)
+            .expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1630,8 +2066,13 @@ second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
         )
         .expect("parses");
 
-        let error = Msq::scaffold(&definition, &SettingsContext::new(), None)
-            .expect_err("no value fits both ranges");
+        let error = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect_err("no value fits both ranges");
 
         assert!(
             matches!(error, MsqError::ConflictingDefaults { .. }),
@@ -1642,8 +2083,9 @@ second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
     #[test]
     fn a_scaffold_whose_peers_round_apart_is_refused() {
         // Both peers settle onto seven and both can store it, but `second`
-        // writes it in user units as 0.07 and rounds that to one digit. The
-        // file then says 0.1, which reads back as ten next to `first`'s seven.
+        // writes it in user units as 0.0000000000007 and the file keeps twelve
+        // decimals. The file then says 0.000000000001, which reads back as ten
+        // next to `first`'s seven.
         let definition = parse_str(
             "\
 [MegaTune]
@@ -1654,14 +2096,19 @@ nPages = 1
 pageSize = 8
 page = 1
 first = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
-second = scalar, U08, 0, \"y\", 0.01, 0, 0, 255, 1
+second = scalar, U08, 0, \"y\", 0.0000000000001, 0, 0, 255, 0
 ",
             &SettingsContext::new(),
         )
         .expect("parses");
 
-        let error = Msq::scaffold(&definition, &SettingsContext::new(), None)
-            .expect_err("the rounding pulls the two apart");
+        let error = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect_err("the rounding pulls the two apart");
 
         assert!(
             matches!(error, MsqError::ConflictingDefaults { .. }),
@@ -1690,8 +2137,13 @@ straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq =
-            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
+        let msq = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1727,8 +2179,13 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq =
-            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
+        let msq = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1760,8 +2217,13 @@ note = string, ASCII, 8
         )
         .expect("parses");
 
-        let msq =
-            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
+        let msq = Msq::scaffold(
+            &definition,
+            &SettingsContext::new(),
+            None,
+            WritePolicy::Full,
+        )
+        .expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
