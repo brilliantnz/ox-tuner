@@ -21,7 +21,8 @@ flowchart LR
 
 1. `source` decodes bytes and handles a leading BOM.
 2. `preprocess` resolves conditionals, definitions, settings, and
-   caller-provided includes.
+   caller-provided includes. An include name resolves from the caller's base
+   directory, never from the including file's directory.
 3. `parser` dispatches section entries into typed models while preserving
    source and document order.
 4. Finalization resolves references and expressions and validates signatures,

@@ -2018,6 +2018,50 @@ mod tests {
     }
 
     #[test]
+    fn an_include_request_carries_the_containing_file_for_diagnostics_only() {
+        // The spec searches `[ProjectFolder]/projectCfg/`, so a bare name inside
+        // an included file still means the definition's base. The containing
+        // file travels in `from` for diagnostics only, never for resolution.
+        let requests = std::cell::RefCell::new(Vec::new());
+        let resolver = |request: IncludeRequest<'_>| {
+            requests.borrow_mut().push((
+                request.path.to_owned(),
+                request.from.map(str::to_owned),
+                request.depth,
+            ));
+            match request.path {
+                "lambdaSensors.ini" => Some(inc("lambdaSensors.ini", "#include engine/pins.inc\n")),
+                "engine/pins.inc" => Some(inc("engine/pins.inc", "pin = 1\n")),
+                _ => None,
+            }
+        };
+        let output = preprocess_with_source(
+            "[X]\n#include \"lambdaSensors.ini\"\n",
+            &SettingsContext::new(),
+            Some("main.ini"),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        assert_eq!(
+            requests.borrow().as_slice(),
+            [
+                (
+                    "lambdaSensors.ini".to_owned(),
+                    Some("main.ini".to_owned()),
+                    0
+                ),
+                (
+                    "engine/pins.inc".to_owned(),
+                    Some("lambdaSensors.ini".to_owned()),
+                    1
+                ),
+            ]
+        );
+        assert_eq!(output.lines[1].text, "pin = 1");
+    }
+
+    #[test]
     fn a_continuation_does_not_join_across_an_include() {
         let resolver = |request: IncludeRequest<'_>| {
             (request.path == "tail.inc").then(|| inc("tail.inc", "list = 1,\n"))
