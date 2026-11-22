@@ -342,17 +342,20 @@ impl VariableSpec {
 
     /// Formats a raw value as the user-unit text a calibration file carries.
     ///
-    /// `TunerStudio` always writes at least one decimal (`12000.0`), so this
-    /// does too; the definition's digits win when they are larger.
+    /// The reference writer prints the converted double with the shortest text
+    /// that reads back as the same value, always with a decimal point
+    /// (`12000.0`). That is not the definition's `digits`: an attribute with
+    /// `digits = 1` can still produce `60.786`, because the raw byte came from
+    /// a value that needs three decimals to round-trip. Matching the reference
+    /// matters for a created file; the reader parses the same double back.
     ///
     /// # Errors
     ///
     /// Returns [`AttributeError`] when the raw value cannot be converted to
     /// user units.
     pub fn format_file(&self, raw: f64) -> Result<String, AttributeError> {
-        let user = self.to_user(raw)?;
-        let digits = usize::from(self.digits).max(1);
-        Ok(format_fixed(normalize_zero(user), digits))
+        let user = normalize_zero(self.to_user(raw)?);
+        Ok(format_reference(user))
     }
 
     /// The shape as a human-readable label (`scalar`, `bits[0:5]`, `16×16`).
@@ -375,6 +378,32 @@ impl VariableSpec {
 
 fn normalize_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
+}
+
+/// Formats a user value the way a calibration file carries it.
+///
+/// The reference writer converts through decimal values, so `raw −12 × scale
+/// 0.1` prints `-1.2`, not the binary artefact `-1.2`'s nearest double. Twelve
+/// decimal places absorb that arithmetic noise while keeping the three
+/// decimals a scale/translate pair can really produce (`60.786`). Trailing
+/// zeros are dropped and an integral value keeps one decimal (`12000.0`). A
+/// value too small for twelve places falls back to its shortest form instead of
+/// rounding to zero. File text therefore keeps at most twelve decimals; a scale
+/// whose user-unit step is smaller than about `5e-13` cannot round-trip through
+/// that text.
+fn format_reference(value: f64) -> String {
+    let fixed = format!("{value:.12}");
+    let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+
+    if trimmed == "0" && value != 0.0 {
+        return format!("{value}");
+    }
+
+    if trimmed.contains('.') {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}.0")
+    }
 }
 
 fn format_fixed(value: f64, digits: usize) -> String {
@@ -572,6 +601,16 @@ mod tests {
         assert_eq!(storage_range(DataType::U16), (0.0, 65_535.0));
         assert_eq!(storage_range(DataType::S16), (-32_768.0, 32_767.0));
         assert!(storage_range(DataType::F32).0.is_infinite());
+    }
+
+    #[test]
+    fn the_reference_format_keeps_decimal_noise_out() {
+        assert_eq!(format_reference(-1.200_000_000_000_000_2), "-1.2");
+        assert_eq!(format_reference(60.786), "60.786");
+        assert_eq!(format_reference(-40.014), "-40.014");
+        assert_eq!(format_reference(156.186), "156.186");
+        assert_eq!(format_reference(12_000.0), "12000.0");
+        assert_eq!(format_reference(0.0), "0.0");
     }
 
     #[test]

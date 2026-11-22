@@ -348,12 +348,78 @@ struct FileValues {
     arrays: HashMap<String, Vec<f64>>,
 }
 
+/// Builds a layout whose presentation expressions resolve against `tune`.
+///
+/// A creation seeded from a controller changes the values those expressions
+/// read: a scale written as `{0.1 / stoich}` means one thing with the
+/// definition's default and another with the ECU's `stoich`. Reloading the
+/// written file resolves them against the file's values, so the scaffold has to
+/// use that same context or its text would read back as different bytes.
+pub(crate) fn layout_for_tune(definition: &Definition, tune: &Tune) -> Arc<TuneLayout> {
+    let values = collect_tune_values(tune);
+    let resolver = Resolver::new(
+        definition,
+        &values.constants,
+        &values.pc_values,
+        &values.arrays,
+    );
+    let mut context = ExprContext {
+        resolver: &resolver,
+    };
+
+    Arc::new(TuneLayout::build_with_context(definition, &mut context))
+}
+
+/// Collects the user-unit values a presentation expression can read.
+///
+/// It mirrors [`collect_file_values`], but reads the tune instead of a
+/// document. A value whose own scale cannot be resolved falls back to its raw
+/// form; the expression then sees the same number the tune holds.
+fn collect_tune_values(tune: &Tune) -> FileValues {
+    let mut values = FileValues::default();
+
+    for spec in tune.layout().variables() {
+        let Some(raw) = tune.value(&spec.name) else {
+            continue;
+        };
+        let Values::Numbers(numbers) = raw else {
+            continue;
+        };
+
+        let user: Vec<f64> = numbers
+            .iter()
+            .map(|number| spec.to_user(*number).unwrap_or(*number))
+            .collect();
+        let key = spec.name.to_ascii_lowercase();
+
+        if user.len() > 1 {
+            // Match `collect_file_values`: a multi-token value is only an
+            // array, never a scalar for a plain name reference.
+            values.arrays.insert(key, user);
+            continue;
+        }
+
+        if spec.ini_page().is_none()
+            && let Some(first) = user.first()
+        {
+            values.pc_values.insert(key.clone(), *first);
+        }
+
+        if let Some(first) = user.first() {
+            values.constants.insert(key, *first);
+        }
+    }
+
+    values
+}
+
 /// Collects the file values that presentation expressions can read.
 ///
 /// Bit fields are stored as labels, so they are mapped back through the
 /// definition's option list, the same way [`load_entry`] maps them on the way
 /// into the tune. Multi-element arrays feed `arrayValue()` and `name[index]`;
-/// a single-element array is also a scalar and lands in both maps.
+/// a single-token value (including a one-cell array) is a scalar and lands only
+/// in the scalar map.
 fn collect_file_values(msq: &Msq, definition: &Definition) -> FileValues {
     let mut values = FileValues::default();
 
@@ -1076,6 +1142,7 @@ pub fn format_values(
                         text.push_str("\n         ");
                     }
                     text.push_str(token);
+                    text.push(' ');
                 }
                 text.push_str("\n      ");
                 Ok(text)

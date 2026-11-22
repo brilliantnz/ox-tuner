@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use oxtuner_ini::SettingsContext;
 
 use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
-use crate::msq::Msq;
+use crate::msq::{Msq, WritePolicy};
 use crate::sidecar::ProjectLayout;
 
 /// The longest folder name creation accepts.
@@ -183,7 +183,7 @@ impl Project {
             );
         })?;
 
-        prepared.create(None)
+        prepared.create(None, WritePolicy::SparseFromDefaults)
     }
 
     /// Validates a create request and parses its definition, writing nothing.
@@ -340,13 +340,20 @@ impl PreparedProject {
     /// `seed` is the page image a controller read produced, when the project is
     /// created from one. Its page-backed values win over the definition's
     /// defaults; PC variables keep their defaults because the page protocol
-    /// does not carry them. A failure removes the folder creation made.
+    /// does not carry them. `policy` decides which entries the file carries:
+    /// [`WritePolicy::Full`] for a controller read, and
+    /// [`WritePolicy::SparseFromDefaults`] for a manual definition. A failure
+    /// removes the folder creation made.
     ///
     /// # Errors
     ///
     /// Returns [`ProjectError`] when the tune cannot be scaffolded, a file
     /// cannot be written, or the created project opens read-only.
-    pub fn create(self, seed: Option<&oxtuner_tune::Tune>) -> Result<Project, ProjectError> {
+    pub fn create(
+        self,
+        seed: Option<&oxtuner_tune::Tune>,
+        policy: WritePolicy,
+    ) -> Result<Project, ProjectError> {
         let _span = tracing::info_span!(
             "project_create",
             root = %self.root.display(),
@@ -354,7 +361,7 @@ impl PreparedProject {
         )
         .entered();
 
-        let result = self.create_inner(seed);
+        let result = self.create_inner(seed, policy);
 
         match &result {
             Ok(project) => tracing::info!(
@@ -374,13 +381,18 @@ impl PreparedProject {
         result
     }
 
-    fn create_inner(self, seed: Option<&oxtuner_tune::Tune>) -> Result<Project, ProjectError> {
+    fn create_inner(
+        self,
+        seed: Option<&oxtuner_tune::Tune>,
+        policy: WritePolicy,
+    ) -> Result<Project, ProjectError> {
         let built = build_scaffold(
             &self.name,
             &self.request,
             &self.definition,
             &self.settings,
             seed,
+            policy,
         )?;
 
         // The target was checked in `prepare`; `create_dir` makes that check
@@ -499,8 +511,9 @@ fn build_scaffold(
     definition: &oxtuner_ini::Definition,
     settings: &SettingsContext,
     seed: Option<&oxtuner_tune::Tune>,
+    policy: WritePolicy,
 ) -> Result<BuiltScaffold, ProjectError> {
-    let document = Msq::scaffold(definition, settings, seed).map_err(ProjectError::Msq)?;
+    let document = Msq::scaffold(definition, settings, seed, policy).map_err(ProjectError::Msq)?;
     let tune_bytes = document.save()?;
     tracing::debug!(
         bytes = tune_bytes.len(),

@@ -71,7 +71,7 @@ pub use inspect::{
     DefinitionPreview, SettingGroupPreview, SettingOptionPreview, inspect_definition,
 };
 pub use load::{FileValueError, LoadedTune, format_values, load};
-pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo};
+pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo, WritePolicy};
 pub use oxtuner_encoding::Latin1Error as EncodeError;
 pub use project::{
     CONFIG_DIR, ConnectionSeed, CreateRequest, MAIN_DEFINITION, PreparedProject, Project,
