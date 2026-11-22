@@ -5,7 +5,7 @@
 //! be emitted verbatim** — tag spelling, attribute quoting, indentation,
 //! comments and elements this build does not understand. That is why this
 //! module keeps each element's opening and closing tag as written and exposes
-//! only [`Element::set_text`] as a mutation.
+//! only [`Element::set_text`] and [`Element::set_attr`] as mutations.
 //!
 //! The parser is deliberately small, but not naive:
 //!
@@ -265,6 +265,36 @@ impl Element {
     pub fn find_children<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
         self.child_elements()
             .filter(move |element| element.name == name)
+    }
+
+    /// Replaces one attribute's value, or adds it, and rebuilds the opening tag.
+    ///
+    /// The serializer writes `raw_open`, so a changed attribute has to be
+    /// reflected there; other attributes and the element's children are kept.
+    pub fn set_attr(&mut self, key: &str, value: &str) {
+        if let Some(attr) = self.attrs.iter_mut().find(|attr| attr.name == key) {
+            value.clone_into(&mut attr.value);
+        } else {
+            self.attrs.push(Attr {
+                name: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+
+        let mut raw_open = format!("<{}", self.name);
+        for attr in &self.attrs {
+            raw_open.push(' ');
+            raw_open.push_str(&attr.name);
+            raw_open.push_str("=\"");
+            raw_open.push_str(&escape_attribute(&attr.value));
+            raw_open.push('"');
+        }
+        if self.self_closing {
+            raw_open.push_str("/>");
+        } else {
+            raw_open.push('>');
+        }
+        self.raw_open = raw_open;
     }
 
     /// The element's text content, entities decoded.

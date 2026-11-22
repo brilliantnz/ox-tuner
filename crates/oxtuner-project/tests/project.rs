@@ -323,6 +323,29 @@ fn saving_without_edits_leaves_the_tune_byte_identical() {
 }
 
 #[test]
+fn saving_with_a_stamp_refreshes_the_bibliography_date() {
+    let dir = project_dir("save-stamp");
+    let mut project = Project::open(dir.path()).expect("the project opens");
+
+    project
+        .save_with_stamp(Some("Sun Nov 22 06:46:58 UTC 2026"))
+        .expect("the project saves");
+    project
+        .save_with_stamp(Some("Mon Nov 23 07:00:00 UTC 2026"))
+        .expect("the project saves again");
+
+    let tune = fs::read_to_string(dir.path().join(TUNE_FILE)).expect("the tune is readable");
+    assert!(
+        tune.contains(r#"<bibliography author="TunerStudio" tuneComment="fixture" writeDate="Mon Nov 23 07:00:00 UTC 2026"/>"#),
+        "{tune}"
+    );
+    assert!(
+        !tune.contains("Sun Nov 22"),
+        "the second save replaces the earlier date: {tune}"
+    );
+}
+
+#[test]
 fn a_save_records_project_state_inside_the_sidecar() {
     let dir = project_dir("state");
     let definition_bytes =

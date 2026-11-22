@@ -61,6 +61,7 @@ pub mod hash;
 pub mod inspect;
 pub mod load;
 pub mod msq;
+mod newline;
 pub mod project;
 pub mod sidecar;
 pub mod xml;
@@ -72,6 +73,7 @@ pub use inspect::{
 };
 pub use load::{FileValueError, LoadedTune, format_values, load};
 pub use msq::{Entry, EntryKind, EntryPage, Msq, MsqError, PageHeader, VersionInfo, WritePolicy};
+pub use newline::Newline;
 pub use oxtuner_encoding::Latin1Error as EncodeError;
 pub use project::{
     CONFIG_DIR, ConnectionSeed, CreateRequest, MAIN_DEFINITION, PreparedProject, Project,
