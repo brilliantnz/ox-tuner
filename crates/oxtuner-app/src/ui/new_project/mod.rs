@@ -43,7 +43,9 @@ use self::definition_step::definition_body;
 use self::footer::{FooterState, creation_failure, footer};
 use self::name_step::{name_body, subscribe_fields};
 use self::review_step::{review_body, success_body};
-use self::state::{ConnectionType, DEFAULT_NAME, SharedWizard, Step, Wizard, effective_definition};
+use self::state::{
+    ConnectionType, DEFAULT_NAME, DefinitionMode, SharedWizard, Step, Wizard, effective_definition,
+};
 use crate::core::{CoreService, firmware};
 
 /// Opens the New Project wizard, unless a dialog is already up.
@@ -180,6 +182,7 @@ fn render(
         .pending_project
         .as_ref()
         .is_some_and(|pending| pending.kind == crate::core::PendingProjectKind::Create);
+    let creating_from_ecu = creating && mode == DefinitionMode::Auto;
     // A running download owns the dialog: no cancel, back, next, close or
     // source change until it succeeds or fails.
     let downloading = status.downloading_definition;
@@ -324,7 +327,11 @@ fn render(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(t!("app.new_project.creating")),
+                            .child(if creating_from_ecu {
+                                t!("app.new_project.creating_from_ecu")
+                            } else {
+                                t!("app.new_project.creating")
+                            }),
                     )
                 })
                 .when_some(failure, |this, message| {

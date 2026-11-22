@@ -15,7 +15,8 @@ use oxtuner_core::{
     BlockingEventStream, CoreConfig, CoreHandle, CoreThread, Event, FailureCode, OpId, ProjectView,
     SaveReport, start,
 };
-use oxtuner_project::{ConnectionSeed, CreateRequest, ProjectLayout, TUNE_FILE};
+use oxtuner_project::{ConnectionSeed, CreateRequest, Msq, ProjectLayout, TUNE_FILE};
+use oxtuner_sim::{Fault, FaultRule, SimConfig, SimOp};
 
 mod support;
 
@@ -79,6 +80,38 @@ nPages = 1
 pageSize = 128
 page = 1
 reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+"#;
+
+/// A definition with the protocol commands a controller read needs.
+///
+/// The page holds one byte `reqFuel` at offset 0, so a preloaded page byte is
+/// visibly the controller's value rather than the definition's default.
+const ECU_CREATE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+queryCommand = "Q"
+
+[Constants]
+endianness = little
+nPages = 1
+pageSize = 16
+page = 1
+pageIdentifier = "\$tsCanId\x01"
+pageReadCommand = "p%2i%2o%2c"
+pageValueWrite = "M%2i%2o%2c%v"
+burnCommand = "b%2i"
+blockingFactor = 8
+blockReadTimeout = 500
+pageActivationDelay = 1
+tsWriteBlocks = on
+reqFuel = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+
+[PcVariables]
+tsCanId = bits, U08, [0:0], "CAN 0", "CAN 1"
+rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
+
+[ConstantsExtensions]
+defaultValue = rpmhigh, 12000
 "#;
 
 /// Writes the create fixture's definition beside the sandbox and returns it.
@@ -407,6 +440,181 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
     let event = core.next();
     assert_eq!(event.op(), Some(op));
     assert!(matches!(event, Event::TuneSaved { .. }), "{event:?}");
+}
+
+#[test]
+fn creating_from_the_ecu_seeds_the_tune_and_keeps_pc_defaults() {
+    let dir = TempDir::new("create-ecu");
+    let definition = dir.path().join("ecu-definition.ini");
+    fs::write(&definition, ECU_CREATE_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    // One known byte at `reqFuel`; the rest of the page is irrelevant.
+    let mut page = vec![0_u8; 16];
+    page[0] = 42;
+
+    let op = core
+        .handle
+        .create_project_from_ecu(
+            CreateRequest {
+                parent: dir.path().to_path_buf(),
+                name: "Roadster".to_owned(),
+                ini_path: definition,
+                expected_signature: Some("speeduino 202501".to_owned()),
+                settings: Vec::new(),
+                connection: None,
+                layout: ProjectLayout::default(),
+            },
+            support::simulator_with(SimConfig {
+                pages: vec![(1, page)],
+                ..SimConfig::default()
+            }),
+        )
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let summary = opened(&event);
+    let root = dir.path().join("Roadster");
+    assert_eq!(summary.root, root);
+
+    let bytes = fs::read(root.join(TUNE_FILE)).expect("the tune is readable");
+    let msq = Msq::parse(&bytes).expect("the tune parses");
+    let entries = msq.entries();
+    let value = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.value.as_str())
+    };
+
+    assert_eq!(
+        value("reqFuel"),
+        Some("4.2"),
+        "the ECU's raw byte 42 must be the value, not the definition default"
+    );
+    assert_eq!(
+        value("rpmhigh"),
+        Some("12000.0"),
+        "a PC variable has no page and keeps its definition default"
+    );
+}
+
+#[test]
+fn a_create_from_ecu_signature_mismatch_writes_nothing() {
+    let dir = TempDir::new("create-ecu-mismatch");
+    let definition = dir.path().join("ecu-definition.ini");
+    fs::write(&definition, ECU_CREATE_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project_from_ecu(
+            CreateRequest {
+                parent: dir.path().to_path_buf(),
+                name: "Mismatch".to_owned(),
+                ini_path: definition,
+                expected_signature: None,
+                settings: Vec::new(),
+                connection: None,
+                layout: ProjectLayout::default(),
+            },
+            support::simulator_with(SimConfig {
+                signature: Some("speeduino 999999".to_owned()),
+                ..SimConfig::default()
+            }),
+        )
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (reason, message) = failure(&event);
+    assert_eq!(reason, FailureCode::ProjectRejected);
+    assert!(message.contains("speeduino 999999"), "{message}");
+    assert!(
+        !dir.path().join("Mismatch").exists(),
+        "a refused create from the ECU leaves no folder behind"
+    );
+}
+
+#[test]
+fn a_failed_create_read_leaves_no_folder() {
+    let dir = TempDir::new("create-ecu-failed-read");
+    let definition = dir.path().join("ecu-definition.ini");
+    fs::write(&definition, ECU_CREATE_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project_from_ecu(
+            CreateRequest {
+                parent: dir.path().to_path_buf(),
+                name: "Broken".to_owned(),
+                ini_path: definition,
+                expected_signature: None,
+                settings: Vec::new(),
+                connection: None,
+                layout: ProjectLayout::default(),
+            },
+            support::simulator_with(SimConfig {
+                faults: vec![FaultRule::new(SimOp::ReadPage, Fault::Disconnect, 1)],
+                ..SimConfig::default()
+            }),
+        )
+        .expect("the command is queued");
+    let event = core.next();
+
+    assert_eq!(event.op(), Some(op));
+    let (reason, _) = failure(&event);
+    assert_eq!(reason, FailureCode::ProjectRejected);
+    assert!(
+        !dir.path().join("Broken").exists(),
+        "a failed page read must not leave a project built from defaults"
+    );
+}
+
+#[test]
+fn stopping_the_core_answers_an_in_flight_create() {
+    let dir = TempDir::new("create-ecu-stop");
+    let definition = dir.path().join("ecu-definition.ini");
+    fs::write(&definition, ECU_CREATE_DEFINITION).expect("the definition is writable");
+    let core = Harness::start();
+
+    let op = core
+        .handle
+        .create_project_from_ecu(
+            CreateRequest {
+                parent: dir.path().to_path_buf(),
+                name: "Stopped".to_owned(),
+                ini_path: definition,
+                expected_signature: None,
+                settings: Vec::new(),
+                connection: None,
+                layout: ProjectLayout::default(),
+            },
+            support::silent(),
+        )
+        .expect("the command is queued");
+
+    // The create owns its op while the signature read is pending. Stopping the
+    // core must answer it exactly once instead of leaving the wizard to time
+    // out.
+    core.handle.shutdown().expect("the shutdown is queued");
+
+    let mut answers = 0;
+    while let Some(event) = core.events.recv_timeout(WAIT) {
+        if matches!(&event, Event::Failed { op: failed, .. } if *failed == op) {
+            answers += 1;
+            let (reason, _) = failure(&event);
+            assert_eq!(reason, FailureCode::ProjectRejected);
+        }
+        if matches!(event, Event::Stopped) {
+            break;
+        }
+    }
+
+    assert_eq!(answers, 1, "the create op is answered once");
+    assert!(!dir.path().join("Stopped").exists());
 }
 
 #[test]

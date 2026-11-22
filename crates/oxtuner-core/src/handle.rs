@@ -278,6 +278,27 @@ impl CoreHandle {
         self.send_request(CommandRequest::CreateProject { request })
     }
 
+    /// Creates a project from the connected controller's tune, then opens it.
+    ///
+    /// The core parses the definition, verifies the signature on `link`, reads
+    /// every page, seeds the scaffold with that image and writes the project.
+    /// The reply is [`crate::Event::ProjectOpened`] or
+    /// [`crate::Event::Failed`] with [`crate::FailureCode::ProjectRejected`].
+    /// A failed read fails the create; it never falls back to the definition's
+    /// defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::QueueFull`] or [`CoreError::Stopped`] when the
+    /// command cannot be queued.
+    pub fn create_project_from_ecu(
+        &self,
+        request: CreateRequest,
+        link: crate::PortChoice,
+    ) -> Result<OpId, CoreError> {
+        self.send_request(CommandRequest::CreateProjectFromEcu { request, link })
+    }
+
     /// Reads a definition for the new-project wizard without owning it.
     ///
     /// Nothing is installed and no session changes. The reply is

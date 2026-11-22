@@ -66,6 +66,25 @@ pub(crate) fn inspect_definition(path: &Path, cx: &mut App) {
 /// same splash an open does, worded for creating. The answer arrives as
 /// `ProjectOpened` or `Failed`, exactly like an open.
 pub(crate) fn create_project(request: CreateRequest, cx: &mut App) {
+    create(request, None, cx);
+}
+
+/// Asks the core to create a project from the controller's tune.
+///
+/// The core verifies the signature on `port`, reads every page, seeds the
+/// scaffold with that image and writes the project. The reply is the same
+/// `ProjectOpened` or `Failed`; a failed read never falls back to defaults.
+pub(crate) fn create_project_from_ecu(
+    request: CreateRequest,
+    port: String,
+    baud: u32,
+    cx: &mut App,
+) {
+    create(request, Some((port, baud)), cx);
+}
+
+/// Sends a create, from the definition's defaults or from a controller read.
+fn create(request: CreateRequest, from_ecu: Option<(String, u32)>, cx: &mut App) {
     let Some(handle) = handle_or_report(cx, FailureCode::ProjectRejected) else {
         return;
     };
@@ -75,7 +94,13 @@ pub(crate) fn create_project(request: CreateRequest, cx: &mut App) {
         .status
         .begin_pending_creation(&root);
 
-    match handle.create_project(request) {
+    let sent = match from_ecu {
+        Some((port, baud)) => {
+            handle.create_project_from_ecu(request, oxtuner_core::PortChoice::serial(port, baud))
+        }
+        None => handle.create_project(request),
+    };
+    match sent {
         Ok(op) => track_pending_project(op, &root, cx),
         Err(error) => {
             tracing::warn!(%error, path = %root.display(), "the core refused the create");

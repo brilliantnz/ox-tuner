@@ -25,6 +25,7 @@ pub(super) fn handle(
     envelope: Envelope,
     session: &mut Session,
     live: &mut Option<Live>,
+    pending_create: &mut Option<super::create::PendingCreate>,
     safety: &mut Safety,
     journal_dir: Option<&std::path::Path>,
     definition_cache_dir: Option<&std::path::Path>,
@@ -38,6 +39,57 @@ pub(super) fn handle(
     ports: &mut PortsWatch,
 ) -> Outcome {
     let Envelope { op, command } = envelope;
+
+    // A create-from-ECU owns the port and the session until its read ends.
+    // Refusing the commands that would replace either keeps the pending read
+    // coherent; harmless commands (layout, journal reads) still answer.
+    if pending_create.is_some()
+        && matches!(
+            &command,
+            CommandRequest::Connect { .. }
+                | CommandRequest::TestConnection { .. }
+                | CommandRequest::ProbeFirmware { .. }
+                | CommandRequest::Disconnect
+                | CommandRequest::ReadAll
+                | CommandRequest::AdoptEcuImage
+                | CommandRequest::StartRealtime { .. }
+                | CommandRequest::StopRealtime
+                | CommandRequest::WriteToRam { .. }
+                | CommandRequest::BurnToFlash { .. }
+                | CommandRequest::RunControllerCommand { .. }
+                | CommandRequest::StartLog { .. }
+                | CommandRequest::StopLog
+                | CommandRequest::SaveTrace { .. }
+                | CommandRequest::RevertTune
+                | CommandRequest::RevertTarget { .. }
+                | CommandRequest::ImportTune { .. }
+                | CommandRequest::RestoreSnapshot { .. }
+                | CommandRequest::ResolveConflicts { .. }
+                | CommandRequest::EditScalar { .. }
+                | CommandRequest::EditTable { .. }
+                | CommandRequest::EditAxis { .. }
+                | CommandRequest::OpenProject { .. }
+                | CommandRequest::CreateProject { .. }
+                | CommandRequest::CreateProjectFromEcu { .. }
+                | CommandRequest::LoadDefinition { .. }
+                | CommandRequest::UnloadDefinition
+        )
+    {
+        report.failures += 1;
+        send(
+            events,
+            Event::Failed {
+                op,
+                failure: Failure {
+                    code: FailureCode::Busy,
+                    message:
+                        "a new project is reading its tune from the ECU; wait for it to finish"
+                            .to_owned(),
+                },
+            },
+        );
+        return Outcome::Continue;
+    }
 
     match command {
         CommandRequest::Shutdown => {
@@ -650,6 +702,14 @@ pub(super) fn handle(
             }
             Outcome::Continue
         }
+        CommandRequest::CreateProjectFromEcu { request, link } => {
+            // The read owns the core loop's connection state; the project is
+            // written only after every page arrived and decoded.
+            if let Some(create) = super::create::begin(op, request, &link, live, events, report) {
+                *pending_create = Some(create);
+            }
+            Outcome::Continue
+        }
         CommandRequest::SetProjectLayout { layout } => {
             let mut stored = false;
 
@@ -1124,7 +1184,7 @@ pub(super) fn handle(
 
 /// Where a project's definition came from, for the open log line.
 #[derive(Debug, Clone, Copy)]
-enum CacheSource {
+pub(super) enum CacheSource {
     /// Read from the project's own `projectCfg/` copy.
     Fresh,
     /// Reused from the shared definition cache.
@@ -1145,7 +1205,7 @@ impl CacheSource {
     clippy::too_many_arguments,
     reason = "the install path mirrors the dispatcher's queue fields"
 )]
-fn adopt_project(
+pub(super) fn adopt_project(
     project: Project,
     op: OpId,
     cache: CacheSource,
@@ -1238,7 +1298,7 @@ fn log_load_report(op: OpId, report: &oxtuner_project::LoadReport) {
 }
 
 /// Reports a project that could not be opened or created.
-fn reject_project(
+pub(super) fn reject_project(
     path: &std::path::Path,
     error: &oxtuner_project::ProjectError,
     op: OpId,

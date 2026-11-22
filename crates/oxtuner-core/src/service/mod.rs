@@ -446,6 +446,9 @@ fn run(
     let mut report = CoreReport::default();
     let mut session = Session::Empty;
     let mut live: Option<Live> = None;
+    // A create that is reading its tune from a controller owns the link until
+    // the pages arrive; the project is written only after the read succeeds.
+    let mut pending_create: Option<create::PendingCreate> = None;
     // The last menu tree the core published, for change suppression.
     let mut last_menu: Vec<MenuNode> = Vec::new();
     let mut menu_dirty = false;
@@ -472,6 +475,7 @@ fn run(
                 envelope,
                 &mut session,
                 &mut live,
+                &mut pending_create,
                 &mut safety,
                 journal_dir.as_deref(),
                 definition_cache_dir.as_deref(),
@@ -494,7 +498,6 @@ fn run(
             }
             report.handled += 1;
         }
-
         if menu_dirty {
             refresh_menu(&events, &session, &latest, &mut last_menu);
             menu_dirty = false;
@@ -508,6 +511,7 @@ fn run(
         let had_frame = latest.get().is_some();
         service_live(
             &mut live,
+            &mut pending_create,
             &mut session,
             &mut safety,
             journal_dir.as_deref(),
@@ -518,6 +522,28 @@ fn run(
             &log,
             &mut report,
         );
+
+        if pending_create
+            .as_ref()
+            .is_some_and(create::PendingCreate::is_ready)
+            && let Some(create) = pending_create.take()
+        {
+            create::finish(
+                create,
+                &mut live,
+                &mut session,
+                &mut safety,
+                journal_dir.as_deref(),
+                &events,
+                &latest,
+                &history,
+                &log,
+                &mut report,
+                &mut last_menu,
+            );
+            menu_dirty = true;
+        }
+
         let connection_changed = live
             .as_ref()
             .map(|connection| connection.connection.revision)
@@ -541,6 +567,20 @@ fn run(
             refresh_menu(&events, &session, &latest, &mut last_menu);
             menu_dirty = false;
         }
+    }
+
+    // A create owns its op while the read is in flight. Its request is still
+    // queued on the connection, so `teardown` below answers it exactly once.
+    // The branch is defensive: `begin` sets both the connection and the pending
+    // create together, so a pending create without a connection should not
+    // exist, but an unanswered op is worse than a redundant check.
+    if live.is_none() {
+        create::fail(
+            &mut pending_create,
+            "the core stopped before the ECU read started",
+            &events,
+            &mut report,
+        );
     }
 
     teardown(
@@ -722,6 +762,10 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 enum PendingKind {
     /// The connect handshake (signature).
     Connect,
+    /// The signature check that starts a create from a controller.
+    CreateSignature,
+    /// The full page read that seeds a create from a controller.
+    CreateRead,
     /// A full page read.
     ReadAll,
     /// One realtime block.
@@ -1200,6 +1244,7 @@ impl Live {
     }
 }
 
+mod create;
 mod dispatch;
 mod ecu;
 mod log;

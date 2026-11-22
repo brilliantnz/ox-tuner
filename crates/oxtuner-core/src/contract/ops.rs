@@ -132,6 +132,22 @@ pub(crate) enum CommandRequest {
         /// The definition bytes copied into `projectCfg/`.
         request: oxtuner_project::CreateRequest,
     },
+    /// Create a project folder from a controller's tune, then open it.
+    ///
+    /// The core parses the definition, connects on `link`, verifies the
+    /// reported signature, reads every page, seeds the scaffold with that image
+    /// and writes the project. The reply is [`super::Event::ProjectOpened`], or
+    /// [`super::Event::Failed`] with
+    /// [`super::FailureCode::ProjectRejected`]; a failed create removes the
+    /// folder it made and leaves the previous session and its files untouched.
+    /// A project that claims to be created from an ECU never silently falls
+    /// back to the definition's defaults.
+    CreateProjectFromEcu {
+        /// The definition and scaffold inputs.
+        request: oxtuner_project::CreateRequest,
+        /// The device the page image is read from.
+        link: crate::link::PortChoice,
+    },
     /// Write the open project's changed values back to its tune file.
     ///
     /// Only variables that differ from the baseline are touched, so an unedited
@@ -491,6 +507,13 @@ pub enum ProjectCommand {
         /// Everything the core needs to scaffold and open the project.
         request: oxtuner_project::CreateRequest,
     },
+    /// Create a project folder from a controller read, then open it.
+    CreateFromEcu {
+        /// Everything the core needs to scaffold and open the project.
+        request: oxtuner_project::CreateRequest,
+        /// The device the page image is read from.
+        link: crate::link::PortChoice,
+    },
     /// Write changed values back to the tune file.
     Save,
     /// Replace the project's panel layout in its state file.
@@ -717,6 +740,7 @@ impl CoreCommand {
             Self::Definition(DefinitionCommand::Unload) => "unload-definition",
             Self::Project(ProjectCommand::Open { .. }) => "open-project",
             Self::Project(ProjectCommand::Create { .. }) => "create-project",
+            Self::Project(ProjectCommand::CreateFromEcu { .. }) => "create-project-from-ecu",
             Self::Project(ProjectCommand::Save) => "save-tune",
             Self::Project(ProjectCommand::SetLayout { .. }) => "set-project-layout",
             Self::Project(ProjectCommand::ListSnapshots) => "list-snapshots",
@@ -773,6 +797,9 @@ impl From<CoreCommand> for CommandRequest {
             CoreCommand::Project(ProjectCommand::Open { path }) => Self::OpenProject { path },
             CoreCommand::Project(ProjectCommand::Create { request }) => {
                 Self::CreateProject { request }
+            }
+            CoreCommand::Project(ProjectCommand::CreateFromEcu { request, link }) => {
+                Self::CreateProjectFromEcu { request, link }
             }
             CoreCommand::Project(ProjectCommand::Save) => Self::SaveTune,
             CoreCommand::Project(ProjectCommand::SetLayout { layout }) => {
