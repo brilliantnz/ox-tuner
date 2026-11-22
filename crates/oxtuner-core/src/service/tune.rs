@@ -314,8 +314,9 @@ pub(super) fn adopt_ecu_image(
 
 /// Saves the chosen tune and returns its path.
 fn save_resolution(project: &mut Project) -> Result<std::path::PathBuf, String> {
+    let stamp = super::stamp::now();
     project
-        .save()
+        .save_with_stamp(Some(&stamp))
         .map(|outcome| outcome.path)
         .map_err(|error| error.to_string())
 }

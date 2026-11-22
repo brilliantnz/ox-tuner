@@ -944,6 +944,24 @@ impl Msq {
         self.document.root_mut()
     }
 
+    /// Updates the `<bibliography>` `writeDate`, or adds it when absent.
+    ///
+    /// Only an existing `<bibliography>` is touched: a document without one is
+    /// left exactly as it arrived rather than gaining metadata it never had.
+    pub fn set_write_date(&mut self, stamp: &str) {
+        let Some(root) = self.root_mut() else {
+            return;
+        };
+        let Some(bibliography) = root.children.iter_mut().find_map(|node| match node {
+            Node::Element(element) if element.name == "bibliography" => Some(element),
+            _ => None,
+        }) else {
+            return;
+        };
+
+        bibliography.set_attr("writeDate", stamp);
+    }
+
     /// The `<versionInfo>` header, when present.
     pub fn version_info(&self) -> Option<VersionInfo> {
         let version = self.root()?.find_child("versionInfo")?;

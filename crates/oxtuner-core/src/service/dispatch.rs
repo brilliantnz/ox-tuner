@@ -742,46 +742,49 @@ pub(super) fn handle(
         }
         CommandRequest::SaveTune => {
             match session {
-                Session::Project(project) => match project.save() {
-                    Ok(outcome) => {
-                        tracing::info!(
-                            %op,
-                            path = %outcome.path.display(),
-                            cells = outcome.cells,
-                            "tune saved"
-                        );
-                        report.tune_saves += 1;
-                        send(
-                            events,
-                            Event::TuneSaved {
-                                op,
-                                outcome: SaveReport {
-                                    path: outcome.path,
-                                    cells: outcome.cells,
+                Session::Project(project) => {
+                    let stamp = stamp::now();
+                    match project.save_with_stamp(Some(&stamp)) {
+                        Ok(outcome) => {
+                            tracing::info!(
+                                %op,
+                                path = %outcome.path.display(),
+                                cells = outcome.cells,
+                                "tune saved"
+                            );
+                            report.tune_saves += 1;
+                            send(
+                                events,
+                                Event::TuneSaved {
+                                    op,
+                                    outcome: SaveReport {
+                                        path: outcome.path,
+                                        cells: outcome.cells,
+                                    },
                                 },
-                            },
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %op,
-                            error_kind = error.kind(),
-                            %error,
-                            "tune save failed"
-                        );
-                        report.failures += 1;
-                        send(
-                            events,
-                            Event::Failed {
-                                op,
-                                failure: Failure {
-                                    code: FailureCode::TuneSaveFailed,
-                                    message: error.to_string(),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %op,
+                                error_kind = error.kind(),
+                                %error,
+                                "tune save failed"
+                            );
+                            report.failures += 1;
+                            send(
+                                events,
+                                Event::Failed {
+                                    op,
+                                    failure: Failure {
+                                        code: FailureCode::TuneSaveFailed,
+                                        message: error.to_string(),
+                                    },
                                 },
-                            },
-                        );
+                            );
+                        }
                     }
-                },
+                }
                 Session::Definition(_) | Session::Empty => {
                     tracing::debug!(%op, "nothing to save");
                     send(

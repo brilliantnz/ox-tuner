@@ -62,6 +62,23 @@ impl Project {
     /// Returns [`ProjectError`] when the check blocks saving or a file cannot
     /// be written.
     pub fn save(&mut self) -> Result<SaveOutcome, ProjectError> {
+        self.save_with_stamp(None)
+    }
+
+    /// Saves, stamping the tune's `writeDate` when a stamp is supplied.
+    ///
+    /// The core passes a fresh stamp on every user save, so a file does not keep
+    /// claiming it was saved at creation time. `None` leaves the header exactly
+    /// as the file had it, which is what a byte-identical unedited save and the
+    /// tests use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] for the same reasons as [`Self::save`].
+    pub fn save_with_stamp(
+        &mut self,
+        write_stamp: Option<&str>,
+    ) -> Result<SaveOutcome, ProjectError> {
         if self.is_read_only() {
             return Err(ProjectError::ReadOnly {
                 reasons: self
@@ -78,6 +95,9 @@ impl Project {
         // formatted) must leave the session's document exactly as it was, so a
         // later revert cannot save text from the failed attempt.
         let mut document = self.msq.clone();
+        if let Some(stamp) = write_stamp {
+            document.set_write_date(stamp);
+        }
         self.remove_alias_entries(&mut document, Some(&diff.changed_variables));
         let mut written: Vec<String> = Vec::new();
         let mut cells = 0;

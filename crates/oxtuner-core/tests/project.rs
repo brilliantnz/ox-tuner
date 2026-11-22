@@ -272,7 +272,7 @@ fn opening_a_project_summarises_the_tune_for_the_ui() {
 }
 
 #[test]
-fn saving_an_unedited_project_writes_nothing_and_keeps_the_file_identical() {
+fn saving_an_unedited_project_writes_no_values_and_refreshes_the_date() {
     let dir = project_dir("save", TUNE);
     let before = dir.tune();
     let core = Harness::start();
@@ -292,7 +292,35 @@ fn saving_an_unedited_project_writes_nothing_and_keeps_the_file_identical() {
         cells: 0,
     };
     assert_eq!(outcome, &expected);
-    assert_eq!(dir.tune(), before, "an unedited save is byte-identical");
+    assert!(
+        dir.tune()
+            .windows(b"writeDate=\"".len())
+            .any(|window| window == b"writeDate=\""),
+        "a save refreshes the bibliography date"
+    );
+    assert_eq!(
+        without_write_date(&dir.tune()),
+        without_write_date(&before),
+        "an unedited save changes nothing except the save date"
+    );
+}
+
+/// Removes the bibliography `writeDate` attribute, so two files can be compared
+/// modulo the one value a save is expected to refresh.
+fn without_write_date(bytes: &[u8]) -> Vec<u8> {
+    let marker = b" writeDate=\"";
+    let Some(start) = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+    else {
+        return bytes.to_vec();
+    };
+    let rest = &bytes[start + marker.len()..];
+    let Some(end) = rest.iter().position(|byte| *byte == b'"') else {
+        return bytes.to_vec();
+    };
+
+    [bytes[..start].to_vec(), rest[end + 1..].to_vec()].concat()
 }
 
 #[test]

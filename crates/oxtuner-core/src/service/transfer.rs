@@ -633,9 +633,11 @@ pub(super) fn burn_to_flash(
 
     // A burn makes the tune durable, so the project file records it too.
     // Every check that can refuse the burn has passed; a save that fails stops
-    // it instead of leaving the file behind.
+    // it instead of leaving the file behind. This is a durable user action, so
+    // the header date moves with it.
+    let stamp = super::stamp::now();
     if !project.images().status().unsaved.is_empty()
-        && let Err(error) = project.save()
+        && let Err(error) = project.save_with_stamp(Some(&stamp))
     {
         return refuse(
             events,
