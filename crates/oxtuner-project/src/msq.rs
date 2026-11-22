@@ -190,6 +190,11 @@ pub enum MsqError {
         /// Why the settle failed.
         reason: String,
     },
+    /// The ECU page image could not be copied onto the scaffold.
+    SeedRejected {
+        /// Why the copy failed.
+        reason: String,
+    },
     /// What the scaffold wrote holds two values for bytes they share.
     ///
     /// A clamp or the user-unit rounding can move one peer and not the other
@@ -220,6 +225,12 @@ impl fmt::Display for MsqError {
             Self::UnsettledDefaults { reason } => {
                 write!(formatter, "the defaults cannot be settled: {reason}")
             }
+            Self::SeedRejected { reason } => {
+                write!(
+                    formatter,
+                    "the ECU page image cannot seed the tune: {reason}"
+                )
+            }
             Self::ConflictingDefaults { conflict } => {
                 write!(
                     formatter,
@@ -239,7 +250,8 @@ impl std::error::Error for MsqError {
             | Self::EntryNotFound { .. }
             | Self::UnknownPage { .. }
             | Self::ConflictingDefaults { .. }
-            | Self::UnsettledDefaults { .. } => None,
+            | Self::UnsettledDefaults { .. }
+            | Self::SeedRejected { .. } => None,
         }
     }
 }
@@ -390,6 +402,50 @@ fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item 
     }
 }
 
+/// Copies the page-backed values of an ECU image onto a scaffold.
+///
+/// Only `[Constants]` values travel over the page protocol; the PC variables
+/// have no page and keep the defaults the layout resolved. Aliases are copied
+/// too: they are redundant views of the same bytes, and the scaffold decides
+/// later whether to write them.
+fn apply_page_seed(tune: &mut Tune, seed: &Tune) -> Result<(), MsqError> {
+    let variables: Vec<(String, Values)> = seed
+        .layout()
+        .variables()
+        .iter()
+        .filter(|spec| spec.ini_page().is_some())
+        .map(|spec| {
+            seed.value(&spec.name)
+                .map(|values| (spec.name.clone(), values.clone()))
+                .ok_or_else(|| MsqError::SeedRejected {
+                    reason: format!("the ECU image has no value for `{}`", spec.name),
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    for (name, values) in variables {
+        match values {
+            Values::Numbers(numbers) => {
+                for (index, raw) in numbers.iter().enumerate() {
+                    tune.set_image_raw(&name, index, *raw).map_err(|error| {
+                        MsqError::SeedRejected {
+                            reason: error.to_string(),
+                        }
+                    })?;
+                }
+            }
+            Values::Text(text) => {
+                tune.set_image_text(&name, &text)
+                    .map_err(|error| MsqError::SeedRejected {
+                        reason: error.to_string(),
+                    })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// The values a scaffold writes for one variable.
 ///
 /// A default outside the declared range or the storage type would come back
@@ -423,8 +479,26 @@ fn is_list(definition: &Definition, name: &str) -> bool {
     matches!(shape, Some(Shape::List(_)))
 }
 
+/// Builds a tune whose layout resolves presentation attributes from the
+/// definition's own defaults.
+///
+/// A scaffold has no values yet, so an attribute written as an expression
+/// (`{fuelLoadMax}`, `{0.1/stoich}`) resolves against the definition. A project
+/// created from a controller decodes its page image into the same layout, so
+/// the copy and the scaffold agree on every variable name, element count and
+/// address.
+pub(crate) fn image_for(definition: &Definition) -> Tune {
+    let mut defaults = DefaultValues {
+        definition,
+        depth: 0,
+    };
+    let layout = TuneLayout::build_with_context(definition, &mut defaults);
+    Tune::new(Arc::new(layout))
+}
+
 impl Msq {
-    /// Builds a new tune document with every value at its definition default.
+    /// Builds a new tune document with every value at its definition default,
+    /// or at the page values of `seed` when one is supplied.
     ///
     /// The document mirrors what the reference writer produces: an unnumbered
     /// PC page first, one numbered page per definition page carrying the
@@ -437,6 +511,10 @@ impl Msq {
     /// resolves before the value is written. A value that still cannot be
     /// written is left out and the open that follows reports it as missing.
     ///
+    /// `seed` is the ECU page image a project created from a controller was
+    /// read from. Its page-backed values replace the defaults; PC variables
+    /// keep their defaults because they do not travel over the page protocol.
+    ///
     /// This is crate-private: project creation is the only caller.
     ///
     /// # Errors
@@ -444,24 +522,21 @@ impl Msq {
     /// Returns [`MsqError::UnknownPage`] when a scaffolded value belongs to a
     /// page the definition does not declare, [`MsqError::Encoding`] when a
     /// written value cannot be represented in ISO-8859-1,
-    /// [`MsqError::UnsettledDefaults`] when the defaults cannot be settled onto
-    /// one value per set of shared bytes, and [`MsqError::ConflictingDefaults`]
-    /// when what the scaffold writes holds two values for bytes they share.
+    /// [`MsqError::SeedRejected`] when the ECU image cannot be copied onto the
+    /// scaffold, [`MsqError::UnsettledDefaults`] when the defaults cannot be
+    /// settled onto one value per set of shared bytes, and
+    /// [`MsqError::ConflictingDefaults`] when what the scaffold writes holds
+    /// two values for bytes they share.
     pub(crate) fn scaffold(
         definition: &Definition,
         settings: &SettingsContext,
+        seed: Option<&Tune>,
     ) -> Result<Self, MsqError> {
-        // A scaffold has no values yet, so presentation attributes are
-        // resolved against the definition's own defaults. Without that, every
-        // attribute written as an expression (`{fuelLoadMax}`, `{0.1/stoich}`)
-        // would stay unresolved and drop its variable from the new tune.
-        let mut defaults = DefaultValues {
-            definition,
-            depth: 0,
-        };
-        let layout = TuneLayout::build_with_context(definition, &mut defaults);
-        let mut tune = Tune::new(Arc::new(layout));
+        let mut tune = image_for(definition);
         apply_definition_defaults(&mut tune, definition);
+        if let Some(seed) = seed {
+            apply_page_seed(&mut tune, seed)?;
+        }
         // A definition can give two constants the same bytes and disagree with
         // itself about what those bytes should hold. A new project must not be
         // born with a pair no write would carry, so the defaults are settled
@@ -1432,7 +1507,7 @@ mod tests {
     fn scaffold_emits_a_document_that_checks_clean() {
         let definition = scaffold_definition();
         let settings = SettingsContext::new();
-        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+        let msq = Msq::scaffold(&definition, &settings, None).expect("defaults scaffold");
 
         let info = msq.version_info().expect("the header is present");
         assert_eq!(info.file_format, "5.0");
@@ -1464,6 +1539,38 @@ mod tests {
     }
 
     #[test]
+    fn a_page_seed_replaces_defaults_but_not_pc_variables() {
+        // A project created from a controller carries the ECU's page image.
+        // The page protocol has no PC variables, so those keep their defaults.
+        let definition = scaffold_definition();
+        let settings = SettingsContext::new();
+        let mut seed = Tune::from_definition(&definition);
+        seed.set_image_raw("reqFuel", 0, 200.0).expect("seeded");
+        seed.set_image_raw("aeMode", 0, 1.0).expect("seeded");
+        seed.set_image_text("note", "ECU").expect("seeded");
+        seed.set_image_raw("table", 3, 9.0).expect("seeded");
+        seed.set_image_raw("rpmhigh", 0, 12_345.0).expect("seeded");
+
+        let msq = Msq::scaffold(&definition, &settings, Some(&seed)).expect("seeded scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
+        let loaded = load(&reparsed, &definition);
+
+        assert_eq!(
+            loaded.tune.raw_at("reqFuel", 0).expect("it is there"),
+            200.0
+        );
+        assert_eq!(loaded.tune.raw_at("aeMode", 0).expect("it is there"), 1.0);
+        assert_eq!(loaded.tune.text("note").expect("it is there"), "ECU");
+        assert_eq!(loaded.tune.raw_at("table", 3).expect("it is there"), 9.0);
+        assert_eq!(
+            loaded.tune.raw_at("rpmhigh", 0).expect("it is there"),
+            0.0,
+            "a PC variable has no page and keeps its definition default"
+        );
+    }
+
+    #[test]
     fn a_scaffolded_tune_keeps_peers_over_one_byte_in_step() {
         // A definition can give two constants the same bytes and disagree with
         // itself about what those bytes should hold: `second` cannot read back
@@ -1487,7 +1594,7 @@ second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
         .expect("parses");
         let settings = SettingsContext::new();
 
-        let msq = Msq::scaffold(&definition, &settings).expect("defaults scaffold");
+        let msq = Msq::scaffold(&definition, &settings, None).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1523,7 +1630,7 @@ second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
         )
         .expect("parses");
 
-        let error = Msq::scaffold(&definition, &SettingsContext::new())
+        let error = Msq::scaffold(&definition, &SettingsContext::new(), None)
             .expect_err("no value fits both ranges");
 
         assert!(
@@ -1553,7 +1660,7 @@ second = scalar, U08, 0, \"y\", 0.01, 0, 0, 255, 1
         )
         .expect("parses");
 
-        let error = Msq::scaffold(&definition, &SettingsContext::new())
+        let error = Msq::scaffold(&definition, &SettingsContext::new(), None)
             .expect_err("the rounding pulls the two apart");
 
         assert!(
@@ -1583,7 +1690,8 @@ straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let msq =
+            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1619,7 +1727,8 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let msq =
+            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1651,7 +1760,8 @@ note = string, ASCII, 8
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(&definition, &SettingsContext::new()).expect("defaults scaffold");
+        let msq =
+            Msq::scaffold(&definition, &SettingsContext::new(), None).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);

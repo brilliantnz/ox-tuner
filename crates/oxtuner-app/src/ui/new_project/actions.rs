@@ -4,6 +4,7 @@ use std::path::Path;
 
 use gpui_kit::App;
 use oxtuner_core::{ConnectionSeed, CreateRequest};
+use rust_i18n::t;
 
 use super::connection_step::{effective_connection, test_matches_pickers};
 use super::name_step::name_target_problem;
@@ -87,6 +88,7 @@ pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut A
             .map(|detected| detected.signature.clone())
     });
     let failure_serial = status.failure_serial;
+    let link = port.clone().map(|port| (port, baud));
 
     let request = CreateRequest {
         parent: parent.to_path_buf(),
@@ -104,5 +106,20 @@ pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut A
         wizard.failure_serial = failure_serial;
     }
 
-    core::create_project(request, cx);
+    // Auto-detect means the tune is the controller's, not the definition's
+    // defaults. A missing port is a failed create, never a silent fallback.
+    if mode == DefinitionMode::Auto {
+        if let Some((port, baud)) = link {
+            core::create_project_from_ecu(request, port, baud, cx);
+        } else {
+            tracing::warn!("create from the ECU pressed without a port");
+            core::report_failure(
+                cx,
+                oxtuner_core::FailureCode::ProjectRejected,
+                t!("app.new_project.connect_required").to_string(),
+            );
+        }
+    } else {
+        core::create_project(request, cx);
+    }
 }

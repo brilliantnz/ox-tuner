@@ -928,6 +928,10 @@ app:
       en: Try again
     creating:
       en: Writing the project folder…
+    creating_from_ecu:
+      en: Reading the ECU and writing the project…
+    connect_required:
+      en: Reading the tune needs a connection. Pick a port first.
     failed:
       en: 'The project was not created: %{message}'
     created:

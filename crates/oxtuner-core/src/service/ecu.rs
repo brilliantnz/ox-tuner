@@ -76,7 +76,14 @@ pub(super) fn teardown(
                     op: pending.op,
                     failure: Failure {
                         code: failure_code(pending.kind),
-                        message: "the session was closed before the operation completed".to_owned(),
+                        message: if matches!(
+                            pending.kind,
+                            PendingKind::CreateSignature | PendingKind::CreateRead
+                        ) {
+                            "the core stopped before the ECU read finished".to_owned()
+                        } else {
+                            "the session was closed before the operation completed".to_owned()
+                        },
                     },
                 },
             ),
@@ -304,6 +311,7 @@ pub(super) fn default_framing(definition: &Definition) -> LinkMode {
 )]
 pub(super) fn service_live(
     live: &mut Option<Live>,
+    pending_create: &mut Option<super::create::PendingCreate>,
     session: &mut Session,
     safety: &mut Safety,
     journal_dir: Option<&std::path::Path>,
@@ -320,7 +328,17 @@ pub(super) fn service_live(
 
     while let Ok(reply) = connection.connection.replies.try_recv() {
         let keep = on_reply(
-            connection, reply, session, safety, events, latest, frames, history, log, report,
+            connection,
+            reply,
+            pending_create,
+            session,
+            safety,
+            events,
+            latest,
+            frames,
+            history,
+            log,
+            report,
         );
         if !keep {
             teardown(
@@ -416,6 +434,7 @@ pub(super) fn service_live(
 pub(super) fn on_reply(
     live: &mut Live,
     reply: IoReply,
+    pending_create: &mut Option<super::create::PendingCreate>,
     session: &mut Session,
     safety: &mut Safety,
     events: &EventTx,
@@ -431,6 +450,37 @@ pub(super) fn on_reply(
     };
 
     match (pending.kind, reply.outcome) {
+        (PendingKind::CreateSignature, IoOutcome::Signature { signature }) => {
+            let Some(create) = pending_create.as_mut() else {
+                tracing::error!("a create signature reply had no pending create");
+                return false;
+            };
+            if let Err(message) = super::create::signature_reached(create, live, signature) {
+                super::create::fail(pending_create, &message, events, report);
+                return false;
+            }
+            true
+        }
+        (PendingKind::CreateRead, IoOutcome::All { pages }) => {
+            let Some(create) = pending_create.as_mut() else {
+                tracing::error!("a create page reply had no pending create");
+                return false;
+            };
+            if let Err(message) = super::create::pages_reached(create, live, &pages) {
+                super::create::fail(pending_create, &message, events, report);
+                return false;
+            }
+            true
+        }
+        (PendingKind::CreateSignature | PendingKind::CreateRead, IoOutcome::Failed(failure)) => {
+            super::create::fail(pending_create, &failure.message, events, report);
+            false
+        }
+        (PendingKind::CreateSignature | PendingKind::CreateRead, outcome) => {
+            let message = format!("the create read received an unexpected reply: {outcome:?}");
+            super::create::fail(pending_create, &message, events, report);
+            false
+        }
         (PendingKind::Connect, IoOutcome::Signature { signature }) => {
             live.set_signature(signature);
             let summary = live.summary(safety.writes_enabled());
@@ -742,6 +792,7 @@ pub(super) fn on_reply(
 pub(super) fn failure_code(kind: PendingKind) -> FailureCode {
     match kind {
         PendingKind::Connect => FailureCode::ConnectFailed,
+        PendingKind::CreateSignature | PendingKind::CreateRead => FailureCode::ProjectRejected,
         PendingKind::ReadAll => FailureCode::ReadFailed,
         PendingKind::Realtime => FailureCode::RealtimeRejected,
         PendingKind::Trace => FailureCode::TraceFailed,

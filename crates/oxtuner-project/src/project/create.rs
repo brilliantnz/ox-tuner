@@ -173,36 +173,34 @@ impl Project {
     /// definition cannot be parsed, a reported signature mismatches, or a
     /// file cannot be written. A failure removes what creation wrote.
     pub fn create(request: &CreateRequest) -> Result<Self, ProjectError> {
-        let root = request.root();
-        let _span = tracing::info_span!(
-            "project_create",
-            root = %root.display(),
-            name = request.name.trim()
-        )
-        .entered();
-
-        let result = Self::create_inner(request);
-
-        match &result {
-            Ok(project) => tracing::info!(
-                root = %project.root().display(),
-                signature = %project.definition().signature,
-                pages = project.definition().pages.len(),
-                constants = project.definition().constants.len(),
-                "project created"
-            ),
-            Err(error) => tracing::warn!(
+        let prepared = Self::prepare(request).inspect_err(|error| {
+            tracing::warn!(
+                root = %request.root().display(),
+                name = request.name.trim(),
                 error_kind = error.kind(),
                 %error,
                 "project creation failed"
-            ),
-        }
+            );
+        })?;
 
-        result
+        prepared.create(None)
     }
 
-    /// The body of [`Self::create`], split out so one place logs its outcome.
-    fn create_inner(request: &CreateRequest) -> Result<Self, ProjectError> {
+    /// Validates a create request and parses its definition, writing nothing.
+    ///
+    /// Splitting preparation from writing lets a project created from a
+    /// controller be validated and parsed before the core opens the port, and
+    /// lets the read image seed the tune the same way both paths use. The
+    /// target folder is checked here and checked again by the atomic
+    /// `create_dir` in [`PreparedProject::create`], so a folder that appeared
+    /// in between still refuses the write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the name or target is unusable, the
+    /// definition cannot be read or parsed, or a reported signature
+    /// mismatches.
+    pub fn prepare(request: &CreateRequest) -> Result<PreparedProject, ProjectError> {
         let name = validate_project_name(&request.name)?;
         let root = request.root();
         ensure_target_free(&root)?;
@@ -213,35 +211,16 @@ impl Project {
             "definition read for the new project"
         );
 
-        // Everything is validated and built in memory before the folder
-        // exists, so a refused definition touches no disk at all.
-        let built = build_scaffold(&name, request, &ini_bytes)?;
+        let (definition, settings) = parse_definition(request, &ini_bytes)?;
 
-        // The target was checked above; `create_dir` makes that check atomic
-        // by refusing a folder that appeared in between. Reusing it would make
-        // the rollback below delete a folder creation did not make.
-        if let Some(parent) = root.parent() {
-            fs::create_dir_all(parent).map_err(|source| ProjectError::Io {
-                path: parent.to_owned(),
-                source,
-            })?;
-        }
-        fs::create_dir(&root).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::AlreadyExists {
-                ProjectError::TargetExists { path: root.clone() }
-            } else {
-                ProjectError::Io {
-                    path: root.clone(),
-                    source,
-                }
-            }
-        })?;
-
-        let mut written: Vec<PathBuf> = Vec::new();
-        let project = Self::write_scaffold(&root, request, &ini_bytes, &built, &mut written)
-            .inspect_err(|_| rollback(&root, &written))?;
-
-        Ok(project)
+        Ok(PreparedProject {
+            request: request.clone(),
+            name,
+            root,
+            ini_bytes,
+            definition,
+            settings,
+        })
     }
 
     /// Writes the scaffold, then opens it through the normal open path so a
@@ -321,6 +300,123 @@ impl Project {
     }
 }
 
+/// A validated create request with its definition parsed and nothing written.
+///
+/// [`Project::prepare`] builds it; [`PreparedProject::create`] writes the files.
+/// A project created from a controller uses the split: the definition has to be
+/// parsed before the port is opened, and the tune is seeded from the page image
+/// the read produced.
+#[derive(Debug, Clone)]
+pub struct PreparedProject {
+    request: CreateRequest,
+    name: String,
+    root: PathBuf,
+    ini_bytes: Vec<u8>,
+    definition: oxtuner_ini::Definition,
+    settings: SettingsContext,
+}
+
+impl PreparedProject {
+    /// The parsed definition the project will carry.
+    pub fn definition(&self) -> &oxtuner_ini::Definition {
+        &self.definition
+    }
+
+    /// The folder the project will occupy.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Builds the tune image a controller read decodes into.
+    ///
+    /// It uses the same presentation context as the scaffold, so every page
+    /// variable the read fills is one the scaffold will write.
+    pub fn new_image(&self) -> oxtuner_tune::Tune {
+        crate::msq::image_for(&self.definition)
+    }
+
+    /// Builds the scaffold, writes it, opens the project and returns it.
+    ///
+    /// `seed` is the page image a controller read produced, when the project is
+    /// created from one. Its page-backed values win over the definition's
+    /// defaults; PC variables keep their defaults because the page protocol
+    /// does not carry them. A failure removes the folder creation made.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectError`] when the tune cannot be scaffolded, a file
+    /// cannot be written, or the created project opens read-only.
+    pub fn create(self, seed: Option<&oxtuner_tune::Tune>) -> Result<Project, ProjectError> {
+        let _span = tracing::info_span!(
+            "project_create",
+            root = %self.root.display(),
+            name = self.name
+        )
+        .entered();
+
+        let result = self.create_inner(seed);
+
+        match &result {
+            Ok(project) => tracing::info!(
+                root = %project.root().display(),
+                signature = %project.definition().signature,
+                pages = project.definition().pages.len(),
+                constants = project.definition().constants.len(),
+                "project created"
+            ),
+            Err(error) => tracing::warn!(
+                error_kind = error.kind(),
+                %error,
+                "project creation failed"
+            ),
+        }
+
+        result
+    }
+
+    fn create_inner(self, seed: Option<&oxtuner_tune::Tune>) -> Result<Project, ProjectError> {
+        let built = build_scaffold(
+            &self.name,
+            &self.request,
+            &self.definition,
+            &self.settings,
+            seed,
+        )?;
+
+        // The target was checked in `prepare`; `create_dir` makes that check
+        // atomic by refusing a folder that appeared in between. Reusing it
+        // would make the rollback below delete a folder creation did not make.
+        if let Some(parent) = self.root.parent() {
+            fs::create_dir_all(parent).map_err(|source| ProjectError::Io {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
+        fs::create_dir(&self.root).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                ProjectError::TargetExists {
+                    path: self.root.clone(),
+                }
+            } else {
+                ProjectError::Io {
+                    path: self.root.clone(),
+                    source,
+                }
+            }
+        })?;
+
+        let mut written: Vec<PathBuf> = Vec::new();
+        Project::write_scaffold(
+            &self.root,
+            &self.request,
+            &self.ini_bytes,
+            &built,
+            &mut written,
+        )
+        .inspect_err(|_| rollback(&self.root, &written))
+    }
+}
+
 /// The bytes a create writes once its inputs prove valid.
 ///
 /// Built before the target folder exists, so a definition that cannot become a
@@ -330,20 +426,18 @@ struct BuiltScaffold {
     properties: String,
 }
 
-/// Validates the request and builds every file's bytes in memory.
+/// Parses the definition creation will copy and build its settings context.
 ///
-/// Nothing here touches the target folder. The definition is parsed, its
-/// include and signature gates run, the tune is scaffolded and serialized, and
-/// the properties text is assembled; only [`Project::write_scaffold`] writes.
-fn build_scaffold(
-    name: &str,
+/// A chosen setting group marks its option active, exactly like the
+/// `<settings>` entry a saved tune carries. The parser only sees the names as
+/// `#if` conditions, so it is given the request as written.
+///
+/// Creation copies one file. A definition that pulls in more would open with
+/// those pages missing, so it is refused instead of half-built.
+fn parse_definition(
     request: &CreateRequest,
     ini_bytes: &[u8],
-) -> Result<BuiltScaffold, ProjectError> {
-    let text = oxtuner_ini::source::decode(ini_bytes).text;
-    // A chosen setting group marks its option active, exactly like the
-    // `<settings>` entry a saved tune carries. The parser only sees the names
-    // as `#if` conditions, so it is given the request as written.
+) -> Result<(oxtuner_ini::Definition, SettingsContext), ProjectError> {
     let overrides: Vec<(String, bool)> = request
         .settings
         .iter()
@@ -352,10 +446,12 @@ fn build_scaffold(
         .map(|option| (option, true))
         .collect();
     let settings = SettingsContext::new().with_overrides(overrides);
+
     // The parser resolves `#include` through a `Fn` resolver, so the names
     // it asks for are recorded through interior mutability. The base is the
     // project's own config folder, which does not exist yet: an include can
     // never resolve there, and recording the name is what refuses it.
+    let text = oxtuner_ini::source::decode(ini_bytes).text;
     let includes = RefCell::new(Vec::new());
     let config = request.root().join(CONFIG_DIR);
     let resolver = |request: oxtuner_ini::IncludeRequest<'_>| {
@@ -375,8 +471,6 @@ fn build_scaffold(
         "definition parsed for the new project"
     );
 
-    // Creation copies one file. A definition that pulls in more would open
-    // with those pages missing, so it is refused instead of half-built.
     let includes = includes.into_inner();
     if !includes.is_empty() {
         return Err(ProjectError::DefinitionNeedsIncludes { names: includes });
@@ -391,11 +485,27 @@ fn build_scaffold(
         });
     }
 
-    let document = Msq::scaffold(&definition, &settings).map_err(ProjectError::Msq)?;
+    Ok((definition, settings))
+}
+
+/// Builds every file's bytes in memory from a parsed definition.
+///
+/// Nothing here touches the target folder; only [`Project::write_scaffold`]
+/// writes. `seed` carries the page image of a project created from a
+/// controller, and is `None` for the manual path.
+fn build_scaffold(
+    name: &str,
+    request: &CreateRequest,
+    definition: &oxtuner_ini::Definition,
+    settings: &SettingsContext,
+    seed: Option<&oxtuner_tune::Tune>,
+) -> Result<BuiltScaffold, ProjectError> {
+    let document = Msq::scaffold(definition, settings, seed).map_err(ProjectError::Msq)?;
     let tune_bytes = document.save()?;
     tracing::debug!(
         bytes = tune_bytes.len(),
-        "tune scaffolded from the definition defaults"
+        seeded = seed.is_some(),
+        "tune scaffolded"
     );
 
     // The keys are the ones TunerStudio reads, so a project created here
@@ -408,7 +518,7 @@ fn build_scaffold(
     // part of the value and report the project as corrupt).
     let signature = definition.signature.trim();
     let mut ecu_settings = String::new();
-    for flag in chosen_flags(&definition, &request.settings) {
+    for flag in chosen_flags(definition, &request.settings) {
         ecu_settings.push_str(&flag);
         ecu_settings.push('|');
     }

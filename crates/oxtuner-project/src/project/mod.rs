@@ -330,8 +330,8 @@ mod open;
 mod save;
 
 pub use create::{
-    ConnectionSeed, CreateRequest, accepts_definition, ensure_target_free, split_destination,
-    validate_project_name,
+    ConnectionSeed, CreateRequest, PreparedProject, accepts_definition, ensure_target_free,
+    split_destination, validate_project_name,
 };
 pub(crate) use open::{normalize_include_name, read_include, read_include_canonical};
 
