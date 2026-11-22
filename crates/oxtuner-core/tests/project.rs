@@ -420,6 +420,7 @@ fn creating_a_project_scaffolds_it_and_leaves_it_open() {
             settings: Vec::new(),
             connection: None,
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();
@@ -464,6 +465,7 @@ fn creating_from_the_ecu_seeds_the_tune_and_keeps_pc_defaults() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 pages: vec![(1, page)],
@@ -518,6 +520,7 @@ fn a_create_from_ecu_signature_mismatch_writes_nothing() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 signature: Some("speeduino 999999".to_owned()),
@@ -555,6 +558,7 @@ fn a_failed_create_read_leaves_no_folder() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::simulator_with(SimConfig {
                 faults: vec![FaultRule::new(SimOp::ReadPage, Fault::Disconnect, 1)],
@@ -591,6 +595,7 @@ fn stopping_the_core_answers_an_in_flight_create() {
                 settings: Vec::new(),
                 connection: None,
                 layout: ProjectLayout::default(),
+                write_stamp: None,
             },
             support::silent(),
         )
@@ -666,6 +671,7 @@ fn a_created_project_remembers_the_wizard_connection() {
                 baud: 57_600,
             }),
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();
@@ -694,6 +700,7 @@ fn a_refused_create_reports_the_reason_and_writes_nothing() {
             settings: Vec::new(),
             connection: None,
             layout: ProjectLayout::default(),
+            write_stamp: None,
         })
         .expect("the command is queued");
     let event = core.next();

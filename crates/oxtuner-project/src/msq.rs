@@ -496,6 +496,22 @@ pub(crate) fn image_for(definition: &Definition) -> Tune {
     Tune::new(Arc::new(layout))
 }
 
+/// Inputs for one scaffold.
+///
+/// A struct rather than six positional parameters: `seed`, `policy`, `flags`
+/// and `write_stamp` are independent choices a caller can easily swap.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScaffoldOptions<'a> {
+    /// The ECU page image, when the project is created from a controller.
+    pub seed: Option<&'a Tune>,
+    /// Which entries the file materializes.
+    pub policy: WritePolicy,
+    /// The save-time stamp for the headers, when the caller supplied one.
+    pub write_stamp: Option<&'a str>,
+    /// The setting flags the `<settings>` snapshot records.
+    pub flags: &'a [String],
+}
+
 /// Which entries a scaffold writes.
 ///
 /// The two creation sources need different files. A project created from a
@@ -750,10 +766,15 @@ impl Msq {
     /// two values for bytes they share.
     pub(crate) fn scaffold(
         definition: &Definition,
-        settings: &SettingsContext,
-        seed: Option<&Tune>,
-        policy: WritePolicy,
+        options: ScaffoldOptions<'_>,
     ) -> Result<Self, MsqError> {
+        let ScaffoldOptions {
+            seed,
+            policy,
+            write_stamp,
+            flags,
+        } = options;
+
         if policy == WritePolicy::SparseFromDefaults && seed.is_some() {
             return Err(MsqError::SeedRejected {
                 reason: "a sparse scaffold has no ECU image to seed".to_owned(),
@@ -793,10 +814,7 @@ impl Msq {
         }
 
         let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
-        push_child(
-            &mut root.children,
-            Element::self_closing("bibliography", &[("author", "Ox Tuner")]),
-        );
+        push_child(&mut root.children, bibliography_element(write_stamp));
         push_child(&mut root.children, version_element(definition));
 
         let pc_page = if pc_entries.is_empty() {
@@ -825,7 +843,7 @@ impl Msq {
             return Err(MsqError::UnknownPage { page: *leftover });
         }
 
-        push_child(&mut root.children, settings_element(settings));
+        push_child(&mut root.children, settings_element(flags));
         push_child(
             &mut root.children,
             Element::self_closing("userComments", &[]),
@@ -1410,16 +1428,28 @@ fn version_element(definition: &Definition) -> Element {
     )
 }
 
-/// The `<settings>` snapshot for the active flags.
-fn settings_element(settings: &SettingsContext) -> Element {
-    let active = settings.active_flags();
-    if active.is_empty() {
+/// The `<bibliography>` header for a scaffolded tune.
+///
+/// The reference writer always carries `tuneComment` and stamps each save; the
+/// author names the application that wrote the file.
+fn bibliography_element(write_stamp: Option<&str>) -> Element {
+    let mut attrs: Vec<(&str, &str)> = vec![("author", "Ox Tuner"), ("tuneComment", "")];
+    if let Some(stamp) = write_stamp {
+        attrs.push(("writeDate", stamp));
+    }
+
+    Element::self_closing("bibliography", &attrs)
+}
+
+/// The `<settings>` snapshot for the flags the project records.
+fn settings_element(flags: &[String]) -> Element {
+    if flags.is_empty() {
         return Element::self_closing("settings", &[]);
     }
 
     let mut element = Element::self_closing("settings", &[]);
     element.open();
-    for flag in active {
+    for flag in flags {
         let flag = flag.as_str();
         push_child(
             &mut element.children,
@@ -1505,6 +1535,23 @@ mod tests {
     )]
     use super::*;
     use oxtuner_ini::parse_str;
+
+    /// Scaffolds with no seed, no flags and no stamp, the common test shape.
+    fn scaffold(
+        definition: &Definition,
+        seed: Option<&Tune>,
+        policy: WritePolicy,
+    ) -> Result<Msq, MsqError> {
+        Msq::scaffold(
+            definition,
+            ScaffoldOptions {
+                seed,
+                policy,
+                write_stamp: None,
+                flags: &[],
+            },
+        )
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
 <msq xmlns="http://www.msefi.com/:msq">
@@ -1730,9 +1777,7 @@ mod tests {
     #[test]
     fn scaffold_emits_a_document_that_checks_clean() {
         let definition = scaffold_definition();
-        let settings = SettingsContext::new();
-        let msq = Msq::scaffold(&definition, &settings, None, WritePolicy::Full)
-            .expect("defaults scaffold");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
 
         let info = msq.version_info().expect("the header is present");
         assert_eq!(info.file_format, "5.0");
@@ -1768,7 +1813,6 @@ mod tests {
         // A project created from a controller carries the ECU's page image.
         // The page protocol has no PC variables, so those keep their defaults.
         let definition = scaffold_definition();
-        let settings = SettingsContext::new();
         let mut seed = Tune::from_definition(&definition);
         seed.set_image_raw("reqFuel", 0, 200.0).expect("seeded");
         seed.set_image_raw("aeMode", 0, 1.0).expect("seeded");
@@ -1776,8 +1820,7 @@ mod tests {
         seed.set_image_raw("table", 3, 9.0).expect("seeded");
         seed.set_image_raw("rpmhigh", 0, 12_345.0).expect("seeded");
 
-        let msq = Msq::scaffold(&definition, &settings, Some(&seed), WritePolicy::Full)
-            .expect("seeded scaffold");
+        let msq = scaffold(&definition, Some(&seed), WritePolicy::Full).expect("seeded scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1839,8 +1882,7 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
 
     fn scaffold_names(policy: WritePolicy) -> Vec<String> {
         let definition = policy_definition();
-        let msq = Msq::scaffold(&definition, &SettingsContext::new(), None, policy)
-            .expect("the policy fixture scaffolds");
+        let msq = scaffold(&definition, None, policy).expect("the policy fixture scaffolds");
 
         msq.entries().into_iter().map(|entry| entry.name).collect()
     }
@@ -1929,13 +1971,8 @@ defaultValue = stoich, 14.7
         seed.set_image_raw("table", 0, 10.0).expect("seeded");
         seed.set_image_raw("table", 1, 10.0).expect("seeded");
 
-        let msq = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            Some(&seed),
-            WritePolicy::Full,
-        )
-        .expect("the seeded scaffold is written");
+        let msq = scaffold(&definition, Some(&seed), WritePolicy::Full)
+            .expect("the seeded scaffold is written");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -1974,13 +2011,7 @@ defaultValue = axis, 10 20
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect("scaffolds");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("scaffolds");
         let text = String::from_utf8(msq.save().expect("serializes")).expect("ascii");
 
         assert!(
@@ -2027,10 +2058,8 @@ second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
             &SettingsContext::new(),
         )
         .expect("parses");
-        let settings = SettingsContext::new();
 
-        let msq = Msq::scaffold(&definition, &settings, None, WritePolicy::Full)
-            .expect("defaults scaffold");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -2066,13 +2095,8 @@ second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
         )
         .expect("parses");
 
-        let error = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect_err("no value fits both ranges");
+        let error =
+            scaffold(&definition, None, WritePolicy::Full).expect_err("no value fits both ranges");
 
         assert!(
             matches!(error, MsqError::ConflictingDefaults { .. }),
@@ -2102,13 +2126,8 @@ second = scalar, U08, 0, \"y\", 0.0000000000001, 0, 0, 255, 0
         )
         .expect("parses");
 
-        let error = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect_err("the rounding pulls the two apart");
+        let error = scaffold(&definition, None, WritePolicy::Full)
+            .expect_err("the rounding pulls the two apart");
 
         assert!(
             matches!(error, MsqError::ConflictingDefaults { .. }),
@@ -2137,13 +2156,7 @@ straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect("defaults scaffold");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -2179,13 +2192,7 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect("defaults scaffold");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);
@@ -2217,13 +2224,7 @@ note = string, ASCII, 8
         )
         .expect("parses");
 
-        let msq = Msq::scaffold(
-            &definition,
-            &SettingsContext::new(),
-            None,
-            WritePolicy::Full,
-        )
-        .expect("defaults scaffold");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
         let bytes = msq.save().expect("the scaffold serializes");
         let reparsed = Msq::parse(&bytes).expect("the scaffold parses");
         let loaded = load(&reparsed, &definition);

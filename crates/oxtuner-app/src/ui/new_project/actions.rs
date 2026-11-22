@@ -98,6 +98,7 @@ pub(super) fn create(model: &SharedWizard, parent: &Path, name: &str, cx: &mut A
         settings,
         connection: port.map(|port| ConnectionSeed { port, baud }),
         layout: cx.global::<AppState>().data().layout.to_project_layout(),
+        write_stamp: None,
     };
 
     {
