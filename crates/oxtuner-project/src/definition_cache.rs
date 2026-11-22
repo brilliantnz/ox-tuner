@@ -836,6 +836,47 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_bare_include_is_not_relative_to_its_own_directory() {
+        // The supported rule (TunerStudio spec §7.3.2) resolves from the
+        // definition base, so `pins.inc` written in engine/config.inc means
+        // projectCfg/pins.inc, not projectCfg/engine/pins.inc.
+        let root = temp_dir("nested-root-relative");
+        let base = root.join("projectCfg");
+        fs::create_dir_all(base.join("engine")).unwrap();
+        fs::write(base.join("engine/config.inc"), "#include pins.inc\n").unwrap();
+        fs::write(base.join("engine/pins.inc"), "pin = 1\n").unwrap();
+
+        let canonical_base = fs::canonicalize(&base).expect("canonical base");
+        let recorder = IncludeRecorder::new(&canonical_base);
+        let resolver = |request: IncludeRequest<'_>| recorder.resolve(request);
+        let preprocessed = oxtuner_ini::preprocess(
+            "#include engine/config.inc\n",
+            &SettingsContext::new(),
+            Some(&resolver),
+        )
+        .expect("preprocesses");
+
+        let diagnostic = preprocessed
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "include-not-found")
+            .expect("the bare nested include does not resolve from the includer's directory");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/config.inc"));
+        assert_eq!(diagnostic.line, Some(1));
+
+        let includes = recorder.finish();
+        assert_eq!(
+            includes
+                .iter()
+                .map(|include| (include.path.as_str(), include.sha256.is_none()))
+                .collect::<Vec<_>>(),
+            [("engine/config.inc", false), ("pins.inc", true)],
+            "the root-relative spelling is the only include input recorded"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_backslash_spelling_is_recorded_as_a_slash_path() {
         let root = temp_dir("backslash-include");
         let base = root.join("projectCfg");
