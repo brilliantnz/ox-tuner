@@ -436,7 +436,7 @@ struct BuiltScaffold {
     backup: String,
 }
 
-/// Parses the definition creation will copy and build its settings context.
+/// Parses the definition creation will copy.
 ///
 /// A chosen setting group marks its option active, exactly like the
 /// `<settings>` entry a saved tune carries. The parser only sees the names as
@@ -539,7 +539,10 @@ fn build_scaffold(
     })
 }
 
-/// The four header lines the reference writer puts above the properties.
+/// The header comment lines the reference writer puts above the properties.
+///
+/// A stamped create writes four lines; an undated one writes the two identity
+/// lines only.
 fn properties_header(stamp: Option<&str>) -> String {
     let mut header = String::from("#Project Attributes.\n#Ox Tuner\n");
     if let Some(stamp) = stamp {

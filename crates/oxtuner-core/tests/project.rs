@@ -623,6 +623,66 @@ fn stopping_the_core_answers_an_in_flight_create() {
 }
 
 #[test]
+fn a_create_keeps_an_injected_stamp_and_dates_a_missing_one() {
+    let dir = TempDir::new("create-stamp");
+    let core = Harness::start();
+    let definition = definition_path(dir.path());
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Stamped".to_owned(),
+            ini_path: definition.clone(),
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: Some("Sun Nov 22 06:46:58 UTC 2026".to_owned()),
+        })
+        .expect("the command is queued");
+    assert_eq!(core.next().op(), Some(op));
+
+    let properties = fs::read_to_string(dir.path().join("Stamped/projectCfg/project.properties"))
+        .expect("properties");
+    assert!(
+        properties.contains("#Last Saved on: Sun Nov 22 06:46:58 UTC 2026"),
+        "{properties}"
+    );
+    let tune = fs::read_to_string(dir.path().join("Stamped").join(TUNE_FILE)).expect("tune");
+    assert!(
+        tune.contains(r#"writeDate="Sun Nov 22 06:46:58 UTC 2026""#),
+        "{tune}"
+    );
+
+    let op = core
+        .handle
+        .create_project(CreateRequest {
+            parent: dir.path().to_path_buf(),
+            name: "Dated".to_owned(),
+            ini_path: definition,
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: None,
+        })
+        .expect("the command is queued");
+    assert_eq!(core.next().op(), Some(op));
+
+    let properties = fs::read_to_string(dir.path().join("Dated/projectCfg/project.properties"))
+        .expect("properties");
+    let saved = properties
+        .lines()
+        .find(|line| line.starts_with("#Last Saved on: "))
+        .expect("the core injects a stamp when the request carries none");
+    assert!(
+        saved.len() > "#Last Saved on: ".len(),
+        "the injected stamp is not empty: {saved}"
+    );
+}
+
+#[test]
 fn inspect_definition_answers_with_the_setting_groups() {
     let dir = TempDir::new("inspect");
     let path = dir.path().join("groups.ini");

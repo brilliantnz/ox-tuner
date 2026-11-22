@@ -498,8 +498,8 @@ pub(crate) fn image_for(definition: &Definition) -> Tune {
 
 /// Inputs for one scaffold.
 ///
-/// A struct rather than six positional parameters: `seed`, `policy`, `flags`
-/// and `write_stamp` are independent choices a caller can easily swap.
+/// A struct rather than positional parameters: `seed`, `policy`, `flags` and
+/// `write_stamp` are independent choices a caller can easily swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScaffoldOptions<'a> {
     /// The ECU page image, when the project is created from a controller.
@@ -846,7 +846,13 @@ impl Msq {
         push_child(&mut root.children, settings_element(flags));
         push_child(
             &mut root.children,
-            Element::self_closing("userComments", &[]),
+            Element::self_closing(
+                "userComments",
+                &[(
+                    "Comment",
+                    "These are user comments that can be related to a particular setting or dialog.",
+                )],
+            ),
         );
 
         let document = Document {
@@ -1443,11 +1449,12 @@ fn bibliography_element(write_stamp: Option<&str>) -> Element {
 
 /// The `<settings>` snapshot for the flags the project records.
 fn settings_element(flags: &[String]) -> Element {
+    let comment = "These setting are only used if this msq is opened without a project.";
     if flags.is_empty() {
-        return Element::self_closing("settings", &[]);
+        return Element::self_closing("settings", &[("Comment", comment)]);
     }
 
-    let mut element = Element::self_closing("settings", &[]);
+    let mut element = Element::new("settings", &[("Comment", comment)]);
     element.open();
     for flag in flags {
         let flag = flag.as_str();

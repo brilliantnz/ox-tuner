@@ -6,11 +6,11 @@
 
 /// The current time formatted for a `.msq` `writeDate` or properties header.
 pub(super) fn now() -> String {
-    format(::time::OffsetDateTime::now_utc())
+    format_stamp(::time::OffsetDateTime::now_utc())
 }
 
 /// Formats an offset date in the reference writer's shape.
-fn format(now: ::time::OffsetDateTime) -> String {
+fn format_stamp(now: ::time::OffsetDateTime) -> String {
     // `time` spells the names in English; the reference keeps the first three
     // characters of each.
     let weekday = now.weekday().to_string();
@@ -40,6 +40,19 @@ mod tests {
             .expect("a valid time")
             .assume_utc();
 
-        assert_eq!(format(at), "Sun Nov 22 06:46:58 UTC 2026");
+        assert_eq!(format_stamp(at), "Sun Nov 22 06:46:58 UTC 2026");
+    }
+
+    #[test]
+    fn a_single_digit_day_is_zero_padded() {
+        // A real TunerStudio file in the samples writes `Mon Mar 03 …`, so the
+        // reference pads the day instead of Java's older space-padded form.
+        let at = ::time::Date::from_calendar_date(2026, ::time::Month::November, 5)
+            .expect("a valid date")
+            .with_hms(6, 46, 58)
+            .expect("a valid time")
+            .assume_utc();
+
+        assert_eq!(format_stamp(at), "Thu Nov 05 06:46:58 UTC 2026");
     }
 }
