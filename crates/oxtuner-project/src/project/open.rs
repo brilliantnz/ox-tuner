@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use oxtuner_ini::{Definition, SettingsContext};
@@ -428,29 +428,60 @@ pub(crate) fn read_include(base: &Path, name: &str) -> Option<String> {
     read_include_canonical(&base, name).map(|(_, text)| text)
 }
 
+/// Normalizes an `#include` name to a base-relative, `/`-separated path.
+///
+/// Definition files are written on every platform, so `engine\pins.inc` and
+/// `engine/pins.inc` name the same file. Returns `None` for an absolute name or
+/// one containing `..`, so the caller can refuse before touching the
+/// filesystem.
+pub(crate) fn normalize_include_name(name: &str) -> Option<String> {
+    let name = name.replace('\\', "/");
+
+    // A drive-relative name (`C:pins.inc`) is absolute enough to leave the
+    // base on Windows; `//server/share` is already caught by the root check.
+    let drive_relative = name
+        .as_bytes()
+        .split_first()
+        .is_some_and(|(first, rest)| first.is_ascii_alphabetic() && rest.starts_with(b":"));
+    if name.starts_with('/') || drive_relative {
+        return None;
+    }
+
+    let mut components = Vec::new();
+    for component in name.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            component => components.push(component),
+        }
+    }
+
+    if components.is_empty() {
+        return None;
+    }
+
+    Some(components.join("/"))
+}
+
 /// Reads an `#include` from an already-canonical base.
 ///
 /// Returns the resolved identity (base-relative, `/`-separated) alongside the
 /// decoded text. The identity is what cycle detection and cache fingerprints
 /// use; two spellings of one file produce the same key.
 pub(crate) fn read_include_canonical(base: &Path, name: &str) -> Option<(String, String)> {
-    let path = Path::new(name);
-    if path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return None;
-    }
+    // Normalize before building the path: on Unix a backslash is an ordinary
+    // filename byte, so an unnormalized name would miss a file that exists.
+    // The traversal checks therefore see the same components the filesystem
+    // will.
+    let name = normalize_include_name(name)?;
 
-    // A symlink inside the definition directory can point anywhere, and a
-    // backslash is not a separator on Unix, so lexical checks alone do not
-    // keep the read inside `base`. Resolve both sides and compare.
-    let path = match fs::canonicalize(base.join(path)) {
+    // A symlink inside the definition directory can point anywhere, so the
+    // lexical normalization alone does not keep the read inside `base`.
+    // Resolve both sides and compare.
+    let path = match fs::canonicalize(base.join(&name)) {
         Ok(path) => path,
         Err(error) => {
-            tracing::debug!(include = name, %error, "an include path could not be resolved");
+            tracing::debug!(include = %name, %error, "an include path could not be resolved");
             return None;
         }
     };

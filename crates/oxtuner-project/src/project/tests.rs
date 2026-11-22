@@ -41,9 +41,45 @@ fn settings_suffixes_map_to_booleans() {
 
 #[test]
 fn an_include_cannot_escape_its_directory() {
-    let base = Path::new("/tmp/project/projectCfg");
-    assert_eq!(read_include(base, "../secret.ini"), None);
-    assert_eq!(read_include(base, "/etc/passwd"), None);
+    let root = std::env::temp_dir().join(format!(
+        "oxtuner-include-escape-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let config = root.join("projectCfg");
+    fs::create_dir_all(config.join("engine")).unwrap();
+    fs::write(root.join("secret.ini"), "signature = \"secret\"").unwrap();
+    fs::write(config.join("real.ini"), "signature = \"real\"").unwrap();
+    fs::write(config.join("engine/pins.inc"), "signature = \"pins\"").unwrap();
+    // A literal backslash is an ordinary filename byte on Unix. Before
+    // normalization this escape vector read the file below and looked like a
+    // successful include; a refused resolution is what the assertion expects.
+    fs::write(config.join("..\\secret.ini"), "signature = \"secret\"").unwrap();
+
+    assert!(read_include(&config, "real.ini").is_some());
+    assert!(
+        read_include(&config, "engine\\pins.inc").is_some(),
+        "a backslash spelling of a file inside the directory must resolve"
+    );
+    for name in [
+        "../secret.ini",
+        "..\\secret.ini",
+        "/etc/passwd",
+        "\\etc\\passwd",
+        "\\\\server\\share\\secret.ini",
+        "C:\\secret.ini",
+    ] {
+        assert_eq!(
+            read_include(&config, name),
+            None,
+            "{name} must stay inside the definition directory"
+        );
+    }
+
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[cfg(unix)]
