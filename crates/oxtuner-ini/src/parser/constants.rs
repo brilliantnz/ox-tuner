@@ -353,6 +353,7 @@ impl SectionSink for ConstantsSink {
                     &mut self.cursor,
                     &mut self.option_tables,
                 ) {
+                    section.record_origin(key, *line);
                     section.understand(*line);
                 }
                 continue;
@@ -1341,6 +1342,8 @@ fn insert_variable(
     line: SourcePos,
 ) {
     let name = variable.name.clone();
+    section.record_origin(&name, line);
+
     if definition.pc_variables.insert(&name, variable).is_some() {
         section.error(
             "duplicate-name",

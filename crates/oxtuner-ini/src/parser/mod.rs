@@ -15,8 +15,10 @@
 //! after that section's last block, so the report follows source order instead
 //! of being grouped by section name. Parse-stage diagnostics carry the source
 //! path from their [`SourcePos`]. Model structs hold only the local line number,
-//! so diagnostics built later from a frozen entry (validation, comms-key
-//! winners) have no file. Coverage is recorded once, in first-appearance order.
+//! so validation keeps a parse-time map of the positions it may report on;
+//! diagnostics built later from a frozen entry without that map (comms-key
+//! winners, fold-deferred notes) have no file. Coverage is recorded once, in
+//! first-appearance order.
 //!
 //! Nothing here panics. A section this build does not model is kept verbatim in
 //! [`Definition::unsupported`]; a key inside a known section that we do not
@@ -171,7 +173,7 @@ fn assemble(
         );
     }
 
-    let coverage = {
+    let (coverage, origins) = {
         let _span = tracing::debug_span!("ini_parse_sections").entered();
         parse_sections(
             &mut definition,
@@ -205,8 +207,63 @@ fn assemble(
         )]));
     }
 
-    finalize(&mut definition);
+    finalize(&mut definition, &preprocessed.sources, &origins);
     Ok(definition)
+}
+
+/// Source positions of the entries that validation reports on.
+///
+/// Frozen model entries keep only a local line number, and an included file
+/// restarts its own numbering, so a diagnostic built after the parse needs the
+/// position the parser saw. This map lives for one parse: a definition loaded
+/// from the cache already carries the diagnostics it produced.
+#[derive(Default)]
+struct ValidationOrigins {
+    constants: HashMap<String, SourcePos>,
+    pc_variables: HashMap<String, SourcePos>,
+    tables: HashMap<String, SourcePos>,
+    curves: HashMap<String, SourcePos>,
+}
+
+impl ValidationOrigins {
+    /// Adds the positions one section parser recorded, if validation reads them.
+    fn add_section(&mut self, section: &str, origins: HashMap<String, SourcePos>) {
+        let target = match section.to_ascii_lowercase().as_str() {
+            "constants" => &mut self.constants,
+            "pcvariables" => &mut self.pc_variables,
+            "tableeditor" => &mut self.tables,
+            "curveeditor" => &mut self.curves,
+            _ => return,
+        };
+
+        target.extend(origins);
+    }
+}
+
+/// The source path and line a validation diagnostic names.
+///
+/// Falls back to the entry's local line when the parser recorded no position.
+/// A single-source parse has no ambiguity: the line belongs to that file, so
+/// no position had to be recorded. A multi-source fallback keeps the shape a
+/// diagnostic had before provenance was kept.
+fn locate_entry<'a>(
+    sources: &'a [SourceFile],
+    position: Option<&SourcePos>,
+    line: u32,
+) -> (Option<&'a str>, u32) {
+    if let Some(position) = position {
+        let path = sources
+            .get(position.source.index())
+            .and_then(|file| file.path.as_deref());
+
+        return (path, position.line);
+    }
+
+    if sources.len() == 1 {
+        return (sources[0].path.as_deref(), line);
+    }
+
+    (None, line)
 }
 
 /// Dispatches every section block in document order and returns its coverage.
@@ -215,8 +272,11 @@ fn parse_sections(
     lines: &[LogicalLine],
     sources: &[SourceFile],
     expander: &Expander<'_>,
-) -> Coverage {
+) -> (Coverage, ValidationOrigins) {
     let blocks = section_blocks(lines);
+    // A parse with one source file needs no provenance map: every local line
+    // belongs to that file. Only an included chain can make a line ambiguous.
+    let record_origins = sources.len() > 1;
     let sources: Arc<[SourceFile]> = Arc::from(sources);
 
     // A sink's final work can itself emit diagnostics, so run it after that
@@ -244,7 +304,8 @@ fn parse_sections(
             Entry::Vacant(entry) => {
                 let last = last_blocks.get(entry.key()).copied().unwrap_or(block_index);
                 let first_pos = block.header.unwrap_or_default();
-                let slot = SectionSlot::new(block.name, &sources, first_pos, entry.key());
+                let slot =
+                    SectionSlot::new(block.name, &sources, first_pos, entry.key(), record_origins);
                 order.push(entry.key().clone());
                 (entry.insert(slot), last == block_index)
             }
@@ -283,7 +344,12 @@ fn parse_sections(
         slot.parser.finish_coverage(&mut coverage);
     }
 
-    coverage
+    let mut origins = ValidationOrigins::default();
+    for (section, mut slot) in slots {
+        origins.add_section(&section, slot.parser.take_origins());
+    }
+
+    (coverage, origins)
 }
 
 /// One `[section]` header and the lines that follow it, in document order.
@@ -339,9 +405,15 @@ struct SectionSlot {
 }
 
 impl SectionSlot {
-    fn new(name: &str, sources: &Arc<[SourceFile]>, first_pos: SourcePos, key: &str) -> Self {
+    fn new(
+        name: &str,
+        sources: &Arc<[SourceFile]>,
+        first_pos: SourcePos,
+        key: &str,
+        record_origins: bool,
+    ) -> Self {
         Self {
-            parser: SectionParser::new(name, sources),
+            parser: SectionParser::new(name, sources, record_origins),
             sink: new_sink(name, key),
             headers: 0,
             first_pos,
@@ -491,6 +563,12 @@ pub(crate) struct SectionParser {
     /// Positions turned into model data. A position, not just a line number,
     /// because included files restart their own line numbering.
     understood: BTreeSet<SourcePos>,
+    /// Where each entry that later validation may name was written, keyed by
+    /// the name the model stores it under.
+    origins: HashMap<String, SourcePos>,
+    /// Whether this parse can mix files. A single-source parse needs no map:
+    /// every local line belongs to the one file.
+    record_origins: bool,
     /// Lines seen.
     pub(crate) total: usize,
     /// Keys reported as unrecognized, so each is logged once per source file.
@@ -503,11 +581,13 @@ pub(crate) struct SectionParser {
 }
 
 impl SectionParser {
-    pub(crate) fn new(name: &str, sources: &Arc<[SourceFile]>) -> Self {
+    pub(crate) fn new(name: &str, sources: &Arc<[SourceFile]>, record_origins: bool) -> Self {
         Self {
             name: name.to_owned(),
             sources: Arc::clone(sources),
             understood: BTreeSet::new(),
+            origins: HashMap::new(),
+            record_origins,
             total: 0,
             reported_keys: BTreeSet::new(),
             diagnostics: Vec::new(),
@@ -523,6 +603,25 @@ impl SectionParser {
     /// Records that this line became model data.
     pub(crate) fn understand(&mut self, pos: SourcePos) {
         self.understood.insert(pos);
+    }
+
+    /// Records where an entry that validation may later report on was written.
+    ///
+    /// The frozen model keeps only a local line number, so this position is
+    /// what lets a validation diagnostic name its file. A single-source parse
+    /// skips the map because the line is unambiguous.
+    #[inline]
+    pub(crate) fn record_origin(&mut self, name: &str, pos: SourcePos) {
+        if !self.record_origins {
+            return;
+        }
+
+        self.origins.insert(name.to_owned(), pos);
+    }
+
+    /// Hands the recorded positions to validation, once the section is done.
+    fn take_origins(&mut self) -> HashMap<String, SourcePos> {
+        std::mem::take(&mut self.origins)
     }
 
     /// Adds one diagnostic through the file-wide bound.
@@ -654,13 +753,13 @@ pub(crate) fn entry_line<'a>(
 }
 
 /// Cross-section validation and reference resolution.
-fn finalize(definition: &mut Definition) {
+fn finalize(definition: &mut Definition, sources: &[SourceFile], origins: &ValidationOrigins) {
     resolve_comms_keys(definition);
     apply_extension_flags(definition);
     validation::promote_live_cursors(definition);
     validation::resolve_dynamic_shapes(definition);
-    validate_pages(definition);
-    validate_references(definition);
+    validate_pages(definition, sources, origins);
+    validate_references(definition, sources, origins);
     validation::validate_expression_calls(definition);
 }
 
@@ -743,9 +842,13 @@ fn apply_extension_flags(definition: &mut Definition) {
     }
 }
 
-fn validate_pages(definition: &mut Definition) {
-    let mut problems = Vec::new();
-
+/// The page-geometry checks for one file's constants.
+fn validate_constant_pages(
+    definition: &Definition,
+    sources: &[SourceFile],
+    origins: &ValidationOrigins,
+    problems: &mut Vec<Diagnostic>,
+) {
     for (name, constant) in definition.constants.iter() {
         if constant.byte_size().is_none() && !constant.shape.is_dynamic() {
             let unit = if constant.shape.element_count().is_none() {
@@ -753,11 +856,13 @@ fn validate_pages(definition: &mut Definition) {
             } else {
                 "bytes"
             };
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.constants.get(name), constant.line);
+            problems.push(Diagnostic::at(
                 Severity::Error,
                 "shape-too-large",
                 format!("`{name}` declares more {unit} than a 32-bit size can hold"),
-                constant.line,
+                source,
+                line,
                 "Constants",
             ));
         }
@@ -767,13 +872,15 @@ fn validate_pages(definition: &mut Definition) {
             continue;
         }
         let Some(page) = definition.page(page_number) else {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.constants.get(name), constant.line);
+            problems.push(Diagnostic::at(
                 Severity::Warning,
                 "unknown-page",
                 format!(
                     "`{name}` is declared on page {page_number}, which the file does not define"
                 ),
-                constant.line,
+                source,
+                line,
                 "Constants",
             ));
             continue;
@@ -783,7 +890,8 @@ fn validate_pages(definition: &mut Definition) {
             && size > 0
             && address.saturating_add(size) > page.size
         {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.constants.get(name), constant.line);
+            problems.push(Diagnostic::at(
                 Severity::Error,
                 "offset-outside-page",
                 format!(
@@ -791,7 +899,8 @@ fn validate_pages(definition: &mut Definition) {
                     address.saturating_add(size),
                     page.size
                 ),
-                constant.line,
+                source,
+                line,
                 "Constants",
             ));
         }
@@ -799,25 +908,39 @@ fn validate_pages(definition: &mut Definition) {
         if let Some(scale) = &constant.scale
             && scale.literal() == Some(0.0)
         {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.constants.get(name), constant.line);
+            problems.push(Diagnostic::at(
                 Severity::Warning,
                 "zero-scale",
                 format!("`{name}` has a scale of 0, so no user value can be computed"),
-                constant.line,
+                source,
+                line,
                 "Constants",
             ));
         }
     }
+}
+
+fn validate_pages(
+    definition: &mut Definition,
+    sources: &[SourceFile],
+    origins: &ValidationOrigins,
+) {
+    let mut problems = Vec::new();
+
+    validate_constant_pages(definition, sources, origins, &mut problems);
 
     // A table or curve may be completed by a later block, so these checks run
     // against the final model rather than a partially read one.
     for (_, table) in definition.tables.iter() {
         if table.z_bins.is_none() {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.tables.get(&table.id), table.line);
+            problems.push(Diagnostic::at(
                 Severity::Warning,
                 "table-without-cells",
                 format!("table `{}` has no `zBins` cell array", table.id),
-                table.line,
+                source,
+                line,
                 "TableEditor",
             ));
         }
@@ -825,14 +948,16 @@ fn validate_pages(definition: &mut Definition) {
 
     for (_, curve) in definition.curves.iter() {
         if curve.x_bins.is_none() || curve.y_bins.is_empty() {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.curves.get(&curve.name), curve.line);
+            problems.push(Diagnostic::at(
                 Severity::Warning,
                 "curve-without-arrays",
                 format!(
                     "curve `{}` needs an X array and at least one Y array",
                     curve.name
                 ),
-                curve.line,
+                source,
+                line,
                 "CurveEditor",
             ));
         }
@@ -842,11 +967,14 @@ fn validate_pages(definition: &mut Definition) {
         // PC variables never become controller memory, so only the element
         // count has to be representable. There is no byte size to exceed.
         if variable.shape.element_count().is_none() && !variable.shape.is_dynamic() {
-            problems.push(Diagnostic::new(
+            let (source, line) =
+                locate_entry(sources, origins.pc_variables.get(name), variable.line);
+            problems.push(Diagnostic::at(
                 Severity::Error,
                 "shape-too-large",
                 format!("`{name}` declares more elements than a 32-bit size can hold"),
-                variable.line,
+                source,
+                line,
                 "PcVariables",
             ));
         }
@@ -855,7 +983,11 @@ fn validate_pages(definition: &mut Definition) {
     extend_bounded(&mut definition.diagnostics, problems);
 }
 
-fn validate_references(definition: &mut Definition) {
+fn validate_references(
+    definition: &mut Definition,
+    sources: &[SourceFile],
+    origins: &ValidationOrigins,
+) {
     let mut problems = Vec::new();
 
     for (id, table) in definition.tables.iter() {
@@ -869,27 +1001,31 @@ fn validate_references(definition: &mut Definition) {
         for (axis_name, axis) in [("x", &table.x_bins), ("y", &table.y_bins)] {
             let Some(axis) = axis else { continue };
             if !array_exists(&axis.array) {
-                problems.push(Diagnostic::new(
+                let (source, line) = locate_entry(sources, origins.tables.get(id), table.line);
+                problems.push(Diagnostic::at(
                     Severity::Warning,
                     "missing-bins-array",
                     format!(
                         "table `{id}` names {axis_name}-axis array `{}`, which no constant defines",
                         axis.array
                     ),
-                    table.line,
+                    source,
+                    line,
                     "TableEditor",
                 ));
             }
             if let Some(channel) = &axis.channel
                 && !definition.channels.contains(channel)
             {
-                problems.push(Diagnostic::new(
+                let (source, line) = locate_entry(sources, origins.tables.get(id), table.line);
+                problems.push(Diagnostic::at(
                     Severity::Note,
                     "missing-axis-channel",
                     format!(
                         "table `{id}` tracks channel `{channel}`, which is not an output channel"
                     ),
-                    table.line,
+                    source,
+                    line,
                     "TableEditor",
                 ));
             }
@@ -897,11 +1033,13 @@ fn validate_references(definition: &mut Definition) {
         if let Some(z) = &table.z_bins
             && !array_exists(z)
         {
-            problems.push(Diagnostic::new(
+            let (source, line) = locate_entry(sources, origins.tables.get(id), table.line);
+            problems.push(Diagnostic::at(
                 Severity::Warning,
                 "missing-table-array",
                 format!("table `{id}` names cell array `{z}`, which no constant defines"),
-                table.line,
+                source,
+                line,
                 "TableEditor",
             ));
         }
@@ -2052,6 +2190,229 @@ yBins = otherBins, secondChannel
             .expect("the nested file's bad line is reported");
         assert_eq!(diagnostic.source.as_deref(), Some("engine/pins.inc"));
         assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_validation_error_in_an_include_names_the_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(Include {
+                path: "engine/config.inc".to_owned(),
+                text: "[Constants]\nwide = array, U08, 0, [16], \"u\", 1, 0\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 4\npage = 1\n#include engine/config.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "offset-outside-page")
+            .expect("the included constant's size is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/config.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+        assert!(
+            diagnostic
+                .to_string()
+                .starts_with("engine/config.inc:2: error:")
+        );
+    }
+
+    #[test]
+    fn a_table_reference_in_an_include_names_the_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/tables.inc" => Some(Include {
+                path: "engine/tables.inc".to_owned(),
+                text: "[TableEditor]\ntable = ve, \"VE\", 1\n    xBins = missingBins, rpm\n"
+                    .to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 64\npage = 1\n#include engine/tables.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "missing-bins-array")
+            .expect("the table's missing bins array is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/tables.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+        assert!(
+            diagnostic
+                .to_string()
+                .starts_with("engine/tables.inc:2: warning:")
+        );
+    }
+
+    #[test]
+    fn a_curve_in_an_include_names_the_file() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/curves.inc" => Some(Include {
+                path: "engine/curves.inc".to_owned(),
+                text: "[CurveEditor]\ncurve = c, \"C\"\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/curves.inc\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "curve-without-arrays")
+            .expect("the curve's missing arrays are reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/curves.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+        assert!(
+            diagnostic
+                .to_string()
+                .starts_with("engine/curves.inc:2: warning:")
+        );
+    }
+
+    #[test]
+    fn a_table_flushed_by_another_header_keeps_its_own_origin() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/tables.inc" => Some(Include {
+                path: "engine/tables.inc".to_owned(),
+                text: "[TableEditor]\ntable = a, \"A\", 1\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/tables.inc\n[TableEditor]\ntable = b, \"B\", 1\n    xBins = missingBins, rpm\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "table-without-cells" && diagnostic.message.contains("`a`")
+            })
+            .expect("the first table is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/tables.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_curve_flushed_by_another_header_keeps_its_own_origin() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/curves.inc" => Some(Include {
+                path: "engine/curves.inc".to_owned(),
+                text: "[CurveEditor]\ncurve = c, \"C\"\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/curves.inc\n[CurveEditor]\ncurve = d, \"D\"\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "curve-without-arrays" && diagnostic.message.contains("`c`")
+            })
+            .expect("the first curve is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/curves.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_redefined_constant_reports_the_later_declaration() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/config.inc" => Some(Include {
+                path: "engine/config.inc".to_owned(),
+                text: "bad = scalar, U08, 0, \"u\", 1, 0\n".to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 4\npage = 1\n#include engine/config.inc\nbad = array, U08, 0, [16], \"u\", 1, 0\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "offset-outside-page")
+            .expect("the later declaration's size is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("main.ini"));
+        assert_eq!(diagnostic.line, Some(8));
+    }
+
+    #[test]
+    fn a_merged_table_keeps_the_first_declaration_origin() {
+        let resolver = |request: IncludeRequest<'_>| match request.path {
+            "engine/tables.inc" => Some(Include {
+                path: "engine/tables.inc".to_owned(),
+                text: "[TableEditor]\ntable = ve, \"VE\", 1\n    xBins = missingBins, rpm\n"
+                    .to_owned(),
+            }),
+            _ => None,
+        };
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n#include engine/tables.inc\n[TableEditor]\ntable = ve, \"VE\", 1\n    zBins = cells\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "missing-bins-array")
+            .expect("the merged table's missing bins array is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("engine/tables.inc"));
+        assert_eq!(diagnostic.line, Some(2));
+    }
+
+    #[test]
+    fn a_named_single_file_validation_error_names_its_file() {
+        let resolver = |_: IncludeRequest<'_>| None;
+        let definition = parse_str_with_source(
+            "[MegaTune]\nsignature = \"x\"\n[Constants]\nnPages = 1\npageSize = 4\npage = 1\nwide = array, U08, 0, [16], \"u\", 1, 0\n",
+            &SettingsContext::new(),
+            "main.ini",
+            &resolver,
+        )
+        .expect("parses");
+
+        let diagnostic = definition
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "offset-outside-page")
+            .expect("the constant's size is reported");
+        assert_eq!(diagnostic.source.as_deref(), Some("main.ini"));
+        assert_eq!(diagnostic.line, Some(7));
     }
 
     #[test]
