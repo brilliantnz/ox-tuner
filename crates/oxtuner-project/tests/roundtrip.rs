@@ -300,6 +300,11 @@ fn a_seeded_scaffold_omits_both_hidden_shapes() {
 
     let reopened = Project::open(&root).expect("the created project opens");
     assert_eq!(
+        reopened.tune().raw_at("bitsA", 0).expect("it opens"),
+        0.0,
+        "a representable value round-trips, not just writes"
+    );
+    assert_eq!(
         reopened.tune().raw_at("invalidFirst", 0).expect("it opens"),
         5.0,
         "the definition's non-zero default applies"
