@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use oxtuner_ini::SettingsContext;
+use uuid::Uuid;
 
 use super::{CONFIG_DIR, MAIN_DEFINITION, PROPERTIES_FILE, Project, ProjectError, TUNE_FILE};
 use crate::msq::{Msq, ScaffoldOptions, WritePolicy};
@@ -178,6 +179,13 @@ impl Project {
     /// Returns [`ProjectError`] when the name or target is unusable, the
     /// definition cannot be parsed, a reported signature mismatches, or a
     /// file cannot be written. A failure removes what creation wrote.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the OS random source fails while minting the project's
+    /// `ecuUid`. That source does not fail for a launched desktop process on
+    /// any supported platform, so this aborts instead of growing the public
+    /// error type for an unreachable failure.
     pub fn create(request: &CreateRequest) -> Result<Self, ProjectError> {
         let prepared = Self::prepare(request).inspect_err(|error| {
             tracing::warn!(
@@ -353,6 +361,13 @@ impl PreparedProject {
     ///
     /// Returns [`ProjectError`] when the tune cannot be scaffolded, a file
     /// cannot be written, or the created project opens read-only.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the OS random source fails while minting the project's
+    /// `ecuUid`. That source does not fail for a launched desktop process on
+    /// any supported platform, so this aborts instead of growing the public
+    /// error type for an unreachable failure.
     pub fn create(
         self,
         seed: Option<&oxtuner_tune::Tune>,
@@ -392,6 +407,10 @@ impl PreparedProject {
         policy: WritePolicy,
         firmware_text: Option<&str>,
     ) -> Result<Project, ProjectError> {
+        // A project's identity is its own, so the writing phase mints it. It is
+        // written once and never regenerated, because the properties file is
+        // not rewritten on save.
+        let ecu_uid = Uuid::new_v4().to_string();
         let built = build_scaffold(
             &self.name,
             &self.request,
@@ -399,6 +418,7 @@ impl PreparedProject {
             seed,
             policy,
             firmware_text,
+            &ecu_uid,
         )?;
 
         // The target was checked in `prepare`; `create_dir` makes that check
@@ -519,6 +539,7 @@ fn build_scaffold(
     seed: Option<&oxtuner_tune::Tune>,
     policy: WritePolicy,
     firmware_text: Option<&str>,
+    ecu_uid: &str,
 ) -> Result<BuiltScaffold, ProjectError> {
     let flags = chosen_flags(definition, &request.settings);
     let document = Msq::scaffold(
@@ -541,7 +562,7 @@ fn build_scaffold(
         "tune scaffolded"
     );
 
-    let properties = properties_text(name, request, definition, &flags, firmware_text);
+    let properties = properties_text(name, request, definition, &flags, firmware_text, ecu_uid);
     let backup = backup_properties_text(name, request, &flags);
 
     Ok(BuiltScaffold {
@@ -579,14 +600,19 @@ fn properties_text(
     definition: &oxtuner_ini::Definition,
     flags: &[String],
     firmware_text: Option<&str>,
+    ecu_uid: &str,
 ) -> String {
     let mut properties = properties_header(request.write_stamp.as_deref());
     push_project_keys(&mut properties, name, request);
     push_flag_key(&mut properties, flags);
 
     // The keys that only the final file carries: identity, firmware text and
-    // the workspace choice.
+    // the workspace choice. The `.bkup` is the earlier stage and omits them,
+    // like the reference writer's backup.
     properties.push_str("canId=-1\n");
+    properties.push_str("ecuUid=");
+    properties.push_str(ecu_uid);
+    properties.push('\n');
     let signature = definition.signature.trim();
     let firmware = firmware_text
         .map(str::trim)

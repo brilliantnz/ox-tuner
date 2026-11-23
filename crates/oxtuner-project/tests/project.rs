@@ -20,6 +20,7 @@ use oxtuner_project::{
     ConnectionSeed, CreateRequest, IssueKind, Project, ProjectError, ProjectLayout, ProjectState,
     TUNE_FILE, WritePolicy,
 };
+use uuid::Uuid;
 
 const MAIN_DEFINITION: &str = r#"
 [MegaTune]
@@ -1414,6 +1415,7 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
         "commPort=COM6",
         "baudRate=115200",
         "canId=-1",
+        "ecuUid=",
         "firmwareDescription=speeduino 202501",
         "ecuSettings=resetcontrol_standard|enablehardware_test_OFF|AFR|FAHRENHEIT|",
         "useCommonDashboardDir=false",
@@ -1431,7 +1433,12 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
     );
     assert!(backup.contains("commPort=COM6"), "{backup}");
     assert!(backup.contains("ecuSettings="), "{backup}");
-    for later in ["canId=", "firmwareDescription=", "lastDisplayedTuneFile="] {
+    for later in [
+        "canId=",
+        "ecuUid=",
+        "firmwareDescription=",
+        "lastDisplayedTuneFile=",
+    ] {
         assert!(
             !backup.contains(later),
             "the backup is the first-stage file, so {later} is not in it: {backup}"
@@ -1456,6 +1463,53 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
             "{flag} missing: {tune}"
         );
     }
+}
+
+#[test]
+fn creation_writes_a_unique_v4_ecu_uid() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-ecu-uid");
+    let mut uids = Vec::new();
+    for name in ["UidOne", "UidTwo"] {
+        let request = CreateRequest {
+            parent: sandbox.path().to_path_buf(),
+            name: name.to_owned(),
+            ini_path: sandbox.definition(DEFINITION),
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: None,
+        };
+        let project = Project::create(&request).expect("creation succeeds");
+        let properties = fs::read_to_string(project.root().join("projectCfg/project.properties"))
+            .expect("properties");
+
+        let uid = properties
+            .lines()
+            .find_map(|line| line.strip_prefix("ecuUid="))
+            .unwrap_or_else(|| panic!("no ecuUid line: {properties}"));
+        let parsed = Uuid::parse_str(uid).expect("the uid is a UUID");
+        assert_eq!(
+            parsed.get_version_num(),
+            4,
+            "a project identity is a v4 UUID: {uid}"
+        );
+
+        uids.push(uid.to_owned());
+    }
+
+    assert_ne!(uids[0], uids[1], "each project gets its own identity");
 }
 
 #[test]
