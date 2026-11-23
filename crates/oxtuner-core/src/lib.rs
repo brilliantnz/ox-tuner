@@ -66,7 +66,14 @@
 //!     .load_definition("speeduino.ini", text.as_bytes())
 //!     .expect("queued");
 //!
-//! let event = events.recv_timeout(Duration::from_secs(5)).expect("an answer");
+//! // The core also publishes its port snapshot, so wait for this command's
+//! // own answer rather than the first event on the stream.
+//! let event = loop {
+//!     let event = events.recv_timeout(Duration::from_secs(5)).expect("an answer");
+//!     if event.op() == Some(op) {
+//!         break event;
+//!     }
+//! };
 //! let Event::DefinitionLoaded { op: answered, view } = event else {
 //!     panic!("expected a load");
 //! };

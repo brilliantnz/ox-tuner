@@ -1866,7 +1866,78 @@ second = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
 }
 
 #[test]
-fn a_text_that_rounds_to_the_same_raw_is_not_reported_as_clamped() {
+fn a_project_created_from_an_image_keeps_every_byte() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+lowView = array, U08, 0, [2x2], "Lambda", 0.0068, 0, 0.00, 2.00, 3
+highView = array, U08, lastOffset, [2x2], "AFR", 0.1, 0, 7, 25.5, 1
+belowMin = scalar, U08, 4, "", 1, 0, 100, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-image-roundtrip");
+    let definition =
+        oxtuner_ini::parse_str(DEFINITION, &oxtuner_ini::SettingsContext::new()).expect("parses");
+    let mut seed = oxtuner_tune::Tune::from_definition(&definition);
+    for (name, values) in [
+        ("lowView", [0.0, 37.0, 200.0, 255.0]),
+        ("highView", [0.0, 37.0, 200.0, 255.0]),
+    ] {
+        for (index, raw) in values.into_iter().enumerate() {
+            seed.set_image_raw(name, index, raw)
+                .expect("the cell exists");
+        }
+    }
+    seed.set_image_raw("belowMin", 0, 0.0)
+        .expect("the cell exists");
+
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "ImageRoundTrip".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+        write_stamp: None,
+    };
+    let project = Project::prepare(&request)
+        .expect("the request prepares")
+        .create(Some(&seed), WritePolicy::Full, None)
+        .expect("creation succeeds");
+
+    let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
+    assert!(
+        tune.contains("name=\"belowMin\">0.0</constant>"),
+        "a value below the declared minimum is written as it is: {tune}"
+    );
+    assert!(
+        tune.contains("name=\"highView\""),
+        "both views of one region are written from the same bytes: {tune}"
+    );
+
+    for spec in seed.layout().variables() {
+        for index in 0..spec.element_count() {
+            assert_eq!(
+                seed.raw_at(&spec.name, index).expect("the seed has it"),
+                project
+                    .tune()
+                    .raw_at(&spec.name, index)
+                    .expect("the project has it"),
+                "`{}`[{index}] changed across create and open",
+                spec.name
+            );
+        }
+    }
+}
+
+#[test]
+fn a_text_that_reads_below_the_bound_is_kept_and_reported() {
     const DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -1877,8 +1948,8 @@ pageSize = 64
 page = 1
 ego = scalar, U08, 0, "", 0.006802721088435375, 0, 0.4761904761904762, 1.7006802721088436, 3
 "#;
-    // The text carries three decimals, so it reads below the minimum; clamping
-    // it back inside lands on the same raw value the text already meant.
+    // The text carries three decimals, so it reads below the minimum. The value
+    // is kept: the range bounds an edit, not what a file states.
     const TUNE: &str = r#"<msq>
     <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
     <page number="0" size="64">
@@ -1893,21 +1964,25 @@ ego = scalar, U08, 0, "", 0.006802721088435375, 0, 0.4761904761904762, 1.7006802
 
     let project = Project::open(dir.path()).expect("the project opens");
 
+    let out_of_range: Vec<&str> = project
+        .report()
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::ValueOutOfRange)
+        .map(|issue| issue.message.as_str())
+        .collect();
+    assert_eq!(out_of_range.len(), 1, "{:?}", project.report().warnings);
     assert!(
-        project
-            .report()
-            .warnings
-            .iter()
-            .all(|issue| issue.kind != IssueKind::ValueClamped),
-        "a clamp that changes no raw value is not news: {:?}",
-        project.report().warnings
+        out_of_range[0].contains("0.476"),
+        "the report names the value the file states: {out_of_range:?}"
     );
     assert_eq!(
         project
             .tune()
             .value("ego")
             .and_then(|values| values.number(0)),
-        Some(70.0)
+        Some(70.0),
+        "70 raw is the 0.476 the file states, not the 100 a clamp would store"
     );
 }
 
@@ -1950,7 +2025,7 @@ defaultValue = axis, 10 20 30
 }
 
 #[test]
-fn a_minimum_between_two_written_decimals_keeps_the_text_inside() {
+fn a_declared_default_at_the_bound_keeps_its_text() {
     const DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -1984,14 +2059,23 @@ defaultValue = p, 7.25
             .report()
             .warnings
             .iter()
-            .all(|issue| issue.kind != IssueKind::ValueClamped),
-        "a minimum between two written decimals is written at the next one: {:?}",
+            .all(|issue| issue.kind != IssueKind::ValueOutOfRange),
+        "the declared default is written and read back as declared: {:?}",
         reopened.report().warnings
+    );
+    let raw = reopened
+        .tune()
+        .value("p")
+        .and_then(|values| values.number(0))
+        .expect("the value is there");
+    assert!(
+        (raw - 7.25 / 0.145_038).abs() < 1e-9,
+        "the declared 7.25 survives the round trip: {raw}"
     );
 }
 
 #[test]
-fn an_unstorable_cell_is_reported_even_when_another_cell_is_clamped() {
+fn a_range_value_and_a_storage_overflow_are_each_reported() {
     const DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -2000,12 +2084,12 @@ signature = "speeduino 202501"
 nPages = 1
 pageSize = 64
 page = 1
-axis = array, U08, 0, [2], "", 1, 0, 0, 1000, 0
+axis = array, S16, 0, [2], "", 1, 0, 0, 100000, 0
 "#;
     const TUNE: &str = r#"<msq>
     <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
     <page number="0" size="64">
-        <constant name="axis">-5.0 500.0</constant>
+        <constant name="axis">-5.0 70000.0</constant>
     </page>
 </msq>
 "#;
@@ -2023,20 +2107,32 @@ axis = array, U08, 0, [2], "", 1, 0, 0, 1000, 0
         .collect();
 
     assert_eq!(
-        kinds
-            .iter()
-            .filter(|kind| **kind == IssueKind::ValueClamped)
-            .count(),
-        1,
-        "the negative cell is clamped to the minimum"
+        project.tune().raw_at("axis", 0).unwrap(),
+        -5.0,
+        "a value inside the storage type is kept whatever the range says"
+    );
+    assert_eq!(
+        project.tune().raw_at("axis", 1).unwrap(),
+        32_767.0,
+        "a value past the storage type is clamped to it"
     );
     assert_eq!(
         kinds
             .iter()
             .filter(|kind| **kind == IssueKind::ValueOutOfRange)
             .count(),
-        1,
-        "the 500 cell fits the range but not U08"
+        2,
+        "one range report and one storage report: {:?}",
+        project.report().warnings
+    );
+    assert!(
+        project
+            .report()
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("kept as written")),
+        "the out-of-range cell is kept: {:?}",
+        project.report().warnings
     );
     assert!(
         project
@@ -2569,15 +2665,9 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
         project.report().warnings
     );
 
-    assert!(
-        project.report().warnings.iter().all(|issue| !matches!(
-            issue.kind,
-            IssueKind::ValueClamped | IssueKind::ValueOutOfRange
-        )),
-        "a scaffold writes values its own loader keeps unchanged: {:?}",
-        project.report().warnings
-    );
-
+    // A fresh definition has values below its declared minimums (the byte is
+    // zero), so the open reports them as out of range and keeps them. The
+    // byte-for-byte comparison below is the invariant that matters.
     let tune = fs::read(project.tune_path()).expect("the scaffolded tune is readable");
     drop(project);
 

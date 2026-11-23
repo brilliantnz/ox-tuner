@@ -9,7 +9,7 @@
 //! ([`crate::VariableSpec::to_user`]). That is the only place the conversion
 //! exists, so a table cell and a scalar cannot disagree about it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -377,88 +377,6 @@ impl Tune {
             .collect()
     }
 
-    /// Makes every value that shares bytes agree on one they can all store.
-    ///
-    /// Two constants over the same bytes can declare different ranges, and a
-    /// clamp moves each of them on its own. That leaves a pair holding two
-    /// values for one byte even where the caller stated one, and the write gate
-    /// then refuses the page over something nobody asked for. So a group that
-    /// already holds one value is pulled onto the tightest range among its
-    /// members and that value is written back to all of them. A group that
-    /// holds two different values is left alone: that disagreement is real and
-    /// judging it belongs to the caller. So is a group whose ranges have no
-    /// value in common, because the fold would then put a value one of them
-    /// rejects on the tune and hide the disagreement from the write gate.
-    pub fn clamp_shared_bytes(&mut self) {
-        let mut settled: HashSet<String> = HashSet::new();
-
-        for page in self.layout.pages().to_vec() {
-            let names: Vec<String> = page
-                .variables
-                .iter()
-                .copied()
-                .filter_map(|index| self.layout.variables().get(index))
-                .map(|spec| spec.name.clone())
-                .collect();
-
-            for name in names {
-                if settled.contains(&name) {
-                    continue;
-                }
-
-                let peers = self.same_value_peers(&name);
-                for peer in &peers {
-                    settled.insert(peer.clone());
-                }
-                if peers.len() < 2 {
-                    continue;
-                }
-                let Some(spec) = self.layout.variable(&name) else {
-                    continue;
-                };
-                let cells = spec.element_count();
-
-                for cell in 0..cells {
-                    let Ok(value) = self.raw_at(&name, cell) else {
-                        continue;
-                    };
-                    let agreed = peers.iter().all(|peer| {
-                        self.raw_at(peer, cell).is_ok_and(|raw| {
-                            self.layout
-                                .variable(peer)
-                                .is_some_and(|other| other.same_wire_value(raw, value))
-                        })
-                    });
-                    if !agreed {
-                        continue;
-                    }
-
-                    let common = peers.iter().fold(value, |acc, peer| {
-                        self.layout
-                            .variable(peer)
-                            .map_or(acc, |other| other.clamp_raw(acc))
-                    });
-                    // Two ranges can have no value in common at all, and the
-                    // fold then lands somewhere one of them rejects. Writing it
-                    // would leave the tune holding something its own clamp
-                    // turns down and hide the disagreement from the write gate.
-                    let storable = peers.iter().all(|peer| {
-                        self.layout.variable(peer).is_some_and(|other| {
-                            other.same_wire_value(other.clamp_raw(common), common)
-                        })
-                    });
-                    if !storable {
-                        continue;
-                    }
-
-                    for peer in &peers {
-                        let _ = self.set_image_raw(peer, cell, common);
-                    }
-                }
-            }
-        }
-    }
-
     /// Makes every value that shares bytes agree, page by page.
     ///
     /// Where a definition gives two constants the same bytes and its own
@@ -467,10 +385,14 @@ impl Tune {
     /// which is the settle the codec does anyway: the page codec runs non-bits
     /// first and bits after, so among peers of the same kind the later declared
     /// one keeps its value while a `bits` field always merges last. On a page it
-    /// rebuilds, every constant follows the result, views included, and each
-    /// group is then pulled onto a value all of it can store, so the tune is
-    /// consistent afterwards instead of starting out with a pair no write would
-    /// carry.
+    /// rebuilds, every constant follows the result, views included, so the tune
+    /// is consistent afterwards instead of starting out with a pair no write
+    /// would carry.
+    ///
+    /// A group that already agrees keeps its value exactly: the codec's own
+    /// round trip returns it, so a byte read from a controller is never moved to
+    /// satisfy a view's declared range.
+    ///
     ///
     /// A page [`TuneLayout::page_can_be_rebuilt`] refuses is never written and
     /// read back, because constants whose bytes overlap without one covering
@@ -478,8 +400,7 @@ impl Tune {
     /// order and drop one of them, while a text field overlapping a number
     /// would be read back as part of that text. A view on one still moves,
     /// since it is not a value of its own and follows the bytes its owner
-    /// holds, and the clamp below still runs over the pairs the page's bytes
-    /// cover.
+    /// holds.
     ///
     /// # Errors
     ///
@@ -512,7 +433,6 @@ impl Tune {
 
             self.adopt_named(&decoded, &names)?;
         }
-        self.clamp_shared_bytes();
 
         Ok(())
     }
@@ -1019,9 +939,9 @@ data0 = bits, U08, 4, [0:7]
 
     #[test]
     fn settling_shared_bytes_leaves_one_value_for_both() {
-        // A definition can give two views of one byte different ranges. The
-        // layout still starts the region at one default, so nothing disagrees
-        // until something writes a value the other view cannot hold.
+        // Two views of one byte start at the same raw zero whatever their
+        // declared ranges say. A file or a controller that carries two values
+        // is reconciled by the page codec, which keeps the later declaration.
         let definition = parse_str(
             r#"
 [MegaTune]
@@ -1040,21 +960,15 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
         let mut tune = Tune::from_definition(&definition);
         let layout = Arc::clone(tune.layout());
 
-        assert_eq!(
-            tune.raw_at("first", 0).unwrap(),
-            tune.raw_at("second", 0).unwrap(),
-            "one byte region starts at one default"
-        );
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 0.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 0.0);
         assert!(
             layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
             "a shared region starts with nothing to reconcile"
         );
 
-        // A carried value can still land outside the other view's range.
-        tune.set_image_raw("first", 0, 0.0).unwrap();
-
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 0.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 7.0);
+        tune.set_image_raw("first", 0, 2.0).unwrap();
+        tune.set_image_raw("second", 0, 3.0).unwrap();
         assert_eq!(layout.value_conflicts(IniPage::FIRST, &tune).len(), 1);
 
         tune.settle_shared_bytes().unwrap();
@@ -1067,6 +981,11 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
         assert_eq!(
             tune.raw_at("first", 0).unwrap(),
             tune.raw_at("second", 0).unwrap()
+        );
+        assert_eq!(
+            tune.raw_at("first", 0).unwrap(),
+            3.0,
+            "the later declaration keeps its value"
         );
     }
 
@@ -1113,90 +1032,6 @@ tight = scalar, U08, 0, "x", 1, 0, 0, 5, 0
         );
     }
 
-    /// Peers over one byte whose declared ranges do not reach each other.
-    const NARROW: &str = r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 8
-page = 1
-first = scalar, U08, 0, "x", 1, 0, 0, 255, 0
-second = scalar, U08, 0, "x", 1, 0, 0, 5, 0
-"#;
-
-    fn narrow() -> Tune {
-        let definition = parse_str(NARROW, &SettingsContext::new()).expect("parses");
-        Tune::from_definition(&definition)
-    }
-
-    #[test]
-    fn a_group_that_agrees_is_pulled_onto_the_tightest_range() {
-        let mut tune = narrow();
-        tune.set_image_raw("first", 0, 12.0).unwrap();
-        tune.set_image_raw("second", 0, 12.0).unwrap();
-
-        tune.clamp_shared_bytes();
-
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 5.0);
-        assert!(
-            tune.layout()
-                .value_conflicts(IniPage::FIRST, &tune)
-                .is_empty(),
-            "one byte holds one value now"
-        );
-    }
-
-    #[test]
-    fn a_group_that_disagrees_is_left_alone() {
-        let mut tune = narrow();
-        tune.set_image_raw("first", 0, 12.0).unwrap();
-        tune.set_image_raw("second", 0, 3.0).unwrap();
-
-        tune.clamp_shared_bytes();
-
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 12.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 3.0);
-        assert_eq!(
-            tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
-            1,
-            "a real disagreement belongs to the caller, not to a clamp"
-        );
-    }
-
-    #[test]
-    fn a_group_with_no_common_value_keeps_its_values() {
-        let definition = parse_str(
-            r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 8
-page = 1
-first = scalar, U08, 0, "x", 1, 0, 0, 10, 0
-second = scalar, U08, 0, "x", 1, 0, 20, 255, 0
-"#,
-            &SettingsContext::new(),
-        )
-        .expect("parses");
-        let mut tune = Tune::from_definition(&definition);
-
-        // Both hold fifteen, which no member of the pair can store: `first`
-        // tops out at ten and `second` starts at twenty. Nothing may move,
-        // because a value either one would reject must not land on the tune and
-        // hide the disagreement from the write gate.
-        tune.set_image_raw("first", 0, 15.0).unwrap();
-        tune.set_image_raw("second", 0, 15.0).unwrap();
-        tune.clamp_shared_bytes();
-
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 15.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 15.0);
-    }
-
     #[test]
     fn settling_leaves_a_page_with_an_ambiguous_pair_alone() {
         // `wide` runs 0..4 and `straddle` runs 2..6, so neither covers the
@@ -1219,14 +1054,26 @@ straddle = array, U08, 2, [4], "", 1, 0, 7, 255, 0
         )
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
+        for (cell, (wide, straddle)) in [1.0, 2.0, 3.0, 4.0]
+            .into_iter()
+            .zip([11.0, 12.0, 13.0, 14.0])
+            .enumerate()
+        {
+            tune.set_image_raw("wide", cell, wide).unwrap();
+            tune.set_image_raw("straddle", cell, straddle).unwrap();
+        }
 
         tune.settle_shared_bytes().unwrap();
 
-        for cell in 0..4 {
-            assert_eq!(tune.raw_at("wide", cell).unwrap(), 0.0);
+        for (cell, (wide, straddle)) in [1.0, 2.0, 3.0, 4.0]
+            .into_iter()
+            .zip([11.0, 12.0, 13.0, 14.0])
+            .enumerate()
+        {
+            assert_eq!(tune.raw_at("wide", cell).unwrap(), wide);
             assert_eq!(
                 tune.raw_at("straddle", cell).unwrap(),
-                7.0,
+                straddle,
                 "cell {cell} of the constant the rebuild would have written over"
             );
         }
@@ -1253,6 +1100,7 @@ inside = scalar, U08, 4, "x", 1, 0, 7, 255, 0
         )
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
+        tune.set_image_raw("inside", 0, 7.0).unwrap();
 
         tune.settle_shared_bytes().unwrap();
 
@@ -1283,6 +1131,8 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
         )
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
+        tune.set_image_raw("wide", 3, 4.0).unwrap();
+        tune.set_image_raw("straddle", 0, 5.0).unwrap();
 
         tune.settle_shared_bytes().unwrap();
 
@@ -1291,48 +1141,11 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
             tune.raw_at("second", 0).unwrap(),
             "the peers on the page that can be rebuilt still settle"
         );
-        assert_eq!(tune.raw_at("wide", 3).unwrap(), 0.0);
+        assert_eq!(tune.raw_at("wide", 3).unwrap(), 4.0);
         assert_eq!(
             tune.raw_at("straddle", 0).unwrap(),
-            7.0,
+            5.0,
             "and the page that cannot be is still untouched"
-        );
-    }
-
-    #[test]
-    fn clamping_still_runs_on_a_page_settling_skips() {
-        // The pair under `first`/`second` is legal and agrees on twelve, which
-        // only `first` can store. The clamp has to pull both onto five even
-        // though the page is one the rebuild skipped.
-        let definition = parse_str(
-            r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 16
-page = 1
-wide = array, U08, 0, [4], "", 1, 0, 0, 255, 0
-straddle = array, U08, 2, [4], "", 1, 0, 7, 255, 0
-first = scalar, U08, 8, "x", 1, 0, 0, 255, 0
-second = scalar, U08, 8, "x", 1, 0, 0, 5, 0
-"#,
-            &SettingsContext::new(),
-        )
-        .expect("parses");
-        let mut tune = Tune::from_definition(&definition);
-        tune.set_image_raw("first", 0, 12.0).unwrap();
-        tune.set_image_raw("second", 0, 12.0).unwrap();
-
-        tune.settle_shared_bytes().unwrap();
-
-        assert_eq!(tune.raw_at("first", 0).unwrap(), 5.0);
-        assert_eq!(tune.raw_at("second", 0).unwrap(), 5.0);
-        assert_eq!(
-            tune.raw_at("wide", 3).unwrap(),
-            0.0,
-            "a rebuild would put the straddle's seven into this cell"
         );
     }
 

@@ -14,10 +14,10 @@
 //! - **A user's edit is flagged, never clamped.** Clamping an edit is the
 //!   core's S2 guardrail (ADR-0011); silently changing it here would hide both
 //!   the edit and the guardrail.
-//! - **A value at a project-file boundary is clamped.** The file has to carry
-//!   what the definition declares and the storage type holds, so
-//!   [`VariableSpec::clamp_raw`] keeps the round trip intact instead of
-//!   writing a value the next open would change.
+//! - **A value at a project-file boundary keeps what was stated.** The file
+//!   carries the value as written, storage-clamped only; the declared range is
+//!   reported, not rewritten. [`VariableSpec::clamp_raw`] stays as the edit-path
+//!   gate used when reconciling shared bytes.
 
 use std::fmt;
 
@@ -214,7 +214,7 @@ impl VariableSpec {
     ///
     /// Integer types round half away from zero. Nothing is clamped: the caller
     /// decides what an out-of-range edit means (ADR-0011 S2 lives in the core).
-    /// A file boundary uses [`Self::clamp_raw`] instead.
+    /// A file boundary uses [`Self::clamp_storage`] instead.
     ///
     /// # Errors
     ///
@@ -252,17 +252,36 @@ impl VariableSpec {
         })
     }
 
+    /// Pulls a raw value inside the storage type only, leaving the declared
+    /// range alone.
+    ///
+    /// The declared minimum and maximum bound edits and display, not storage: a
+    /// controller can hold a byte its definition's range does not cover, and a
+    /// value read from it must stay that byte. A non-finite value has no
+    /// position in the type, so it becomes the type's own zero.
+    #[must_use]
+    pub fn clamp_storage(&self, raw: f64) -> f64 {
+        let (low, high) = storage_range(self.data_type);
+        if raw.is_finite() {
+            raw.clamp(low, high)
+        } else {
+            0.0_f64.clamp(low, high)
+        }
+    }
+
     /// Pulls a raw value inside the declared range and the storage type.
     ///
-    /// A default or a file value outside either would otherwise read back
-    /// changed. The declared bounds are first pulled in to the decimals a file
-    /// writes: a minimum of `7.25` written with one decimal reads back as
-    /// `7.2`, below the minimum again. A declared range narrower than one
-    /// written step keeps its own bounds and leaves the text alone.
+    /// The edit path uses this when reconciling shared bytes; a value read from
+    /// a file or a controller goes through [`Self::clamp_storage`] instead,
+    /// because a declared range bounds an edit and the display, not the byte.
+    /// The declared bounds are first pulled in to the decimals a file writes: a
+    /// minimum of `7.25` written with one decimal reads back as `7.2`, below
+    /// the minimum again. A declared range narrower than one written step keeps
+    /// its own bounds and leaves the text alone.
     ///
     /// The storage type narrows here instead of keeping and warning, unlike
-    /// [`Self::to_raw`]: a file boundary has to write something the type can
-    /// hold, and the alternative is a value that changes on the next open.
+    /// [`Self::to_raw`]: a peer that cannot store the reconciled value must
+    /// veto it, and the alternative is a value the write gate would refuse.
     /// A non-finite value has no sane position in the range, so it becomes
     /// the storage type's own zero.
     #[must_use]

@@ -59,10 +59,12 @@ pub enum IssueKind {
     Definition,
     /// A value could not be loaded (bad text, wrong element count, …).
     ValueSkipped,
-    /// A value was stored but does not fit the declared storage type.
+    /// A value is outside its declared range or does not fit its storage type.
+    ///
+    /// The value is kept: a controller can hold a byte its definition's range
+    /// does not cover, and a file states what it states. Only a value the
+    /// storage type cannot hold is clamped, and that is reported here too.
     ValueOutOfRange,
-    /// A file value outside the declared range was clamped on load.
-    ValueClamped,
     /// A `<pageData>` hex block disagrees with the decoded `<constant>` values.
     PageDataMismatch,
 }
@@ -91,7 +93,6 @@ impl IssueKind {
             Self::Definition => "definition",
             Self::ValueSkipped => "value-skipped",
             Self::ValueOutOfRange => "value-out-of-range",
-            Self::ValueClamped => "value-clamped",
             Self::PageDataMismatch => "page-data-mismatch",
         }
     }

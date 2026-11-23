@@ -267,9 +267,9 @@ fn reconcile_pages(
         // Two values for one set of bytes have no single answer to give.
         // Rebuilding the page would pick one by the order the file lists them
         // in, so the page is left as loaded and the caller decides what to do
-        // about it. That can be the file stating two answers, or the declared
-        // ranges clamping one value into two; the message names the pair and
-        // covers both, because the caller treats them the same.
+        // about it. That is the file stating two answers (or user-unit
+        // rounding splitting one into two); the message names the pair because
+        // the caller treats them the same.
         let carried = |name: &str| applied.iter().any(|other| other.eq_ignore_ascii_case(name));
         let clash = layout
             .value_conflicts(page.page, tune)
@@ -279,8 +279,8 @@ fn reconcile_pages(
             report.warn(
                 IssueKind::ValueSkipped,
                 format!(
-                    "page {}: the values for `{}` and `{}` cannot both stand within their \
-                     declared ranges over the bytes they share, so the page is left as loaded",
+                    "page {}: the values for `{}` and `{}` cannot both stand over the bytes \
+                     they share, so the page is left as loaded",
                     page.page, conflict.first, conflict.second
                 ),
             );
@@ -802,6 +802,10 @@ fn load_entry(
 ///
 /// Every token is parsed and converted before any cell is written, so a bad
 /// value halfway through a list leaves the variable entirely at its default.
+#[expect(
+    clippy::float_cmp,
+    reason = "a clamp that fits returns its input unchanged, which is the question here"
+)]
 fn load_numbers(
     tune: &mut Tune,
     spec: &VariableSpec,
@@ -830,43 +834,36 @@ fn load_numbers(
         users.push(user);
     }
 
-    let mut clamped: Option<(f64, f64, f64)> = None;
-    let mut clamped_overflow = false;
-    let mut out_of_storage: Option<(usize, f64)> = None;
+    let mut out_of_range: Option<(f64, f64, f64)> = None;
+    let mut out_of_storage: Option<(usize, f64, f64)> = None;
     let mut raws = Vec::with_capacity(users.len());
 
     for (index, user) in users.into_iter().enumerate() {
-        // A file value outside the declared range is clamped the way
-        // `TunerStudio` loads one, and reported once per variable. The writer
-        // is what rounds a bound to the written step, so a file this build
-        // wrote reopens without a clamp.
+        // The declared range bounds an edit and the display; it does not make a
+        // file value wrong. A controller can hold a byte its definition's range
+        // does not cover, and rewriting it would lose what the file states.
         let low = spec.minimum.unwrap_or(f64::NEG_INFINITY);
         let high = spec.maximum.unwrap_or(f64::INFINITY);
         let (low, high) = (low.min(high), low.max(high));
-        let clamped_user = user.clamp(low, high);
-        let conversion = spec
-            .to_raw(clamped_user)
-            .map_err(|error| error.to_string())?;
-
-        // Only a clamp that changes the stored value is reported. A text that
-        // rounds below a bound but converts back to the same raw value changed
-        // nothing.
-        let written_raw = spec.to_raw(user).map(|written| written.raw).ok();
-        let cell_clamped = written_raw != Some(conversion.raw);
-        if cell_clamped {
-            clamped.get_or_insert((user, low, high));
-            clamped_overflow |= conversion.raw_out_of_range;
-        } else if conversion.is_out_of_range() {
-            out_of_storage.get_or_insert((index, clamped_user));
+        if user < low || user > high {
+            out_of_range.get_or_insert((user, low, high));
         }
 
+        let conversion = spec.to_raw(user).map_err(|error| error.to_string())?;
         if !conversion.raw.is_finite() {
             return Err(format!(
                 "`{}`[{index}] = {user} has no finite raw value",
                 spec.name
             ));
         }
-        raws.push(conversion.raw);
+
+        // The storage type is the one hard boundary: a byte the type cannot
+        // hold has to be clamped, and the report says so.
+        let raw = spec.clamp_storage(conversion.raw);
+        if raw != conversion.raw {
+            out_of_storage.get_or_insert((index, user, raw));
+        }
+        raws.push(raw);
     }
 
     // Every cell converted before any is written, so a refused value leaves
@@ -876,7 +873,7 @@ fn load_numbers(
             .map_err(|error| error.to_string())?;
     }
 
-    if let Some((index, value)) = out_of_storage {
+    if let Some((index, value, raw)) = out_of_storage {
         let cell = if matches!(spec.shape, EntryShape::Array { .. }) {
             format!("`{}`[{index}]", spec.name)
         } else {
@@ -885,13 +882,13 @@ fn load_numbers(
         report.warn(
             IssueKind::ValueOutOfRange,
             format!(
-                "{cell} = {value} does not fit the declared storage type; the value is kept as \
-                 written"
+                "{cell} = {value} does not fit the declared storage type; it was clamped to \
+                 raw {raw}"
             ),
         );
     }
 
-    if let Some((found, low, high)) = clamped {
+    if let Some((found, low, high)) = out_of_range {
         let range = match (low.is_finite(), high.is_finite()) {
             (true, true) => format!("{low}..{high}"),
             (true, false) => format!("the declared minimum {low}"),
@@ -900,15 +897,10 @@ fn load_numbers(
         };
 
         report.warn(
-            IssueKind::ValueClamped,
+            IssueKind::ValueOutOfRange,
             format!(
-                "`{}` = {found} is outside {range}; it was clamped{}",
-                spec.name,
-                if clamped_overflow {
-                    ", and the clamped value does not fit the declared storage type"
-                } else {
-                    ""
-                }
+                "`{}` = {found} is outside {range}; the value is kept as written",
+                spec.name
             ),
         );
     }
@@ -2300,7 +2292,7 @@ bins = array, U08, 0, [2], "", 1, 0, 0, 100, 0
 scalarValue = scalar, U08, 2, "", 1, 0, 0, 100, 0
 "#;
 
-    const CLAMP_MSQ: &str = r#"<msq>
+    const OUT_OF_RANGE_MSQ: &str = r#"<msq>
     <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
     <page number="0" size="64">
         <constant cols="1" rows="2" name="bins">5 150</constant>
@@ -2309,36 +2301,41 @@ scalarValue = scalar, U08, 2, "", 1, 0, 0, 100, 0
 </msq>"#;
 
     #[test]
-    fn a_file_value_past_the_declared_range_is_clamped_and_reported() {
+    fn a_file_value_past_the_declared_range_is_kept_and_reported() {
         let definition = parse_str(CLAMP_DEFINITION, &SettingsContext::new()).expect("parses");
-        let loaded = load(&Msq::parse(CLAMP_MSQ.as_bytes()).unwrap(), &definition);
+        let loaded = load(
+            &Msq::parse(OUT_OF_RANGE_MSQ.as_bytes()).unwrap(),
+            &definition,
+        );
 
         assert_eq!(loaded.tune.raw_at("bins", 0).unwrap(), 5.0);
-        assert_eq!(loaded.tune.raw_at("bins", 1).unwrap(), 100.0);
-        assert_eq!(loaded.tune.scalar_raw("scalarValue").unwrap(), 100.0);
+        assert_eq!(
+            loaded.tune.raw_at("bins", 1).unwrap(),
+            150.0,
+            "the declared range does not rewrite what the file states"
+        );
+        assert_eq!(loaded.tune.scalar_raw("scalarValue").unwrap(), 150.0);
 
-        let clamped: Vec<&str> = loaded
+        let out_of_range: Vec<&str> = loaded
             .report
             .warnings
             .iter()
-            .filter(|issue| issue.kind == IssueKind::ValueClamped)
+            .filter(|issue| issue.kind == IssueKind::ValueOutOfRange)
             .map(|issue| issue.message.as_str())
             .collect();
 
-        assert_eq!(clamped.len(), 2, "{clamped:?}");
+        assert_eq!(out_of_range.len(), 2, "{out_of_range:?}");
         assert!(
-            clamped
+            out_of_range
                 .iter()
                 .any(|message| message.contains("scalarValue"))
         );
-        assert!(clamped.iter().any(|message| message.contains("bins")));
+        assert!(out_of_range.iter().any(|message| message.contains("bins")));
         assert!(
-            loaded
-                .report
-                .warnings
+            out_of_range
                 .iter()
-                .all(|issue| issue.kind != IssueKind::ValueOutOfRange),
-            "a clamped value is not also reported as kept"
+                .all(|message| message.contains("kept as written")),
+            "the report says the value was kept"
         );
     }
 }

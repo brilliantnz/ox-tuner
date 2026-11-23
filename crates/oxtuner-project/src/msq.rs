@@ -385,7 +385,7 @@ pub(crate) fn apply_definition_defaults(tune: &mut Tune, definition: &Definition
     }
 }
 
-/// Writes one raw value per index, inside the declared range.
+/// Writes one raw value per index, inside the storage type.
 ///
 /// Indices only grow, so the first cell the tune does not have ends the list:
 /// a definition default with more values than the array is a definition
@@ -394,7 +394,7 @@ fn apply_cells(tune: &mut Tune, spec: &VariableSpec, values: impl Iterator<Item 
     for (index, value) in values.enumerate() {
         let Some(value) = value else { continue };
 
-        let raw = spec.clamp_raw(value);
+        let raw = spec.clamp_storage(value);
         if let Err(error) = tune.set_image_raw(&spec.name, index, raw) {
             tracing::debug!(
                 name = %spec.name,
@@ -449,21 +449,6 @@ fn apply_page_seed(tune: &mut Tune, seed: &Tune) -> Result<(), MsqError> {
     }
 
     Ok(())
-}
-
-/// The values a scaffold writes for one variable.
-///
-/// A default outside the declared range or the storage type would come back
-/// different from the tune's first open, so it is written inside both. The
-/// value on disk then equals the value the loader reads, which is what makes a
-/// created project exactly an opened one.
-fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
-    match values {
-        Values::Numbers(numbers) => {
-            Values::Numbers(numbers.iter().map(|raw| spec.clamp_raw(*raw)).collect())
-        }
-        Values::Text(text) => Values::Text(text.clone()),
-    }
 }
 
 /// The `(cols, rows)` an array entry is written with.
@@ -747,11 +732,10 @@ fn scaffold_entries(
         if values.is_empty() {
             continue;
         }
-        let values = clamp_values(spec, values);
         let text = match load::format_values_with(
             spec,
             definition,
-            &values,
+            values,
             &load::CellIndent::for_depth(PAGE_CHILD_DEPTH),
         ) {
             Ok(text) => text,
@@ -2371,10 +2355,10 @@ second = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
     }
 
     #[test]
-    fn a_scaffold_whose_peers_have_no_common_value_is_refused() {
+    fn a_scaffold_whose_peers_have_no_common_range_uses_the_raw_zero() {
         // `first` cannot store anything from 11 up and `second` cannot store
-        // anything below 20, so no value fits both and a new tune would open
-        // holding two of them for one byte.
+        // anything below 20. Neither range is a storage bound, so the byte the
+        // controller holds (zero) is kept and both views read it.
         let definition = parse_str(
             "\
 [MegaTune]
@@ -2391,43 +2375,18 @@ second = scalar, U08, 0, \"x\", 1, 0, 20, 255, 0
         )
         .expect("parses");
 
-        let error =
-            scaffold(&definition, None, WritePolicy::Full).expect_err("no value fits both ranges");
+        let msq = scaffold(&definition, None, WritePolicy::Full).expect("defaults scaffold");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let loaded = load(&Msq::parse(&bytes).expect("parses"), &definition);
 
+        assert_eq!(loaded.tune.raw_at("first", 0).expect("it is there"), 0.0);
+        assert_eq!(loaded.tune.raw_at("second", 0).expect("it is there"), 0.0);
         assert!(
-            matches!(error, MsqError::ConflictingDefaults { .. }),
-            "the refusal names the pair: {error}"
-        );
-    }
-
-    #[test]
-    fn a_scaffold_whose_peers_round_apart_is_refused() {
-        // Both peers settle onto seven and both can store it, but `second`
-        // writes it in user units as 0.0000000000007 and the file keeps twelve
-        // decimals. The file then says 0.000000000001, which reads back as ten
-        // next to `first`'s seven.
-        let definition = parse_str(
-            "\
-[MegaTune]
-signature = \"speeduino 202501\"
-
-[Constants]
-nPages = 1
-pageSize = 8
-page = 1
-first = scalar, U08, 0, \"x\", 1, 0, 7, 255, 0
-second = scalar, U08, 0, \"y\", 0.0000000000001, 0, 0, 255, 0
-",
-            &SettingsContext::new(),
-        )
-        .expect("parses");
-
-        let error = scaffold(&definition, None, WritePolicy::Full)
-            .expect_err("the rounding pulls the two apart");
-
-        assert!(
-            matches!(error, MsqError::ConflictingDefaults { .. }),
-            "what lands on disk is what is judged: {error}"
+            loaded
+                .layout
+                .value_conflicts(IniPage::FIRST, &loaded.tune)
+                .is_empty(),
+            "one raw zero serves both views"
         );
     }
 
@@ -2461,7 +2420,7 @@ straddle = array, U08, 2, [4], \"\", 1, 0, 7, 255, 0
             assert_eq!(loaded.tune.raw_at("wide", cell).expect("it is there"), 0.0);
             assert_eq!(
                 loaded.tune.raw_at("straddle", cell).expect("it is there"),
-                7.0,
+                0.0,
                 "cell {cell} must not be written over by a rebuild"
             );
         }
@@ -2494,7 +2453,7 @@ inside = scalar, U08, 4, \"x\", 1, 0, 7, 255, 0
         let loaded = load(&reparsed, &definition);
 
         assert_eq!(loaded.tune.text("note").expect("it is there"), "");
-        assert_eq!(loaded.tune.raw_at("inside", 0).expect("it is there"), 7.0);
+        assert_eq!(loaded.tune.raw_at("inside", 0).expect("it is there"), 0.0);
     }
 
     #[test]
@@ -2515,6 +2474,9 @@ page = 1
 owner = array, U08, 0, [4], \"\", 1, 0, 7, 255, 0
 view = scalar, U08, 1, \"\", 1, 0, 0, 255, 0
 note = string, ASCII, 8
+
+[ConstantsExtensions]
+defaultValue = owner, 1 2 3 4
 ",
             &SettingsContext::new(),
         )
@@ -2531,7 +2493,7 @@ note = string, ASCII, 8
 
         assert_eq!(
             loaded.tune.raw_at("view", 0).expect("it is there"),
-            7.0,
+            2.0,
             "the view reads the byte its owner holds when the file is opened back"
         );
     }
