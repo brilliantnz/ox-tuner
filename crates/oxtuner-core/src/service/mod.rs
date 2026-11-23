@@ -24,7 +24,7 @@ use std::{
 
 use crossfire::{MTx, RecvTimeoutError, Rx, mpsc, spsc};
 use oxtuner_datalog::{LogColumn, LogStatus, Logger};
-use oxtuner_ini::Definition;
+use oxtuner_ini::{CommandTemplate as IniCommandTemplate, Definition};
 use oxtuner_project::{DefinitionSource, Project};
 use oxtuner_protocol::{BehaviorKind, LinkMode};
 use oxtuner_tune::{IniPage, Tune, TuneDiff, TuneStatus, ValueConflict, decode_page, patch_page};
@@ -762,8 +762,12 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 enum PendingKind {
     /// The connect handshake (signature).
     Connect,
+    /// The `versionInfo` query that follows a successful connect handshake.
+    ConnectVersion,
     /// The signature check that starts a create from a controller.
     CreateSignature,
+    /// The `versionInfo` query that follows a create signature check.
+    CreateVersion,
     /// The full page read that seeds a create from a controller.
     CreateRead,
     /// A full page read.
@@ -934,6 +938,10 @@ struct EcuConnection {
     definition_signature: String,
     behavior: String,
     framing: &'static str,
+    /// The definition's `versionInfo` interrogate command, when it has one.
+    version_command: Option<IniCommandTemplate>,
+    /// The firmware text the controller answered, when it did.
+    version_text: Option<String>,
     pages: usize,
     realtime_block: Option<u16>,
     connected: bool,
@@ -1029,6 +1037,12 @@ impl Live {
                     LinkMode::Legacy => "legacy",
                     LinkMode::Envelope => "envelope",
                 },
+                version_command: definition
+                    .version_info
+                    .as_deref()
+                    .map(IniCommandTemplate::parse)
+                    .filter(|command| !command.is_empty()),
+                version_text: None,
                 pages: definition.pages.len(),
                 realtime_block,
                 connected: false,
@@ -1220,6 +1234,7 @@ impl Live {
             writes_enabled,
             behavior: self.connection.behavior.clone(),
             framing: self.connection.framing,
+            version_text: self.connection.version_text.clone(),
             pages: self.connection.pages,
             realtime_block: self.connection.realtime_block,
         }
@@ -1233,6 +1248,12 @@ impl Live {
         } else {
             SignatureVerdict::Mismatch
         };
+        // A reconnect keeps the last version text: the handshake proves the
+        // link, not a different controller. A changed signature means the
+        // controller is not the one that reported that text, so it is dropped.
+        if self.connection.signature != signature {
+            self.connection.version_text = None;
+        }
         self.connection.signature = signature;
         self.connection.connected = true;
         self.connection.revision = self.connection.revision.wrapping_add(1);

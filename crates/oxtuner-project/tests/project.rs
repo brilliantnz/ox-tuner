@@ -1345,7 +1345,7 @@ rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
     };
     let project = Project::prepare(&request)
         .expect("a one-row table is a legal shape")
-        .create(None, WritePolicy::Full)
+        .create(None, WritePolicy::Full, None)
         .expect("creation succeeds");
 
     let tune = fs::read_to_string(project.tune_path()).expect("the tune is readable");
@@ -1500,6 +1500,55 @@ value = scalar, U08, 0, "", 1, 0, 0, 255, 0
         "{tune}"
     );
     assert!(!tune.contains("writeDate="), "{tune}");
+}
+
+#[test]
+fn a_controller_version_text_fills_the_firmware_fields() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+versionInfo = "S"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+value = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+
+    let sandbox = TempDir::new("create-version");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Versioned".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+        write_stamp: None,
+    };
+    let project = Project::prepare(&request)
+        .expect("the request prepares")
+        .create(None, WritePolicy::Full, Some("Speeduino 2025.01.7"))
+        .expect("creation succeeds");
+    let root = project.root().to_path_buf();
+    drop(project);
+
+    let tune = fs::read_to_string(root.join(TUNE_FILE)).expect("the tune");
+    assert!(
+        tune.contains(r#"firmwareInfo="Speeduino 2025.01.7""#),
+        "{tune}"
+    );
+    assert!(
+        tune.contains(r#"signature="speeduino 202501""#),
+        "the signature stays the definition's: {tune}"
+    );
+    let properties =
+        fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties");
+    assert!(
+        properties.contains("firmwareDescription=Speeduino 2025.01.7"),
+        "{properties}"
+    );
 }
 
 #[test]

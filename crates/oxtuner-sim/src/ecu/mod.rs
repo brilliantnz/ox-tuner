@@ -77,6 +77,8 @@ pub(crate) struct RealtimeEcu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Request<'a> {
     Signature,
+    /// The definition's `versionInfo` command.
+    Version,
     ReadPage {
         page: u8,
         offset: u16,
@@ -108,6 +110,9 @@ pub(crate) enum Request<'a> {
 pub(crate) struct SimEcu {
     pub(crate) signature: Vec<u8>,
     query: Option<CommandPattern>,
+    /// The definition's `versionInfo` command, when the host can ask it.
+    version: Option<CommandPattern>,
+    pub(crate) version_text: Vec<u8>,
     realtime: Option<RealtimeEcu>,
     /// `[ControllerCommands]` command strings, in definition order.
     controller: Vec<CommandPattern>,
@@ -188,8 +193,12 @@ fn realtime_ecu(
 }
 
 impl SimEcu {
-    /// Builds the message set, using `signature` as the reply text.
-    pub(crate) fn new(definition: &Definition, signature: String) -> Result<Self, SimError> {
+    /// Builds the message set with an optional `versionInfo` reply.
+    pub(crate) fn with_version(
+        definition: &Definition,
+        signature: String,
+        version_text: Option<String>,
+    ) -> Result<Self, SimError> {
         let variables = variables(definition);
         let wire_order = if definition.comms.force_big_endian_protocol {
             WireOrder::BigEndian
@@ -203,6 +212,13 @@ impl SimEcu {
             .as_ref()
             .filter(|command| !command.is_empty())
             .and_then(pattern);
+        let version = version_text.as_ref().and_then(|_| {
+            definition
+                .version_info
+                .as_deref()
+                .map(CommandTemplate::parse)
+                .and_then(|command| pattern(&command))
+        });
         let realtime = realtime_ecu(definition, &variables, wire_order)?;
 
         let pages = pages::build_pages(definition, &variables, wire_order)?;
@@ -222,6 +238,8 @@ impl SimEcu {
         Ok(Self {
             signature: signature.into_bytes(),
             query,
+            version,
+            version_text: version_text.unwrap_or_default().into_bytes(),
             realtime,
             controller,
             pages,
@@ -239,6 +257,12 @@ impl SimEcu {
             && pattern.matches(bytes)
         {
             return Some(Request::Signature);
+        }
+
+        if let Some(pattern) = &self.version
+            && pattern.matches(bytes)
+        {
+            return Some(Request::Version);
         }
 
         if let Some(realtime) = &self.realtime
@@ -350,14 +374,16 @@ cmdOff = \"y\\x01\"
 
     #[test]
     fn the_signature_query_is_recognised() {
-        let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
+        let ecu = SimEcu::with_version(&definition(), "speeduino 202501".to_owned(), None)
+            .expect("builds");
 
         assert_eq!(ecu.interpret(b"Q"), Some(Request::Signature));
     }
 
     #[test]
     fn a_controller_command_is_recognised() {
-        let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
+        let ecu = SimEcu::with_version(&definition(), "speeduino 202501".to_owned(), None)
+            .expect("builds");
 
         assert_eq!(ecu.interpret(b"z"), Some(Request::ControllerCommand));
         assert_eq!(ecu.interpret(b"y\x01"), Some(Request::ControllerCommand));
@@ -370,7 +396,8 @@ cmdOff = \"y\\x01\"
 
     #[test]
     fn a_page_read_reports_the_page_from_the_definition_identifier() {
-        let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
+        let ecu = SimEcu::with_version(&definition(), "speeduino 202501".to_owned(), None)
+            .expect("builds");
 
         let request = ecu
             .interpret(&[b'p', 0x00, 0x01, 0x02, 0x00, 0x03, 0x00])
@@ -500,7 +527,8 @@ burnPending = bits, U16, 0, [8:8]
 
     #[test]
     fn a_write_carries_its_payload() {
-        let ecu = SimEcu::new(&definition(), "speeduino 202501".to_owned()).expect("builds");
+        let ecu = SimEcu::with_version(&definition(), "speeduino 202501".to_owned(), None)
+            .expect("builds");
 
         let request = ecu
             .interpret(&[b'M', 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0xAA, 0xBB])

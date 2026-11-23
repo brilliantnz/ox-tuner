@@ -156,6 +156,8 @@ pub(crate) enum IoOp {
     BurnPages { pages: Vec<u8> },
     /// Send one `[ControllerCommands]` action's command strings, in order.
     Command { commands: Vec<IniCommandTemplate> },
+    /// Ask the definition's `versionInfo` command for the firmware text.
+    Version { command: IniCommandTemplate },
     /// Read one realtime block.
     ReadRealtime,
     /// Reopen the link and read the signature again.
@@ -248,6 +250,8 @@ pub(crate) enum IoOutcome {
     Burned { pages: usize },
     /// One controller command action was sent.
     Command { report: RawCommandReport },
+    /// The controller's firmware version text.
+    Version { text: String },
     /// One realtime block.
     Realtime { block: Vec<u8> },
     /// The link reopened and answered again.
@@ -732,6 +736,10 @@ fn execute(
         }
         IoOp::Command { commands } => match protocol.run_commands(transport, &commands) {
             Ok(report) => (IoOutcome::Command { report }, false),
+            Err(error) => (failure(&error), false),
+        },
+        IoOp::Version { command } => match protocol.read_command_text(transport, &command) {
+            Ok(text) => (IoOutcome::Version { text }, false),
             Err(error) => (failure(&error), false),
         },
         IoOp::ReadRealtime => match protocol.read_realtime(transport) {

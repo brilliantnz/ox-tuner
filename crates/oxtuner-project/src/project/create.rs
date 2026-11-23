@@ -189,7 +189,7 @@ impl Project {
             );
         })?;
 
-        prepared.create(None, WritePolicy::SparseFromDefaults)
+        prepared.create(None, WritePolicy::SparseFromDefaults, None)
     }
 
     /// Validates a create request and parses its definition, writing nothing.
@@ -357,6 +357,7 @@ impl PreparedProject {
         self,
         seed: Option<&oxtuner_tune::Tune>,
         policy: WritePolicy,
+        firmware_text: Option<&str>,
     ) -> Result<Project, ProjectError> {
         let _span = tracing::info_span!(
             "project_create",
@@ -365,7 +366,7 @@ impl PreparedProject {
         )
         .entered();
 
-        let result = self.create_inner(seed, policy);
+        let result = self.create_inner(seed, policy, firmware_text);
 
         match &result {
             Ok(project) => tracing::info!(
@@ -389,8 +390,16 @@ impl PreparedProject {
         self,
         seed: Option<&oxtuner_tune::Tune>,
         policy: WritePolicy,
+        firmware_text: Option<&str>,
     ) -> Result<Project, ProjectError> {
-        let built = build_scaffold(&self.name, &self.request, &self.definition, seed, policy)?;
+        let built = build_scaffold(
+            &self.name,
+            &self.request,
+            &self.definition,
+            seed,
+            policy,
+            firmware_text,
+        )?;
 
         // The target was checked in `prepare`; `create_dir` makes that check
         // atomic by refusing a folder that appeared in between. Reusing it
@@ -509,6 +518,7 @@ fn build_scaffold(
     definition: &oxtuner_ini::Definition,
     seed: Option<&oxtuner_tune::Tune>,
     policy: WritePolicy,
+    firmware_text: Option<&str>,
 ) -> Result<BuiltScaffold, ProjectError> {
     let flags = chosen_flags(definition, &request.settings);
     let document = Msq::scaffold(
@@ -518,6 +528,7 @@ fn build_scaffold(
             policy,
             write_stamp: request.write_stamp.as_deref(),
             flags: &flags,
+            firmware_text,
         },
     )
     .map_err(ProjectError::Msq)?;
@@ -526,10 +537,11 @@ fn build_scaffold(
         bytes = tune_bytes.len(),
         seeded = seed.is_some(),
         flags = flags.len(),
+        versioned = firmware_text.is_some(),
         "tune scaffolded"
     );
 
-    let properties = properties_text(name, request, definition, &flags);
+    let properties = properties_text(name, request, definition, &flags, firmware_text);
     let backup = backup_properties_text(name, request, &flags);
 
     Ok(BuiltScaffold {
@@ -566,6 +578,7 @@ fn properties_text(
     request: &CreateRequest,
     definition: &oxtuner_ini::Definition,
     flags: &[String],
+    firmware_text: Option<&str>,
 ) -> String {
     let mut properties = properties_header(request.write_stamp.as_deref());
     push_project_keys(&mut properties, name, request);
@@ -575,9 +588,13 @@ fn properties_text(
     // the workspace choice.
     properties.push_str("canId=-1\n");
     let signature = definition.signature.trim();
-    if !signature.is_empty() {
+    let firmware = firmware_text
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(signature);
+    if !firmware.is_empty() {
         properties.push_str("firmwareDescription=");
-        properties.push_str(&oxtuner_encoding::escape_java_property(signature));
+        properties.push_str(&oxtuner_encoding::escape_java_property(firmware));
         properties.push('\n');
     }
     properties.push_str("useCommonDashboardDir=false\n");

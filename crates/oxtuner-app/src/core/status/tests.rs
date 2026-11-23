@@ -220,6 +220,7 @@ fn connection() -> ConnectionView {
         port: "/dev/cu.usbmodem21201".to_owned(),
         custom: false,
         signature: "speeduino 202501".to_owned(),
+        version_text: None,
         definition_signature: "speeduino 202501".to_owned(),
         verdict: oxtuner_core::SignatureVerdict::Match,
         read_only: false,

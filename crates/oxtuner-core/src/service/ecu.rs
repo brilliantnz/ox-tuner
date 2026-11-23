@@ -78,7 +78,9 @@ pub(super) fn teardown(
                         code: failure_code(pending.kind),
                         message: if matches!(
                             pending.kind,
-                            PendingKind::CreateSignature | PendingKind::CreateRead
+                            PendingKind::CreateSignature
+                                | PendingKind::CreateRead
+                                | PendingKind::CreateVersion
                         ) {
                             "the core stopped before the ECU read finished".to_owned()
                         } else {
@@ -461,6 +463,44 @@ pub(super) fn on_reply(
             }
             true
         }
+        (PendingKind::CreateVersion, IoOutcome::Version { text }) => {
+            let Some(create) = pending_create.as_mut() else {
+                tracing::error!("a create version reply had no pending create");
+                return false;
+            };
+            if let Err(message) = super::create::version_reached(create, live, Some(text)) {
+                super::create::fail(pending_create, &message, events, report);
+                return false;
+            }
+            true
+        }
+        (PendingKind::CreateVersion, IoOutcome::Failed(failure)) => {
+            tracing::warn!(
+                kind = failure.kind.as_str(),
+                %failure.message,
+                "the create version query failed; the signature remains the firmware identity"
+            );
+            let Some(create) = pending_create.as_mut() else {
+                tracing::error!("a create version failure had no pending create");
+                return false;
+            };
+            if let Err(message) = super::create::version_reached(create, live, None) {
+                super::create::fail(pending_create, &message, events, report);
+                return false;
+            }
+            true
+        }
+        (PendingKind::CreateVersion, outcome) => {
+            tracing::warn!(?outcome, "the create version query got an unexpected reply");
+            let Some(create) = pending_create.as_mut() else {
+                return false;
+            };
+            if let Err(message) = super::create::version_reached(create, live, None) {
+                super::create::fail(pending_create, &message, events, report);
+                return false;
+            }
+            true
+        }
         (PendingKind::CreateRead, IoOutcome::All { pages }) => {
             let Some(create) = pending_create.as_mut() else {
                 tracing::error!("a create page reply had no pending create");
@@ -501,36 +541,47 @@ pub(super) fn on_reply(
                 // A probe is not a session: its port is released at once.
                 return false;
             }
-            tracing::info!(
-                port = %summary.port,
-                signature = %summary.signature,
-                verdict = summary.verdict.as_str(),
-                read_only = summary.read_only,
-                "ECU connected"
-            );
-            send(
-                events,
-                Event::Connected {
-                    op: pending.op,
-                    view: summary,
-                },
-            );
-            // A connect that answered is the one worth reopening next time;
-            // remembering it in the project keeps each project on its own ECU.
-            // A reconnect to the same port has nothing to persist, so the state
-            // file is left alone.
-            if let Session::Project(project) = session
-                && let Some(saved) = &live.connection.saved_connection
-                && {
-                    let connection = &project.state().connection;
-                    connection.last_port.as_deref() != Some(saved.port.as_str())
-                        || connection.baud_override != Some(saved.baud)
+
+            // The version text is separate metadata, not the signature. A
+            // controller that does not answer still gets a usable session.
+            if let Some(command) = live.connection.version_command.clone() {
+                if let Err(error) = live.request(
+                    pending.op,
+                    PendingKind::ConnectVersion,
+                    IoOp::Version { command },
+                ) {
+                    tracing::warn!(%error, "the version query could not be queued");
+                    announce_connection(live, pending.op, session, events, safety);
                 }
-                && let Err(error) =
-                    project.set_connection(Some(saved.port.clone()), Some(saved.baud))
-            {
-                tracing::warn!(%error, "the project device could not be persisted");
+            } else {
+                announce_connection(live, pending.op, session, events, safety);
             }
+            true
+        }
+        (PendingKind::ConnectVersion, IoOutcome::Version { text }) => {
+            if !text.trim().is_empty() {
+                live.connection.version_text = Some(text);
+            }
+            announce_connection(live, pending.op, session, events, safety);
+            true
+        }
+        (PendingKind::ConnectVersion, IoOutcome::Failed(failure)) => {
+            if failure.kind == IoFailureKind::LinkLost {
+                connection_lost(live, session, events, latest, failure.message);
+                return true;
+            }
+            // Optional metadata: report it and keep the session.
+            tracing::warn!(
+                kind = failure.kind.as_str(),
+                %failure.message,
+                "the firmware version query failed; the signature still identifies the session"
+            );
+            announce_connection(live, pending.op, session, events, safety);
+            true
+        }
+        (PendingKind::ConnectVersion, outcome) => {
+            tracing::warn!(?outcome, "the version query got an unexpected reply");
+            announce_connection(live, pending.op, session, events, safety);
             true
         }
         (PendingKind::Connect, IoOutcome::Failed(failure)) => {
@@ -788,11 +839,50 @@ pub(super) fn on_reply(
     }
 }
 
+/// Sends the session summary once the handshake and the optional version query
+/// are done.
+fn announce_connection(
+    live: &mut Live,
+    op: OpId,
+    session: &mut Session,
+    events: &EventTx,
+    safety: &Safety,
+) {
+    let summary = live.summary(safety.writes_enabled());
+    tracing::info!(
+        port = %summary.port,
+        signature = %summary.signature,
+        version = summary.version_text.as_deref().unwrap_or(""),
+        verdict = summary.verdict.as_str(),
+        read_only = summary.read_only,
+        "ECU connected"
+    );
+    send(events, Event::Connected { op, view: summary });
+
+    // A connect that answered is the one worth reopening next time;
+    // remembering it in the project keeps each project on its own ECU. A
+    // reconnect to the same port has nothing to persist, so the state file is
+    // left alone.
+    if let Session::Project(project) = session
+        && let Some(saved) = &live.connection.saved_connection
+        && {
+            let connection = &project.state().connection;
+            connection.last_port.as_deref() != Some(saved.port.as_str())
+                || connection.baud_override != Some(saved.baud)
+        }
+        && let Err(error) = project.set_connection(Some(saved.port.clone()), Some(saved.baud))
+    {
+        tracing::warn!(%error, "the project device could not be persisted");
+    }
+}
+
 /// Turns a pending kind into the failure code its UI switches on.
 pub(super) fn failure_code(kind: PendingKind) -> FailureCode {
     match kind {
-        PendingKind::Connect => FailureCode::ConnectFailed,
-        PendingKind::CreateSignature | PendingKind::CreateRead => FailureCode::ProjectRejected,
+        PendingKind::Connect | PendingKind::ConnectVersion => FailureCode::ConnectFailed,
+        PendingKind::CreateSignature | PendingKind::CreateRead | PendingKind::CreateVersion => {
+            FailureCode::ProjectRejected
+        }
         PendingKind::ReadAll => FailureCode::ReadFailed,
         PendingKind::Realtime => FailureCode::RealtimeRejected,
         PendingKind::Trace => FailureCode::TraceFailed,

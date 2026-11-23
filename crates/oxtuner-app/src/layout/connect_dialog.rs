@@ -556,6 +556,10 @@ fn section(title: String, body: AnyElement, muted: gpui_kit::Hsla) -> AnyElement
     clippy::too_many_arguments,
     reason = "the status block renders the connection, link and test facts together"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the status block is one match over the connection, link and test states"
+)]
 fn session_status(
     cx: &App,
     connection: Option<&ConnectionView>,
@@ -586,6 +590,14 @@ fn session_status(
                     "app.connect.status_connected",
                     signature = connection.signature.clone()
                 )))
+                .when_some(connection.version_text.clone(), |this, version| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(t!("app.connect.firmware_version", version = version)),
+                    )
+                })
                 .when(connection.read_only, |this| {
                     this.child(
                         div()

@@ -432,6 +432,62 @@ fn connecting_without_a_definition_is_refused() {
 }
 
 #[test]
+fn connecting_reads_the_optional_firmware_text() {
+    let harness = Harness::start();
+    let fixture = FIXTURE.replace(
+        "queryCommand = \"Q\"",
+        "queryCommand = \"Q\"\nversionInfo = \"S\"",
+    );
+    harness
+        .handle
+        .load_definition("versioned.ini", fixture.as_bytes())
+        .expect("queued");
+    harness.wait_loaded();
+
+    harness.connect(SimConfig {
+        version_text: Some("Speeduino 2025.01.7".to_owned()),
+        ..SimConfig::default()
+    });
+    let summary = harness.wait_connected();
+
+    assert_eq!(
+        summary.version_text.as_deref(),
+        Some("Speeduino 2025.01.7"),
+        "the version text is separate from the signature"
+    );
+    assert_eq!(summary.signature, "speeduino 202501");
+
+    harness.thread.join();
+}
+
+#[test]
+fn connecting_without_a_version_answer_keeps_the_signature_identity() {
+    let harness = Harness::start();
+    let fixture = FIXTURE.replace(
+        "queryCommand = \"Q\"",
+        "queryCommand = \"Q\"\nversionInfo = \"S\"",
+    );
+    harness
+        .handle
+        .load_definition("versioned.ini", fixture.as_bytes())
+        .expect("queued");
+    harness.wait_loaded();
+
+    // No `version_text`: the simulator leaves the command unanswered, which is
+    // a controller that does not implement `versionInfo`.
+    harness.connect(SimConfig::default());
+    let summary = harness.wait_connected();
+
+    assert_eq!(
+        summary.version_text, None,
+        "a silent controller leaves the version unavailable"
+    );
+    assert_eq!(summary.signature, "speeduino 202501");
+
+    harness.thread.join();
+}
+
+#[test]
 fn a_mismatched_signature_locks_the_session_read_only() {
     let harness = Harness::start();
     harness.load();
@@ -515,13 +571,25 @@ fn realtime_values_arrive_through_the_latest_frame() {
 #[test]
 fn a_lost_link_is_reported_and_the_core_reconnects() {
     let harness = Harness::start();
-    harness.load();
+    let fixture = FIXTURE.replace(
+        "queryCommand = \"Q\"",
+        "queryCommand = \"Q\"\nversionInfo = \"S\"",
+    );
+    harness
+        .handle
+        .load_definition("versioned.ini", fixture.as_bytes())
+        .expect("queued");
     harness.wait_loaded();
     harness.connect(SimConfig {
+        version_text: Some("Speeduino 2025.01.7".to_owned()),
         faults: vec![FaultRule::new(SimOp::ReadPage, Fault::Disconnect, 1)],
         ..SimConfig::default()
     });
-    harness.wait_connected();
+    let connected = harness.wait_connected();
+    assert_eq!(
+        connected.version_text.as_deref(),
+        Some("Speeduino 2025.01.7")
+    );
 
     harness.handle.read_all().expect("queued");
 
@@ -540,6 +608,11 @@ fn a_lost_link_is_reported_and_the_core_reconnects() {
         unreachable!()
     };
     assert_eq!(summary.signature, "speeduino 202501");
+    assert_eq!(
+        summary.version_text.as_deref(),
+        Some("Speeduino 2025.01.7"),
+        "a reconnect keeps the version text the controller already reported"
+    );
 
     harness.thread.join();
 }
