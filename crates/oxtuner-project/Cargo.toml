@@ -29,6 +29,9 @@ serde_json.workspace = true
 # aarch64 path does.
 sha2.workspace = true
 tracing.workspace = true
+# The per-project `ecuUid` in `project.properties`. The `v4` feature pulls the
+# OS random source transitively, which covers every supported platform.
+uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 criterion.workspace = true
