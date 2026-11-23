@@ -155,6 +155,10 @@ fn tune_from_pages(definition: &Definition, page1: &[u8], page2: &[u8]) -> Tune 
 }
 
 /// Whether `raw` is one of the options the definition hides as `"INVALID"`.
+///
+/// Mirrors the crate-private `msq::selects_hidden_option`. It uses the same
+/// `any` spelling, not the first match: an option value is unique in practice,
+/// but the test oracle must not take a different branch if it is not.
 fn hidden_value(definition: &Definition, spec: &VariableSpec, raw: f64) -> bool {
     if !matches!(spec.shape, EntryShape::Bits { .. }) {
         return false;
@@ -164,8 +168,7 @@ fn hidden_value(definition: &Definition, spec: &VariableSpec, raw: f64) -> bool 
         constant
             .options
             .iter()
-            .find(|option| f64::from(option.value) == raw)
-            .is_some_and(|option| option.hidden)
+            .any(|option| option.hidden && f64::from(option.value) == raw)
     })
 }
 
@@ -249,6 +252,63 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn a_seeded_scaffold_omits_both_hidden_shapes() {
+    // The property test almost certainly sees a hidden value, but it cannot
+    // assert that it does. Pin both shapes deterministically: the option-0
+    // placeholder and a repeated hidden label away from zero.
+    let definition =
+        parse_str(IMAGE_DEFINITION, &SettingsContext::new()).expect("the fixture parses");
+    let mut page1 = vec![0u8; 16];
+    page1[2] = 0; // `invalidFirst` selects the hidden option 0.
+    page1[10] = 0b10; // `hiddenGap` selects the hidden option 2.
+    let seed = tune_from_pages(&definition, &page1, &[0u8; 8]);
+
+    let sandbox = tempfile::TempDir::new().expect("a temporary directory");
+    let ini_path = sandbox.path().join("mainController.ini");
+    std::fs::write(&ini_path, IMAGE_DEFINITION).expect("the fixture definition is written");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "Hidden".to_owned(),
+        ini_path,
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+        write_stamp: None,
+    };
+    let project = Project::prepare(&request)
+        .expect("the request prepares")
+        .create(Some(&seed), WritePolicy::Full, None)
+        .expect("the project is created");
+    let root = project.root().to_path_buf();
+    drop(project);
+
+    let written = std::fs::read_to_string(root.join("CurrentTune.msq")).expect("the tune reads");
+    for name in ["invalidFirst", "hiddenGap"] {
+        assert!(
+            !written.contains(&format!("name=\"{name}\"")),
+            "`{name}` is INVALID and must stay out of the tune: {written}"
+        );
+    }
+    assert!(
+        written.contains("name=\"bitsA\""),
+        "a representable value is still written: {written}"
+    );
+
+    let reopened = Project::open(&root).expect("the created project opens");
+    assert_eq!(
+        reopened.tune().raw_at("invalidFirst", 0).expect("it opens"),
+        5.0,
+        "the definition's non-zero default applies"
+    );
+    assert_eq!(
+        reopened.tune().raw_at("hiddenGap", 0).expect("it opens"),
+        0.0,
+        "an undeclared default is raw zero"
+    );
 }
 
 #[test]
