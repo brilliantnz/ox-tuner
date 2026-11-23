@@ -6,72 +6,6 @@
 use super::dispatch::{record_local_journal, refuse, send, send_status};
 use super::*;
 
-/// Clamps every non-controller tune value that is about to be written.
-///
-/// Edits are already clamped when they enter the core. An imported tune or a
-/// file written by another tool can still carry an out-of-range value, and the
-/// write path must not send those blindly. A value the controller already
-/// holds is left alone: it is not part of the write plan, so clamping it would
-/// turn "leave the ECU's tune alone" into a write of a different number — a
-/// definition's range is not the firmware's limit. Controller-owned values are
-/// not part of the write plan either.
-///
-/// A value that shares its bytes with another view is left alone as well. One
-/// byte cannot satisfy two declared ranges, the view the user edited was
-/// clamped when it was edited, and its peers follow the same bytes; clamping
-/// one of them here would move the shared byte away from the edit. Returns how
-/// many cells changed.
-pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
-    let mut clamped: Vec<(String, usize, f64)> = Vec::new();
-    {
-        let images = project.images();
-        let Some(ram) = images.ecu_ram() else {
-            return 0;
-        };
-        for spec in project.layout().variables() {
-            if spec.is_controller_owned() || project.layout().is_alias(&spec.name) {
-                continue;
-            }
-            if project.layout().same_value_peers(&spec.name).len() > 1 {
-                continue;
-            }
-            for index in 0..spec.element_count() {
-                let Ok(value) = images.working().user_at(&spec.name, index) else {
-                    continue;
-                };
-                let same_at_wire = match (
-                    images.working().raw_at(&spec.name, index),
-                    ram.raw_at(&spec.name, index),
-                ) {
-                    (Ok(wanted), Ok(sent)) => spec.same_wire_value(wanted, sent),
-                    _ => false,
-                };
-                if same_at_wire {
-                    // The ECU holds this value; there is nothing to send.
-                    continue;
-                }
-                let (wanted, changed) = clamp_user(spec, value);
-                if changed {
-                    clamped.push((spec.name.clone(), index, wanted));
-                }
-            }
-        }
-    }
-    let count = clamped.len();
-    let mut touched: Vec<String> = Vec::new();
-    for (name, index, value) in clamped {
-        if let Err(error) = project.tune_mut().set_user_at(&name, index, value) {
-            tracing::warn!(%name, %error, "a clamped value could not be stored");
-        }
-        touched.push(name);
-    }
-
-    // A clamp moves bytes a neighbour may also claim, and this runs just before
-    // the gate that looks for two values over one set of them.
-    reconcile_groups(project, &touched, "a clamp");
-    count
-}
-
 /// The values that differ from ECU RAM, in layout order.
 ///
 /// This is a tune **sync**, not a replay of edit timestamps: it survives saving
@@ -720,6 +654,23 @@ pub(super) fn import_tune(
     }
 
     let loaded = oxtuner_project::load::load(&msq, project.definition());
+    // The file's values are imported as written (ADR-0034), so an out-of-range
+    // one reaches the wire unchanged on the next write. Say so once here, where
+    // the values enter, instead of clamping them silently on the way out.
+    let out_of_range = loaded
+        .report
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == oxtuner_project::IssueKind::ValueOutOfRange)
+        .count();
+    if out_of_range > 0 {
+        tracing::warn!(
+            %op,
+            path = %path.display(),
+            count = out_of_range,
+            "the imported tune states values outside their declared range; they are written as stated unless the storage type cannot hold them"
+        );
+    }
     let before = project.images().working().snapshot();
     let snapshot = match snapshot::write(project, operation) {
         Ok(path) => path,
