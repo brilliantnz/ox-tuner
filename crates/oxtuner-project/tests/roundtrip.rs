@@ -7,11 +7,13 @@
     reason = "the property test unwraps fixture setup and compares raw values exactly"
 )]
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use oxtuner_ini::{Definition, SettingsContext, parse_str};
-use oxtuner_project::{Msq, format_values, load};
-use oxtuner_tune::{TuneLayout, Values};
+use oxtuner_project::{
+    CreateRequest, Msq, Project, ProjectLayout, WritePolicy, format_values, load,
+};
+use oxtuner_tune::{IniPage, Tune, TuneLayout, Values, decode_page};
 use proptest::prelude::*;
 
 const DEFINITION: &str = r#"
@@ -102,6 +104,112 @@ proptest! {
     #[test]
     fn arbitrary_text_never_panics_the_reader(text in "\\PC{0,512}") {
         let _ = Msq::parse(text.as_bytes());
+    }
+}
+
+/// A definition whose every declared page byte is expressible in the file: each
+/// bit field lists an option for every value its bits can hold, every scale is
+/// a constant, and `narrow` declares a range tighter than its storage so the
+/// range path is covered too. Bytes no constant covers are padding and are not
+/// part of the compared set.
+const IMAGE_DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 2
+pageSize = 16, 8
+page = 1
+scalarA = scalar, U08, 0, "ms", 0.1, 0, 0, 25.5, 1
+bitsA = bits, U08, 1, [0:1], "Off", "One", "Two", "Three"
+invalidFirst = bits, U08, 2, [0:2], "INVALID", "One", "Two", "Three", "Four", "Five", "Six", "Seven"
+narrow = scalar, U08, 3, "", 1, 0, 0, 200, 0
+peerA = array, U08, 4, [2x2], "AFR", 0.1, 0, 0, 25.5, 1
+peerB = array, U08, 4, [2x2], "Lambda", 1, 0, 0, 255, 0
+wide = scalar, U16, 8, "", 1, 0, 0, 65535, 0
+page = 2
+second = scalar, S08, 0, "", 1, 0, -128, 127, 0
+"#;
+
+/// A tune whose page values are `page1` and `page2`, decoded the way a read
+/// from the controller decodes them.
+fn tune_from_pages(definition: &Definition, page1: &[u8], page2: &[u8]) -> Tune {
+    let mut tune = Tune::from_definition(definition);
+    let layout = Arc::clone(tune.layout());
+
+    for (number, bytes) in [(1u8, page1), (2u8, page2)] {
+        let page = IniPage::new(number).expect("the fixture declares the page");
+        let mut decoded = tune.snapshot();
+        decode_page(&layout, page, bytes, &mut decoded).expect("the page decodes");
+        tune.adopt_values(&decoded)
+            .expect("the decoded values are adopted");
+    }
+
+    tune
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        ..ProptestConfig::default()
+    })]
+
+    /// A project created from a controller image carries every byte of it.
+    ///
+    /// The definition is built so every declared page byte has a text form, the
+    /// way a vendored definition does for the values it declares. Whatever the
+    /// controller reported, `create(Full)` followed by an open must read back
+    /// the same raw values, including a value above a range narrower than its
+    /// storage.
+    #[test]
+    fn a_project_created_from_arbitrary_page_bytes_keeps_them(
+        page1 in proptest::collection::vec(any::<u8>(), 16),
+        page2 in proptest::collection::vec(any::<u8>(), 8),
+    ) {
+        let definition =
+            parse_str(IMAGE_DEFINITION, &SettingsContext::new()).expect("the fixture parses");
+        let seed = tune_from_pages(&definition, &page1, &page2);
+
+        let sandbox = tempfile::TempDir::new().expect("a temporary directory");
+        let ini_path = sandbox.path().join("mainController.ini");
+        std::fs::write(&ini_path, IMAGE_DEFINITION).expect("the fixture definition is written");
+        let request = CreateRequest {
+            parent: sandbox.path().to_path_buf(),
+            name: "Image".to_owned(),
+            ini_path,
+            expected_signature: None,
+            settings: Vec::new(),
+            connection: None,
+            layout: ProjectLayout::default(),
+            write_stamp: None,
+        };
+        let project = Project::prepare(&request)
+            .expect("the request prepares")
+            .create(Some(&seed), WritePolicy::Full, None)
+            .expect("the project is created");
+        let root = project.root().to_path_buf();
+        drop(project);
+
+        let reopened = Project::open(&root).expect("the created project opens");
+        prop_assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+
+        for spec in seed.layout().variables() {
+            if spec.ini_page().is_none() || !spec.shape.is_numeric() {
+                continue;
+            }
+            for index in 0..spec.element_count() {
+                prop_assert_eq!(
+                    seed.raw_at(&spec.name, index).expect("the seed holds it"),
+                    reopened
+                        .tune()
+                        .raw_at(&spec.name, index)
+                        .expect("the project holds it"),
+                    "`{}`[{}] changed across create and open",
+                    spec.name,
+                    index
+                );
+            }
+        }
     }
 }
 
