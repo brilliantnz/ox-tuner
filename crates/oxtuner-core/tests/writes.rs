@@ -784,6 +784,53 @@ fn a_write_is_clamped_to_the_definition_range() {
 }
 
 #[test]
+fn a_value_outside_the_declared_range_is_written_as_stated() {
+    // The definition declares `rpmBins` 0..10000 and the file states 20000, the
+    // way another tool can leave a bin past the editor's limit. S2 clamps what
+    // the user types, not what a file holds: the write sends the file's byte and
+    // must not rewrite the document on its way out.
+    const TUNE_ABOVE_MAX: &str = r#"<?xml version="1.0" encoding="ISO-8859-1"?>
+<msq xmlns="http://www.msefi.com/:msq">
+    <bibliography author="TunerStudio" tuneComment="fixture"/>
+    <versionInfo fileFormat="5.0" firmwareInfo="Speeduino+2025.01.3" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant cols="2" digits="0" name="veTable" rows="2" units="%">10.0 20.0 30.0 40.0</constant>
+        <constant name="rpmBins">20000.0 2000.0</constant>
+        <constant name="mapBins">50.0 100.0</constant>
+        <constant name="reqFuel">12.0</constant>
+    </page>
+    <settings Comment="fixture"/>
+</msq>
+"#;
+
+    let dir = TempDir::new("above-max");
+    fs::write(dir.path.join(TUNE_FILE), TUNE_ABOVE_MAX).expect("the tune is writable");
+
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+    core.use_project_tune();
+
+    let Event::TuneWritten { report, .. } = core.write() else {
+        panic!("the write was refused");
+    };
+    assert!(report.verified);
+    assert_eq!(
+        core.table().x_axis.values,
+        [20_000.0, 2000.0],
+        "the write sends the file's value and leaves the working image as it was"
+    );
+    assert_eq!(
+        core.status().pending_write.cells,
+        0,
+        "the read-back matched what was sent"
+    );
+
+    core.close();
+}
+
+#[test]
 fn writes_are_off_by_default_and_the_switch_gates_them() {
     let dir = TempDir::new("off");
     let core = Harness::start(false);

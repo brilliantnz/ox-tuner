@@ -6,9 +6,9 @@
 use super::dispatch::{refuse, send, send_status};
 use super::ecu::connection_lost;
 use super::tune::{
-    ambiguous_write_page, clamp_working_changes, conflicting_value_page, reconcile_groups,
-    unresolved_conflicts, unsent_ambiguous_page, unsent_changes, unsent_conflicting_value,
-    unsent_edits, unsent_for_pages,
+    ambiguous_write_page, conflicting_value_page, reconcile_groups, unresolved_conflicts,
+    unsent_ambiguous_page, unsent_changes, unsent_conflicting_value, unsent_edits,
+    unsent_for_pages,
 };
 use super::*;
 
@@ -280,10 +280,6 @@ pub(super) fn write_to_ram(
     }
     if let Some(reason) = unresolved_conflicts(project) {
         return refuse(events, report, op, FailureCode::WriteRefused, &reason);
-    }
-    let clamped = clamp_working_changes(project);
-    if clamped > 0 {
-        tracing::info!(%op, clamped, "out-of-range values clamped before writing");
     }
     let (changed_variables, changed_pages, _) = unsent_changes(project);
     if changed_variables.is_empty() || changed_pages.is_empty() {
