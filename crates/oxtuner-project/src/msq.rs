@@ -536,9 +536,10 @@ pub(crate) struct ScaffoldOptions<'a> {
 ///
 /// The two creation sources need different files. A project created from a
 /// controller holds the ECU's whole tune, so the writer emits every constant
-/// the definition describes, minus the INVALID-first placeholders. A manual
-/// project matches the reference writer's sparse new tune: only arrays whose
-/// default is non-zero and the numeric PC variables that declare a default.
+/// the definition describes, an `INVALID`-first placeholder included whenever
+/// the image backs it. A manual project matches the reference writer's sparse
+/// new tune: only arrays whose default is non-zero and the numeric PC variables
+/// that declare a default.
 #[expect(
     clippy::exhaustive_enums,
     reason = "the two creation sources have exactly two writer policies"
@@ -546,6 +547,13 @@ pub(crate) struct ScaffoldOptions<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePolicy {
     /// Every constant the definition has, with the current image values.
+    ///
+    /// A seeded scaffold writes every page constant, including one whose
+    /// option 0 is the `INVALID` placeholder: that byte is part of the image
+    /// the controller reported, and leaving the entry out would let the
+    /// definition's default replace it on the next open. A PC variable is
+    /// written only when the definition gives it a default, because no
+    /// controller image backs one.
     Full,
     /// Only the values the reference writer stores for a new from-INI tune.
     ///
@@ -556,8 +564,12 @@ pub enum WritePolicy {
 }
 
 /// Whether a scaffold writes `spec` under `policy`.
+///
+/// `seeded` says whether a controller image backs the tune, which decides what
+/// a full scaffold does with a page constant whose option 0 is `INVALID`.
 fn writes_entry(
     policy: WritePolicy,
+    seeded: bool,
     definition: &Definition,
     layout: &TuneLayout,
     tune: &Tune,
@@ -571,35 +583,42 @@ fn writes_entry(
         return false;
     }
 
-    match policy {
-        WritePolicy::Full => !invalid_first(definition, spec),
-        WritePolicy::SparseFromDefaults => {
-            if layout.is_alias(&spec.name) || !declares_default(definition, &spec.name) {
-                return false;
-            }
-
-            if spec.ini_page().is_some() {
+    if spec.ini_page().is_some() {
+        return match policy {
+            // Without an image there is nothing to preserve: a field the
+            // reference writer marks non-persistent would only add an entry no
+            // controller value backs.
+            WritePolicy::Full => seeded || !invalid_first(definition, spec),
+            WritePolicy::SparseFromDefaults => {
                 // Page scalars stay implicit and resolve from the definition on
                 // open; only arrays with a non-zero default are materialized.
                 let is_array = matches!(spec.shape, EntryShape::Array { .. });
-                is_array
+                !layout.is_alias(&spec.name)
+                    && declares_default(definition, &spec.name)
+                    && is_array
                     && tune
                         .value(&spec.name)
                         .is_some_and(|values| user_non_zero(spec, values))
-            } else {
-                // A PC variable has no page to fall back to, so every numeric
-                // one with a declared default is written, zero included.
-                spec.shape.is_numeric()
             }
-        }
+        };
     }
+
+    // A PC variable never travels over the page protocol, so no controller
+    // image backs it. The reference writer stores the numeric ones the
+    // definition gives a default and leaves the rest out: aliases, channel
+    // names and units are derived, and an array no default names starts on a
+    // zero the controller never reported. Both policies follow that rule so a
+    // seeded tune carries the same PC page the reference writes.
+    !layout.is_alias(&spec.name)
+        && spec.shape.is_numeric()
+        && declares_default(definition, &spec.name)
 }
 
 /// Whether the definition's option 0 for `spec` is the `INVALID` placeholder.
 ///
-/// The reference writer treats the whole field as non-persistent. The value
-/// stays in the tune image so expressions and menus still see the real board
-/// metadata; only the file omits it.
+/// An unseeded scaffold treats the whole field as non-persistent, matching the
+/// reference writer. The value stays in the tune image so expressions and menus
+/// still see the real board metadata; only the file omits it.
 fn invalid_first(definition: &Definition, spec: &VariableSpec) -> bool {
     let options = definition
         .constant(&spec.name)
@@ -718,12 +737,13 @@ fn scaffold_entries(
     layout: &TuneLayout,
     tune: &Tune,
     policy: WritePolicy,
+    seeded: bool,
 ) -> (Vec<Element>, BTreeMap<u16, Vec<Element>>) {
     let mut pc_entries: Vec<Element> = Vec::new();
     let mut pages: BTreeMap<u16, Vec<Element>> = BTreeMap::new();
 
     for spec in layout.variables() {
-        if !writes_entry(policy, definition, layout, tune, spec) {
+        if !writes_entry(policy, seeded, definition, layout, tune, spec) {
             continue;
         }
         let Some(values) = tune.value(&spec.name) else {
@@ -814,6 +834,7 @@ impl Msq {
                 reason: "a sparse scaffold has no ECU image to seed".to_owned(),
             });
         }
+        let seeded = seed.is_some();
         let mut tune = image_for(definition);
         apply_definition_defaults(&mut tune, definition);
         if let Some(seed) = seed {
@@ -841,7 +862,7 @@ impl Msq {
                 reason: error.to_string(),
             })?;
         let layout = Arc::clone(tune.layout());
-        let (pc_entries, mut pages) = scaffold_entries(definition, &layout, &tune, policy);
+        let (pc_entries, mut pages) = scaffold_entries(definition, &layout, &tune, policy, seeded);
 
         if policy == WritePolicy::Full {
             add_page_fillers(&mut pages, &layout);
@@ -2051,9 +2072,13 @@ mod tests {
 
         let entries = msq.entries();
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        for name in ["rpmhigh", "reqFuel", "aeMode", "note", "table", "b"] {
+        for name in ["reqFuel", "aeMode", "note", "table", "b"] {
             assert!(names.contains(&name), "{name} is scaffolded");
         }
+        assert!(
+            !names.contains(&"rpmhigh"),
+            "a PC variable with no declared default stays implicit: {names:?}"
+        );
 
         let table = entries
             .iter()
@@ -2091,6 +2116,13 @@ mod tests {
         assert_eq!(loaded.tune.raw_at("aeMode", 0).expect("it is there"), 1.0);
         assert_eq!(loaded.tune.text("note").expect("it is there"), "ECU");
         assert_eq!(loaded.tune.raw_at("table", 3).expect("it is there"), 9.0);
+        assert!(
+            !reparsed
+                .entries()
+                .iter()
+                .any(|entry| entry.name == "rpmhigh"),
+            "a PC variable no image backs is not written for a seeded scaffold"
+        );
         assert_eq!(
             loaded.tune.raw_at("rpmhigh", 0).expect("it is there"),
             0.0,
@@ -2153,7 +2185,7 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
 
         assert!(
             !names.iter().any(|name| name == "invalidField"),
-            "an INVALID-first field is not persisted: {names:?}"
+            "an unseeded INVALID-first field is not persisted: {names:?}"
         );
         assert!(
             !names.iter().any(|name| name == "tsCanId"),
@@ -2166,12 +2198,52 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
             "owner",
             "alias",
             "noSave",
+            "pcDefault",
+            "pcZero",
             "UNALLOCATED_TOP_0",
             "UNALLOCATED_TOP_1",
         ] {
             assert!(
                 names.iter().any(|candidate| candidate == name),
                 "{name}: {names:?}"
+            );
+        }
+        for name in ["pcNoDefault", "pcText"] {
+            assert!(
+                !names.iter().any(|candidate| candidate == name),
+                "{name} has no declared default and no image behind it: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seeded_full_scaffold_keeps_an_invalid_first_field() {
+        // The byte an `INVALID`-first field covers is part of the image the
+        // controller reported. Writing only a non-`INVALID` value would let
+        // the definition's default replace the byte the controller holds.
+        let definition = policy_definition();
+
+        for (raw, written) in [(0.0, "\"INVALID\""), (1.0, "\"One\"")] {
+            let mut seed = Tune::from_definition(&definition);
+            seed.set_image_raw("invalidField", 0, raw).expect("seeded");
+
+            let msq = scaffold(&definition, Some(&seed), WritePolicy::Full)
+                .expect("the seeded scaffold is written");
+            let bytes = msq.save().expect("the scaffold serializes");
+            let saved = String::from_utf8_lossy(&bytes).into_owned();
+            assert!(
+                saved.contains(&format!("name=\"invalidField\">{written}</constant>")),
+                "raw {raw} must be written as {written}: {saved}"
+            );
+
+            let loaded = load(
+                &Msq::parse(&bytes).expect("the scaffold parses"),
+                &definition,
+            );
+            assert_eq!(
+                loaded.tune.raw_at("invalidField", 0).expect("it is there"),
+                raw,
+                "the byte the controller reported survives create and open"
             );
         }
     }
