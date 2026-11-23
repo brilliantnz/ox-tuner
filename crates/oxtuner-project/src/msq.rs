@@ -535,25 +535,26 @@ pub(crate) struct ScaffoldOptions<'a> {
 /// Which entries a scaffold writes.
 ///
 /// The two creation sources need different files. A project created from a
-/// controller holds the ECU's whole tune, so the writer emits every constant
-/// the definition describes, an `INVALID`-first placeholder included whenever
-/// the image backs it. A manual project matches the reference writer's sparse
-/// new tune: only arrays whose default is non-zero and the numeric PC variables
-/// that declare a default.
+/// controller holds the ECU's tuning values, so the writer emits the page
+/// constants the image backs, leaving out a value the definition offers only as
+/// the hidden `"INVALID"` label (the definition's default applies on open). A
+/// manual project matches the reference writer's sparse new tune: only arrays
+/// whose default is non-zero and the numeric PC variables that declare a
+/// default.
 #[expect(
     clippy::exhaustive_enums,
     reason = "the two creation sources have exactly two writer policies"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePolicy {
-    /// Every constant the definition has, with the current image values.
+    /// Every representable constant, with the current image values.
     ///
-    /// A seeded scaffold writes every page constant, including one whose
-    /// option 0 is the `INVALID` placeholder: that byte is part of the image
-    /// the controller reported, and leaving the entry out would let the
-    /// definition's default replace it on the next open. A PC variable is
-    /// written only when the definition gives it a default, because no
-    /// controller image backs one.
+    /// A seeded scaffold writes the page constants the image holds, but leaves
+    /// out a value the definition offers only as the hidden `"INVALID"` label:
+    /// the reference writer treats that as no tuning value, and writing the
+    /// label would pin a byte the default should replace on the next open. A PC
+    /// variable is written only when the definition gives it a default, because
+    /// no controller image backs one.
     Full,
     /// Only the values the reference writer stores for a new from-INI tune.
     ///
@@ -566,7 +567,7 @@ pub enum WritePolicy {
 /// Whether a scaffold writes `spec` under `policy`.
 ///
 /// `seeded` says whether a controller image backs the tune, which decides what
-/// a full scaffold does with a page constant whose option 0 is `INVALID`.
+/// a full scaffold does with a value the definition marks `INVALID`.
 fn writes_entry(
     policy: WritePolicy,
     seeded: bool,
@@ -588,7 +589,18 @@ fn writes_entry(
             // Without an image there is nothing to preserve: a field the
             // reference writer marks non-persistent would only add an entry no
             // controller value backs.
-            WritePolicy::Full => seeded || !invalid_first(definition, spec),
+            WritePolicy::Full => {
+                if seeded {
+                    // A value the definition offers only as the hidden
+                    // `"INVALID"` label is not a tuning value. The reference
+                    // writer leaves the entry out and the definition's default
+                    // applies on open; writing `"INVALID"` would instead pin
+                    // the omitted byte and disagree with the reference.
+                    !invalid_value(definition, tune, spec)
+                } else {
+                    !invalid_first(definition, spec)
+                }
+            }
             WritePolicy::SparseFromDefaults => {
                 // Page scalars stay implicit and resolve from the definition on
                 // open; only arrays with a non-zero default are materialized.
@@ -631,6 +643,55 @@ fn invalid_first(definition: &Definition, spec: &VariableSpec) -> bool {
         });
 
     matches!(options.and_then(|options| options.first()), Some(option) if option.value == 0 && option.hidden)
+}
+
+/// Whether `spec`'s current value reads as the hidden `"INVALID"` label.
+///
+/// A bit field is the only shape with labels, and a hidden option is the
+/// reference writer's non-persistent marker. The value stays in the working
+/// image so expressions see it; only the file leaves its entry out, and the
+/// definition's default applies on the next open.
+fn invalid_value(definition: &Definition, tune: &Tune, spec: &VariableSpec) -> bool {
+    if !matches!(spec.shape, EntryShape::Bits { .. }) {
+        return false;
+    }
+
+    let Some(Values::Numbers(numbers)) = tune.value(&spec.name) else {
+        return false;
+    };
+    let Some(raw) = numbers.first().copied() else {
+        return false;
+    };
+
+    selects_hidden_option(definition, &spec.name, raw)
+}
+
+/// Whether `name`'s `raw` value selects an option the definition hides.
+///
+/// A hidden option is the reference writer's non-persistent marker: the value
+/// names no tuning choice, so the file leaves it out and the definition's
+/// default applies on open. The lookup covers a page constant and a PC variable,
+/// because both can carry an option list.
+#[expect(
+    clippy::float_cmp,
+    reason = "a bit option's value is an integer compared to the field's raw integer value"
+)]
+pub(crate) fn selects_hidden_option(definition: &Definition, name: &str, raw: f64) -> bool {
+    let options = definition
+        .constant(name)
+        .map(|constant| &constant.options)
+        .or_else(|| {
+            definition
+                .pc_variables
+                .get_ignore_case(name)
+                .map(|variable| &variable.options)
+        });
+
+    options.is_some_and(|options| {
+        options
+            .iter()
+            .any(|option| option.hidden && f64::from(option.value) == raw)
+    })
 }
 
 /// Whether the definition carries a `defaultValue` or `rawValue` for `name`.
@@ -873,7 +934,7 @@ impl Msq {
         push_child(
             &mut root.children,
             1,
-            version_element(definition, firmware_text),
+            version_element(definition, firmware_text, seeded),
         );
 
         let pc_page = if pc_entries.is_empty() {
@@ -1364,12 +1425,34 @@ impl Msq {
                 continue;
             }
 
-            page_element.children.retain(|node| match node {
-                Node::Element(entry) if entry.name == kind.element() => !entry
-                    .attr("name")
-                    .is_some_and(|written| written.eq_ignore_ascii_case(name)),
-                _ => true,
-            });
+            let whitespace =
+                |node: &Node| matches!(node, Node::Text(text) if text.trim().is_empty());
+
+            while let Some(position) = page_element.children.iter().position(|node| {
+                matches!(
+                    node,
+                    Node::Element(entry)
+                        if entry.name == kind.element()
+                            && entry
+                                .attr("name")
+                                .is_some_and(|written| written.eq_ignore_ascii_case(name))
+                )
+            }) {
+                page_element.children.remove(position);
+
+                // The entry's indentation is a sibling text node. Removing only
+                // the element would leave a whitespace-only line behind, so
+                // take the indentation with it; when the entry starts the page,
+                // take the indentation that follows instead.
+                let before = position
+                    .checked_sub(1)
+                    .filter(|&index| whitespace(&page_element.children[index]));
+                if let Some(index) = before {
+                    page_element.children.remove(index);
+                } else if page_element.children.get(position).is_some_and(whitespace) {
+                    page_element.children.remove(position);
+                }
+            }
 
             return;
         }
@@ -1594,15 +1677,16 @@ fn page_element(
 /// The `<versionInfo>` header for a scaffolded tune.
 ///
 /// `firmwareInfo` prefers the text the controller answered for the definition's
-/// `versionInfo` command; without one it falls back to the signature, which is
-/// still a truthful firmware identity. The signature attribute is always the
+/// `versionInfo` command. A project created from a controller whose reply was
+/// silent falls back to the signature, which is still a truthful firmware
+/// identity; a project built from a definition alone writes an empty value,
+/// matching the reference writer. The signature attribute is always the
 /// signature.
-fn version_element(definition: &Definition, firmware_text: Option<&str>) -> Element {
+fn version_element(definition: &Definition, firmware_text: Option<&str>, seeded: bool) -> Element {
     let pages = definition.pages.len().to_string();
-    let firmware = firmware_text
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or(definition.signature.as_str());
+    let supplied = firmware_text.map(str::trim).filter(|text| !text.is_empty());
+    let fallback = seeded.then_some(definition.signature.as_str());
+    let firmware = supplied.or(fallback).unwrap_or("");
     // The reference sample spells the same value `Speeduino+2025.01.7`; the
     // `+` is its writer's encoding, not part of the ECU reply. Keep the reply
     // verbatim: both readers accept the space form and it is what the
@@ -2062,7 +2146,10 @@ mod tests {
         let info = msq.version_info().expect("the header is present");
         assert_eq!(info.file_format, "5.0");
         assert_eq!(info.signature, "speeduino 202501");
-        assert_eq!(info.firmware_info, "speeduino 202501");
+        assert_eq!(
+            info.firmware_info, "",
+            "a definition-only project has no firmware reply, like the reference writer"
+        );
         assert_eq!(info.n_pages, Some(2));
         assert_eq!(msq.pages().len(), 2);
         assert_eq!(msq.pc_page_count(), 1);
@@ -2157,6 +2244,7 @@ noSave = array, U08, [8], "", 1, 0, 0, 255, 0, noMsqSave
 pcText = string, ASCII, 8
 
 [ConstantsExtensions]
+defaultValue = invalidField, 5
 defaultValue = scalarDefault, 7
 defaultValue = arr, 1 2 3 4
 defaultValue = zeroArr, 0 0 0 0
@@ -2217,35 +2305,52 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
     }
 
     #[test]
-    fn a_seeded_full_scaffold_keeps_an_invalid_first_field() {
-        // The byte an `INVALID`-first field covers is part of the image the
-        // controller reported. Writing only a non-`INVALID` value would let
-        // the definition's default replace the byte the controller holds.
+    fn a_seeded_full_scaffold_leaves_an_invalid_value_to_the_default() {
+        // The reference writer does not persist a value the definition offers
+        // only as the hidden `"INVALID"` label: the definition's default applies
+        // on the next open. A representable value is written as its label and
+        // survives.
         let definition = policy_definition();
+        let mut seed = Tune::from_definition(&definition);
 
-        for (raw, written) in [(0.0, "\"INVALID\""), (1.0, "\"One\"")] {
-            let mut seed = Tune::from_definition(&definition);
-            seed.set_image_raw("invalidField", 0, raw).expect("seeded");
+        seed.set_image_raw("invalidField", 0, 0.0)
+            .expect("the image is seeded");
+        let msq = scaffold(&definition, Some(&seed), WritePolicy::Full)
+            .expect("the seeded scaffold is written");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let saved = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(
+            !saved.contains("name=\"invalidField\""),
+            "an INVALID value stays out of the tune: {saved}"
+        );
+        let loaded = load(
+            &Msq::parse(&bytes).expect("the scaffold parses"),
+            &definition,
+        );
+        assert_eq!(
+            loaded.tune.raw_at("invalidField", 0).expect("it is there"),
+            5.0,
+            "the definition's non-zero default applies on open"
+        );
 
-            let msq = scaffold(&definition, Some(&seed), WritePolicy::Full)
-                .expect("the seeded scaffold is written");
-            let bytes = msq.save().expect("the scaffold serializes");
-            let saved = String::from_utf8_lossy(&bytes).into_owned();
-            assert!(
-                saved.contains(&format!("name=\"invalidField\">{written}</constant>")),
-                "raw {raw} must be written as {written}: {saved}"
-            );
-
-            let loaded = load(
-                &Msq::parse(&bytes).expect("the scaffold parses"),
-                &definition,
-            );
-            assert_eq!(
-                loaded.tune.raw_at("invalidField", 0).expect("it is there"),
-                raw,
-                "the byte the controller reported survives create and open"
-            );
-        }
+        seed.set_image_raw("invalidField", 0, 1.0)
+            .expect("the image is seeded");
+        let msq = scaffold(&definition, Some(&seed), WritePolicy::Full)
+            .expect("the seeded scaffold is written");
+        let bytes = msq.save().expect("the scaffold serializes");
+        let saved = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(
+            saved.contains("name=\"invalidField\">\"One\"</constant>"),
+            "a representable value is written: {saved}"
+        );
+        let loaded = load(
+            &Msq::parse(&bytes).expect("the scaffold parses"),
+            &definition,
+        );
+        assert_eq!(
+            loaded.tune.raw_at("invalidField", 0).expect("it is there"),
+            1.0
+        );
     }
 
     #[test]
@@ -2709,6 +2814,97 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
         assert!(
             saved.contains("<constant name=\"REQFUEL\">2.0</constant>"),
             "{saved}"
+        );
+    }
+
+    #[test]
+    fn removing_an_entry_takes_its_indentation_with_it() {
+        let source = r#"<msq>
+    <versionInfo signature="s"/>
+    <page number="0" size="64">
+        <constant name="a">1.0</constant>
+        <constant name="b">2.0</constant>
+    </page>
+</msq>"#;
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.remove_entry(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "a",
+        );
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert!(!saved.contains("name=\"a\""), "{saved}");
+        assert!(
+            saved.contains("<constant name=\"b\">2.0</constant>"),
+            "{saved}"
+        );
+        assert!(
+            !saved
+                .lines()
+                .any(|line| !line.is_empty() && line.trim().is_empty()),
+            "a removed entry must not leave a whitespace-only line: {saved:?}"
+        );
+        assert_eq!(
+            saved,
+            r#"<msq>
+    <versionInfo signature="s"/>
+    <page number="0" size="64">
+        <constant name="b">2.0</constant>
+    </page>
+</msq>"#
+        );
+    }
+
+    #[test]
+    fn removing_the_only_entry_leaves_a_clean_page() {
+        let source = r#"<msq>
+    <versionInfo signature="s"/>
+    <page number="0" size="64">
+        <constant name="a">1.0</constant>
+    </page>
+</msq>"#;
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.remove_entry(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "a",
+        );
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            r#"<msq>
+    <versionInfo signature="s"/>
+    <page number="0" size="64">
+    </page>
+</msq>"#
+        );
+    }
+
+    #[test]
+    fn removing_an_entry_without_leading_whitespace_takes_the_following_one() {
+        let source = "<msq><page number=\"0\" size=\"64\"><constant name=\"a\">1.0</constant>\n        <constant name=\"b\">2.0</constant>\n    </page></msq>";
+        let mut msq = Msq::parse(source.as_bytes()).expect("parses");
+
+        msq.remove_entry(
+            EntryPage::Numbered(MsqPage::new(0)),
+            EntryKind::Constant,
+            "a",
+        );
+
+        let saved = String::from_utf8(msq.save().unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            "<msq><page number=\"0\" size=\"64\"><constant name=\"b\">2.0</constant>\n    </page></msq>"
+        );
+        assert!(
+            !saved
+                .lines()
+                .any(|line| !line.is_empty() && line.trim().is_empty()),
+            "{saved:?}"
         );
     }
 

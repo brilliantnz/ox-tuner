@@ -562,7 +562,15 @@ fn build_scaffold(
         "tune scaffolded"
     );
 
-    let properties = properties_text(name, request, definition, &flags, firmware_text, ecu_uid);
+    let properties = properties_text(
+        name,
+        request,
+        definition,
+        &flags,
+        firmware_text,
+        ecu_uid,
+        seed.is_some(),
+    );
     let backup = backup_properties_text(name, request, &flags);
 
     Ok(BuiltScaffold {
@@ -601,6 +609,7 @@ fn properties_text(
     flags: &[String],
     firmware_text: Option<&str>,
     ecu_uid: &str,
+    seeded: bool,
 ) -> String {
     let mut properties = properties_header(request.write_stamp.as_deref());
     push_project_keys(&mut properties, name, request);
@@ -613,12 +622,15 @@ fn properties_text(
     properties.push_str("ecuUid=");
     properties.push_str(ecu_uid);
     properties.push('\n');
-    let signature = definition.signature.trim();
-    let firmware = firmware_text
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .unwrap_or(signature);
-    if !firmware.is_empty() {
+    // The controller's reply is the only firmware text a project owns. A
+    // seeded project whose controller stayed silent falls back to the
+    // signature, which still names the build; a project built from a
+    // definition alone writes no key at all, matching the reference writer.
+    let supplied = firmware_text.map(str::trim).filter(|text| !text.is_empty());
+    let fallback = seeded
+        .then(|| definition.signature.trim())
+        .filter(|signature| !signature.is_empty());
+    if let Some(firmware) = supplied.or(fallback) {
         properties.push_str("firmwareDescription=");
         properties.push_str(&oxtuner_encoding::escape_java_property(firmware));
         properties.push('\n');
