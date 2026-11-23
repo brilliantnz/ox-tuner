@@ -1292,9 +1292,11 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
     let properties =
         fs::read_to_string(root.join("projectCfg/project.properties")).expect("properties exist");
     assert!(properties.contains("projectName=Roadster"));
-    assert!(properties.contains("speeduino 202501"));
     assert!(properties.contains("ecuConfigFile=mainController.ini"));
-    assert!(properties.contains("firmwareDescription=speeduino 202501"));
+    assert!(
+        !properties.contains("firmwareDescription="),
+        "a definition-only project has no firmware reply, like the reference writer: {properties}"
+    );
     assert!(
         properties.contains("ecuSettings=\n"),
         "no group selected yet: {properties}"
@@ -1305,7 +1307,7 @@ rpmhigh = scalar, U16, 0, "rpm", 1, 0, 0, 20000, 0
     );
     assert!(
         !properties.contains("signature="),
-        "the TS key is firmwareDescription: {properties}"
+        "the reference key is firmwareDescription: {properties}"
     );
 
     assert!(!project.is_read_only(), "{:?}", project.report().blockers);
@@ -1358,6 +1360,10 @@ rowWise = array, U08, 0, [4x1], "", 1, 0, 0, 255, 0
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one create asserting every file it writes keeps the fixture in sight"
+)]
 fn creation_writes_the_reference_properties_header_and_rotates_the_backup() {
     const DEFINITION: &str = r#"
 [MegaTune]
@@ -1416,7 +1422,6 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
         "baudRate=115200",
         "canId=-1",
         "ecuUid=",
-        "firmwareDescription=speeduino 202501",
         "ecuSettings=resetcontrol_standard|enablehardware_test_OFF|AFR|FAHRENHEIT|",
         "useCommonDashboardDir=false",
         "useCommonTuneViewDir=false",
@@ -1424,6 +1429,11 @@ fahrenheit_value = scalar, U08, 1, "", 1, 0, 0, 255, 0
     ] {
         assert!(properties.contains(key), "{key} missing: {properties}");
     }
+
+    assert!(
+        !properties.contains("firmwareDescription="),
+        "a definition-only project has no firmware reply: {properties}"
+    );
 
     let backup =
         fs::read_to_string(root.join("projectCfg/project.properties.bkup")).expect("the backup");
@@ -2853,7 +2863,7 @@ fn a_project_created_from_the_reference_definition_opens_clean() {
     );
     assert!(
         project.report().missing_values.is_empty(),
-        "a scaffold writes every variable the definition declares: {:?}",
+        "a scaffold writes every representable variable the definition declares: {:?}",
         project.report().missing_values
     );
     assert!(

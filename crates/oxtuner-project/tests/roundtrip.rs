@@ -13,7 +13,7 @@ use oxtuner_ini::{Definition, SettingsContext, parse_str};
 use oxtuner_project::{
     CreateRequest, Msq, Project, ProjectLayout, WritePolicy, format_values, load,
 };
-use oxtuner_tune::{IniPage, Tune, TuneLayout, Values, decode_page};
+use oxtuner_tune::{EntryShape, IniPage, Tune, TuneLayout, Values, VariableSpec, decode_page};
 use proptest::prelude::*;
 
 const DEFINITION: &str = r#"
@@ -107,11 +107,13 @@ proptest! {
     }
 }
 
-/// A definition whose every declared page byte is expressible in the file: each
-/// bit field lists an option for every value its bits can hold, every scale is
-/// a constant, and `narrow` declares a range tighter than its storage so the
-/// range path is covered too. Bytes no constant covers are padding and are not
-/// part of the compared set.
+/// A definition whose every declared page byte has a text form: each bit field
+/// lists an option for every value its bits can hold, every scale is a constant,
+/// and `narrow` declares a range tighter than its storage so the range path is
+/// covered too. `hiddenGap` repeats a hidden label away from zero, the shape a
+/// real definition uses for the values it does not offer. `invalidFirst`
+/// declares a non-zero default, so leaving its INVALID value out is visible on
+/// the next open. Bytes no constant covers are padding and are not compared.
 const IMAGE_DEFINITION: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -127,8 +129,12 @@ narrow = scalar, U08, 3, "", 1, 0, 0, 200, 0
 peerA = array, U08, 4, [2x2], "AFR", 0.1, 0, 0, 25.5, 1
 peerB = array, U08, 4, [2x2], "Lambda", 1, 0, 0, 255, 0
 wide = scalar, U16, 8, "", 1, 0, 0, 65535, 0
+hiddenGap = bits, U08, 10, [0:2], "INVALID", "One", "INVALID", "Three"
 page = 2
 second = scalar, S08, 0, "", 1, 0, -128, 127, 0
+
+[Defaults]
+defaultValue = invalidFirst, 5
 "#;
 
 /// A tune whose page values are `page1` and `page2`, decoded the way a read
@@ -148,21 +154,38 @@ fn tune_from_pages(definition: &Definition, page1: &[u8], page2: &[u8]) -> Tune 
     tune
 }
 
+/// Whether `raw` is one of the options the definition hides as `"INVALID"`.
+fn hidden_value(definition: &Definition, spec: &VariableSpec, raw: f64) -> bool {
+    if !matches!(spec.shape, EntryShape::Bits { .. }) {
+        return false;
+    }
+
+    definition.constant(&spec.name).is_some_and(|constant| {
+        constant
+            .options
+            .iter()
+            .find(|option| f64::from(option.value) == raw)
+            .is_some_and(|option| option.hidden)
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 64,
         ..ProptestConfig::default()
     })]
 
-    /// A project created from a controller image carries every byte of it.
+    /// A project created from a controller image carries every tuning value.
     ///
     /// The definition is built so every declared page byte has a text form, the
     /// way a vendored definition does for the values it declares. Whatever the
     /// controller reported, `create(Full)` followed by an open must read back
     /// the same raw values, including a value above a range narrower than its
-    /// storage.
+    /// storage. A value the definition offers only as the hidden `"INVALID"`
+    /// label is not a tuning value: the reference writer leaves the entry out
+    /// and the definition's default applies on open.
     #[test]
-    fn a_project_created_from_arbitrary_page_bytes_keeps_them(
+    fn a_project_created_from_arbitrary_page_bytes_keeps_every_tuning_value(
         page1 in proptest::collection::vec(any::<u8>(), 16),
         page2 in proptest::collection::vec(any::<u8>(), 8),
     ) {
@@ -192,22 +215,37 @@ proptest! {
 
         let reopened = Project::open(&root).expect("the created project opens");
         prop_assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+        let written = std::fs::read_to_string(root.join("CurrentTune.msq"))
+            .expect("the created tune reads");
 
         for spec in seed.layout().variables() {
             if spec.ini_page().is_none() || !spec.shape.is_numeric() {
                 continue;
             }
             for index in 0..spec.element_count() {
-                prop_assert_eq!(
-                    seed.raw_at(&spec.name, index).expect("the seed holds it"),
-                    reopened
-                        .tune()
-                        .raw_at(&spec.name, index)
-                        .expect("the project holds it"),
-                    "`{}`[{}] changed across create and open",
-                    spec.name,
-                    index
-                );
+                let seeded = seed.raw_at(&spec.name, index).expect("the seed holds it");
+                let opened = reopened
+                    .tune()
+                    .raw_at(&spec.name, index)
+                    .expect("the project holds it");
+                if hidden_value(&definition, spec, seeded) {
+                    prop_assert!(
+                        !written.contains(&format!("name=\"{}\"", spec.name)),
+                        "`{}` is INVALID and must stay out of the tune",
+                        spec.name
+                    );
+                    prop_assert_eq!(
+                        opened, spec.default_raw,
+                        "`{}` is INVALID and must open at the default",
+                        spec.name
+                    );
+                } else {
+                    prop_assert_eq!(
+                        seeded, opened,
+                        "`{}`[{}] changed across create and open",
+                        spec.name, index
+                    );
+                }
             }
         }
     }

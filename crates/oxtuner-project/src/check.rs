@@ -636,26 +636,16 @@ pub(crate) fn check_page_data(
 ///
 /// `INVALID` has no stable byte value: a writer may store its list position or
 /// a sentinel such as `0xFF`. There is nothing meaningful to compare.
-#[expect(
-    clippy::float_cmp,
-    reason = "a bit option matches its exact integer raw value"
-)]
 fn selects_hidden_option(definition: &Definition, spec: &VariableSpec, tune: &Tune) -> bool {
     if !matches!(spec.shape, EntryShape::Bits { .. }) {
         return false;
     }
 
-    let Some(constant) = definition.constant(&spec.name) else {
-        return false;
-    };
     let Ok(raw) = tune.scalar_raw(&spec.name) else {
         return false;
     };
 
-    constant
-        .options
-        .iter()
-        .any(|option| option.hidden && f64::from(option.value) == raw)
+    crate::msq::selects_hidden_option(definition, &spec.name, raw)
 }
 
 fn preview(names: &[&str]) -> String {

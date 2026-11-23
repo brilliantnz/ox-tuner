@@ -1148,14 +1148,27 @@ pub(crate) fn format_values_with(
                         .get_ignore_case(&spec.name)
                         .map(|variable| &variable.options)
                 });
-            let label = options.and_then(|options| {
-                options
-                    .iter()
-                    .find(|option| f64::from(option.value) == raw)
-                    .map(|option| option.label.as_str())
-            });
-            match label {
-                Some(label) => {
+            let option = options
+                .and_then(|options| options.iter().find(|option| f64::from(option.value) == raw));
+            match option {
+                Some(option) => {
+                    // A label carries the value only when reading it back lands
+                    // on this option. Hidden options all spell `"INVALID"`, so
+                    // the reader resolves the label to the first one; writing
+                    // the label for a later hidden value would change the byte
+                    // on the next open. Write the number instead: a reader
+                    // takes a bare number as the field value.
+                    let label_round_trips = options.is_some_and(|options| {
+                        options
+                            .iter()
+                            .find(|candidate| candidate.label.trim() == option.label.trim())
+                            .is_some_and(|candidate| candidate.value == option.value)
+                    });
+                    if !label_round_trips {
+                        return Ok(raw.to_string());
+                    }
+
+                    let label = option.label.as_str();
                     if let Some(character) = oxtuner_encoding::first_non_latin1(label) {
                         return Err(FileValueError::Label {
                             name: spec.name.clone(),
@@ -2193,6 +2206,74 @@ straddle = array, U08, 2, [4], "", 1, 0, 0, 255, 0
         let loaded = loaded();
 
         assert_eq!(loaded.tune.scalar_raw("numbered").unwrap(), 1.0);
+    }
+
+    #[test]
+    fn a_hidden_option_after_zero_is_written_as_its_number() {
+        // Every hidden option is spelled `"INVALID"`, and the reader resolves
+        // that text to the first one. Writing the label for a later hidden
+        // value would silently change the byte on the next open, so the
+        // formatter writes the number instead.
+        const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+gapped = bits, U08, 0, [0:2], "INVALID", "One", "INVALID", "Three"
+"#;
+        const EMPTY: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant name="gapped">"One"</constant>
+    </page>
+</msq>"#;
+
+        let definition =
+            parse_str(DEFINITION, &SettingsContext::new()).expect("the definition parses");
+        let mut loaded = load(&Msq::parse(EMPTY.as_bytes()).unwrap(), &definition);
+
+        for (raw, expected) in [
+            (0.0, "\"INVALID\""),
+            (1.0, "\"One\""),
+            (2.0, "2"),
+            (3.0, "\"Three\""),
+        ] {
+            loaded
+                .tune
+                .set_raw_at("gapped", 0, raw)
+                .expect("the value is writable");
+            let spec = loaded
+                .layout
+                .variables()
+                .iter()
+                .find(|spec| spec.name == "gapped")
+                .expect("the variable is in the layout");
+            let text = format_values(
+                spec,
+                &definition,
+                loaded.tune.value("gapped").expect("the value is there"),
+            )
+            .expect("the value formats");
+            assert_eq!(text, expected, "raw {raw}");
+
+            let msq = format!(
+                r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="16">
+        <constant name="gapped">{text}</constant>
+    </page>
+</msq>"#
+            );
+            let reloaded = load(&Msq::parse(msq.as_bytes()).unwrap(), &definition);
+            assert_eq!(
+                reloaded.tune.scalar_raw("gapped").unwrap(),
+                raw,
+                "the written text must read back as the same byte: {text}"
+            );
+        }
     }
 
     #[test]
