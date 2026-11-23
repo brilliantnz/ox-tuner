@@ -2244,6 +2244,7 @@ noSave = array, U08, [8], "", 1, 0, 0, 255, 0, noMsqSave
 pcText = string, ASCII, 8
 
 [ConstantsExtensions]
+defaultValue = invalidField, 5
 defaultValue = scalarDefault, 7
 defaultValue = arr, 1 2 3 4
 defaultValue = zeroArr, 0 0 0 0
@@ -2328,8 +2329,8 @@ defaultValue = noSave, 1 1 1 1 1 1 1 1
         );
         assert_eq!(
             loaded.tune.raw_at("invalidField", 0).expect("it is there"),
-            0.0,
-            "the definition's default applies on open"
+            5.0,
+            "the definition's non-zero default applies on open"
         );
 
         seed.set_image_raw("invalidField", 0, 1.0)
