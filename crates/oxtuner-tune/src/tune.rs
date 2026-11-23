@@ -295,15 +295,21 @@ impl Tune {
     /// Re-derives every value that shares bytes with `name` from the page image.
     ///
     /// Two constants can sit over the same bytes, and editing one of them moves
-    /// bytes the other also claims. Left alone the two disagree, and a write
-    /// would settle them in declaration order. So the edited value is written
-    /// to the page image and every constant that shares its bytes is read back
-    /// from it, the same way a load reconciles a page. The edited value is the
-    /// one that survives, and the others follow the bytes.
+    /// bytes the other also claims. A peer that covers exactly the same bytes is
+    /// mirrored by the setter, so both already hold the same raw value. Every
+    /// other neighbour, a bit field inside a word or a view under its owner,
+    /// holds a different number over part of those bytes and has to follow them:
+    /// the edited value is written to the page image and every constant that
+    /// shares its bytes is read back from it, the same way a load reconciles a
+    /// page. The edited value is the one that survives.
     ///
     /// A view is handled the same way. It is never written on its own, but
     /// patching the page with it moves the bytes its owner claims, which is
     /// what a file that carries a view without its owner already does.
+    ///
+    /// A peer's declared range does not take part: the declared minimum and
+    /// maximum bound an edit and the display, not the byte the controller
+    /// holds, so a view whose range cannot express the value still follows it.
     ///
     /// # Errors
     ///
@@ -324,55 +330,40 @@ impl Tune {
         let mut decoded = self.snapshot();
         crate::wire::decode_page(&layout, page, &patched, &mut decoded)?;
 
-        // A peer with a tighter range cannot store what the edited value leaves
-        // in the bytes. Sending that would put a value on the wire its own clamp
-        // rejects, so the re-derivation stands down and the write gate refuses
-        // the disagreement instead. A word and a bit field inside it hold
-        // different numbers and are not judged against each other.
-        let storable = self.same_value_peers(name).iter().all(|peer| {
-            let Some(spec) = layout.variable(peer) else {
-                return true;
-            };
-
-            (0..spec.element_count()).all(|cell| {
-                decoded
-                    .raw_at(peer, cell)
-                    .is_ok_and(|value| spec.same_wire_value(spec.clamp_raw(value), value))
-            })
-        });
-        if !storable {
-            return Ok(());
-        }
-
         let moved = layout.names_sharing_bytes(name);
         self.adopt_named(&decoded, &moved)
     }
 
-    /// The variables storing the same quantity as `name` over the same bytes.
+    /// Copies a stored raw value to every view of the same bytes.
     ///
-    /// Two constants are peers here only when they start at the same address
-    /// and hold the same kind of value, which is what makes one number of them
-    /// comparable. A word and a bit field inside it share bytes but hold
-    /// different numbers, each read against its own range, and a text value
-    /// holds none of either, so neither takes part.
-    fn same_value_peers(&self, name: &str) -> Vec<String> {
-        let Some(spec) = self.layout.variable(name) else {
-            return Vec::new();
-        };
-        if !spec.shape.is_numeric() {
-            return Vec::new();
+    /// Two constants that cover exactly the same bytes are one quantity: the
+    /// controller stores one number and both read it back. Editing either one
+    /// has to leave the other holding the same raw value, or the two disagree
+    /// and the write gate refuses the page. The peer's declared range is not
+    /// consulted; it bounds an edit through that view, not the shared byte.
+    /// Only the edited cell keeps an edit timestamp: the peer follows by value,
+    /// and the user did not type into that view.
+    fn mirror_shared_value(&mut self, name: &str, index: usize, raw: f64) {
+        for peer in self.same_value_peers(name) {
+            if peer.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            let Some(variable) = self.layout.index(&peer) else {
+                continue;
+            };
+            if let Some(Values::Numbers(numbers)) = self.values.get_mut(variable)
+                && let Some(cell) = numbers.get_mut(index)
+            {
+                *cell = raw;
+            }
         }
+    }
 
+    /// [`TuneLayout::same_value_peers`], owned for the mirror pass.
+    fn same_value_peers(&self, name: &str) -> Vec<String> {
         self.layout
-            .names_sharing_bytes(name)
+            .same_value_peers(name)
             .into_iter()
-            .filter(|peer| {
-                self.layout.variable(peer).is_some_and(|other| {
-                    other.address == spec.address
-                        && other.data_type == spec.data_type
-                        && other.shape == spec.shape
-                })
-            })
             .map(str::to_owned)
             .collect()
     }
@@ -603,6 +594,8 @@ impl Tune {
             }
         }
         self.edits.insert(Cell { variable, index }, at);
+        self.mirror_shared_value(name, index, raw);
+
         Ok(())
     }
 
@@ -990,10 +983,62 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
     }
 
     #[test]
-    fn a_peer_that_cannot_store_the_survivor_is_left_disagreeing() {
-        // `tight` cannot store what `loose` can, so the re-derivation stands
-        // down rather than move `tight` onto a value its own clamp rejects.
-        // The write gate still sees the pair and refuses the page.
+    fn an_edit_through_a_table_view_mirrors_the_cell() {
+        // The two fuel-target views hold the same table under different scales
+        // and ranges. Editing a cell through either one leaves both reading the
+        // same raw value, so page 5 stays writable.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+lambdaTable = array, U08, 0, [2x2], "Lambda", 0.0068, 0, 0, 2, 3
+afrTable = array, U08, 0, [2x2], "AFR", 0.1, 0, 7, 25.5, 1
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.set_cell_user("afrTable", 1, 0, 14.7).unwrap();
+
+        assert_eq!(tune.raw_at("afrTable", 2).unwrap(), 147.0);
+        assert_eq!(
+            tune.raw_at("lambdaTable", 2).unwrap(),
+            147.0,
+            "the lambda view reads the byte the edit left"
+        );
+        assert_eq!(
+            tune.raw_at("lambdaTable", 0).unwrap(),
+            0.0,
+            "the cells the edit did not touch keep their value"
+        );
+        assert!(
+            tune.layout()
+                .value_conflicts(IniPage::FIRST, &tune)
+                .is_empty(),
+            "one table, one set of bytes"
+        );
+
+        // And the reverse direction: a lambda edit lands in the AFR view.
+        tune.set_cell_user("lambdaTable", 0, 1, 0.5).unwrap();
+        assert_eq!(
+            tune.raw_at("afrTable", 1).unwrap(),
+            74.0,
+            "0.5 lambda is raw 74, which is 7.4 AFR"
+        );
+        assert_eq!(tune.raw_at("lambdaTable", 1).unwrap(), 74.0);
+    }
+
+    #[test]
+    fn an_edit_through_one_view_mirrors_a_peer_whose_range_rejects_it() {
+        // `tight` declares a maximum of 5 user units, but its range bounds an
+        // edit through `tight`, not the byte both views share. Editing `loose`
+        // leaves `tight` reading the same raw value, so the page stays writable.
         let definition = parse_str(
             r#"
 [MegaTune]
@@ -1011,24 +1056,58 @@ tight = scalar, U08, 0, "x", 1, 0, 0, 5, 0
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
 
-        tune.set_image_raw("loose", 0, 12.0).unwrap();
-        tune.set_image_raw("tight", 0, 3.0).unwrap();
-        tune.reconcile_shared_bytes("loose").unwrap();
+        tune.set_user_at("loose", 0, 12.0).unwrap();
 
+        assert_eq!(tune.raw_at("loose", 0).unwrap(), 12.0);
         assert_eq!(
             tune.raw_at("tight", 0).unwrap(),
-            3.0,
-            "the peer keeps its own value rather than taking one its clamp rejects"
-        );
-        assert_eq!(
-            tune.raw_at("loose", 0).unwrap(),
             12.0,
-            "nothing moved at all"
+            "a view of the same bytes follows the value even when its own range is tighter"
         );
+        assert!(
+            tune.layout()
+                .value_conflicts(IniPage::FIRST, &tune)
+                .is_empty(),
+            "one byte holds one value, so the write gate has nothing to refuse"
+        );
+
+        // The other direction mirrors too, and the peer's own edit is what
+        // survives.
+        tune.set_user_at("tight", 0, 3.0).unwrap();
+        assert_eq!(tune.raw_at("loose", 0).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn an_imported_value_is_not_mirrored() {
+        // A file states what it states: loading writes each value on its own,
+        // so a file carrying two answers for one byte keeps both and the load
+        // reports the disagreement instead of silently picking one.
+        let definition = parse_str(
+            r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+first = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "x", 1, 0, 0, 255, 0
+"#,
+            &SettingsContext::new(),
+        )
+        .expect("parses");
+        let mut tune = Tune::from_definition(&definition);
+
+        tune.set_image_raw("first", 0, 2.0).unwrap();
+        tune.set_image_raw("second", 0, 3.0).unwrap();
+
+        assert_eq!(tune.raw_at("first", 0).unwrap(), 2.0);
+        assert_eq!(tune.raw_at("second", 0).unwrap(), 3.0);
         assert_eq!(
             tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
             1,
-            "the gate still sees the disagreement"
+            "an import is not an edit; the conflict stays visible"
         );
     }
 

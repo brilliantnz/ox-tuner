@@ -271,19 +271,21 @@ impl VariableSpec {
 
     /// Pulls a raw value inside the declared range and the storage type.
     ///
-    /// The edit path uses this when reconciling shared bytes; a value read from
-    /// a file or a controller goes through [`Self::clamp_storage`] instead,
-    /// because a declared range bounds an edit and the display, not the byte.
+    /// A display or an editor uses this to present a value inside the range the
+    /// definition declares. It is not part of the shared-byte path: a peer
+    /// keeps the raw value the edit stored, because the declared range bounds
+    /// an edit through that view, not the byte both share. A value read from a
+    /// file or a controller goes through [`Self::clamp_storage`] instead.
+    ///
     /// The declared bounds are first pulled in to the decimals a file writes: a
     /// minimum of `7.25` written with one decimal reads back as `7.2`, below
     /// the minimum again. A declared range narrower than one written step keeps
     /// its own bounds and leaves the text alone.
     ///
     /// The storage type narrows here instead of keeping and warning, unlike
-    /// [`Self::to_raw`]: a peer that cannot store the reconciled value must
-    /// veto it, and the alternative is a value the write gate would refuse.
-    /// A non-finite value has no sane position in the range, so it becomes
-    /// the storage type's own zero.
+    /// [`Self::to_raw`]: a value being presented has to be one the type can
+    /// hold. A non-finite value has no sane position in the range, so it
+    /// becomes the storage type's own zero.
     #[must_use]
     pub fn clamp_raw(&self, raw: f64) -> f64 {
         let (storage_low, storage_high) = storage_range(self.data_type);

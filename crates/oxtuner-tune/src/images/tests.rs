@@ -1191,6 +1191,53 @@ scaled = scalar, U08, 0, \"\", {unknownExpression}, 0
     }
 
     #[test]
+    fn reverting_a_view_moves_its_peer_and_clears_its_mark() {
+        // `a` and `aView` cover the same byte. Reverting one moves both, and
+        // the mark on the peer belongs to the discard too.
+        let definition = parse_str(
+            "\
+[MegaTune]
+signature = \"speeduino 202501\"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+a = scalar, U08, 0, \"\", 1, 0, 0, 255, 0
+aView = scalar, U08, 0, \"\", 1, 0, 0, 5, 0
+",
+            &SettingsContext::new(),
+        )
+        .expect("the definition parses");
+        let layout = Arc::new(TuneLayout::build(&definition, &|_| None));
+        let mut images = TuneImages::from_working(Tune::new(Arc::clone(&layout)));
+        let mut ram = Tune::new(Arc::clone(&layout));
+        ram.set_user("a", 9.0).unwrap();
+        images.reconcile_read(ram).unwrap();
+
+        images.working_mut().set_user("a", 3.0).unwrap();
+        assert_eq!(
+            images.working().raw_at("aView", 0).unwrap(),
+            3.0,
+            "the edit reached the peer"
+        );
+
+        let reverted = images.revert_variables(&["a".to_owned()]);
+
+        assert_eq!(reverted, 1, "the caller named one variable");
+        assert_eq!(images.working().raw_at("a", 0).unwrap(), 0.0);
+        assert_eq!(
+            images.working().raw_at("aView", 0).unwrap(),
+            0.0,
+            "the peer followed the revert"
+        );
+        assert!(
+            images.conflicts().is_empty(),
+            "the peer's mark went with the value"
+        );
+    }
+
+    #[test]
     fn reverting_restores_the_baseline_and_clears_conflicts() {
         let mut images = images();
         images.set_ecu_ram(tune()).unwrap();
