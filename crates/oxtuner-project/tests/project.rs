@@ -1685,6 +1685,51 @@ rawValue = axis, 1 2 3
 }
 
 #[test]
+fn a_new_project_with_two_views_of_one_region_opens_writable() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 512
+page = 1
+lambdaTable = array, U08, 0, [16x16], "Lambda", 0.0068, 0.0, 0.00, 2.00, 3
+afrTable = array, U08, lastOffset, [16x16], "AFR", 0.1, 0.0, 7, 25.5, 1
+"#;
+
+    let sandbox = TempDir::new("create-shared-views");
+    let request = CreateRequest {
+        parent: sandbox.path().to_path_buf(),
+        name: "SharedViews".to_owned(),
+        ini_path: sandbox.definition(DEFINITION),
+        expected_signature: None,
+        settings: Vec::new(),
+        connection: None,
+        layout: ProjectLayout::default(),
+        write_stamp: None,
+    };
+    let project = Project::create(&request).expect("two views of one region share one default");
+    assert!(!project.is_read_only(), "{:?}", project.report().blockers);
+
+    // A default-only array stays implicit, and both views must carry the same
+    // bytes when the file omits them.
+    let tune = fs::read_to_string(project.root().join(TUNE_FILE)).expect("the tune");
+    assert!(
+        !tune.contains("lambdaTable") && !tune.contains("afrTable"),
+        "neither view is materialized: {tune}"
+    );
+    assert_eq!(
+        project.tune().raw_at("lambdaTable", 0),
+        project.tune().raw_at("afrTable", 0),
+        "one byte region holds one value"
+    );
+
+    let reopened = Project::open(project.root()).expect("reopens");
+    assert!(!reopened.is_read_only(), "{:?}", reopened.report().blockers);
+}
+
+#[test]
 fn a_text_that_rounds_to_the_same_raw_is_not_reported_as_clamped() {
     const DEFINITION: &str = r#"
 [MegaTune]

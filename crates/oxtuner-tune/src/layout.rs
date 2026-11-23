@@ -320,15 +320,14 @@ const MAX_OVERLAP_ISSUES: usize = 8;
 /// issues stop after [`MAX_OVERLAP_ISSUES`] and one summary line follows.
 fn mark_ambiguous(
     variables: &[VariableSpec],
-    mut spans: Vec<Span>,
+    spans: &[Span],
     page: &PageLayout,
     aliases: &[Option<usize>],
     ambiguous: &mut [bool],
     issues: &mut Vec<LayoutIssue>,
 ) {
-    // Sorted by start, the inner loop can stop at the first span that begins
-    // past this one's end.
-    spans.sort_by_key(|span| span.start);
+    // `spans` is sorted by start, so the inner loop can stop at the first span
+    // that begins past this one's end.
     let mut listed = 0usize;
     let mut unlisted = 0usize;
 
@@ -399,7 +398,102 @@ struct OverlapCheck {
     issues: Vec<LayoutIssue>,
 }
 
-fn check_overlaps(variables: &[VariableSpec], pages: &[PageLayout]) -> OverlapCheck {
+/// Gives every group of variables that occupy exactly the same bytes one
+/// default.
+///
+/// Two views of one table can declare different ranges, and each view's default
+/// is clamped into its own range. A tune that omits both would then open with
+/// two defaults for one byte region, so the group takes the last declared
+/// member's default — the one a rebuilt page would keep — pulled onto a value
+/// every member can store. A value no file wrote is one value.
+///
+/// `spans` is sorted by `(start, len)`, so a group is one adjacent run.
+fn unify_shared_defaults(variables: &mut [VariableSpec], spans: &[Span]) {
+    let mut position = 0;
+    while position < spans.len() {
+        let head = spans[position];
+        let mut end = position + 1;
+        while end < spans.len() && spans[end].start == head.start && spans[end].len == head.len {
+            end += 1;
+        }
+
+        if end - position > 1 {
+            unify_region(variables, &spans[position..end]);
+        }
+        position = end;
+    }
+}
+
+/// Unifies each kind of value that shares one byte region.
+///
+/// A region can hold different kinds of value. Each kind unifies on its own, in
+/// declaration order, so an unrelated entry between two peers does not split
+/// them.
+fn unify_region(variables: &mut [VariableSpec], region: &[Span]) {
+    for (offset, span) in region.iter().enumerate() {
+        let already_grouped = region[..offset]
+            .iter()
+            .any(|earlier| same_entry(variables, earlier.index, span.index));
+        if already_grouped {
+            continue;
+        }
+
+        let members: Vec<Span> = region
+            .iter()
+            .filter(|other| same_entry(variables, span.index, other.index))
+            .copied()
+            .collect();
+        if members.len() > 1 {
+            unify_group(variables, &members);
+        }
+    }
+}
+
+/// Whether two variables name the same kind of value over the same bytes.
+fn same_entry(variables: &[VariableSpec], first: usize, second: usize) -> bool {
+    variables.get(first).is_some_and(|left| {
+        variables
+            .get(second)
+            .is_some_and(|right| left.data_type == right.data_type && left.shape == right.shape)
+    })
+}
+
+/// Gives one peer group a common default every member can store.
+fn unify_group(variables: &mut [VariableSpec], members: &[Span]) {
+    // The codec writes peers in declaration order, and `spans` keeps that order
+    // inside a group, so the last member is the value a rebuilt page keeps.
+    let Some(kept) = members
+        .last()
+        .and_then(|span| variables.get(span.index))
+        .map(|spec| spec.default_raw)
+    else {
+        return;
+    };
+    let common = members.iter().fold(kept, |acc, span| {
+        variables
+            .get(span.index)
+            .map_or(acc, |spec| spec.clamp_raw(acc))
+    });
+
+    // Two declared ranges can share no value at all. Then no default can
+    // satisfy every member, and refusing pages is the write gate's job.
+    let storable = members.iter().all(|span| {
+        variables
+            .get(span.index)
+            .is_some_and(|spec| spec.same_wire_value(spec.clamp_raw(common), common))
+    });
+    if !storable {
+        return;
+    }
+
+    for span in members {
+        if let Some(spec) = variables.get_mut(span.index) {
+            spec.default_raw = common;
+        }
+    }
+}
+
+fn check_overlaps(variables: &mut [VariableSpec], pages: &[PageLayout]) -> OverlapCheck {
     let mut check = OverlapCheck {
         aliases: vec![None; variables.len()],
         ambiguous: vec![false; variables.len()],
@@ -407,11 +501,18 @@ fn check_overlaps(variables: &[VariableSpec], pages: &[PageLayout]) -> OverlapCh
     };
 
     for page in pages {
-        let spans = page_spans(variables, page);
+        let mut spans = page_spans(variables, page);
+        // Sorted by position, peers and overlaps are adjacent runs, so one
+        // order serves the default unification, the alias scan and the
+        // ambiguity scan. The index tiebreak keeps declaration order inside a
+        // group, which is the order the page codec writes peers in.
+        spans.sort_unstable_by_key(|span| (span.start, span.len, span.index));
+
+        unify_shared_defaults(variables, &spans);
         mark_aliases(spans.clone(), variables, &mut check.aliases);
         mark_ambiguous(
             variables,
-            spans,
+            &spans,
             page,
             &check.aliases,
             &mut check.ambiguous,
@@ -694,7 +795,7 @@ impl TuneLayout {
         }
 
         layout.build_pages(definition);
-        let overlap = check_overlaps(&layout.variables, &layout.pages);
+        let overlap = check_overlaps(&mut layout.variables, &layout.pages);
         layout.aliases = overlap.aliases;
         layout.ambiguous = overlap.ambiguous;
         layout.issues.extend(overlap.issues);
@@ -2472,6 +2573,83 @@ off = scalar, U08, 0, "", 1, -50, 0, 100, 0
         assert_eq!(
             spec.default_raw, 50.0,
             "raw 0 would read back as user -50, below the minimum"
+        );
+    }
+
+    #[test]
+    fn two_views_of_one_region_share_one_default() {
+        const VIEWS: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 512
+page = 1
+lambdaTable = array, U08, 0, [16x16], "Lambda", { 0.1 / stoich }, 0.0000, 0.00, 2.00, 3
+afrTable = array, U08, lastOffset, [16x16], "AFR", 0.1, 0.0, 7, 25.5, 1
+stoich = scalar, U08, 256, "", 0.1, 0, 0, 255, 1
+
+[ConstantsExtensions]
+defaultValue = stoich, 14.7
+"#;
+
+        let definition = parse_str(VIEWS, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|name| (name == "stoich").then_some(14.7));
+
+        let lambda = layout.variable("lambdaTable").expect("lambda");
+        let afr = layout.variable("afrTable").expect("afr");
+        assert_eq!(lambda.address, afr.address, "the views share their bytes");
+        assert_eq!(
+            lambda.default_raw, afr.default_raw,
+            "one byte region carries one default"
+        );
+        assert_eq!(
+            afr.default_raw,
+            afr.clamp_raw(0.0),
+            "the default stays inside the declared range"
+        );
+
+        let tune = Tune::new(Arc::new(layout));
+        assert!(
+            tune.layout()
+                .value_conflicts(IniPage::FIRST, &tune)
+                .is_empty(),
+            "a tune that omits both views must not hold two values for one byte"
+        );
+    }
+
+    #[test]
+    fn views_with_disjoint_ranges_keep_their_own_defaults() {
+        const DISJOINT: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 8
+page = 1
+low = scalar, U08, 0, "x", 1, 0, 0, 10, 0
+high = scalar, U08, 0, "x", 1, 0, 200, 255, 0
+"#;
+
+        let definition = parse_str(DISJOINT, &SettingsContext::new()).expect("parses");
+        let layout = TuneLayout::build(&definition, &|_| None);
+        let low = layout.variable("low").expect("low");
+        let high = layout.variable("high").expect("high");
+
+        assert_ne!(
+            low.default_raw, high.default_raw,
+            "no value satisfies both ranges, so there is nothing safe to unify to"
+        );
+
+        // The disagreement stays visible instead of being hidden behind a
+        // value one view rejects.
+        let tune = Tune::new(Arc::new(layout));
+        assert_eq!(
+            tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
+            1,
+            "the write gate must still see the pair"
         );
     }
 
