@@ -562,6 +562,54 @@ fn a_value_that_does_not_round_trip_still_burns() {
 }
 
 #[test]
+fn an_edit_through_a_peer_view_is_writable_and_burns() {
+    // `veTable` and `veTableAfr` are the same four bytes under different
+    // scales and ranges. Five is inside `veTable`'s range but below the raw
+    // value the AFR view declares, and the two used to disagree after the edit,
+    // so the write gate refused the page.
+    let dir = TempDir::with_constants(
+        "peer-view-burn",
+        "veTableAfr = array, U08, 0, [2x2], \"AFR\", 0.1, 0, 7, 25.5, 1",
+    );
+    let core = Harness::start(true);
+    core.open(dir.path());
+    core.connect(SimConfig::default());
+    core.read_all();
+    core.use_project_tune();
+
+    // Settle the ECU on the project's image first, so the next write is the
+    // edit alone.
+    let Event::TuneWritten { report, .. } = core.write() else {
+        panic!("the baseline write was refused");
+    };
+    assert!(report.verified);
+    assert_eq!(core.status().pending_write.cells, 0);
+
+    core.edit_cell(5.0);
+
+    let Event::TuneWritten { report, .. } = core.write() else {
+        panic!("the write was refused after an edit through a peer view");
+    };
+    assert!(report.verified);
+    assert_eq!(
+        report.cells, 2,
+        "both views of the byte are in the plan, and neither raises a conflict"
+    );
+    assert_eq!(
+        core.status().pending_write.cells,
+        0,
+        "both views of the byte hold the value the ECU now carries"
+    );
+
+    let Event::TuneBurned { report, .. } = core.burn() else {
+        panic!("the burn was refused");
+    };
+    assert!(report.verified);
+
+    core.close();
+}
+
+#[test]
 fn an_ecu_value_outside_the_declared_range_is_left_alone() {
     let dir = TempDir::new("range");
     // The controller holds a bin past the definition's declared maximum: 65535

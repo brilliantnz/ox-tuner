@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::diff::diff_values;
@@ -475,13 +475,17 @@ impl TuneImages {
     ///
     /// This is the one-document discard: a table's cells or a dialog's
     /// constants go back to the saved tune, and every other variable keeps its
-    /// edits. Conflict marks for the reverted variables go with their values,
-    /// unless a read or write failed: that variable keeps its mark so the
-    /// reader can still see what did not move.
+    /// edits. A view that covers exactly the same bytes follows the value by
+    /// the setter's own peer rule. Conflict marks for the reverted variables
+    /// and their peers go with their values, unless a read or write failed:
+    /// that variable keeps its mark so the reader can still see what did not
+    /// move.
     ///
-    /// Returns how many values moved; a text variable counts as one. A variable
-    /// the layout does not know, or one whose images disagree about its shape,
-    /// is skipped — there is nothing safe to copy for it.
+    /// Returns how many values moved; a text variable counts as one, and a
+    /// peer that followed is not counted because the caller named the view it
+    /// reverted. A variable the layout does not know, or one whose images
+    /// disagree about its shape, is skipped — there is nothing safe to copy for
+    /// it.
     ///
     /// Each move goes through the normal setter, so the edit log records the
     /// discard's timestamp, not the original edit's. That is deliberate: the
@@ -492,6 +496,7 @@ impl TuneImages {
     )]
     pub fn revert_variables(&mut self, names: &[impl AsRef<str>]) -> usize {
         let mut reverted = 0;
+        let mut cleared: BTreeSet<usize> = BTreeSet::new();
 
         for name in names {
             let name = name.as_ref();
@@ -550,15 +555,22 @@ impl TuneImages {
             // too, the way a whole-tune revert drops every conflict. A failed
             // write leaves the mark in place: it would otherwise point at a
             // value that did not move.
-            if !failed
-                && moved
-                && let Some(variable) = self.layout.index(name)
-            {
-                self.overlays.retain(|key, overlay| {
-                    key.variable != variable
-                        || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
-                });
+            // The list includes `name` itself. A peer holds the same bytes, so
+            // it moved with the value and its mark belongs to the discard too.
+            if !failed && moved {
+                for peer in self.layout.same_value_peers(name) {
+                    if let Some(index) = self.layout.index(peer) {
+                        cleared.insert(index);
+                    }
+                }
             }
+        }
+
+        if !cleared.is_empty() {
+            self.overlays.retain(|key, overlay| {
+                !cleared.contains(&key.variable)
+                    || !matches!(overlay, Overlay::Conflict | Overlay::Superseded)
+            });
         }
 
         reverted

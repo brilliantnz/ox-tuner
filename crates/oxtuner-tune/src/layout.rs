@@ -1098,6 +1098,35 @@ impl TuneLayout {
         self.ambiguous.get(index).copied().unwrap_or(false)
     }
 
+    /// The variables storing the same quantity as `name` over the same bytes.
+    ///
+    /// Two constants are peers here only when they start at the same address
+    /// and hold the same kind of value, which is what makes one number of them
+    /// comparable. A word and a bit field inside it share bytes but hold
+    /// different numbers, each read against its own range, and a text value
+    /// holds none of either, so neither takes part. The list includes `name`
+    /// itself, so more than one entry means the value is shared.
+    #[must_use]
+    pub fn same_value_peers(&self, name: &str) -> Vec<&str> {
+        let Some(spec) = self.variable(name) else {
+            return Vec::new();
+        };
+        if !spec.shape.is_numeric() {
+            return Vec::new();
+        }
+
+        self.names_sharing_bytes(name)
+            .into_iter()
+            .filter(|peer| {
+                self.variable(peer).is_some_and(|other| {
+                    other.address == spec.address
+                        && other.data_type == spec.data_type
+                        && other.shape == spec.shape
+                })
+            })
+            .collect()
+    }
+
     /// Whether `page` holds constants whose shared bytes have no safe owner.
     ///
     /// Such a page is still read and decoded, and a file's values are adopted

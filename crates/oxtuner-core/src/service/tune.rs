@@ -14,7 +14,13 @@ use super::*;
 /// holds is left alone: it is not part of the write plan, so clamping it would
 /// turn "leave the ECU's tune alone" into a write of a different number — a
 /// definition's range is not the firmware's limit. Controller-owned values are
-/// not part of the write plan either. Returns how many cells changed.
+/// not part of the write plan either.
+///
+/// A value that shares its bytes with another view is left alone as well. One
+/// byte cannot satisfy two declared ranges, the view the user edited was
+/// clamped when it was edited, and its peers follow the same bytes; clamping
+/// one of them here would move the shared byte away from the edit. Returns how
+/// many cells changed.
 pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
     let mut clamped: Vec<(String, usize, f64)> = Vec::new();
     {
@@ -24,6 +30,9 @@ pub(super) fn clamp_working_changes(project: &mut Project) -> usize {
         };
         for spec in project.layout().variables() {
             if spec.is_controller_owned() || project.layout().is_alias(&spec.name) {
+                continue;
+            }
+            if project.layout().same_value_peers(&spec.name).len() > 1 {
                 continue;
             }
             for index in 0..spec.element_count() {

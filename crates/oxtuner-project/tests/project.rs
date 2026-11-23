@@ -2025,6 +2025,207 @@ defaultValue = axis, 10 20 30
 }
 
 #[test]
+fn an_edit_through_one_view_survives_save_and_reopen() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+lambdaTable = array, U08, 0, [2x2], "Lambda", 0.0068, 0, 0, 2, 3
+afrTable = array, U08, 0, [2x2], "AFR", 0.1, 0, 7, 25.5, 1
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant cols="2" rows="2" name="lambdaTable">1.0 1.0 1.0 1.0</constant>
+        <constant cols="2" rows="2" name="afrTable">14.7 14.7 14.7 14.7</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("view-mirror");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(
+        project
+            .layout()
+            .value_conflicts(oxtuner_tune::IniPage::FIRST, project.tune())
+            .is_empty(),
+        "the file's two views already agree"
+    );
+
+    project
+        .tune_mut()
+        .set_cell_user("afrTable", 1, 1, 7.4)
+        .expect("the cell is editable");
+    assert_eq!(
+        project.tune().raw_at("lambdaTable", 3).unwrap(),
+        74.0,
+        "the lambda view holds the same byte as the edited AFR cell"
+    );
+
+    let outcome = project.save().expect("the tune saves");
+    assert_eq!(
+        outcome.cells, 2,
+        "both views of the byte are written, not just the edited one"
+    );
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert!(
+        reopened
+            .layout()
+            .value_conflicts(oxtuner_tune::IniPage::FIRST, reopened.tune())
+            .is_empty(),
+        "one byte still holds one value"
+    );
+    assert_eq!(reopened.tune().raw_at("afrTable", 3).unwrap(), 74.0);
+    assert_eq!(
+        reopened.tune().raw_at("lambdaTable", 3).unwrap(),
+        74.0,
+        "the mirrored value survives save and reopen"
+    );
+    assert_eq!(
+        reopened.tune().raw_at("afrTable", 0).unwrap(),
+        147.0,
+        "the cells the edit did not touch keep their value"
+    );
+}
+
+#[test]
+fn a_view_whose_scale_is_unresolved_still_follows_an_edit() {
+    // The real Speeduino definition scales the lambda table by `{0.1 / stoich}`.
+    // A controller that reports `stoich = 0` leaves that view unconvertible, so
+    // it is never written; the AFR view carries the byte and the lambda view
+    // follows it on open.
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+stoich = scalar, U08, 0, ":1", 0.1, 0, 0, 25.5, 1
+lambdaTable = array, U08, 2, [2x2], "Lambda", { 0.1 / stoich }, 0, 0, 2, 3
+afrTable = array, U08, 2, [2x2], "AFR", 0.1, 0, 7, 25.5, 1
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="stoich">0.0</constant>
+        <constant cols="2" rows="2" name="lambdaTable">0.0 0.0 0.0 0.0</constant>
+        <constant cols="2" rows="2" name="afrTable">0.0 0.0 0.0 0.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("unresolved-view");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    assert!(
+        project
+            .layout()
+            .variable("lambdaTable")
+            .is_some_and(|spec| spec.scale.is_none()),
+        "the definition's scale depends on the controller's stoich"
+    );
+
+    project
+        .tune_mut()
+        .set_cell_user("afrTable", 1, 0, 14.0)
+        .expect("the AFR cell is editable");
+    assert_eq!(
+        project.tune().raw_at("lambdaTable", 2).unwrap(),
+        140.0,
+        "the lambda view mirrors a value it cannot convert itself"
+    );
+
+    let outcome = project.save().expect("the tune saves");
+    assert_eq!(
+        outcome.cells, 1,
+        "only the view that can be formatted is written"
+    );
+
+    let reopened = Project::open(dir.path()).expect("the project reopens");
+    assert_eq!(reopened.tune().raw_at("afrTable", 2).unwrap(), 140.0);
+    assert_eq!(
+        reopened.tune().raw_at("lambdaTable", 2).unwrap(),
+        140.0,
+        "the byte the AFR view wrote back reaches the lambda view"
+    );
+    assert!(
+        reopened
+            .layout()
+            .value_conflicts(oxtuner_tune::IniPage::FIRST, reopened.tune())
+            .is_empty(),
+        "one byte still holds one value"
+    );
+}
+
+#[test]
+fn an_imported_file_with_two_values_for_one_byte_is_reported() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 64
+page = 1
+first = scalar, U08, 0, "", 1, 0, 0, 255, 0
+second = scalar, U08, 0, "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = r#"<msq>
+    <versionInfo fileFormat="5.0" nPages="1" signature="speeduino 202501"/>
+    <page number="0" size="64">
+        <constant name="first">2.0</constant>
+        <constant name="second">3.0</constant>
+    </page>
+</msq>
+"#;
+
+    let dir = TempDir::new("import-clash");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let project = Project::open(dir.path()).expect("the project opens");
+
+    let clash: Vec<&str> = project
+        .report()
+        .warnings
+        .iter()
+        .filter(|issue| issue.kind == IssueKind::ValueSkipped)
+        .map(|issue| issue.message.as_str())
+        .collect();
+    assert_eq!(clash.len(), 1, "{:?}", project.report().warnings);
+    assert!(
+        clash[0].contains("cannot both stand"),
+        "the report names the pair it could not reconcile: {clash:?}"
+    );
+    assert_eq!(
+        project.tune().raw_at("first", 0).unwrap(),
+        2.0,
+        "an import is not an edit: the file's values stand as written"
+    );
+    assert_eq!(project.tune().raw_at("second", 0).unwrap(), 3.0);
+    assert_eq!(
+        project
+            .layout()
+            .value_conflicts(oxtuner_tune::IniPage::FIRST, project.tune())
+            .len(),
+        1,
+        "the disagreement stays visible to the write gate"
+    );
+}
+
+#[test]
 fn a_declared_default_at_the_bound_keeps_its_text() {
     const DEFINITION: &str = r#"
 [MegaTune]
