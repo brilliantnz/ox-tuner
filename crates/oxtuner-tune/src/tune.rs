@@ -1019,9 +1019,9 @@ data0 = bits, U08, 4, [0:7]
 
     #[test]
     fn settling_shared_bytes_leaves_one_value_for_both() {
-        // A definition can disagree with itself about what a shared byte holds:
-        // `second` cannot read back as zero inside its range, so its default is
-        // seven while `first` stays at zero.
+        // A definition can give two views of one byte different ranges. The
+        // layout still starts the region at one default, so nothing disagrees
+        // until something writes a value the other view cannot hold.
         let definition = parse_str(
             r#"
 [MegaTune]
@@ -1039,6 +1039,19 @@ second = scalar, U08, 0, "x", 1, 0, 7, 255, 0
         .expect("parses");
         let mut tune = Tune::from_definition(&definition);
         let layout = Arc::clone(tune.layout());
+
+        assert_eq!(
+            tune.raw_at("first", 0).unwrap(),
+            tune.raw_at("second", 0).unwrap(),
+            "one byte region starts at one default"
+        );
+        assert!(
+            layout.value_conflicts(IniPage::FIRST, &tune).is_empty(),
+            "a shared region starts with nothing to reconcile"
+        );
+
+        // A carried value can still land outside the other view's range.
+        tune.set_image_raw("first", 0, 0.0).unwrap();
 
         assert_eq!(tune.raw_at("first", 0).unwrap(), 0.0);
         assert_eq!(tune.raw_at("second", 0).unwrap(), 7.0);
