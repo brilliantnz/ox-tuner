@@ -466,6 +466,34 @@ fn clamp_values(spec: &VariableSpec, values: &Values) -> Values {
     }
 }
 
+/// The `(cols, rows)` an array entry is written with.
+///
+/// A one-dimensional list is written as one column of N rows, the way the
+/// reference writer stores it. A `[Nx1]` table keeps its declared shape: only
+/// the definition's own `[N]` form is a list.
+pub(crate) fn written_shape(spec: &VariableSpec, definition: &Definition) -> Option<WrittenShape> {
+    let EntryShape::Array { cols, rows } = spec.shape else {
+        return None;
+    };
+    if rows == 1 && cols > 1 && is_list(definition, &spec.name) {
+        Some(WrittenShape {
+            cols: 1,
+            rows: cols,
+        })
+    } else {
+        Some(WrittenShape { cols, rows })
+    }
+}
+
+/// How many cells one line and how many lines an array entry carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WrittenShape {
+    /// Values per line.
+    pub cols: usize,
+    /// Lines of values.
+    pub rows: usize,
+}
+
 /// Whether the definition declares `name` as a one-dimensional list.
 ///
 /// The flattened shape cannot tell a `[N]` list from a `[Nx1]` table: both are
@@ -661,14 +689,15 @@ fn add_page_fillers(pages: &mut BTreeMap<u16, Vec<Element>>, layout: &TuneLayout
 
         let rows = gap.to_string();
         let name = format!("UNALLOCATED_TOP_{msq_page}");
-        let mut fill = String::from("\n         ");
-        for index in 0..gap {
-            if index > 0 {
-                fill.push_str("\n         ");
-            }
-            fill.push_str("0.0 ");
+        let indent = crate::load::CellIndent::for_depth(PAGE_CHILD_DEPTH);
+        let mut fill = String::new();
+        for _ in 0..gap {
+            fill.push('\n');
+            fill.push_str(indent.cells());
+            fill.push_str("0.0");
         }
-        fill.push_str("\n      ");
+        fill.push('\n');
+        fill.push_str(indent.close());
 
         let mut element = Element::new(
             "constant",
@@ -719,7 +748,12 @@ fn scaffold_entries(
             continue;
         }
         let values = clamp_values(spec, values);
-        let text = match load::format_values(spec, definition, &values) {
+        let text = match load::format_values_with(
+            spec,
+            definition,
+            &values,
+            &load::CellIndent::for_depth(PAGE_CHILD_DEPTH),
+        ) {
             Ok(text) => text,
             Err(error) => {
                 tracing::debug!(
@@ -735,7 +769,7 @@ fn scaffold_entries(
             Some(_) => EntryKind::Constant,
             None => EntryKind::PcVariable,
         };
-        let element = entry_element(spec, is_list(definition, &spec.name), tag, &text);
+        let element = entry_element(spec, definition, tag, &text);
 
         match spec.ini_page() {
             Some(page) => pages.entry(page.to_msq().get()).or_default().push(element),
@@ -830,18 +864,19 @@ impl Msq {
         }
 
         let mut root = Element::new("msq", &[("xmlns", SCAFFOLD_NAMESPACE)]);
-        push_child(&mut root.children, bibliography_element(write_stamp));
+        push_child(&mut root.children, 1, bibliography_element(write_stamp));
         push_child(
             &mut root.children,
+            1,
             version_element(definition, firmware_text),
         );
 
         let pc_page = if pc_entries.is_empty() {
             Element::self_closing("page", &[])
         } else {
-            page_element(None, None, pc_entries)
+            page_element(1, None, None, pc_entries)
         };
-        push_child(&mut root.children, pc_page);
+        push_child(&mut root.children, 1, pc_page);
 
         for page in &definition.pages {
             let Some(ini) = IniPage::new(page.number) else {
@@ -853,18 +888,19 @@ impl Msq {
             let numbered = if entries.is_empty() {
                 Element::self_closing("page", &[("number", &number.to_string()), ("size", &size)])
             } else {
-                page_element(Some(&number.to_string()), Some(&size), entries)
+                page_element(1, Some(&number.to_string()), Some(&size), entries)
             };
-            push_child(&mut root.children, numbered);
+            push_child(&mut root.children, 1, numbered);
         }
 
         if let Some(leftover) = pages.keys().next() {
             return Err(MsqError::UnknownPage { page: *leftover });
         }
 
-        push_child(&mut root.children, settings_element(flags));
+        push_child(&mut root.children, 1, settings_element(1, flags));
         push_child(
             &mut root.children,
+            1,
             Element::self_closing(
                 "userComments",
                 &[(
@@ -873,6 +909,7 @@ impl Msq {
                 )],
             ),
         );
+        root.children.push(Node::Text("\n".to_owned()));
 
         let document = Document {
             declaration: Some("xml version=\"1.0\" encoding=\"ISO-8859-1\"".to_owned()),
@@ -1387,14 +1424,103 @@ impl Msq {
         element.set_text(text);
         // A self-closing `<page …/>` must be opened first, or the serializer
         // would keep emitting it unchanged and the new entry would be lost.
+        let (entry_indent, close_indent) = page_write_indent(page_element);
         page_element.open();
         page_element
             .children
-            .push(Node::Text("\n        ".to_owned()));
+            .push(Node::Text(format!("\n{entry_indent}")));
         page_element.children.push(Node::Element(element));
-        page_element.children.push(Node::Text("\n    ".to_owned()));
+        page_element
+            .children
+            .push(Node::Text(format!("\n{close_indent}")));
         Ok(())
     }
+
+    /// Formats one entry's value the way this document lays it out.
+    ///
+    /// An entry the document already carries keeps the indentation its own text
+    /// uses; a new one uses the layout a written entry has.
+    pub(crate) fn format_entry(
+        &self,
+        page: EntryPage,
+        kind: EntryKind,
+        spec: &VariableSpec,
+        definition: &Definition,
+        values: &Values,
+    ) -> Result<String, load::FileValueError> {
+        let indent = self
+            .entry_cell_indent(page, kind, &spec.name)
+            .or_else(|| {
+                self.page_element(page)
+                    .map(|element| load::CellIndent::inside(page_write_indent(element).0.as_str()))
+            })
+            .unwrap_or_else(|| load::CellIndent::for_depth(PAGE_CHILD_DEPTH));
+        load::format_values_with(spec, definition, values, &indent)
+    }
+
+    /// The page element a file address names.
+    fn page_element(&self, page: EntryPage) -> Option<&Element> {
+        self.root()?
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(element) if element.name == "page" => Some(element),
+                _ => None,
+            })
+            .find(|element| page_address(element) == Some(page))
+    }
+
+    /// The cell layout an entry the document carries already uses.
+    fn entry_cell_indent(
+        &self,
+        page: EntryPage,
+        kind: EntryKind,
+        name: &str,
+    ) -> Option<load::CellIndent> {
+        let page_element = self.page_element(page)?;
+
+        page_element
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(element) if element.name == kind.element() => Some(element),
+                _ => None,
+            })
+            .find(|entry| {
+                entry
+                    .attr("name")
+                    .is_some_and(|written| written.eq_ignore_ascii_case(name))
+            })
+            .and_then(|entry| load::CellIndent::of_text(&entry.text()))
+    }
+}
+
+/// The indentation a page's entries already use, and the one its closing tag
+/// uses.
+///
+/// A page written by this build indents entries one level inside itself, while
+/// a flat page keeps its column-zero layout; an appended entry follows whichever
+/// the page already has instead of mixing the two.
+fn page_write_indent(page: &Element) -> (String, String) {
+    let first_entry = page
+        .children
+        .iter()
+        .position(|node| matches!(node, Node::Element(_)));
+    let entry = first_entry
+        .and_then(|index| {
+            index
+                .checked_sub(1)
+                .and_then(|before| page.children.get(before))
+        })
+        .and_then(|node| match node {
+            Node::Text(text) if text.trim().is_empty() => text.rsplit('\n').next(),
+            _ => None,
+        })
+        .unwrap_or("        ")
+        .to_owned();
+    let close = entry.strip_suffix("    ").unwrap_or_default().to_owned();
+
+    (entry, close)
 }
 
 /// A `<constant>` or `<pcVariable>` element for one formatted value.
@@ -1402,22 +1528,19 @@ impl Msq {
 /// Attributes are stored in alphabetical order: arrays carry `cols`/`rows`,
 /// non-bits carry `digits`, and a non-empty `units` is kept. Bit fields are a
 /// bare `name` plus the label, the way the reference writer stores them.
-fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str) -> Element {
+fn entry_element(
+    spec: &VariableSpec,
+    definition: &Definition,
+    kind: EntryKind,
+    text: &str,
+) -> Element {
     let cols_text;
     let mut rows_text: Option<String> = None;
     let digits_text = spec.digits.to_string();
     let mut attrs: Vec<(&str, &str)> = Vec::new();
-    if let EntryShape::Array { cols, rows } = spec.shape {
-        // A one-dimensional list is written as one column of N rows, the way
-        // the reference writer stores it. A `[Nx1]` table keeps its declared
-        // shape: only the definition's own `[N]` form is a list.
-        let (cols, rows) = if is_list && rows == 1 && cols > 1 {
-            (1, cols)
-        } else {
-            (cols, rows)
-        };
-        cols_text = cols.to_string();
-        rows_text = Some(rows.to_string());
+    if let Some(shape) = written_shape(spec, definition) {
+        cols_text = shape.cols.to_string();
+        rows_text = Some(shape.rows.to_string());
         attrs.push(("cols", cols_text.as_str()));
     }
 
@@ -1439,9 +1562,13 @@ fn entry_element(spec: &VariableSpec, is_list: bool, kind: EntryKind, text: &str
     element
 }
 
-/// A `<page>` element with its entries, in the reference writer's unindented
-/// layout.
-fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>) -> Element {
+/// A `<page>` element with its entries, indented under `depth`.
+fn page_element(
+    depth: usize,
+    number: Option<&str>,
+    size: Option<&str>,
+    entries: Vec<Element>,
+) -> Element {
     let mut attrs: Vec<(&str, &str)> = Vec::new();
     if let Some(number) = number {
         attrs.push(("number", number));
@@ -1452,9 +1579,10 @@ fn page_element(number: Option<&str>, size: Option<&str>, entries: Vec<Element>)
 
     let mut page = Element::new("page", &attrs);
     for entry in entries {
-        push_child(&mut page.children, entry);
+        push_child(&mut page.children, depth + 1, entry);
     }
-    page.children.push(Node::Text("\n".to_owned()));
+    page.children
+        .push(Node::Text(format!("\n{}", "    ".repeat(depth))));
     page
 }
 
@@ -1499,7 +1627,7 @@ fn bibliography_element(write_stamp: Option<&str>) -> Element {
 }
 
 /// The `<settings>` snapshot for the flags the project records.
-fn settings_element(flags: &[String]) -> Element {
+fn settings_element(depth: usize, flags: &[String]) -> Element {
     let comment = "These setting are only used if this msq is opened without a project.";
     if flags.is_empty() {
         return Element::self_closing("settings", &[("Comment", comment)]);
@@ -1511,20 +1639,27 @@ fn settings_element(flags: &[String]) -> Element {
         let flag = flag.as_str();
         push_child(
             &mut element.children,
+            depth + 1,
             Element::self_closing("setting", &[("name", flag), ("value", flag)]),
         );
     }
-    element.children.push(Node::Text("\n".to_owned()));
+    element
+        .children
+        .push(Node::Text(format!("\n{}", "    ".repeat(depth))));
     element
 }
 
-/// Appends a child element on its own line, with no indentation.
+/// Page entries sit one level inside `<page>`, which sits one level inside
+/// `<msq>`.
+const PAGE_CHILD_DEPTH: usize = 2;
+
+/// Appends a child element on its own line, indented to its depth.
 ///
-/// The reference writer puts every element at column zero; following it is what
-/// makes a created file compare cleanly. Loaded documents keep their own text
+/// A created document is indented four spaces per level; the closing tag of an
+/// element lines up with its opening tag. Loaded documents keep their own text
 /// nodes, so this only shapes the scaffold.
-fn push_child(children: &mut Vec<Node>, element: Element) {
-    children.push(Node::Text("\n".to_owned()));
+fn push_child(children: &mut Vec<Node>, depth: usize, element: Element) {
+    children.push(Node::Text(format!("\n{}", "    ".repeat(depth))));
     children.push(Node::Element(element));
 }
 
@@ -2146,11 +2281,13 @@ pageSize = 16
 page = 1
 reqFuel = scalar, U08, 0, \"ms\", 0.1, 0, 0, 25.5, 1
 axis = array, U08, 1, [2], \"\", 1, 0, 0, 255, 0
-mode = bits, U08, 3, [0:1], \"A\", \"B\"
+table = array, U08, 3, [3x2], \"\", 1, 0, 0, 255, 0
+mode = bits, U08, 13, [0:1], \"A\", \"B\"
 
 [ConstantsExtensions]
 defaultValue = reqFuel, 15.4
 defaultValue = axis, 10 20
+defaultValue = table, 1 2 3 4 5 6
 ",
             &SettingsContext::new(),
         )
@@ -2172,12 +2309,26 @@ defaultValue = axis, 10 20
             "a bits field is a bare label, as the reference writes it: {text}"
         );
         assert!(
-            text.contains("\n         10.0 \n         20.0 \n      </constant>"),
-            "array cells keep the reference padding and trailing space: {text}"
+            text.contains("\n            10.0\n            20.0\n        </constant>"),
+            "a list is one cell per line, indented inside the entry: {text}"
         );
         assert!(
-            !text.contains("\n    <"),
-            "the reference writer puts every element at column zero: {text}"
+            text.contains(
+                "\n            1.0 2.0 3.0\n            4.0 5.0 6.0\n        </constant>"
+            ),
+            "a table is one row per line, aligned with its opening tag: {text}"
+        );
+        assert!(
+            text.contains("\n        <constant"),
+            "entries are indented one level inside `<page>`: {text}"
+        );
+        assert!(
+            text.contains("\n    </page>"),
+            "a closing tag lines up with its opening tag: {text}"
+        );
+        assert!(
+            text.ends_with("\n</msq>\n"),
+            "the root closes on its own line: {text}"
         );
     }
 

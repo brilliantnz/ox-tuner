@@ -4,7 +4,6 @@ use oxtuner_tune::{Owner, TuneDiff};
 
 use crate::Msq;
 use crate::atomic;
-use crate::load::{self};
 use crate::msq::{EntryKind, EntryPage};
 use crate::sidecar::{ProjectLayout, ProjectState};
 
@@ -126,7 +125,11 @@ impl Project {
             // Counted before the write: `values` borrows the images and the
             // document copy is mutated next.
             let changed = baseline.changed_cells(values);
-            let text = match load::format_values(spec, &self.definition, values) {
+            let (page, kind) = match spec.ini_page() {
+                Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
+                None => (EntryPage::Pc, EntryKind::PcVariable),
+            };
+            let text = match document.format_entry(page, kind, spec, &self.definition, values) {
                 Ok(text) => text,
                 // The ECU owns this value and the file cannot express it; the
                 // file's own text stays rather than wedging every later save.
@@ -142,10 +145,6 @@ impl Project {
                 }
             };
 
-            let (page, kind) = match spec.ini_page() {
-                Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
-                None => (EntryPage::Pc, EntryKind::PcVariable),
-            };
             document.put_entry_text(page, kind, name, &text)?;
 
             // Only the cells that actually reached the file are reported; a
@@ -244,12 +243,18 @@ impl Project {
             let Some(values) = self.tune().value(name) else {
                 continue;
             };
-            let text = load::format_values(spec, &self.definition, values).map_err(|source| {
-                ProjectError::Unrepresentable {
+            let text = document
+                .format_entry(
+                    EntryPage::Pc,
+                    EntryKind::PcVariable,
+                    spec,
+                    &self.definition,
+                    values,
+                )
+                .map_err(|source| ProjectError::Unrepresentable {
                     name: name.to_owned(),
                     source,
-                }
-            })?;
+                })?;
             document
                 .put_entry_text(EntryPage::Pc, EntryKind::PcVariable, name, &text)
                 .map_err(ProjectError::Msq)?;
@@ -291,12 +296,12 @@ impl Project {
             if values.is_empty() {
                 continue;
             }
-            let Ok(text) = load::format_values(spec, &self.definition, values) else {
-                continue;
-            };
             let (page, kind) = match spec.ini_page() {
                 Some(page) => (EntryPage::Numbered(page.to_msq()), EntryKind::Constant),
                 None => (EntryPage::Pc, EntryKind::PcVariable),
+            };
+            let Ok(text) = document.format_entry(page, kind, spec, &self.definition, values) else {
+                continue;
             };
             document.put_entry_text(page, kind, &spec.name, &text)?;
         }
