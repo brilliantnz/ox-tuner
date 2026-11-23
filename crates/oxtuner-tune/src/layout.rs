@@ -401,11 +401,11 @@ struct OverlapCheck {
 /// Gives every group of variables that occupy exactly the same bytes one
 /// default.
 ///
-/// Two views of one table can declare different ranges, and each view's default
-/// is clamped into its own range. A tune that omits both would then open with
-/// two defaults for one byte region, so the group takes the last declared
-/// member's default — the one a rebuilt page would keep — pulled onto a value
-/// every member can store. A value no file wrote is one value.
+/// Two views of one table can declare different ranges, but a range bounds an
+/// edit, not a default. A tune that omits both would open with two defaults for
+/// one byte region, so the group takes the last declared member's default — the
+/// one a rebuilt page would keep — storage-clamped only. A value no file wrote
+/// is one value.
 ///
 /// `spans` is sorted by `(start, len)`, so a group is one adjacent run.
 fn unify_shared_defaults(variables: &mut [VariableSpec], spans: &[Span]) {
@@ -461,30 +461,16 @@ fn same_entry(variables: &[VariableSpec], first: usize, second: usize) -> bool {
 /// Gives one peer group a common default every member can store.
 fn unify_group(variables: &mut [VariableSpec], members: &[Span]) {
     // The codec writes peers in declaration order, and `spans` keeps that order
-    // inside a group, so the last member is the value a rebuilt page keeps.
-    let Some(kept) = members
+    // inside a group, so the last member is the value a rebuilt page keeps. A
+    // declared default is taken as declared (storage-clamped only); the range
+    // bounds edits, not the default.
+    let Some(common) = members
         .last()
         .and_then(|span| variables.get(span.index))
-        .map(|spec| spec.default_raw)
+        .map(|spec| spec.clamp_storage(spec.default_raw))
     else {
         return;
     };
-    let common = members.iter().fold(kept, |acc, span| {
-        variables
-            .get(span.index)
-            .map_or(acc, |spec| spec.clamp_raw(acc))
-    });
-
-    // Two declared ranges can share no value at all. Then no default can
-    // satisfy every member, and refusing pages is the write gate's job.
-    let storable = members.iter().all(|span| {
-        variables
-            .get(span.index)
-            .is_some_and(|spec| spec.same_wire_value(spec.clamp_raw(common), common))
-    });
-    if !storable {
-        return;
-    }
 
     for span in members {
         if let Some(spec) = variables.get_mut(span.index) {
@@ -1611,7 +1597,7 @@ fn default_raw(
         .get_ignore_case(name)
         .and_then(|number| resolve(number, values))
     {
-        return spec.clamp_raw(raw);
+        return spec.clamp_storage(raw);
     }
 
     if let Some(user) = definition
@@ -1621,27 +1607,13 @@ fn default_raw(
         .and_then(|number| resolve(number, values))
         && let Ok(conversion) = spec.to_raw(user)
     {
-        return spec.clamp_raw(conversion.raw);
+        return spec.clamp_storage(conversion.raw);
     }
 
-    // No declared default. A raw zero is the right default only when it reads
-    // back as user zero inside the declared range: a translate offset moves it,
-    // and the fast path would return exactly the value the clamp exists to
-    // avoid. Zero is inside every storage type, so that half needs no check.
-    let zero_in_range = spec.translate == Some(0.0)
-        && 0.0 >= spec.minimum.unwrap_or(f64::NEG_INFINITY)
-        && 0.0 <= spec.maximum.unwrap_or(f64::INFINITY);
-    if zero_in_range {
-        debug_assert_eq!(
-            0.0,
-            spec.clamp_raw(0.0),
-            "the fast path must return what the clamp would"
-        );
-
-        return 0.0;
-    }
-
-    spec.clamp_raw(0.0)
+    // No declared default. A byte no file wrote is zero in the image, whatever
+    // the definition's display range says; a range clamp here would fabricate a
+    // value the controller does not hold.
+    0.0
 }
 
 #[cfg(test)]
@@ -2520,7 +2492,7 @@ REQFUEL = scalar, U08, 1, "", 1, 0, 0, 3, 0
 "#;
 
     #[test]
-    fn a_default_outside_the_written_step_is_pulled_inside() {
+    fn a_declared_default_is_kept_as_declared() {
         const BOUNDED: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -2539,17 +2511,19 @@ defaultValue = p, 7.25
         let layout = TuneLayout::build(&definition, &|_| None);
         let spec = layout.variable("p").expect("p");
 
-        // The writer carries at least one decimal, so a raw default that reads
-        // back as 7.25 exactly would still be written as 7.2, below the bound.
-        let written = spec.format_file(spec.default_raw).expect("written");
+        // The definition declares this default; the declared range bounds an
+        // edit, not the value the definition itself names.
         assert_eq!(
-            written, "7.3",
-            "an omitted default is written at the next representable value"
+            spec.default_raw,
+            spec.to_raw(7.25).expect("7.25 converts").raw,
+            "a declared default is kept, not pulled to the written step"
         );
+        let written = spec.format_file(spec.default_raw).expect("written");
+        assert_eq!(written, "7.25", "the text carries the declared value");
     }
 
     #[test]
-    fn an_undefaulted_value_with_an_offset_reads_like_the_clamp() {
+    fn an_undefaulted_value_starts_at_raw_zero() {
         const OFFSET: &str = r#"
 [MegaTune]
 signature = "speeduino 202501"
@@ -2566,13 +2540,13 @@ off = scalar, U08, 0, "", 1, -50, 0, 100, 0
         let spec = layout.variable("off").expect("off");
 
         assert_eq!(
-            spec.default_raw,
-            spec.clamp_raw(0.0),
-            "the fast path must return what the clamp would"
+            spec.default_raw, 0.0,
+            "a byte no file wrote is zero whatever the declared range says"
         );
         assert_eq!(
-            spec.default_raw, 50.0,
-            "raw 0 would read back as user -50, below the minimum"
+            spec.to_user(0.0).expect("converts"),
+            -50.0,
+            "the offset still applies to what the value reads as"
         );
     }
 
@@ -2605,9 +2579,8 @@ defaultValue = stoich, 14.7
             "one byte region carries one default"
         );
         assert_eq!(
-            afr.default_raw,
-            afr.clamp_raw(0.0),
-            "the default stays inside the declared range"
+            lambda.default_raw, 0.0,
+            "an undeclared default is the zero byte the controller holds"
         );
 
         let tune = Tune::new(Arc::new(layout));
@@ -2616,40 +2589,6 @@ defaultValue = stoich, 14.7
                 .value_conflicts(IniPage::FIRST, &tune)
                 .is_empty(),
             "a tune that omits both views must not hold two values for one byte"
-        );
-    }
-
-    #[test]
-    fn views_with_disjoint_ranges_keep_their_own_defaults() {
-        const DISJOINT: &str = r#"
-[MegaTune]
-signature = "speeduino 202501"
-
-[Constants]
-nPages = 1
-pageSize = 8
-page = 1
-low = scalar, U08, 0, "x", 1, 0, 0, 10, 0
-high = scalar, U08, 0, "x", 1, 0, 200, 255, 0
-"#;
-
-        let definition = parse_str(DISJOINT, &SettingsContext::new()).expect("parses");
-        let layout = TuneLayout::build(&definition, &|_| None);
-        let low = layout.variable("low").expect("low");
-        let high = layout.variable("high").expect("high");
-
-        assert_ne!(
-            low.default_raw, high.default_raw,
-            "no value satisfies both ranges, so there is nothing safe to unify to"
-        );
-
-        // The disagreement stays visible instead of being hidden behind a
-        // value one view rejects.
-        let tune = Tune::new(Arc::new(layout));
-        assert_eq!(
-            tune.layout().value_conflicts(IniPage::FIRST, &tune).len(),
-            1,
-            "the write gate must still see the pair"
         );
     }
 
