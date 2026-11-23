@@ -1730,6 +1730,142 @@ afrTable = array, U08, lastOffset, [16x16], "AFR", 0.1, 0.0, 7, 25.5, 1
 }
 
 #[test]
+fn saving_keeps_the_cell_indentation_the_file_uses() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+table = array, U08, 0, [2x2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = "<msq>\n    <versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"speeduino 202501\"/>\n    <page number=\"0\" size=\"16\">\n        <constant cols=\"2\" rows=\"2\" name=\"table\">\n         1.0 2.0 \n         3.0 4.0 \n      </constant>\n    </page>\n</msq>\n";
+
+    let dir = TempDir::new("save-indent");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_cell_user("table", 0, 1, 7.0)
+        .expect("the cell is editable");
+    project.save().expect("the tune saves");
+
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("\n         1.0 7.0\n         3.0 4.0\n      </constant>"),
+        "an edited array keeps the file's own indentation: {saved}"
+    );
+}
+
+#[test]
+fn a_single_line_array_is_written_in_the_entry_layout() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+table = array, U08, 0, [2x2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = "<msq>\n    <versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"speeduino 202501\"/>\n    <page number=\"0\" size=\"16\">\n        <constant cols=\"2\" rows=\"2\" name=\"table\">1.0 2.0 3.0 4.0</constant>\n    </page>\n</msq>\n";
+
+    let dir = TempDir::new("save-inline");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_cell_user("table", 0, 1, 7.0)
+        .expect("the cell is editable");
+    project.save().expect("the tune saves");
+
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("\n            1.0 7.0\n            3.0 4.0\n        </constant>"),
+        "a one-line entry has no indentation to follow, so the written layout applies: {saved}"
+    );
+}
+
+#[test]
+fn saving_a_crlf_file_keeps_its_line_endings_and_cell_indent() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+table = array, U08, 0, [2x2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = "<msq>\r\n    <versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"speeduino 202501\"/>\r\n    <page number=\"0\" size=\"16\">\r\n        <constant cols=\"2\" rows=\"2\" name=\"table\">\r\n         1.0 2.0 \r\n         3.0 4.0 \r\n      </constant>\r\n    </page>\r\n</msq>\r\n";
+
+    let dir = TempDir::new("save-crlf-indent");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_cell_user("table", 0, 1, 7.0)
+        .expect("the cell is editable");
+    project.save().expect("the tune saves");
+
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains("\r\n         1.0 7.0\r\n         3.0 4.0\r\n      </constant>"),
+        "the edited cells keep the file's indentation and line ending: {saved:?}"
+    );
+    assert_eq!(
+        saved.matches('\n').count(),
+        saved.matches("\r\n").count(),
+        "no line ending changes style: {saved:?}"
+    );
+}
+
+#[test]
+fn an_appended_entry_follows_a_flat_page() {
+    const DEFINITION: &str = r#"
+[MegaTune]
+signature = "speeduino 202501"
+
+[Constants]
+nPages = 1
+pageSize = 16
+page = 1
+first = array, U08, 0, [2x2], "", 1, 0, 0, 255, 0
+second = array, U08, 4, [2x2], "", 1, 0, 0, 255, 0
+"#;
+    const TUNE: &str = "<msq>\n<versionInfo fileFormat=\"5.0\" nPages=\"1\" signature=\"speeduino 202501\"/>\n<page number=\"0\" size=\"16\">\n<constant cols=\"2\" rows=\"2\" name=\"first\">1.0 2.0 3.0 4.0</constant>\n</page>\n</msq>\n";
+
+    let dir = TempDir::new("append-flat");
+    dir.write("projectCfg/mainController.ini", DEFINITION);
+    dir.write(TUNE_FILE, TUNE);
+
+    let mut project = Project::open(dir.path()).expect("the project opens");
+    project
+        .tune_mut()
+        .set_cell_user("second", 0, 0, 9.0)
+        .expect("the cell is editable");
+    project.save().expect("the tune saves");
+
+    let saved = tune_text(&dir);
+    assert!(
+        saved.contains(
+            "\n<constant name=\"second\">\n    9.0 0.0\n    0.0 0.0\n</constant>\n</page>"
+        ),
+        "an appended entry follows the page's column-zero layout: {saved}"
+    );
+}
+
+#[test]
 fn a_text_that_rounds_to_the_same_raw_is_not_reported_as_clamped() {
     const DEFINITION: &str = r#"
 [MegaTune]

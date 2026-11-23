@@ -1047,10 +1047,86 @@ fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, Fi
     })
 }
 
+/// Whitespace an array entry puts around its cells.
+///
+/// A file written by this build indents the cells one level inside the entry
+/// and lines the closing tag up with the opening tag. A file from another
+/// writer keeps whatever it already uses, which [`Self::of_text`] reads back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CellIndent {
+    cells: String,
+    close: String,
+}
+
+impl CellIndent {
+    /// The layout a written entry uses: cells one level inside the entry.
+    pub(crate) fn for_depth(depth: usize) -> Self {
+        Self::inside(&"    ".repeat(depth))
+    }
+
+    /// Cells one level inside a tag indented with `tag_indent`.
+    pub(crate) fn inside(tag_indent: &str) -> Self {
+        Self {
+            cells: format!("{tag_indent}    "),
+            close: tag_indent.to_owned(),
+        }
+    }
+
+    /// Whitespace before each line of cells.
+    pub(crate) fn cells(&self) -> &str {
+        &self.cells
+    }
+
+    /// Whitespace before the closing tag.
+    pub(crate) fn close(&self) -> &str {
+        &self.close
+    }
+
+    /// The reference writer's flat layout, for a caller that wants its text.
+    fn reference() -> Self {
+        Self {
+            cells: "         ".to_owned(),
+            close: "      ".to_owned(),
+        }
+    }
+
+    /// The whitespace the entry's own text already uses, when it is multi-line.
+    ///
+    /// A one-line value has no layout to follow, and a line that is not
+    /// whitespace before the closing tag is not an indented entry.
+    pub(crate) fn of_text(text: &str) -> Option<Self> {
+        let mut lines = text.split('\n');
+        let before = lines.next()?;
+        // A blank line between the opening tag and the first row is not an
+        // indentation anyone wrote; skip it rather than read an empty one.
+        let cells = lines.find(|line| !line.trim().is_empty())?;
+        let close = text.rsplit('\n').next()?;
+        if !before.trim().is_empty() || !close.trim().is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            cells: leading_whitespace(cells).to_owned(),
+            close: close.to_owned(),
+        })
+    }
+}
+
+/// The spaces or tabs that start `line`.
+fn leading_whitespace(line: &str) -> &str {
+    let end = line
+        .char_indices()
+        .find_map(|(index, character)| (character != ' ' && character != '\t').then_some(index))
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
 /// Formats a variable's stored values as the text a `.msq` carries.
 ///
 /// A `.msq` declares ISO-8859-1 and stores text as bytes, so a character with
-/// no byte in that set is refused rather than escaped.
+/// no byte in that set is refused rather than escaped. Scalars, bit labels and
+/// strings stay inline; an array is laid out with `indent`, one cell per line
+/// or one row per line when it has more than one column.
 ///
 /// # Errors
 ///
@@ -1061,10 +1137,11 @@ fn format_text(spec: &VariableSpec, text: &str, len: usize) -> Result<String, Fi
     clippy::float_cmp,
     reason = "a bit option matches its exact integer raw value"
 )]
-pub fn format_values(
+pub(crate) fn format_values_with(
     spec: &VariableSpec,
     definition: &Definition,
     values: &Values,
+    indent: &CellIndent,
 ) -> Result<String, FileValueError> {
     match (&spec.shape, values) {
         (EntryShape::Text { len }, Values::Text(text)) => format_text(spec, text, *len),
@@ -1136,15 +1213,23 @@ pub fn format_values(
             if shape.is_scalar() {
                 Ok(tokens.into_iter().next().unwrap_or_default())
             } else {
-                let mut text = String::from("\n         ");
+                // A table carries one row per line; a list is one column of
+                // rows, so it lands one cell per line.
+                let cols = crate::msq::written_shape(spec, definition)
+                    .map_or(1, |shape| shape.cols)
+                    .max(1);
+                let mut text = String::new();
                 for (index, token) in tokens.iter().enumerate() {
-                    if index > 0 {
-                        text.push_str("\n         ");
+                    if index % cols == 0 {
+                        text.push('\n');
+                        text.push_str(&indent.cells);
+                    } else {
+                        text.push(' ');
                     }
                     text.push_str(token);
-                    text.push(' ');
                 }
-                text.push_str("\n      ");
+                text.push('\n');
+                text.push_str(&indent.close);
                 Ok(text)
             }
         }
@@ -1153,6 +1238,23 @@ pub fn format_values(
             reason: "the definition expects a number".to_owned(),
         }),
     }
+}
+
+/// Formats one variable's value in the reference writer's flat layout.
+///
+/// Project files written by this build follow the document's own indentation
+/// through [`format_values_with`]; this wrapper keeps the reference spacing for
+/// callers that only need the tokens.
+///
+/// # Errors
+///
+/// Returns [`FileValueError`] for the same reasons as [`format_values_with`].
+pub fn format_values(
+    spec: &VariableSpec,
+    definition: &Definition,
+    values: &Values,
+) -> Result<String, FileValueError> {
+    format_values_with(spec, definition, values, &CellIndent::reference())
 }
 
 #[cfg(test)]
