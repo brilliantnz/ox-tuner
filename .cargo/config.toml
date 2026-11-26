@@ -1,9 +1,31 @@
-# Share compiler artifacts across checkouts via sccache.
-# sccache cannot cache incremental builds, so incremental is off here:
-# cold builds hit the shared cache instead of recompiling the GPUI tree.
+# sccache is opt-in (see README.md and CONTRIBUTING.md). A plain `cargo build`
+# works without it.
+#
+# To enable it locally, uncomment the two sections below. Keep that change
+# local — do not commit the uncommented version.
+#
+# [build]
+# rustc-wrapper = "sccache"
+#
+# [profile.dev]
+# incremental = false
+#
+# Notes for when it is enabled:
+#
+# - Fast local rebuilds: export CARGO_INCREMENTAL=1 together with
+#   SCCACHE_ALLOW_INCREMENTAL=1. Changed workspace crates then rebuild
+#   incrementally (uncached) while registry dependencies stay cached. Without
+#   the allow flag, sccache 0.20 hard-errors on CARGO_INCREMENTAL=1, so never
+#   set CARGO_INCREMENTAL alone. Do not commit either variable.
+# - Warming a fresh checkout or worktree: SCCACHE_ALLOW_INCREMENTAL=cache also
+#   caches incremental crates, so workspace crates hit too — at the price of a
+#   slower first rebuild after each edit. Prefer `=1` for iteration and `=cache`
+#   for warming a new checkout.
+# - Extra checkouts at different paths: export SCCACHE_BASEDIRS with every
+#   checkout root, colon-separated (e.g. "/path/a:/path/b"), then restart the
+#   server (`sccache --stop-server`). Path dependencies and OUT_DIR users such
+#   as serde then share hits across checkouts. CARGO_TARGET_DIR needs no setting
+#   since 0.20: separate target dirs share the cache automatically. A hit still
+#   carries the debug paths of the checkout that compiled it.
+#
 # Verify with: cargo build -p oxtuner-ini && sccache --show-stats
-[build]
-rustc-wrapper = "sccache"
-
-[profile.dev]
-incremental = false
