@@ -38,8 +38,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
-      # through cargo-binstall. The crate publishes a Linux binary, so this is a
-      # download rather than the source build `cargo install` would do.
+      # through cargo-binstall. That installs the musl build of cargo-fuzz,
+      # whose compiled-in default target is x86_64-unknown-linux-musl. The
+      # target is not installed and ASAN rejects a static libc, so name the
+      # runner's GNU host explicitly on every `fuzz run` below.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
@@ -66,17 +68,17 @@ jobs:
 
       - name: Frame decoder
         working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run decode_frame -- -max_total_time=1200 -max_len=65536
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu decode_frame -- -max_total_time=1200 -max_len=65536
       - name: Trace parser
         working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run replay_trace -- -max_total_time=1200 -max_len=65536
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_trace -- -max_total_time=1200 -max_len=65536
 
       - name: INI parsers
         working-directory: crates/oxtuner-ini
         run: |
           for target in parse_ini parse_bytes preprocess bit_options pc_variables sections; do
             echo "::group::$target"
-            cargo +nightly fuzz run "$target" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=600 -max_len=65536
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=600 -max_len=65536
             echo "::endgroup::"
           done
 
