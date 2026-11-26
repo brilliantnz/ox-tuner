@@ -20,11 +20,12 @@
 
 <!-- List commands actually run and their outcomes. Mark anything not run as not run, with a short reason. Include relevant manual or hardware checks. -->
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+- [ ] `cargo nextest run --workspace --all-features --locked`
+- [ ] `cargo test --workspace --all-features --locked --doc`
 - [ ] `cargo deny check`
-- [ ] `pnpm fmt:check`
+- [ ] `pnpm exec oxfmt --check`
 - Manual or hardware checks:
 
 ## Performance
