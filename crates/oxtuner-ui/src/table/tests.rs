@@ -1387,7 +1387,17 @@ fn load_1min() -> f64 {
 /// The frame budget, with room for a busy desktop so a loaded machine is not
 /// reported as a renderer regression. A real regression exceeds both.
 fn judged_budget_ms() -> f64 {
-    if load_1min() > 3.0 { 16.7 * 2.5 } else { 16.7 }
+    // A Windows runner has no GPU: GPUI renders through the software
+    // rasterizer there and the shared runners sit at 20-23 ms p95 with an idle
+    // load of 0. The desktop budget stays strict; CI gets the room the
+    // rasterizer needs, and a real regression still crosses it.
+    let base = if cfg!(target_os = "windows") && std::env::var_os("CI").is_some() {
+        16.7 * 1.6
+    } else {
+        16.7
+    };
+
+    if load_1min() > 3.0 { base * 2.5 } else { base }
 }
 
 /// ADR-0013's measurable criterion: a 32×32 grid with a moving selection and a
