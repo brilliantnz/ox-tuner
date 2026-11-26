@@ -40,8 +40,8 @@
             }
           ],
           "hidden": false,
-          "image-name": "graphite-tri 2.svg",
-          "name": "graphite-tri 2",
+          "image-name": "oxtuner.svg",
+          "name": "oxtuner",
           "position": {
             "scale": 1.2,
             "translation-in-points": [-1.9999999999999432, 0]
