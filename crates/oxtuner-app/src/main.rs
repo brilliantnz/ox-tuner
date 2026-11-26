@@ -44,9 +44,20 @@ fn main() {
     let settings = AppSettings::load(&paths);
     let session = AppState::load(&paths);
 
-    // The bundled OxTuner themes are seeded next to the settings file before
-    // anything reads them; the watcher installed later picks up user edits.
-    theme::seed(&paths);
+    // An older build seeded a user-editable theme file next to the settings.
+    // This build uses the compiled-in pair, so say why an edited palette no
+    // longer applies instead of leaving the file silently inert.
+    if let Some(themes) = paths
+        .settings_file()
+        .parent()
+        .map(|config| config.join("themes"))
+        .filter(|themes| themes.exists())
+    {
+        tracing::warn!(
+            path = %themes.display(),
+            "old user theme files are inert; this build uses the compiled-in OxTuner pair"
+        );
+    }
 
     // The locale is global state outside GPUI, so select it before any window
     // or component renders. Only English ships today; the key is persisted so a
@@ -89,7 +100,7 @@ fn main() {
         // Install the OxTuner light/dark pair, then follow the stored
         // preference: choosing Light or Dark in Settings has to survive a
         // restart, and System follows the OS from here on.
-        theme::register(&paths, cx);
+        theme::register(cx);
 
         // One discovery for the process; every command reads this instance
         // instead of asking the platform again.

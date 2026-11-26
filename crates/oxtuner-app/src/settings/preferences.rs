@@ -438,7 +438,7 @@ impl AppSettings {
 
     /// Replaces the in-memory document and path; used by tests.
     #[cfg(test)]
-    fn with(settings: Settings) -> Self {
+    pub(crate) fn with(settings: Settings) -> Self {
         Self {
             path: PathBuf::from("/tmp/oxtuner-settings.json"),
             settings,

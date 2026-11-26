@@ -11,7 +11,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    constants::APP_NAME,
+    constants::{APP_NAME, MAIN_WINDOW_MIN_HEIGHT, MAIN_WINDOW_MIN_WIDTH},
     layout::{AppLayout, titlebar::titlebar_options},
     settings::preferences::AppSettings,
     state::session::{self, AppState},
@@ -109,14 +109,18 @@ pub fn bring_forward(window: &mut Window, cx: &mut App) {
 
 /// Options for the main window, restoring the geometry the user left.
 ///
-/// The window is **always** created windowed, at a size guaranteed to be smaller
-/// than the display (see `WindowState::windowed_bounds`); [`restore`] applies the
+/// The window is **always** created windowed, at `WindowState::windowed_bounds`
+/// (the last session's size, or the designed minimum); [`restore`] applies the
 /// last session's maximize afterwards. Both halves matter:
 ///
 /// - creating with `WindowBounds::Maximized` asks the platform to zoom while the
 ///   window is still being created, before it is on screen, which is too early;
 /// - creating at the *maximized* size and then zooming is worse: on macOS zoom is
 ///   a toggle, so a window that already covers the display is shrunk by it.
+///
+/// The designed size is also the window minimum, so on a display smaller than
+/// the minimum the first frame extends past the visible area; the platform
+/// enforces the minimum either way.
 pub fn options(cx: &App) -> WindowOptions {
     let bounds = cx.global::<AppState>().data().window.windowed_bounds(cx);
 
@@ -139,7 +143,7 @@ pub fn options(cx: &App) -> WindowOptions {
         // Always windowed: [`restore`] applies the last session's maximize once
         // the window exists.
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(1600.), px(980.))),
+        window_min_size: Some(size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT))),
         app_id: Some(APP_NAME.into()),
         ..Default::default()
     }
@@ -162,9 +166,11 @@ const RETRY_SECOND: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Restores the window the last session left.
 ///
-/// The window was created windowed at a size smaller than the display, so a zoom
-/// request here always expands it — which is why macOS's toggle semantics are
-/// safe. Asking for it during creation is too early for the platform; asking with
+/// The window is always created windowed, never already at the display's size, so
+/// a zoom request here expands it on any display that can hold the minimum; on a
+/// smaller display the platform decides how much of the frame to show. That is
+/// why macOS's toggle semantics are safe.
+/// Asking for the maximize during creation is too early for the platform; asking with
 /// `restore_native_window_state` instead is worse: `AppKit` applies that
 /// synchronously, its frame change re-enters the app through GPUI's resize
 /// callback, and the app is already mutably borrowed (`RefCell` already borrowed).
