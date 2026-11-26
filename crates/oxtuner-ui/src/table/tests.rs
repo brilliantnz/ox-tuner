@@ -1384,21 +1384,16 @@ fn load_1min() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The frame budget, with room for a busy desktop so a loaded machine is not
-/// reported as a renderer regression. A real regression exceeds both.
+/// The frame budget: one 60 fps frame, with the same 2.5x allowance for a busy
+/// desktop or a shared CI runner. Neither has a quiet GPU: the same healthy
+/// table measured 17-29 ms p95 across the Linux, Windows and macOS runners,
+/// and the regression this guards is an order of magnitude past the allowance.
 fn judged_budget_ms() -> f64 {
-    // A Windows runner has no GPU: GPUI renders through the software
-    // rasterizer there, and the shared runners have measured 20-29 ms p95
-    // across runs with an idle load of 0. Give CI the same allowance a loaded
-    // desktop gets; the regression this test guards - virtualisation dropping
-    // out and 16k cells rendering - is an order of magnitude past it.
-    let base = if cfg!(target_os = "windows") && std::env::var_os("CI").is_some() {
+    if std::env::var_os("CI").is_some() || load_1min() > 3.0 {
         16.7 * 2.5
     } else {
         16.7
-    };
-
-    if load_1min() > 3.0 { base * 2.5 } else { base }
+    }
 }
 
 /// ADR-0013's measurable criterion: a 32×32 grid with a moving selection and a
