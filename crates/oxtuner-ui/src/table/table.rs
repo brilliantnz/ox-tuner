@@ -499,7 +499,10 @@ impl Table {
             return;
         }
 
-        if modifiers.platform {
+        // The secondary modifier is Cmd on macOS and Ctrl elsewhere. Reading
+        // `platform` instead would listen for the Super key on Linux and
+        // Windows, where every shortcut here would go dead.
+        if modifiers.secondary(cx) {
             match key {
                 "c" => self.copy_selection(cx),
                 "v" => self.paste_clipboard(cx),

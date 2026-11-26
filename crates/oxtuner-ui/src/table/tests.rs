@@ -1294,7 +1294,7 @@ fn single_click_on_another_header_dismisses_the_bin_edit(cx: &mut TestAppContext
 }
 
 /// A keystroke with the platform's command modifier: Cmd on macOS, Ctrl
-/// elsewhere. The grid reads `modifiers.platform`, so the test must press the
+/// elsewhere. The grid reads the secondary modifier, so the test must press the
 /// same key a user would.
 fn shortcut(key: &str) -> String {
     if cfg!(target_os = "macos") {
