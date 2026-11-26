@@ -106,11 +106,10 @@ Do not infer an API from the summary. Read the changed source or PR diff.
 ### Feature and default-feature changes
 
 `crates/oxtuner-ui` disables default features and asks for
-`["assets", "component"]`; `crates/oxtuner-app` takes the defaults. A release
-that moves something into a default feature (for example, making the Linux X11
-backend an optional default feature) must be reflected in both manifests. Decide
-explicitly whether the library and the binary need the feature, and note it in
-the PR.
+`["assets", "component", "x11"]`; `crates/oxtuner-app` takes the defaults.
+The `x11` entry is explicit because the crate disables the defaults: gpui-kit
+0.11 made the Linux X11 backend an opt-in default feature, so without it the
+backend would be silently lost.
 
 ## 2. Move the pin
 
@@ -373,8 +372,9 @@ Final report to the user:
   branch. Never commit or push the update (or an edit to this skill) directly
   to the default branch.
 - Never bump a format constant (`SETTINGS_SCHEMA_VERSION`,
-  `STATE_SCHEMA_VERSION`, `PARSER_VERSION`, `CACHE_FORMAT_VERSION`) for a
-  dependency update. Format constants stay at their initial value.
+  `THEME_SCHEMA_VERSION`, `STATE_SCHEMA_VERSION`, `PARSER_VERSION`,
+  `CACHE_FORMAT_VERSION`) for a dependency update. Format constants stay at
+  their initial value.
 - Never bypass ECU write, read-back or burn guardrails; a UI dependency update
   has no reason to touch them.
 - If the target is missing from crates.io, the release notes are missing for a
