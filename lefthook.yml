@@ -1,0 +1,19 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: rust-fmt
+      glob:
+        - '*.rs'
+        - '**/*.rs'
+      files: git diff --name-only --cached --diff-filter=ACMR -- '*.rs'
+      run: rustfmt --edition 2024 {files}
+      stage_fixed: true
+    - name: non-rust-fmt
+      glob:
+        - '*.{js,mjs,cjs,ts,json,jsonc,md,yml,yaml,toml,css}'
+        - '**/*.{js,mjs,cjs,ts,json,jsonc,md,yml,yaml,toml,css}'
+      files: git diff --name-only --cached --diff-filter=ACMR -- '*.js' '*.mjs' '*.cjs' '*.ts' '*.json' '*.jsonc' '*.md' '*.yml' '*.yaml' '*.toml' '*.css'
+      # Exit 0 when every file given is one oxfmt ignores; real violations
+      # still fail the commit.
+      run: pnpm exec oxfmt --no-error-on-unmatched-pattern {files}
+      stage_fixed: true

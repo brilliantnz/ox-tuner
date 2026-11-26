@@ -27,7 +27,9 @@ this repository.
 You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it
 for you), and Node.js 24 or newer with `pnpm` for the non-Rust formatting
 check and the `clean:*` scripts (use the pnpm version pinned in
-`package.json`).
+`package.json`). `pnpm install` also installs the pre-commit hook (via the
+`prepare` script): staged files are auto-formatted with rustfmt and oxfmt on
+every commit, so check the diff when the hook rewrites something.
 
 ```sh
 cargo build --workspace

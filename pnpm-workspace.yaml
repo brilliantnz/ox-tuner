@@ -1,0 +1,6 @@
+allowBuilds:
+  lefthook: true
+
+# Hours, not pnpm's 10-hour default: fresh releases wait 2 hours before they
+# can enter the tree, so a bad publish can be pulled first.
+minimumReleaseAge: 120
