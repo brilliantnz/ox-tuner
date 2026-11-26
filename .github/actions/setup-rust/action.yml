@@ -1,0 +1,59 @@
+name: Setup Rust
+description: >-
+  Install the toolchain pinned in rust-toolchain.toml, drop the runner's
+  floating toolchains, and restore the Rust cache.
+
+inputs:
+  components:
+    description: Extra rustup components, comma separated.
+    required: false
+    default: ''
+  cache-key:
+    description: Extra rust-cache key, one per job or operating system.
+    required: false
+    default: ''
+  cache:
+    description: Restore and save the Rust cache. Off for jobs that do not compile.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # Install exactly the toolchain pinned in rust-toolchain.toml instead of
+    # the floating `@stable` shorthand. `rustup toolchain install` does not read
+    # the components table, so they are passed through as well.
+    - id: toolchain
+      shell: bash
+      run: |
+        channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.channel }}
+        components: ${{ inputs.components }}
+
+    # rust-cache folds every rustup-installed toolchain into its cache key, so
+    # the runner's floating `stable` is dropped: otherwise each new Rust stable
+    # release would change the key and force a full rebuild even though cargo
+    # builds with the pinned version.
+    - name: Drop floating toolchains (keep the rust-cache key stable)
+      shell: bash
+      run: |
+        channel='${{ steps.toolchain.outputs.channel }}'
+        rustup default "$channel"
+        for tc in $(rustup toolchain list --quiet); do
+          case "$tc" in
+            "$channel"*) ;;
+            *) rustup toolchain uninstall "$tc" || true ;;
+          esac
+        done
+
+    # cache-on-failure keeps the compiled dependency tree even when a check
+    # fails, instead of recompiling from scratch on the next push.
+    - uses: Swatinem/rust-cache@v2
+      if: inputs.cache == 'true'
+      with:
+        cache-on-failure: 'true'
+        key: ${{ inputs.cache-key }}

@@ -1,0 +1,115 @@
+name: Platforms
+
+# Second half of CI. Linux is already covered by the `checks` job in `ci.yml`,
+# so this file is Windows and macOS only. It runs on:
+#
+#   a pull request       every pull request, once the Linux half is green
+#   a push to `main`     a merge is where a platform break is still easy to fix
+#   a review approval    asked for by approving the pull request
+#   workflow_dispatch    started by hand
+#   `/ci platforms`      asked for by comment on a pull request
+#
+# No schedule: a pull request and a merge already cover both platforms.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out.
+        required: true
+        type: string
+      release:
+        description: Build the workspace in release mode on the platforms that opt in.
+        required: false
+        type: boolean
+        default: true
+      release-macos:
+        description: Also build the workspace in release mode on macOS.
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to check out. Leave empty for the branch this runs on.
+        required: false
+        type: string
+        default: ''
+      release:
+        description: Build the workspace in release mode on the platforms that opt in.
+        required: false
+        type: boolean
+        default: true
+      release-macos:
+        description: Also build the workspace in release mode on macOS.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# A distinct prefix: this workflow shares its run with the caller, so a group
+# named after `github.workflow` would collide with `ci.yml`'s own group and
+# cancel the run that called it.
+concurrency:
+  group: platforms-${{ inputs.ref || github.ref }}
+  # A merge to `main` keeps its run; a new push to the same pull request does
+  # not need the old one.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Local checkouts may wrap rustc in sccache; runners must not. Cargo
+  # treats an empty `RUSTC_WRAPPER` as "no wrapper".
+  RUSTC_WRAPPER: ''
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      # The release build recompiles every dependency, so it is the slowest
+      # step here. Only Windows does it; `release-macos` opts macOS in.
+      matrix:
+        include:
+          - os: windows-latest
+            timeout: 60
+            release: true
+          - os: macos-latest
+            timeout: 60
+            release: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      # `cache-key` keeps one cache per platform: the default rust-cache key is
+      # already scoped by OS and arch, and a shared key would let one platform
+      # evict another.
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-key: ${{ matrix.os }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # Clippy and the tests share one job so the dependency tree is built
+      # once. The workspace is checked on every platform that ships, not just
+      # the developer's own: a serial, path or file-separator assumption is
+      # exactly what only another platform catches.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo nextest run --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked --doc
+
+      # `--release` is a separate profile tree and recompiles every dependency.
+      # It catches what debug builds hide: overflow checks off, optimised-out
+      # branches, and a `#[cfg]` that only a release build selects.
+      - name: Build the workspace in release mode
+        if: ${{ inputs.release && (matrix.release || inputs['release-macos']) }}
+        run: cargo build --workspace --all-features --locked --release

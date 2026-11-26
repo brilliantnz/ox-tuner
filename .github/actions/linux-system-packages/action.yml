@@ -1,0 +1,52 @@
+name: Linux system packages
+description: >-
+  Install the system libraries GPUI and serialport link and enumerate against
+  on a Linux runner.
+
+runs:
+  using: composite
+  steps:
+    # GPUI's Linux backend links system libraries; a bare runner fails at
+    # build-script time (`yeslogic-fontconfig-sys` needs `fontconfig.pc`).
+    # `libudev-dev` and `pkg-config` are for serialport, whose Linux enumeration
+    # uses libudev; without its headers the build script cannot find the
+    # library. A hung mirror is a real failure mode on hosted runners and plain
+    # `apt-get` has no timeout, so every call is capped and retried.
+    - name: Install system packages
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        packages=(
+          libfontconfig-dev
+          libudev-dev
+          pkg-config
+          libfreetype-dev
+          libwayland-dev
+          libxkbcommon-dev
+          libxkbcommon-x11-dev
+          libx11-xcb-dev
+          libxcb1-dev
+          libxcb-render0-dev
+          libxcb-shm0-dev
+          libvulkan1
+          mesa-vulkan-drivers
+        )
+
+        retry() {
+          local attempt=1
+          local max=3
+          until "$@"; do
+            if [ "$attempt" -ge "$max" ]; then
+              echo "gave up after $max attempts: $*" >&2
+              return 1
+            fi
+            echo "attempt $attempt failed, retrying in 15s: $*" >&2
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+        }
+
+        retry sudo timeout 300 apt-get update -y
+        retry sudo timeout 900 env DEBIAN_FRONTEND=noninteractive \
+          apt-get install -y --no-install-recommends "${packages[@]}"

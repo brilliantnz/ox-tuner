@@ -1,225 +1,334 @@
 name: CI
 
+# CI is split in two halves.
+#
+# This half runs on a Linux runner: format, cargo-deny, Clippy, the workspace
+# tests, and the two short fuzz runs. It answers every pull request and every
+# push to `main`.
+#
+# The other half lives in `platforms.yml`: Windows and macOS. Standard runners
+# are free for a public repository, so it also runs on every pull request, as
+# well as a push to `main`, a manual run, an approval, and a `/ci platforms`
+# comment. It never starts before this half is green.
+#
+# A draft pull request and a push to a branch with no open pull request run no
+# jobs. `/ci` and an approval only count when a maintainer writes them.
+
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, ready_for_review, reopened]
+    types: [opened, ready_for_review, reopened, synchronize]
   pull_request_review:
     types: [submitted]
   issue_comment:
     types: [created]
   workflow_dispatch:
-  # Long-running fuzz targets. The short runs are part of every pull request;
-  # this one finds the deep inputs on a schedule.
-  schedule:
-    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
-  cancel-in-progress: true
+  # The event name is part of the group so an approval only cancels an earlier
+  # approval; it must never cancel the `pull_request` run it was waiting for.
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+    github.event.pull_request.number || github.event.issue.number || github.ref }}
+  # A merge to `main` is never cancelled by the next one: every commit that
+  # lands keeps the platform run it was given.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Local checkouts may wrap rustc in sccache; runners must not. Cargo
+  # treats an empty `RUSTC_WRAPPER` as "no wrapper".
+  RUSTC_WRAPPER: ''
+  # The commit under test. A comment run defaults to the base branch, and a
+  # review event carries the reviewed commit rather than the branch tip, so
+  # both are spelled out here once instead of in every checkout.
+  CI_REF: >-
+    ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number)
+    || github.event_name == 'pull_request_review' && github.event.pull_request.head.sha
+    || github.sha }}
 
 jobs:
+  # Single decision point for every trigger. Every other job needs this one, so
+  # a skipped gate skips the whole run.
   gate:
     name: gate
     runs-on: ubuntu-latest
-    # Single decision point for every trigger; every other job needs this
-    # one, so a skipped gate skips the whole workflow.
-    # CI disabled during early development (saves runner time/credits).
-    # Re-enable by removing the `if: false` below and restoring the original condition.
-    # Original gate condition:
-    #   if: >-
-    #     github.event_name == 'push' ||
-    #     github.event_name == 'workflow_dispatch' ||
-    #     (github.event_name == 'pull_request' &&
-    #     !github.event.pull_request.draft) ||
-    #     (github.event_name == 'pull_request_review' &&
-    #     github.event.review.state == 'approved' &&
-    #     !github.event.pull_request.draft) ||
-    #     (github.event_name == 'issue_comment' &&
-    #     github.event.issue.pull_request &&
-    #     startsWith(github.event.comment.body, '/ci'))
-    if: false
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft) ||
+      (github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
+      !github.event.pull_request.draft) ||
+      (github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      startsWith(github.event.comment.body, '/ci'))
     steps:
       - run: echo "CI gate passed for ${{ github.event_name }}"
 
+  # The three fast checks. None of them compiles Rust, so each is a short job
+  # and the three run side by side.
+  #
+  # None of them repeats on an approval: the same commit already passed them on
+  # its `pull_request` run. This repository has no require-status-check branch
+  # protection, so a skipped check on the approval run cannot block a merge.
   fmt:
     name: fmt (rust)
     needs: gate
+    if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      # For `/ci` comment runs the default ref is main — check out the PR head.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+          ref: ${{ env.CI_REF }}
 
-      # Install exactly the toolchain pinned in rust-toolchain.toml instead of the floating `@stable` shorthand.
-      - id: tc
-        shell: bash
-        run: |
-          echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      # Formatting compiles nothing, so it wants the pinned toolchain without
+      # the build cache.
+      - uses: ./.github/actions/setup-rust
         with:
-          toolchain: ${{ steps.tc.outputs.channel }}
           components: rustfmt
+          cache: 'false'
       - run: cargo fmt --all --check
 
   # Markdown, JSON, YAML, TOML, CSS, JS — everything cargo fmt does not cover.
   # Configuration lives in .oxfmtrc.json; the pnpm version is pinned in package.json.
-  fmt-nonrust:
+  fmt_nonrust:
     name: fmt (non-rust)
     needs: gate
+    if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      # For `/ci` comment runs the default ref is main — check out the PR head.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+          ref: ${{ env.CI_REF }}
       - uses: pnpm/setup@v3
         with:
           runtime: node@24
           # `cache` is a boolean in pnpm/setup v3 (unlike actions/setup-node,
           # where it takes the package-manager name).
           cache: true
+          # The action installs by default; the explicit frozen install below
+          # is the one that decides, so this stops a second, non-frozen run.
+          install: false
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec oxfmt --check
 
   deny:
     name: deny (licenses, advisories, bans, sources)
     needs: gate
+    if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      # For `/ci` comment runs the default ref is main — check out the PR head.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
+          ref: ${{ env.CI_REF }}
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # The protocol and trace parsers take untrusted bytes. The short runs below
-  # gate a PR; the scheduled job (fuzz-long) runs the same targets for longer.
-  fuzz:
-    name: fuzz (protocol, quick)
+  # Clippy and the workspace tests share one job on purpose. They both build
+  # the dependency tree into target/debug, so one runner does both and the tree
+  # is compiled once.
+  checks:
+    name: clippy + tests (linux)
     needs: gate
+    if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CI_REF }}
+
+      # This job is also Linux's coverage: the platform matrix runs Windows and
+      # macOS only, so the Linux packages are installed here and nowhere else.
+      - uses: ./.github/actions/linux-system-packages
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-key: linux
+
+      # nextest is what the project runs locally, so CI runs it too. It does
+      # not run doctests, which is why `cargo test --doc` follows.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo nextest run --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked --doc
+
+  # The parsers take untrusted bytes: the protocol and trace targets read the
+  # wire and a recorded session, and the INI targets read a user-supplied
+  # definition file. The short runs below gate a change; `fuzz.yml` runs the
+  # same targets for longer on a schedule.
+  #
+  # The run is scoped to the parser that changed. Building the nightly fuzz
+  # targets is the slow part of this job, and a UI or project-only change
+  # cannot reach those parsers; the default is to run, so an unknown event
+  # still fuzzes.
+  fuzz:
+    name: fuzz (parsers, quick)
+    needs: gate
+    if: github.event_name != 'pull_request_review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CI_REF }}
+
+      - name: Scope the run to the parser that changed
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          run_all() {
+            echo 'protocol=true' >> "$GITHUB_OUTPUT"
+            echo 'ini=true' >> "$GITHUB_OUTPUT"
+          }
+
+          case "${{ github.event_name }}" in
+            pull_request)
+              if git fetch --depth=1 --no-tags origin "${{ github.base_ref }}" 2>/dev/null; then
+                base=FETCH_HEAD
+              else
+                run_all
+                exit 0
+              fi
+              ;;
+            push)
+              # The previous tip of the branch, so a multi-commit push is
+              # compared against where it started instead of only its last
+              # commit.
+              base='${{ github.event.before }}'
+              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                run_all
+                exit 0
+              fi
+              if ! git fetch --depth=1 --no-tags origin "$base" 2>/dev/null; then
+                run_all
+                exit 0
+              fi
+              base=FETCH_HEAD
+              ;;
+            *)
+              run_all
+              exit 0
+              ;;
+          esac
+
+          changed="$RUNNER_TEMP/changed.txt"
+          if ! git diff --name-only "$base" HEAD > "$changed"; then
+            run_all
+            exit 0
+          fi
+
+          # The fuzz crates have their own lockfiles, which the path filters
+          # below already cover. A workspace-level dependency or toolchain bump
+          # can change either parser, so it runs both.
+          if grep -qE '^(Cargo\.lock|Cargo\.toml|rust-toolchain\.toml)$' "$changed"; then
+            run_all
+            exit 0
+          fi
+
+          if grep -qE '^crates/oxtuner-protocol/' "$changed"; then
+            echo 'protocol=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'protocol=false' >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -qE '^crates/oxtuner-ini/' "$changed"; then
+            echo 'ini=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ini=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: dtolnay/rust-toolchain@nightly
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+      # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
+      # through cargo-binstall. The crate publishes a Linux binary, so this is a
+      # download rather than the source build `cargo install` would do.
+      - uses: taiki-e/install-action@v2
+        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        with:
+          tool: cargo-fuzz
+      # The fuzz crates build into their own target directory, outside the
+      # workspace one, so each needs its own cache entry.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        with:
+          workspaces: |
+            crates/oxtuner-protocol/fuzz -> target
+            crates/oxtuner-ini/fuzz -> target
+          key: fuzz
+
       - name: Frame decoder (60 s)
+        if: steps.scope.outputs.protocol == 'true'
         working-directory: crates/oxtuner-protocol/fuzz
         run: cargo +nightly fuzz run decode_frame -- -max_total_time=60 -max_len=65536
       - name: Trace parser (60 s)
+        if: steps.scope.outputs.protocol == 'true'
         working-directory: crates/oxtuner-protocol/fuzz
         run: cargo +nightly fuzz run replay_trace -- -max_total_time=60 -max_len=65536
-
-  fuzz-long:
-    name: fuzz (scheduled, 20 min per target)
-    needs: gate
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-      - name: Frame decoder
-        working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run decode_frame -- -max_total_time=1200
-      - name: Trace parser
-        working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run replay_trace -- -max_total_time=1200
-
-  # CI: clippy -D warnings and tests must pass on Windows, macOS, Linux.
-  build-test:
-    name: ${{ matrix.os }}
-    needs: gate
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["ubuntu-latest","windows-latest"]') }}
-    steps:
-      # For `/ci` comment runs the default ref is main — check out the PR head.
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.sha }}
-
-      # GPUI's Linux backend links system libraries; a bare runner fails at
-      # build-script time (`yeslogic-fontconfig-sys` needs `fontconfig.pc`).
-      # macOS and Windows ship theirs. `libudev-dev` and `pkg-config` are for
-      # serialport, whose Linux enumeration uses libudev; without its headers the
-      # build script cannot find the library.
-      - name: Install Linux system packages
-        if: runner.os == 'Linux'
+      # Six targets at a minute each: the full parse pipeline in text and in
+      # bytes, the preprocessor, and the three focused parsers. The dictionary
+      # is what lets mutations reach section dispatch.
+      - name: INI parsers (60 s each)
+        if: steps.scope.outputs.ini == 'true'
+        working-directory: crates/oxtuner-ini
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libfontconfig-dev \
-            libudev-dev \
-            pkg-config \
-            libfreetype-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shm0-dev \
-            libvulkan1 \
-            mesa-vulkan-drivers
-
-      # Install exactly the toolchain pinned in rust-toolchain.toml.
-      # rust-cache folds every rustup-installed toolchain
-      # into its cache key, so we also drop the runner's floating `stable`:
-      # otherwise each new Rust stable release would change the key and force
-      # a full rebuild even though cargo builds with the pinned version.
-      - id: tc
-        shell: bash
-        run: |
-          echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.tc.outputs.channel }}
-          components: clippy
-      - name: Drop floating toolchains (keep the rust-cache key stable)
-        shell: bash
-        run: |
-          channel='${{ steps.tc.outputs.channel }}'
-          rustup default "$channel"
-          for tc in $(rustup toolchain list --quiet); do
-            case "$tc" in
-              "$channel"*) ;;
-              *) rustup toolchain uninstall "$tc" || true ;;
-            esac
+          for target in parse_ini parse_bytes preprocess bit_options pc_variables sections; do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=60 -max_len=65536
+            echo "::endgroup::"
           done
 
-      # Caches target/{debug,release} + ~/.cargo, keyed by Cargo.lock and
-      # Cargo.toml files, rust-toolchain.toml, rustc version and OS/arch — so
-      # all three steps below start warm on the next run. cache-on-failure
-      # keeps the compiled dependency tree even when clippy/test fail, instead
-      # of throwing the work away and recompiling from scratch next push.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: 'true'
-
-      # clippy and test share target/debug (dependencies compile once, only
-      # the workspace crates are rebuilt after clippy, because its
-      # RUSTC_WORKSPACE_WRAPPER changes their fingerprint).
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-features --locked
-
-      # `--release` is a separate profile tree (cargo cannot share artifacts
-      # across profiles) and recompiles every dependency — verify it
-      # post-merge and on manual runs instead of every approved PR run, its
-      # target/release tree stays warm in rust-cache between those runs.
-      - run: cargo build --workspace --all-features --locked --release
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+  # The second half. This job owns no runner of its own: it hands the work
+  # to `platforms.yml`.
+  #
+  # `always()` is required to reach the condition at all once a `needs` job is
+  # skipped, which is exactly what an approval run does to the Linux jobs. The
+  # result checks keep the rule that a failed Linux check never triggers the
+  # platform run; a scoped-out fuzz job counts as passed.
+  platforms:
+    name: platforms (windows, macos)
+    needs: [fmt, fmt_nonrust, deny, checks, fuzz]
+    if: >-
+      always() &&
+      ((github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
+      !github.event.pull_request.draft) ||
+      (((github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft) ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+      startsWith(github.event.comment.body, '/ci platforms'))) &&
+      needs.fmt.result == 'success' &&
+      needs.fmt_nonrust.result == 'success' &&
+      needs.deny.result == 'success' &&
+      needs.checks.result == 'success' &&
+      (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')))
+    uses: ./.github/workflows/platforms.yml
+    with:
+      ref: >-
+        ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number)
+        || github.event_name == 'pull_request_review' && github.event.pull_request.head.sha
+        || github.sha }}
+      # A comment or a plain pull request asks for the platform test, not for
+      # the release build; a merge and an approval get both.
+      release: >-
+        ${{ github.event_name != 'pull_request' &&
+        github.event_name != 'issue_comment' }}

@@ -1,0 +1,100 @@
+name: Fuzz
+
+# Long fuzz runs. The protocol and trace parsers read untrusted bytes off the
+# wire and out of a recorded session, and the INI targets read a user-supplied
+# definition file. The 60-second runs on every parser change live in `ci.yml`.
+# Linux only: the parsers don't depend on the platform.
+#
+# One job, not one per suite: fuzzing is single-threaded, so a second runner
+# would just redo the same work plus another toolchain install.
+
+on:
+  schedule:
+    # Twice a month, on the 1st and the 15th at 03:00 UTC. The corpus carries
+    # over between runs, so longer runs less often beat short runs weekly.
+    - cron: '0 3 1,15 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Local checkouts may wrap rustc in sccache; runners must not. Cargo
+  # treats an empty `RUSTC_WRAPPER` as "no wrapper".
+  RUSTC_WRAPPER: ''
+
+jobs:
+  fuzz-long:
+    name: fuzz (protocol 20 min, INI 10 min per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
+      # through cargo-binstall. The crate publishes a Linux binary, so this is a
+      # download rather than the source build `cargo install` would do.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # The fuzz crates build into their own target directory, outside the
+      # workspace one, so both are listed here.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/oxtuner-protocol/fuzz -> target
+            crates/oxtuner-ini/fuzz -> target
+          key: fuzz-long
+
+      # The corpus is what makes a later run worth more than a fresh start:
+      # without it, every run rediscovers the same edges. The key is per run so
+      # the entry is always saved, and the restore prefix takes the most recent.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            crates/oxtuner-protocol/fuzz/corpus
+            crates/oxtuner-ini/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Frame decoder
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run decode_frame -- -max_total_time=1200 -max_len=65536
+      - name: Trace parser
+        working-directory: crates/oxtuner-protocol/fuzz
+        run: cargo +nightly fuzz run replay_trace -- -max_total_time=1200 -max_len=65536
+
+      - name: INI parsers
+        working-directory: crates/oxtuner-ini
+        run: |
+          for target in parse_ini parse_bytes preprocess bit_options pc_variables sections; do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=600 -max_len=65536
+            echo "::endgroup::"
+          done
+
+      # A crash is only useful with the input that caused it. The corpus itself
+      # is already carried by the cache; this archive is the copy that can be
+      # downloaded after a red run, with any crash artefacts beside it, and it
+      # must be collected here: the corpus only exists on this runner.
+      - name: Archive the corpus and any crash artefacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-corpus
+          path: |
+            crates/oxtuner-protocol/fuzz/corpus
+            crates/oxtuner-protocol/fuzz/artifacts
+            crates/oxtuner-ini/fuzz/corpus
+            crates/oxtuner-ini/fuzz/artifacts
+          if-no-files-found: ignore
+          # Keep the corpus just long enough to reproduce a crash from the run
+          # that produced it.
+          retention-days: 14
