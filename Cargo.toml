@@ -1,8 +1,3 @@
-# ox-tuner — Cargo workspace.
-#
-# The repository and workspace are `ox-tuner`, the shipped binary is `oxtuner`,
-# crates use the `oxtuner-` prefix.
-
 [workspace]
 resolver = "3"
 members = [
