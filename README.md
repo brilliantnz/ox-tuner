@@ -61,6 +61,9 @@ Before building Ox Tuner, make sure you have:
 
 - [Git](https://git-scm.com/)
 - [Rustup](https://rustup.rs/) for managing Rust toolchains
+- [Node.js](https://nodejs.org/) 24 or newer, for the JS tooling
+  (`pnpm fmt:check`, the `clean:*` scripts)
+- [pnpm](https://pnpm.io/) matching the version pinned in `package.json`
 - The platform-specific build dependencies listed below
 
 The required Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml). Rustup automatically installs the pinned toolchain and the `clippy` and `rustfmt` components when you run a Cargo command from the repository.
@@ -263,6 +266,19 @@ cargo test --workspace --all-features --locked
 ```
 
 These are the essential local checks to run before submitting a pull request.
+
+### Cleaning
+
+`pnpm clean` reclaims `target/` via `cargo sweep` (it shows a dry-run
+preview before deleting). `pnpm clean:all` goes further and also wipes the
+sccache disk cache and `node_modules`. The node clean scripts only delete
+with `--force`, which the pnpm scripts pass for you; run them directly with
+`--dry-run` to preview:
+
+```sh
+node scripts/clean-sccache.mjs --dry-run
+node scripts/clean-node-modules.mjs --dry-run
+```
 
 ## Run
 

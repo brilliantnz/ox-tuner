@@ -25,7 +25,9 @@ this repository.
 ## Setup
 
 You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it
-for you) and `pnpm` for the non-Rust formatting check.
+for you), and Node.js 24 or newer with `pnpm` for the non-Rust formatting
+check and the `clean:*` scripts (use the pnpm version pinned in
+`package.json`).
 
 ```sh
 cargo build --workspace
@@ -36,6 +38,12 @@ Platform dependencies (system libraries for the GUI and serial support,
 Xcode tools on macOS, MSVC + CMake on Windows) are listed in the
 [Development](README.md#development) section of [README.md](README.md).
 Follow that section for your OS before building `oxtuner-app`.
+
+The `clean:*` scripts delete build outputs: `pnpm clean` reclaims `target/`
+via `cargo sweep`, while `pnpm clean:all` also wipes the sccache disk cache
+and `node_modules`. They never touch your source, projects, or tunes, but
+preview first when unsure — `cargo sweep --time 30 --dry-run` and
+`node scripts/clean-sccache.mjs --dry-run`.
 
 ## The checks
 
