@@ -88,7 +88,8 @@ works without it.
 <details>
 <summary><strong>macOS</strong></summary>
 
-Ox Tuner requires macOS 15 or later and the Xcode Command Line Tools.
+Ox Tuner requires macOS 15 (Sequoia) or later, on Apple Silicon or Intel, and
+the Xcode Command Line Tools.
 
 Install the Command Line Tools:
 
