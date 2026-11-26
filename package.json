@@ -2,14 +2,17 @@
   "name": "ox-tuner-tooling",
   "private": true,
   "scripts": {
+    "clean": "cargo sweep --dry-run --time 30 && cargo sweep --time 30",
+    "clean:all": "cargo clean && node scripts/clean-sccache.mjs --force && node scripts/clean-node-modules.mjs --force",
+    "clean:sccache": "node scripts/clean-sccache.mjs --force",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check"
   },
   "devDependencies": {
-    "oxfmt": "0.79.0"
+    "oxfmt": "0.80.0"
   },
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@12.21.0"
+  "packageManager": "pnpm@12.23.0"
 }
