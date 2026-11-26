@@ -53,13 +53,18 @@ Run these before you push. CI runs the same set on every pull request and every
 push to `main`:
 
 ```sh
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo nextest run --workspace --all-features --locked
 cargo test --workspace --all-features --locked --doc
 cargo deny check
-pnpm fmt:check
+pnpm exec oxfmt --check
 ```
+
+Windows and macOS run the same Clippy and test steps on every pull request,
+and Windows adds a release build on `main`. They start once the Linux checks
+are green, so a cross-platform break is visible before review. A maintainer can
+ask for them again with a `/ci platforms` comment on the pull request.
 
 `cargo nextest` is the project's test runner. Install it with
 `cargo install cargo-nextest` or `cargo binstall cargo-nextest`.
