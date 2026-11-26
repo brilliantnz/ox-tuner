@@ -528,28 +528,24 @@ pub(crate) fn capture_window(window: &Window, cx: &mut App) {
 ///
 /// `Window::is_maximized` is the primary signal, and the only one Windows and
 /// Linux need: it asks `IsZoomed` and the window manager's state respectively.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn window_is_maximized(window: &Window, _cx: &App) -> bool {
+    window.is_maximized()
+}
+
+/// Whether the window is maximized right now.
 ///
 /// macOS additionally accepts the frame zoom produces — the display's usable area
 /// at its origin, within one pixel — because gpui's macOS check compares sizes
 /// exactly and misses a zoomed window by a pixel often enough that the flag was
 /// saved as `false`. This *records* the state; nothing infers a maximize from a
 /// size when opening.
-///
-/// `cx` is only read on macOS. The parameter stays in the signature on every
-/// platform so callers do not need their own `cfg`, and the allowance below keeps
-/// `-D warnings` happy where it is unused.
-#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+#[cfg(target_os = "macos")]
 pub(crate) fn window_is_maximized(window: &Window, cx: &App) -> bool {
-    if window.is_maximized() {
-        return true;
-    }
-
-    #[cfg(target_os = "macos")]
-    if let Some(display) = window.display(cx) {
-        return is_zoom_frame(&display.visible_bounds(), &window.bounds());
-    }
-
-    false
+    window.is_maximized()
+        || window
+            .display(cx)
+            .is_some_and(|display| is_zoom_frame(&display.visible_bounds(), &window.bounds()))
 }
 
 thread_local! {
