@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  # Actions are referenced by major tag, so one grouped PR per week keeps
+  # `checkout`, `cache` and the rest on their latest release.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  # Patch releases only. A minor bump of `gpui-kit` or `gpui` has to be tested
+  # and the vendored components aligned with it first, so that is a deliberate
+  # change and never a bot PR. Security updates ignore this rule.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-patch:
+        patterns: ['*']
+        update-types: [patch]
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']
+    open-pull-requests-limit: 5
+
+  # oxfmt and lefthook are pinned exactly; minor and patch bumps are safe to
+  # take from a bot.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
