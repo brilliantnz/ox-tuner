@@ -44,7 +44,10 @@ The architecture is designed to keep the ECU communication and tuning core indep
 
 **Ox Tuner is experimental and under active development.**
 
-It is not production-ready. Hardware validation is limited, and protocol behavior and tune-writing operations must not be assumed safe or complete across all target ECUs.
+It is not production-ready. Public APIs, file formats, and behavior may change
+without notice, and bugs should be expected. Hardware validation is limited,
+and protocol behavior and tune-writing operations must not be assumed safe or
+complete across all target ECUs.
 
 Development and testing should begin with the built-in simulator, followed by controlled bench testing. Never perform tune writes or burns on a running engine.
 
@@ -69,6 +72,13 @@ rustc --version
 cargo --version
 rustup show active-toolchain
 ```
+
+`sccache` (>= 0.20) is optional. Install it with `cargo install sccache` or
+`cargo binstall sccache`, then uncomment the sccache lines in
+`.cargo/config.toml` to share compiler artifacts across checkouts — a second
+checkout or worktree then reuses the first build instead of recompiling the
+GPUI tree. Keep that change local and do not commit it; plain `cargo build`
+works without it.
 
 ### Platform Setup
 
