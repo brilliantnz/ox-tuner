@@ -50,10 +50,12 @@ runs:
           esac
         done
 
-    # cache-on-failure keeps the compiled dependency tree even when a check
-    # fails, instead of recompiling from scratch on the next push.
+    # A GitHub cache entry cannot be overwritten and this key is stable across
+    # commits, so the first snapshot is the one every later run restores. Saving
+    # a failed run freezes that snapshot halfway — clippy's metadata without the
+    # rlibs nextest needs — and the cache never catches up. Only a green job
+    # writes one.
     - uses: Swatinem/rust-cache@v2
       if: inputs.cache == 'true'
       with:
-        cache-on-failure: 'true'
         key: ${{ inputs.cache-key }}
