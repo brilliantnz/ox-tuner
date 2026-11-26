@@ -18,7 +18,9 @@ name = "model"
 harness = false
 
 [dependencies]
-gpui-kit = { workspace = true, default-features = false, features = ["assets", "component"] }
+# `x11` is a default feature of gpui-kit 0.11; this crate disables the defaults,
+# so it asks for the Linux backend explicitly.
+gpui-kit = { workspace = true, default-features = false, features = ["assets", "component", "x11"] }
 oxtuner-core.workspace = true
 tracing.workspace = true
 

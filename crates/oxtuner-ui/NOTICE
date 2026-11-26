@@ -2,10 +2,19 @@ oxtuner-ui vendors the dock skin and the tab bar from gpui-component.
 
   Source: gpui-component 0.9.0 (https://github.com/longbridge/gpui-kit),
           with the 0.9.1 icon-only tab width fix (#3792) ported into
-          src/tabs/tab.rs
+          src/tabs/tab.rs, and migrated to gpui-component 0.11.0
   Files:  src/dock/{mod,panel,tab_panel,dock,invalid_panel}.rs
           src/tabs/{mod,tab,tab_bar}.rs
   License: Apache License 2.0, see LICENSE-APACHE beside this file.
+
+The vendored code was re-checked against gpui-component 0.11.0 (27 Nov 2026).
+The 0.11.0 changes that reach this copy were applied: the upstream GPUI blanket
+`IntoElement` impl replaced the local impl on the resize tracker, and the
+folder-tab path now uses a bare `PathBuilder::fill()` because the removed
+`FillOptions::tolerance` builder has no replacement in the new path API.
+`DockSkin::set_split_divider_line_visible` was not taken: the component exposes
+the line-less renderer only as a crate-private function, and the app's docks
+keep the resting hairline.
 
 The vendored code was reviewed against gpui-component 0.10.0 when the
 dependency moved (18 Nov 2026). The 0.9.1 icon-width fix was ported. The

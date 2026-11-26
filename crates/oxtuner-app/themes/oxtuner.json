@@ -1,5 +1,5 @@
 {
-  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/tags/v0.10.0/.theme-schema.json",
+  "$schema": "https://github.com/longbridge/gpui-kit/raw/refs/tags/v0.11.0/.theme-schema.json",
   "schema_version": 1,
   "name": "OxTuner",
   "author": "OxTuner",

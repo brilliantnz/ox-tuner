@@ -1,5 +1,5 @@
-// Vendored from gpui-component 0.9.0, with the 0.9.1 icon-width fix ported
-// (Apache-2.0). See NOTICE in this crate.
+// Vendored from gpui-component 0.9.0, with the 0.9.1 icon-width fix ported;
+// migrated to 0.11.0 (Apache-2.0). See NOTICE in this crate.
 
 use std::{rc::Rc, time::Duration};
 
@@ -9,10 +9,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Background, ClickEvent, Edges, ElementId,
-    FillOptions, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, PathStyle,
-    Pixels, Point, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, canvas,
-    div, point, px, relative,
+    Animation, AnimationExt as _, AnyElement, App, Background, ClickEvent, Edges, ElementId, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels, Point, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, point, px, relative,
 };
 
 /// Room between two [`TabVariant::Folder`] tabs, holding their separator.
@@ -497,8 +496,7 @@ fn folder_tab_shape(metrics: FolderTabMetrics, bg: Background) -> impl IntoEleme
             // Like Chrome, keep at least a third of the top flat on narrow tabs.
             let radius = ((bounds.size.width - curve * 2.) / 3.).clamp(px(0.), curve);
 
-            let mut path =
-                PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::tolerance(0.02)));
+            let mut path = PathBuilder::fill();
             path.move_to(point(left, bottom));
             quarter_circle_to(
                 &mut path,
