@@ -4,3 +4,10 @@
 [profile.default]
 # Transport EOF tests wait out real deadlines; don't flag them slow.
 slow-timeout = "120s"
+
+# A frame-budget test samples the renderer, so it must not share the machine
+# with the rest of the suite. nextest runs tests in parallel, and a few
+# CPU-bound neighbours were enough to push the table past its budget on CI.
+[[profile.default.overrides]]
+filter = 'test(~within_the_60fps_budget) | test(~p9_budget)'
+threads-required = "num-cpus"
