@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::store;
+use crate::constants::{MAIN_WINDOW_MIN_HEIGHT, MAIN_WINDOW_MIN_WIDTH};
 use crate::core::CoreService;
 use crate::platform::paths::AppPaths;
 
@@ -150,14 +151,19 @@ impl WindowState {
     /// zooming does not enlarge it, and the next zoom step produces a slightly
     /// smaller frame, so the window ratchets down launch after launch. It is
     /// cleared on start-up so the file heals as well as the window.
+    ///
+    /// A display too small for the minimum window has no windowed frame that is
+    /// not display-sized, so geometry cannot tell a maximize from the designed
+    /// size there; nothing is healed in that case.
     pub(crate) fn bounds_are_maximize_shaped(&self, cx: &App) -> bool {
-        self.bounds
-            .map(WindowRect::to_bounds)
-            .is_some_and(|stored| {
-                cx.displays()
-                    .iter()
-                    .any(|display| fills_display(&display.visible_bounds(), &stored))
-            })
+        let Some(stored) = self.bounds.map(WindowRect::to_bounds) else {
+            return false;
+        };
+        let designed = Self::default_bounds(cx);
+
+        cx.displays()
+            .iter()
+            .any(|display| maximize_shaped(&display.visible_bounds(), &stored, &designed))
     }
 
     /// The geometry the window takes while it is **windowed**.
@@ -165,7 +171,10 @@ impl WindowState {
     /// This is the size the window is created with, and the size zooming out
     /// returns to, so it must be a size a person could work in — never one of the
     /// maximize-shaped frames [`Self::bounds_are_maximize_shaped`] rejects, which
-    /// would be replaced by [`Self::default_bounds`].
+    /// would be replaced by [`Self::default_bounds`]. On a display smaller than
+    /// the minimum, [`Self::default_bounds`] is itself larger than the visible
+    /// area; the platform keeps it at the minimum and the extra room is simply
+    /// off screen.
     ///
     /// A rectangle whose display is gone (the monitor was unplugged) is kept but
     /// re-centred on the current one.
@@ -189,10 +198,34 @@ impl WindowState {
         }
     }
 
-    /// The designed first-run size: 1200×800, centred, which leaves visible space
-    /// around it on a laptop display.
+    /// The designed first-run size: the main window's minimum size, centred.
+    ///
+    /// It matches `window_min_size` in the window options on purpose. A smaller
+    /// default is a size the platform refuses to keep, so the window would be
+    /// grown on the first frame and the restored geometry would disagree with
+    /// what the user sees.
     pub(crate) fn default_bounds(cx: &App) -> Bounds<Pixels> {
-        Bounds::centered(None, size(px(1200.), px(800.)), cx)
+        let designed = size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT));
+
+        // Centre the designed size itself: `Bounds::centered` clamps the size to
+        // the display first, and the platform's minimum wins over that clamp.
+        // On a display larger than the minimum both give the same rectangle; on
+        // a smaller one the window still overflows evenly instead of only to
+        // the bottom-right.
+        let origin = cx
+            .primary_display()
+            .map(|display| display.visible_bounds().center())
+            .map_or_else(
+                || point(px(0.), px(0.)),
+                |center| {
+                    point(
+                        center.x - px(MAIN_WINDOW_MIN_WIDTH / 2.),
+                        center.y - px(MAIN_WINDOW_MIN_HEIGHT / 2.),
+                    )
+                },
+            );
+
+        Bounds::new(origin, designed)
     }
 }
 
@@ -210,6 +243,20 @@ fn fills_display(display: &Bounds<Pixels>, window: &Bounds<Pixels>) -> bool {
     };
 
     nearly(window.size.width, display.size.width) && nearly(window.size.height, display.size.height)
+}
+
+/// Whether a stored frame can only be a maximize artifact rather than the
+/// designed windowed size.
+///
+/// When the display cannot hold the designed window, every frame is
+/// display-sized and geometry carries no information about a maximize, so the
+/// stored rectangle is trusted.
+fn maximize_shaped(
+    display: &Bounds<Pixels>,
+    stored: &Bounds<Pixels>,
+    designed: &Bounds<Pixels>,
+) -> bool {
+    !fills_display(display, designed) && fills_display(display, stored)
 }
 
 /// Whether `window` *is* the frame zoom produces: the display's usable area at the
@@ -921,6 +968,34 @@ mod tests {
         assert_eq!(WindowRect::from_bounds(&rect.to_bounds()), rect);
     }
 
+    /// The first frame is created at the default bounds and the platform's
+    /// minimum size is applied at the same time. They must request the same
+    /// rectangle, or the window visibly grows on the first frame and the
+    /// restored geometry disagrees with what the user sees.
+    #[gpui_kit::test]
+    fn the_default_window_is_the_minimum_size_the_platform_keeps(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+
+        cx.update(|cx| {
+            cx.set_global(AppState::with(AppStateData::default()));
+
+            let bounds = WindowState::default().windowed_bounds(cx);
+            let minimum = crate::app::window::options(cx)
+                .window_min_size
+                .expect("the main window declares a minimum size");
+
+            // The literal pins the designed size; the equality below is what
+            // keeps the two code paths from drifting apart.
+            assert_eq!(minimum, size(px(1600.), px(980.)));
+            assert_eq!(
+                bounds.size, minimum,
+                "the first frame must already be the size the platform keeps"
+            );
+        });
+    }
+
     /// The stored rectangle is restored untouched — never shrunk to the screen.
     /// Resizing it would change the window size the platform compares against
     /// when it answers "is this window maximized", which is what decides whether
@@ -984,6 +1059,25 @@ mod tests {
             &display,
             &Bounds::new(point(px(50.), px(60.)), size(px(1700.), px(1000.)))
         ));
+    }
+
+    /// A display too small to hold the designed window has no windowed frame
+    /// that is not display-sized. Reading such a frame as a maximize artifact
+    /// would mark a small laptop's session maximized and zoom on every launch.
+    #[test]
+    fn a_display_smaller_than_the_minimum_never_reads_as_maximized() {
+        let designed = Bounds::new(point(px(0.), px(0.)), size(px(1600.), px(980.)));
+
+        let roomy = Bounds::new(point(px(0.), px(39.)), size(px(1920.), px(1080.)));
+        let zoomed = Bounds::new(point(px(0.), px(39.)), size(px(1920.), px(1080.)));
+        assert!(maximize_shaped(&roomy, &zoomed, &designed));
+
+        let cramped = Bounds::new(point(px(0.), px(39.)), size(px(1366.), px(768.)));
+        assert!(
+            fills_display(&cramped, &designed),
+            "the fixture must be smaller than the designed window"
+        );
+        assert!(!maximize_shaped(&cramped, &designed, &designed));
     }
 
     /// Detecting a maximize is a different question from storing one: only the
