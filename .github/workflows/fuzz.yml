@@ -36,6 +36,10 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
+      # The GNU target builds serialport's libudev support, which the fuzz
+      # crate reaches through `oxtuner-transport`; without libudev-dev its
+      # build script fails before any fuzzing starts.
+      - uses: ./.github/actions/linux-system-packages
       - uses: dtolnay/rust-toolchain@nightly
       # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
       # through cargo-binstall. That installs the musl build of cargo-fuzz,

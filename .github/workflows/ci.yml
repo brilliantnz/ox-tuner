@@ -256,6 +256,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+      # The GNU target builds serialport's libudev support, which the fuzz crate
+      # reaches through `oxtuner-transport`; without libudev-dev its build
+      # script fails before any fuzzing starts.
+      - uses: ./.github/actions/linux-system-packages
+        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
       # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
       # through cargo-binstall. That installs the musl build of cargo-fuzz,
       # whose compiled-in default target is x86_64-unknown-linux-musl. The
