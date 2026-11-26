@@ -1388,11 +1388,12 @@ fn load_1min() -> f64 {
 /// reported as a renderer regression. A real regression exceeds both.
 fn judged_budget_ms() -> f64 {
     // A Windows runner has no GPU: GPUI renders through the software
-    // rasterizer there and the shared runners sit at 20-23 ms p95 with an idle
-    // load of 0. The desktop budget stays strict; CI gets the room the
-    // rasterizer needs, and a real regression still crosses it.
+    // rasterizer there, and the shared runners have measured 20-29 ms p95
+    // across runs with an idle load of 0. Give CI the same allowance a loaded
+    // desktop gets; the regression this test guards - virtualisation dropping
+    // out and 16k cells rendering - is an order of magnitude past it.
     let base = if cfg!(target_os = "windows") && std::env::var_os("CI").is_some() {
-        16.7 * 1.6
+        16.7 * 2.5
     } else {
         16.7
     };
