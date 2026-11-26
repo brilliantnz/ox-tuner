@@ -206,6 +206,10 @@ impl WindowState {
     /// what the user sees.
     pub(crate) fn default_bounds(cx: &App) -> Bounds<Pixels> {
         let designed = size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT));
+        let half = size(
+            px(MAIN_WINDOW_MIN_WIDTH / 2.),
+            px(MAIN_WINDOW_MIN_HEIGHT / 2.),
+        );
 
         // Centre the designed size itself: `Bounds::centered` clamps the size to
         // the display first, and the platform's minimum wins over that clamp.
@@ -217,12 +221,7 @@ impl WindowState {
             .map(|display| display.visible_bounds().center())
             .map_or_else(
                 || point(px(0.), px(0.)),
-                |center| {
-                    point(
-                        center.x - px(MAIN_WINDOW_MIN_WIDTH / 2.),
-                        center.y - px(MAIN_WINDOW_MIN_HEIGHT / 2.),
-                    )
-                },
+                |center| point(center.x - half.width, center.y - half.height),
             );
 
         Bounds::new(origin, designed)
@@ -1066,7 +1065,10 @@ mod tests {
     /// would mark a small laptop's session maximized and zoom on every launch.
     #[test]
     fn a_display_smaller_than_the_minimum_never_reads_as_maximized() {
-        let designed = Bounds::new(point(px(0.), px(0.)), size(px(1600.), px(980.)));
+        let designed = Bounds::new(
+            point(px(0.), px(0.)),
+            size(px(MAIN_WINDOW_MIN_WIDTH), px(MAIN_WINDOW_MIN_HEIGHT)),
+        );
 
         let roomy = Bounds::new(point(px(0.), px(39.)), size(px(1920.), px(1080.)));
         let zoomed = Bounds::new(point(px(0.), px(39.)), size(px(1920.), px(1080.)));
