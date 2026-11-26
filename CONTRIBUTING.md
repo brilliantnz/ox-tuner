@@ -200,7 +200,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 `fix(tune): refuse values that disagree over bytes they share`. One branch, one
 concern, and the diff contains only what the pull request describes.
 
-Every pull request uses `.github/pull_request_template.md`. Fill in every
+Every pull request uses `.github/PULL_REQUEST_TEMPLATE.md`. Fill in every
 section. Something you did not run gets marked as not run with a short reason;
 an empty section is not a completed template.
 
