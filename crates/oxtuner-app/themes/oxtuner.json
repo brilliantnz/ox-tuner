@@ -3,7 +3,7 @@
   "schema_version": 1,
   "name": "OxTuner",
   "author": "OxTuner",
-  "_note": "Editor keys are written twice (dotted and underscored) because gpui-kit reads dotted names with the tree-sitter highlighter and underscored names with the stub highlighter; unknown keys are ignored, so both stay. mono_font.family is intentionally absent: gpui-kit falls back to Menlo, Consolas or DejaVu Sans Mono per platform, and naming one family would break the other two.",
+  "_note": "Editor keys are written twice (dotted and underscored) because gpui-kit reads dotted names with the tree-sitter highlighter and underscored names with the stub highlighter; unknown keys are ignored, so both stay. mono_font.family is intentionally absent: gpui-kit falls back to Menlo, Consolas or DejaVu Sans Mono per platform, and naming one family would break the other two. $schema and schema_version are editor metadata; no runtime code reads them.",
   "themes": [
     {
       "is_default": true,

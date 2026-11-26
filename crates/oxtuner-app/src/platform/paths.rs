@@ -197,13 +197,6 @@ impl AppPaths {
         self.registry_dir().join("firmware")
     }
 
-    /// The directory that holds the user-editable color themes. The bundled
-    /// `OxTuner` light and dark themes are seeded here on first launch, next to
-    /// `settings.json` and `state.json`, and reloaded live when edited.
-    pub fn themes_dir(&self) -> PathBuf {
-        self.config_dir.join("themes")
-    }
-
     /// The directory for per-run log files.
     pub fn log_dir(&self) -> &Path {
         &self.logs_dir
@@ -358,10 +351,6 @@ mod tests {
         assert_eq!(
             paths.state_file(),
             PathBuf::from("/Users/me/Library/Application Support/OxTuner/state.json")
-        );
-        assert_eq!(
-            paths.themes_dir(),
-            PathBuf::from("/Users/me/Library/Application Support/OxTuner/themes")
         );
         assert_eq!(
             paths.projects_dir(),
