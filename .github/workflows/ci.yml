@@ -173,15 +173,55 @@ jobs:
   # same targets for longer on a schedule.
   #
   # The run is scoped to the parser that changed. Building the nightly fuzz
-  # targets is the slow part of this job, and a UI or project-only change
-  # cannot reach those parsers; the default is to run, so an unknown event
-  # still fuzzes.
+  # targets is the slow part, and a UI or project-only change cannot reach
+  # those parsers; the default is to run, so an unknown event still fuzzes.
+  #
+  # One matrix job per target: the targets are single-threaded, and running
+  # eight 60-second targets in one job made the fuzz gate the longest check on
+  # every pull request. Parallel jobs keep the gate near the slowest target
+  # plus one cached build.
   fuzz:
-    name: fuzz (parsers, quick)
+    name: fuzz (${{ matrix.target }})
     needs: gate
     if: github.event_name != 'pull_request_review'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: decode_frame
+            parser: protocol
+            dir: crates/oxtuner-protocol/fuzz
+            dict: false
+          - target: replay_trace
+            parser: protocol
+            dir: crates/oxtuner-protocol/fuzz
+            dict: false
+          - target: parse_ini
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
+          - target: parse_bytes
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
+          - target: preprocess
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
+          - target: bit_options
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
+          - target: pc_variables
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
+          - target: sections
+            parser: ini
+            dir: crates/oxtuner-ini
+            dict: true
     steps:
       - uses: actions/checkout@v7
         with:
@@ -194,8 +234,8 @@ jobs:
           set -euo pipefail
 
           run_all() {
-            echo 'protocol=true' >> "$GITHUB_OUTPUT"
-            echo 'ini=true' >> "$GITHUB_OUTPUT"
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            exit 0
           }
 
           case "${{ github.event_name }}" in
@@ -204,7 +244,6 @@ jobs:
                 base=FETCH_HEAD
               else
                 run_all
-                exit 0
               fi
               ;;
             push)
@@ -214,24 +253,20 @@ jobs:
               base='${{ github.event.before }}'
               if [ "$base" = "0000000000000000000000000000000000000000" ]; then
                 run_all
-                exit 0
               fi
               if ! git fetch --depth=1 --no-tags origin "$base" 2>/dev/null; then
                 run_all
-                exit 0
               fi
               base=FETCH_HEAD
               ;;
             *)
               run_all
-              exit 0
               ;;
           esac
 
           changed="$RUNNER_TEMP/changed.txt"
           if ! git diff --name-only "$base" HEAD > "$changed"; then
             run_all
-            exit 0
           fi
 
           # The fuzz crates have their own lockfiles, which the path filters
@@ -239,67 +274,56 @@ jobs:
           # can change either parser, so it runs both.
           if grep -qE '^(Cargo\.lock|Cargo\.toml|rust-toolchain\.toml)$' "$changed"; then
             run_all
-            exit 0
           fi
 
-          if grep -qE '^crates/oxtuner-protocol/' "$changed"; then
-            echo 'protocol=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'protocol=false' >> "$GITHUB_OUTPUT"
+          case "${{ matrix.parser }}" in
+            protocol) parser_path='^crates/oxtuner-protocol/' ;;
+            ini) parser_path='^crates/oxtuner-ini/' ;;
+          esac
+          if grep -qE "$parser_path" "$changed"; then
+            run_all
           fi
 
-          if grep -qE '^crates/oxtuner-ini/' "$changed"; then
-            echo 'ini=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ini=false' >> "$GITHUB_OUTPUT"
-          fi
+          echo 'run=false' >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@nightly
-        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        if: steps.scope.outputs.run == 'true'
       # The GNU target builds serialport's libudev support, which the fuzz crate
       # reaches through `oxtuner-transport`; without libudev-dev its build
       # script fails before any fuzzing starts.
       - uses: ./.github/actions/linux-system-packages
-        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        if: steps.scope.outputs.run == 'true'
       # `cargo-fuzz` is not in install-action's prebuilt list, so it resolves
       # through cargo-binstall. That installs the musl build of cargo-fuzz,
       # whose compiled-in default target is x86_64-unknown-linux-musl. The
       # target is not installed and ASAN rejects a static libc, so name the
       # runner's GNU host explicitly on every `fuzz run` below.
       - uses: taiki-e/install-action@v2
-        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        if: steps.scope.outputs.run == 'true'
         with:
           tool: cargo-fuzz
       # The fuzz crates build into their own target directory, outside the
-      # workspace one, so each needs its own cache entry.
+      # workspace one, so each needs its own cache entry. A key per target
+      # keeps the parallel saves from racing for one entry. Branches restore
+      # the main cache but do not write one; see setup-rust.
       - uses: Swatinem/rust-cache@v2
-        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
+        if: steps.scope.outputs.run == 'true'
         with:
           workspaces: |
             crates/oxtuner-protocol/fuzz -> target
             crates/oxtuner-ini/fuzz -> target
-          key: fuzz
+          key: fuzz-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Frame decoder (60 s)
-        if: steps.scope.outputs.protocol == 'true'
-        working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu decode_frame -- -max_total_time=60 -max_len=65536
-      - name: Trace parser (60 s)
-        if: steps.scope.outputs.protocol == 'true'
-        working-directory: crates/oxtuner-protocol/fuzz
-        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_trace -- -max_total_time=60 -max_len=65536
-      # Six targets at a minute each: the full parse pipeline in text and in
-      # bytes, the preprocessor, and the three focused parsers. The dictionary
-      # is what lets mutations reach section dispatch.
-      - name: INI parsers (60 s each)
-        if: steps.scope.outputs.ini == 'true'
-        working-directory: crates/oxtuner-ini
+      - name: Run the target (60 s)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: ${{ matrix.dir }}
         run: |
-          for target in parse_ini parse_bytes preprocess bit_options pc_variables sections; do
-            echo "::group::$target"
-            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=60 -max_len=65536
-            echo "::endgroup::"
-          done
+          if [ "${{ matrix.dict }}" = "true" ]; then
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" -- -dict="$GITHUB_WORKSPACE/crates/oxtuner-ini/fuzz/ini.dict" -max_total_time=60 -max_len=65536
+          else
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" -- -max_total_time=60 -max_len=65536
+          fi
 
   # The second half. This job owns no runner of its own: it hands the work
   # to `platforms.yml`.
