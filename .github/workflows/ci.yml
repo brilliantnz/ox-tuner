@@ -303,15 +303,16 @@ jobs:
         with:
           tool: cargo-fuzz
       # The fuzz crates build into their own target directory, outside the
-      # workspace one, so each needs its own cache entry. Branches restore the
-      # main cache but do not write one; see setup-rust.
+      # workspace one, so each needs its own cache entry. A key per target
+      # keeps the parallel saves from racing for one entry. Branches restore
+      # the main cache but do not write one; see setup-rust.
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:
           workspaces: |
             crates/oxtuner-protocol/fuzz -> target
             crates/oxtuner-ini/fuzz -> target
-          key: fuzz
+          key: fuzz-${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run the target (60 s)
