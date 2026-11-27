@@ -4,7 +4,8 @@ name: Cache janitor
 # from main now, but every dependency change still creates a new keyed entry
 # and the old one stays until GitHub evicts it. This job keeps the budget
 # healthy on purpose: it drops entries nobody restored for two weeks and, if
-# the total is still high, the least recently used entries until it fits.
+# the total is still high, the least recently used entries until it fits under
+# 9 GB, leaving headroom below GitHub's 10 GB limit.
 #
 # It never touches the newest entries first, so the cache a pull request is
 # most likely to restore survives.
@@ -34,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           MAX_AGE_DAYS: '14'
-          MAX_TOTAL_GB: '8'
+          MAX_TOTAL_GB: '9'
         run: |
           set -euo pipefail
 
