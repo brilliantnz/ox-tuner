@@ -1,4 +1,5 @@
-// Vendored from gpui-component 0.9.0 (Apache-2.0). See NOTICE in this crate.
+// Vendored from gpui-component 0.9.0; migrated to 0.11.0 (Apache-2.0).
+// See NOTICE in this crate.
 
 use gpui_kit::base::dock::{PanelEvent, PanelState};
 use gpui_kit::component::ActiveTheme as _;

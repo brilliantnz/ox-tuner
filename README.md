@@ -229,7 +229,7 @@ sudo pacman -S --needed vulkan-nouveau
 
 </details>
 
-The Linux package lists follow the [GPUI Kit 0.10.0 installation guide](https://gpui-kit.com/versions/v0.10.0/docs/installation/), supplemented with the X11, Wayland, and font development packages used by this workspace, plus the `libudev` headers needed for serial-port enumeration (`libudev-dev` on Ubuntu/Debian, `systemd-devel` on Fedora, provided by `systemd` on Arch). Ubuntu 24.04 is the documented upstream baseline. Fedora and Arch Linux use their equivalent distribution packages.
+The Linux package lists follow the [GPUI Kit 0.11.0 installation guide](https://gpui-kit.com/versions/v0.11.0/docs/installation/), supplemented with the X11, Wayland, and font development packages used by this workspace, plus the `libudev` headers needed for serial-port enumeration (`libudev-dev` on Ubuntu/Debian, `systemd-devel` on Fedora, provided by `systemd` on Arch). Ubuntu 24.04 is the documented upstream baseline. Fedora and Arch Linux use their equivalent distribution packages.
 
 On Linux, run Ox Tuner from an active Wayland or X11 graphical session with a working Vulkan driver. Installing the Vulkan loader alone does not provide a GPU driver. The Mesa Vulkan packages provide drivers for supported Intel and AMD GPUs. NVIDIA users need a driver package that provides a compatible Vulkan ICD.
 

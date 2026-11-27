@@ -1,4 +1,5 @@
-// Vendored from gpui-component 0.9.0 (Apache-2.0). See NOTICE in this crate.
+// Vendored from gpui-component 0.9.0; migrated to 0.11.0 (Apache-2.0).
+// See NOTICE in this crate.
 
 //! The dock's appearance: frames, panel chrome and the tab strip.
 //!

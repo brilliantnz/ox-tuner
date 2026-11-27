@@ -1,4 +1,5 @@
-// Vendored from gpui-component 0.9.0 (Apache-2.0). See NOTICE in this crate.
+// Vendored from gpui-component 0.9.0; migrated to 0.11.0 (Apache-2.0).
+// See NOTICE in this crate.
 
 //! The dock area's appearance: the outer frame, the split frames, and one
 //! dock's chrome.
@@ -161,14 +162,6 @@ impl DockSkin {
 struct DockResizeTracker {
     dock: DockContext,
     shared: Rc<SkinShared>,
-}
-
-impl IntoElement for DockResizeTracker {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for DockResizeTracker {

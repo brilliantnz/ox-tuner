@@ -28,6 +28,10 @@ allow = [
   "ISC",
   "MIT",
   "MPL-2.0",
+  # NCSA: libfuzzer-sys (via rav1e <- ravif <- image <- gpui). Permissive
+  # UIUC license, compatible with GPL-3.0-or-later; re-check if the image
+  # chain ever leaves the tree.
+  "NCSA",
   "Unicode-3.0",
   "Unicode-DFS-2016",
   "Unlicense",
