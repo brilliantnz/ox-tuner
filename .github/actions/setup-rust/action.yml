@@ -55,7 +55,12 @@ runs:
     # a failed run freezes that snapshot halfway — clippy's metadata without the
     # rlibs nextest needs — and the cache never catches up. Only a green job
     # writes one.
+    #
+    # Pull requests restore the base branch cache but never write their own:
+    # every branch writing a 1–1.5 GB target cache filled the repository's
+    # 10 GB budget and evicted the main cache it was trying to reuse.
     - uses: Swatinem/rust-cache@v2
       if: inputs.cache == 'true'
       with:
         key: ${{ inputs.cache-key }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}

@@ -52,11 +52,15 @@ jobs:
       # The fuzz crates build into their own target directory, outside the
       # workspace one, so both are listed here.
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.protocol == 'true' || steps.scope.outputs.ini == 'true'
         with:
           workspaces: |
             crates/oxtuner-protocol/fuzz -> target
             crates/oxtuner-ini/fuzz -> target
           key: fuzz-long
+          # Same rule as the workspace cache: only main writes, branches
+          # restore.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The corpus is what makes a later run worth more than a fresh start:
       # without it, every run rediscovers the same edges. The key is per run so
